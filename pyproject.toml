@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "keqing1"
+version = "0.1.0"
+description = "Riichi Mahjong MVP with mjai stream training and bot inference."
+requires-python = ">=3.12"
+dependencies = [
+  "numpy>=1.24",
+  "pyyaml>=6.0",
+  "riichienv>=0.4.7",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
