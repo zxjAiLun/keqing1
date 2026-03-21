@@ -205,89 +205,403 @@ class FeatureEncoder:
         # =====================================================================
 
         try:
-            he = HandEvaluator(obs.hand, None)
-            is_tenpai = he.is_tenpai()
-            waits = he.get_waits() if is_tenpai else []
-            n_waits = len(waits)
-
-            # 13: 向听数 (0=已听牌)
-            shanten = self._calc_shanten(he)
-            scalar_features[scalar_idx] = shanten / 7.0
+            # 使用 riichienv.calculate_shanten 计算真正的向听数
+            shanten = self._calc_shanten(obs.hand)
+            scalar_features[scalar_idx] = shanten / 10.0
             scalar_idx += 1
 
             # 14: 是否听牌
+            is_tenpai = (shanten <= 0)
             scalar_features[scalar_idx] = 1.0 if is_tenpai else 0.0
             scalar_idx += 1
 
-            # 15: 有效进张数
-            scalar_features[scalar_idx] = n_waits / 34.0
+            # 15: 有效进张数 (Ukeire)
+            # 按向听数归一化
+            ukeire = self._calc_ukeire(obs.hand)
+            # 不同向听数的进张数范围不同，按向听数分别归一化
+            if shanten == 1:
+                # 1向听: 最大进张数约20
+                normalized_ukeire = min(ukeire / 25.0, 1.0)
+            elif shanten == 2:
+                # 2向听: 最大进张数约30
+                normalized_ukeire = min(ukeire / 100.0, 1.0)
+            elif shanten >= 3:
+                # 3+向听: 最大进张数约50
+                normalized_ukeire = min(ukeire / 250.0, 1.0)
+            else:
+                normalized_ukeire = 0.0
+            scalar_features[scalar_idx] = normalized_ukeire
             scalar_idx += 1
 
-            # 16: 预计胡牌点数
-            if is_tenpai and n_waits > 0:
-                dora = obs.dora_indicators if hasattr(obs, 'dora_indicators') else []
-                wait_tile_id = waits[0] * 4
-                result = he.calc(wait_tile_id, dora, [], None)
-                if result:
-                    agari = max(result.ron_agari, result.tsumo_agari_oya, result.tsumo_agari_ko)
-                    scalar_features[scalar_idx] = min(agari / 30000.0, 1.0)
+            # 16: 非役字牌倾向 (无人立直时)
+            # 无人立直时才考虑打出字牌
+
+            # 检查其他家是否有人立直
+            other_riichi = any(obs.riichi_declared[i] for i in range(4) if i != obs.player_id)
+
+            # 估算巡目 (通过累计舍牌数)
+            total_discards = sum(len(d) for d in obs.discards) if hasattr(obs, 'discards') else 0
+            is_early = total_discards < 6  # 早巡
+            is_late = total_discards >= 12  # 尾盘
+
+            # 宝牌指示器的牌类型
+            dora_types = set()
+            if hasattr(obs, 'dora_indicators'):
+                for tid in obs.dora_indicators:
+                    dora_types.add(tid // 4)
+
+            if not other_riichi:
+                # 无人立直，计算打出字牌倾向
+                # 统计手里有多少字牌
+                honor_tiles = [t for t in obs.hand if t >= 108]  # 字牌 tile_id >= 108
+                n_honor = len(honor_tiles)
+
+                # 检查打出字牌是否进向听
+                # 如果字牌不是宝牌，打出通常不进向听
+                if n_honor > 0:
+                    # 检查手里字牌有多少是宝牌
+                    honor_dora_count = sum(1 for t in honor_tiles if t // 4 in dora_types)
+
+                    if is_early and honor_dora_count == 0:
+                        # 早巡 + 字牌非宝牌 + 打出不进向听 = 极高概率
+                        honor_tendency = 0.95
+                    elif is_early and honor_dora_count > 0:
+                        # 早巡 + 字牌是宝牌 + 打出进向听 = 极低概率
+                        honor_tendency = 0.05
+                    elif is_late and n_honor >= 2:
+                        # 尾盘 + >=2张字牌 = 极低概率
+                        honor_tendency = 0.1
+                    elif shanten <= 2:
+                        # 其他巡目 + 向听<=2 = 极高概率
+                        honor_tendency = 0.9
+                    else:
+                        honor_tendency = 0.5
+                else:
+                    honor_tendency = 0.0
+            else:
+                honor_tendency = 0.0  # 有人立直时设为0
+            scalar_features[scalar_idx] = honor_tendency
             scalar_idx += 1
 
-            # 17: 胡牌概率
-            win_prob = self._calc_win_probability(shanten, n_waits, is_tenpai)
-            scalar_features[scalar_idx] = win_prob
+            # 17: 胡牌概率 (暂时保留占位)
+            scalar_features[scalar_idx] = 0.0
             scalar_idx += 1
 
-            # 18: 有役/无役判断
-            # 简单判断: 有进张则可能有役
-            has_yaku = 1.0 if is_tenpai or shanten <= 1 else 0.0
-            scalar_features[scalar_idx] = has_yaku
+            # 18: Speed Reference (速度参考)
+            # 仅在 1-向听和 2-向听时有意义
+            speed_ref = self._calc_speed_ref(obs.hand, shanten)
+            scalar_features[scalar_idx] = speed_ref / 100.0  # 归一化到 [0, 1] (原始是百分比)
             scalar_idx += 1
 
-            # 19: 副露倾向
-            # 基于当前副露次数和巡目计算
-            my_fuuro = scalar_features[4]  # 自己的副露次数
-            my_round = scalar_features[8]  # 自己的巡目
-            # 巡目后期副露倾向降低
-            fuuro_tendency = my_fuuro * (1.0 - my_round * 0.5)
-            scalar_features[scalar_idx] = min(fuuro_tendency, 0.1)
+            # 19: 行动模式 (0=平衡, 0.5=进攻, 1=防守)
+            # 防守模式：其他家立直 且 自己向听>2，或者其他家fuuro宝牌>=3
+            # 进攻模式：早巡 或 自己>=2张宝牌
+            # 其他：平衡模式
+
+            # 检查其他家fuuro中的宝牌数
+            fuuro_dora_count = 0
+            if hasattr(obs, 'melds'):
+                for pid, meld_list in enumerate(obs.melds):
+                    if pid == obs.player_id:
+                        continue
+                    for meld in meld_list:
+                        # meld 可能是 list 或其他格式
+                        if isinstance(meld, list):
+                            for tile_id in meld:
+                                if tile_id // 4 in dora_types:
+                                    fuuro_dora_count += 1
+
+            # 统计自己手里的宝牌数
+            my_dora_count = sum(1 for t in obs.hand if t // 4 in dora_types)
+
+            # 判断模式
+            if other_riichi and shanten > 2:
+                # 防守：有人立直 + 自己向听>2
+                action_mode = 1.0
+            elif fuuro_dora_count >= 3:
+                # 防守：其他家fuuro宝牌>=3
+                action_mode = 1.0
+            elif is_early or my_dora_count >= 2:
+                # 进攻：早巡 或 自己>=2张宝牌
+                action_mode = 0.5
+            else:
+                # 平衡
+                action_mode = 0.0
+
+            scalar_features[scalar_idx] = action_mode
             scalar_idx += 1
 
         except Exception as e:
             # 分析失败时使用默认值
-            scalar_features[scalar_idx:scalar_idx + 7] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-            scalar_idx += 7
+            scalar_features[scalar_idx:scalar_idx + 6] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            scalar_idx += 6
 
         return tile_features, scalar_features
 
-    def _calc_shanten(self, he: HandEvaluator) -> int:
+    def _calc_shanten(self, hand_tile_ids: List[int]) -> int:
         """
         计算向听数 (距离听牌的距离)
-        """
-        if he.is_tenpai():
-            return 0
-        # HandEvaluator 没有直接提供向听数
-        waits = he.get_waits()
-        if len(waits) > 0:
-            return 1
-        return 4  # 粗略估计
 
-    def _calc_win_probability(self, shanten: int, n_waits: int, is_tenpai: bool) -> float:
+        使用 riichienv.calculate_shanten 计算真正的向听数
+
+        Args:
+            hand_tile_ids: 手牌的 tile id 列表 (0-135)
+
+        Returns:
+            向听数 (-1=已完成, 0=听牌, >0=距离听牌)
         """
-        计算胡牌概率
+        try:
+            # calculate_shanten 期望的是 [0,4,8,...] 格式的 tile id 列表
+            return calculate_shanten(hand_tile_ids)
+        except Exception:
+            # 如果计算失败，返回一个保守的估计
+            return 4
+
+    def _calc_ukeire(self, hand_tile_ids: List[int]) -> int:
+        """
+        计算最佳进张数 (Ukeire / Waiting)
+
+        在打牌前计算：
+        - 如果是14张手牌，计算打每张牌后的最大进张数
+        - 如果是13张手牌，直接计算进张数
+
+        Args:
+            hand_tile_ids: 手牌的 tile id 列表 (0-135)
+
+        Returns:
+            最大有效进张数
+        """
+        original_shanten = self._calc_shanten(hand_tile_ids)
+
+        # 如果已经听牌或完成，不需要进张
+        if original_shanten <= 0:
+            return 0
+
+        # 如果是13张手牌，直接计算进张数
+        if len(hand_tile_ids) == 13:
+            return self._calc_ukeire_after_discard(hand_tile_ids)
+
+        # 如果是14张手牌，计算打每张牌后的最大进张数
+        if len(hand_tile_ids) == 14:
+            return self._calc_best_ukeire_for_14tile(hand_tile_ids)
+
+        return 0
+
+    def _calc_ukeire_after_discard(self, hand_13: List[int]) -> int:
+        """
+        计算打牌后的进张数
+
+        Args:
+            hand_13: 打牌后的13张手牌
+
+        Returns:
+            进张数 (摸入能听牌的牌数)
+        """
+        original_shanten = self._calc_shanten(hand_13)
+
+        # 如果已经听牌或完成，不需要进张
+        if original_shanten <= 0:
+            return 0
+
+        # 统计每种牌type的数量
+        tile_type_counts = [0] * 34
+        for tid in hand_13:
+            if 0 <= tid < 136:
+                tile_type = tid // 4
+                tile_type_counts[tile_type] += 1
+
+        total_ukeire = 0
+
+        # 遍历所有34种牌，检查摸入是否能降低向听
+        for tile_type in range(34):
+            remaining = 4 - tile_type_counts[tile_type]
+            if remaining <= 0:
+                continue
+
+            # 模拟摸入这张牌 (13张 -> 14张)
+            test_hand = hand_13 + [tile_type * 4]
+            new_shanten = self._calc_shanten(test_hand)
+
+            if new_shanten < original_shanten:
+                total_ukeire += remaining
+
+        return total_ukeire
+
+    def _calc_best_ukeire_for_14tile(self, hand_14: List[int]) -> int:
+        """
+        计算14张手牌的最佳进张数
+
+        遍历所有可能的打牌选择，返回最佳选择的最大进张数
+
+        Args:
+            hand_14: 14张手牌
+
+        Returns:
+            最大有效进张数
+        """
+        original_shanten = self._calc_shanten(hand_14)
+
+        if original_shanten <= 0:
+            return 0
+
+        # 统计每种牌type的数量
+        tile_type_counts = [0] * 34
+        for tid in hand_14:
+            if 0 <= tid < 136:
+                tile_type = tid // 4
+                tile_type_counts[tile_type] += 1
+
+        max_ukeire = 0
+
+        # 遍历所有可能的打牌选择
+        for tile_type in range(34):
+            if tile_type_counts[tile_type] == 0:
+                continue
+
+            # 模拟打出这张牌
+            new_hand = []
+            removed = False
+            for tid in hand_14:
+                if not removed and tid // 4 == tile_type:
+                    removed = True
+                else:
+                    new_hand.append(tid)
+
+            # 计算打这张牌后的进张数
+            ukeire = self._calc_ukeire_after_discard(new_hand)
+            max_ukeire = max(max_ukeire, ukeire)
+
+        return max_ukeire
+
+    def _calc_speed_ref(self, hand_tile_ids: List[int], shanten: int) -> float:
+        """
+        计算速度参考 (Speed Reference)
+
+        仅在 1-向听和 2-向听时有意义
 
         公式:
-        - 听牌时: n_waits / 34
-        - 1向听时: (n_waits / 34) * 0.3
-        - 2向听时: (n_waits / 34) * 0.1
-        - 3+向听: 极低
-        """
-        if is_tenpai:
-            return n_waits / 34.0
+        p2 = ukeire / 120
+        p1 = avgNextUkeire / 120
+        q1 = 1 - p1
+        q2 = 1 - p2
+        speedRef = (1 - (p2 * q1^n - p1 * q2^n) / (q1 - q2)) * 100
 
-        base_rates = {0: 1.0, 1: 0.3, 2: 0.1, 3: 0.02, 4: 0.005}
-        base_rate = base_rates.get(shanten, 0.001)
-        return (n_waits / 34.0) * base_rate
+        Args:
+            hand_tile_ids: 手牌的 tile id 列表
+            shanten: 当前向听数
+
+        Returns:
+            Speed Reference (百分比，0-100)
+        """
+        if shanten < 1 or shanten > 2:
+            return 0.0
+
+        # 仅在14张手牌时计算
+        if len(hand_tile_ids) != 14:
+            return 0.0
+
+        original_shanten = shanten
+        ukeire = self._calc_ukeire(hand_tile_ids)
+
+        if ukeire == 0:
+            return 0.0
+
+        # 计算 avgNextUkeire
+        # 统计所有能进张的牌，以及进张后的最佳进张数
+        tile_type_counts = [0] * 34
+        for tid in hand_tile_ids:
+            if 0 <= tid < 136:
+                tile_type = tid // 4
+                tile_type_counts[tile_type] += 1
+
+        next_shanten_tiles = 0
+        next_shanten_ukeire = 0
+
+        # 首先收集所有能进张的牌
+        for tile_type in range(34):
+            remaining = 4 - tile_type_counts[tile_type]
+            if remaining <= 0:
+                continue
+
+            test_hand = hand_tile_ids + [tile_type * 4]
+            new_shanten = self._calc_shanten(test_hand)
+
+            if new_shanten < original_shanten:
+                # 这是能降低向听的进张牌
+                next_shanten_tiles += remaining
+
+                # 计算进张后的最佳进张 (打哪张最好)
+                best_after_ukeire = self._calc_best_discard_ukeire(test_hand, original_shanten - 1)
+                next_shanten_ukeire += remaining * best_after_ukeire
+
+        if next_shanten_tiles == 0:
+            return 0.0
+
+        avg_next_ukeire = next_shanten_ukeire / next_shanten_tiles
+
+        # 计算 Speed Reference
+        left_count = 120
+        left_turns = 10 if shanten == 1 else 3
+
+        p2 = ukeire / left_count
+        p1 = avg_next_ukeire / left_count
+        q1 = 1 - p1
+        q2 = 1 - p2
+
+        if abs(q1 - q2) < 1e-9:
+            return 0.0
+
+        # speedRef = (1 - (p2 * q1^n - p1 * q2^n) / (q1 - q2)) * 100
+        q1_power_n = q1 ** left_turns
+        q2_power_n = q2 ** left_turns
+        speed_ref = (1 - (p2 * q1_power_n - p1 * q2_power_n) / (q1 - q2)) * 100
+
+        return max(0.0, min(100.0, speed_ref))
+
+    def _calc_best_discard_ukeire(self, hand_tile_ids: List[int], target_shanten: int) -> int:
+        """
+        计算打某张牌后的最佳进张数
+
+        遍历手牌中每种牌，计算打出后的最大进张数
+
+        Args:
+            hand_tile_ids: 手牌 (包含刚摸入的牌)
+            target_shanten: 目标向听数 (应该是 original_shanten - 1)
+
+        Returns:
+            最佳进张数
+        """
+        # 统计每种牌type的数量
+        tile_type_counts = [0] * 34
+        for tid in hand_tile_ids:
+            if 0 <= tid < 136:
+                tile_type = tid // 4
+                tile_type_counts[tile_type] += 1
+
+        best_ukeire = 0
+
+        # 尝试打每种牌 (只考虑手牌中有的)
+        for tile_type in range(34):
+            if tile_type_counts[tile_type] <= 0:
+                continue
+
+            # 模拟打出这张牌 (只移除一张)
+            new_hand = []
+            removed = False
+            for tid in hand_tile_ids:
+                if not removed and tid // 4 == tile_type:
+                    removed = True  # 只移除一张
+                else:
+                    new_hand.append(tid)
+
+            new_shanten = self._calc_shanten(new_hand)
+
+            if new_shanten == target_shanten:
+                # 计算这个状态的进张数
+                ukeire = self._calc_ukeire(new_hand)
+                best_ukeire = max(best_ukeire, ukeire)
+
+        return best_ukeire
 
     def get_feature_shape(self) -> Tuple[Tuple[int, int], Tuple[int]]:
         """返回特征形状"""
