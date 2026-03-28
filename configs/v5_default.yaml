@@ -1,0 +1,36 @@
+# v5model 默认训练配置
+# 针对 4060 Laptop (16G VRAM + 16G RAM + i7-12700H)
+
+# 数据目录（先用 ds1-ds3 验证，成功后改为 ds1-ds13）
+data_dirs:
+  - artifacts/converted_mjai/ds1
+  - artifacts/converted_mjai/ds2
+  - artifacts/converted_mjai/ds3
+
+output_dir: artifacts/models/modelv5
+
+# 模型结构
+hidden_dim: 256
+num_res_blocks: 4
+dropout: 0.1
+
+# 训练超参
+num_epochs: 20
+batch_size: 64             # DataLoader batch size
+accumulation_steps: 4      # 等效 batch = 256
+learning_rate: 0.0003
+weight_decay: 0.0001
+warmup_steps: 500
+value_loss_weight: 0.5
+
+# 每 epoch 预估步数（用于 cosine decay 计算，可根据实际调整）
+steps_per_epoch: 5000
+
+# 验证集比例
+val_ratio: 0.05
+
+# DataLoader workers
+num_workers: 2
+
+# 日志打印间隔（step 数）
+log_interval: 200

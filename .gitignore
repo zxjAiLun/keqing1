@@ -55,7 +55,6 @@ log.jsonl
 2.jsonl
 
 # Third-party libraries
-third_party/
 
 # Logs and debug
 *.log
@@ -64,9 +63,7 @@ debug/
 logs/
 
 # Documentation (generated)
-*.md
 *.pdf
-docs/
 
 # OS
 .DS_Store
@@ -89,3 +86,4 @@ Thumbs.db
 keqing1.code-workspace
 uv.lock
 .venv/
+third_party/
