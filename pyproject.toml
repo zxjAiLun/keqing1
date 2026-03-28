@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Riichi Mahjong MVP with mjai stream training and bot inference."
 requires-python = ">=3.12"
 dependencies = [
+  "ipykernel>=7.2.0",
   "numpy>=1.24",
   "pyyaml>=6.0",
   "riichienv>=0.4.7",
@@ -23,3 +24,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests/v5model"]
+
+[dependency-groups]
+dev = [
+    "mahjong>=1.4.0",
+    "pytest>=9.0.2",
+]

@@ -29,6 +29,31 @@ _VALUE_NORM = 30000.0
 _BUFFER_SIZE = 2000
 
 
+def _mirror_tile_feat(tile_feat: np.ndarray) -> np.ndarray:
+    """m/p 镜像：交换 tile_feat 的 col 0-8（万子）和 col 9-17（饼子）。"""
+    mirrored = tile_feat.copy()
+    mirrored[:, 0:9] = tile_feat[:, 9:18]
+    mirrored[:, 9:18] = tile_feat[:, 0:9]
+    return mirrored
+
+
+def _mirror_mask(mask: np.ndarray) -> np.ndarray:
+    """m/p 镜像：交换 mask 中 dahai idx 0-8（万子）和 9-17（饼子）。"""
+    mirrored = mask.copy()
+    mirrored[0:9] = mask[9:18]
+    mirrored[9:18] = mask[0:9]
+    return mirrored
+
+
+def _mirror_action_idx(idx: int) -> int:
+    """m/p 镜像：dahai 万子↔饼子，其余动作不变。"""
+    if 0 <= idx <= 8:
+        return idx + 9
+    if 9 <= idx <= 17:
+        return idx - 9
+    return idx
+
+
 def _extract_final_deltas(events: List[dict]) -> List[int]:
     """累加一局所有 hora/ryukyoku 的 deltas，返回 4 个玩家的总分变化。"""
     totals = [0, 0, 0, 0]
@@ -75,15 +100,20 @@ class MjaiIterableDataset(IterableDataset):
         shuffle: bool = True,
         buffer_size: int = _BUFFER_SIZE,
         seed: Optional[int] = None,
+        augment: bool = True,
     ):
         self.file_paths = list(file_paths)
         self.shuffle = shuffle
         self.buffer_size = buffer_size
         self.seed = seed
+        self.augment = augment
 
     def __iter__(self) -> Iterator:
-        rng = random.Random(self.seed)
+        worker_info = torch.utils.data.get_worker_info()
         paths = list(self.file_paths)
+        if worker_info is not None:
+            paths = paths[worker_info.id :: worker_info.num_workers]
+        rng = random.Random(self.seed)
         if self.shuffle:
             rng.shuffle(paths)
 
@@ -92,7 +122,10 @@ class MjaiIterableDataset(IterableDataset):
         for path in paths:
             for sample in _parse_file(path):
                 buffer.append(sample)
-                if len(buffer) >= self.buffer_size:
+                if self.augment:
+                    tf, sc, mk, ai, vt = sample
+                    buffer.append((_mirror_tile_feat(tf), sc, _mirror_mask(mk), _mirror_action_idx(ai), vt))
+                while len(buffer) >= self.buffer_size:
                     idx = rng.randrange(len(buffer))
                     yield buffer[idx]
                     buffer[idx] = buffer[-1]

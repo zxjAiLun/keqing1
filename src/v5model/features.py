@@ -60,24 +60,51 @@ from typing import Dict, List
 
 import numpy as np
 
-from riichienv import calculate_shanten, HandEvaluator, Meld, MeldType
-import riichienv.convert as _cvt
-
-from mahjong_env.tiles import normalize_tile, AKA_DORA_TILES
+from mahjong.tile import TilesConverter, FIVE_RED_MAN, FIVE_RED_PIN, FIVE_RED_SOU
+from riichienv import calculate_shanten, HandEvaluator, Meld as RiichiMeld, MeldType
 
 # ---------------------------------------------------------------------------
-# 34 种牌名顺序（与 action_space.py 保持一致）
+# 牌格式转换（项目字符串格式 → tile136 / tile34）
+# 项目格式: "1m".."9m", "5mr", "1p".."9p", "5pr", "1s".."9s", "5sr",
+#           "E","S","W","N","P","F","C"
 # ---------------------------------------------------------------------------
-_SUITS = ("m", "p", "s")
-_TILE_NAMES: List[str] = []
-for _suit in _SUITS:
+_SUIT_KW = {'m': 'man', 'p': 'pin', 's': 'sou'}
+_HONOR_Z  = {'E': '1', 'S': '2', 'W': '3', 'N': '4', 'P': '5', 'F': '6', 'C': '7'}
+
+_STR_TO_136: Dict[str, int] = {}
+for _suit, _kw in _SUIT_KW.items():
     for _n in range(1, 10):
-        _TILE_NAMES.append(f"{_n}{_suit}")
-_TILE_NAMES.extend(["E", "S", "W", "N", "P", "F", "C"])
+        _key = f'{_n}{_suit}'
+        _t = TilesConverter.string_to_136_array(**{_kw: str(_n)}, has_aka_dora=True)
+        _STR_TO_136[_key] = _t[0]
+_STR_TO_136['5mr'] = FIVE_RED_MAN
+_STR_TO_136['5pr'] = FIVE_RED_PIN
+_STR_TO_136['5sr'] = FIVE_RED_SOU
+for _name, _z in _HONOR_Z.items():
+    _STR_TO_136[_name] = TilesConverter.string_to_136_array(honors=_z)[0]
 
-TILE_TO_IDX: Dict[str, int] = {t: i for i, t in enumerate(_TILE_NAMES)}
+_AKA_136 = frozenset({FIVE_RED_MAN, FIVE_RED_PIN, FIVE_RED_SOU})
+
+
+def _to_136(tile: str) -> int:
+    """项目字符串 → tile136；未知牌返回 -1。"""
+    return _STR_TO_136.get(tile, -1)
+
+
+def _to_34(tile: str) -> int:
+    """项目字符串 → tile34（0-33）；未知牌返回 -1。"""
+    t136 = _STR_TO_136.get(tile, -1)
+    return t136 // 4 if t136 >= 0 else -1
+
+
+def _is_aka(tile: str) -> bool:
+    return _STR_TO_136.get(tile, -1) in _AKA_136
+
+
+# ---------------------------------------------------------------------------
+# 34 种牌名顺序（与 action_space.py 保持一致，tile34 index 对应）
+# ---------------------------------------------------------------------------
 N_TILES = 34
-
 C_TILE = 128
 N_SCALAR = 20
 
@@ -85,37 +112,26 @@ _WIND_ORDER = ["E", "S", "W", "N"]
 _BAKAZE_IDX = {"E": 0, "S": 1, "W": 2, "N": 3}
 
 
-def _deaka(tile: str) -> str:
-    if tile in AKA_DORA_TILES:
-        return normalize_tile(tile)
-    return tile
-
-
-def _tile_idx(tile: str) -> int:
-    return TILE_TO_IDX.get(_deaka(tile), -1)
-
-
-_MELD_TYPE_MAP = {
-    'chi': MeldType.Chi,
-    'pon': MeldType.Pon,
-    'daiminkan': MeldType.Daiminkan,
-    'ankan': MeldType.Ankan,
-    'kakan': MeldType.Kakan,
-}
-
-
-def _snap_melds_to_riichienv(melds: List[dict]) -> List[Meld]:
+def _snap_melds_to_mahjong(melds: List[dict]) -> List[RiichiMeld]:
+    """将 snap meld dict 列表转为 riichienv.Meld 列表（供 HandEvaluator 使用）。"""
+    _TYPE_MAP = {
+        'chi': MeldType.Chi,
+        'pon': MeldType.Pon,
+        'daiminkan': MeldType.Daiminkan,
+        'ankan': MeldType.Ankan,
+        'kakan': MeldType.Kakan,
+    }
     result = []
     for m in melds:
-        mt = _MELD_TYPE_MAP.get(m.get('type', ''))
+        mt = _TYPE_MAP.get(m.get('type', ''))
         if mt is None:
             continue
-        tiles = [_cvt.mjai_to_tid(t) for t in m.get('consumed', [])]
+        tiles136 = [_to_136(t) for t in m.get('consumed', []) if _to_136(t) >= 0]
         pai = m.get('pai')
-        if pai:
-            tiles.append(_cvt.mjai_to_tid(pai))
+        if pai and _to_136(pai) >= 0:
+            tiles136.append(_to_136(pai))
         opened = m.get('type') != 'ankan'
-        result.append(Meld(mt, tiles, opened))
+        result.append(RiichiMeld(mt, tiles136, opened))
     return result
 
 
@@ -138,13 +154,10 @@ def encode(state: Dict, actor: int):
 
     # ---- ch 0-3: 自家手牌计数 planes ----
     from collections import Counter
-    hand_count: Counter = Counter(_deaka(t) for t in hand)
-    for tile, cnt in hand_count.items():
-        idx = _tile_idx(tile)
-        if idx < 0:
-            continue
+    hand_count: Counter = Counter(_to_34(t) for t in hand if _to_34(t) >= 0)
+    for tile34, cnt in hand_count.items():
         for k in range(min(cnt, 4)):
-            tile_feat[k, idx] = 1.0
+            tile_feat[k, tile34] = 1.0
 
     # ---- ch 4-7: 自家副露 presence ----
     actor_melds = melds[actor] if actor < len(melds) else []
@@ -152,7 +165,7 @@ def encode(state: Dict, actor: int):
         ch = 4 + meld_slot
         pais = meld.get("consumed", []) + ([meld.get("pai")] if meld.get("pai") else [])
         for p in pais:
-            idx = _tile_idx(p)
+            idx = _to_34(p)
             if idx >= 0:
                 tile_feat[ch, idx] = 1.0
 
@@ -161,12 +174,12 @@ def encode(state: Dict, actor: int):
     for slot, pid in enumerate(other_pids):  # slot 0,1,2
         ch_base = 8 + slot * 4
         for disc in discards[pid] if pid < len(discards) else []:
-            idx = _tile_idx(disc)
+            idx = _to_34(disc)
             if idx >= 0:
                 tile_feat[ch_base, idx] = 1.0  # presence（不区分顺序）
     # 自家舍牌 ch 20
     for disc in discards[actor] if actor < len(discards) else []:
-        idx = _tile_idx(disc)
+        idx = _to_34(disc)
         if idx >= 0:
             tile_feat[20, idx] = 1.0
 
@@ -177,7 +190,7 @@ def encode(state: Dict, actor: int):
 
     # ---- ch 25-29: dora 指示牌（累加，最多5个） ----
     for di, dm in enumerate(dora_markers[:5]):
-        idx = _tile_idx(dm)
+        idx = _to_34(dm)
         if idx >= 0:
             tile_feat[25 + di, idx] = 1.0
 
@@ -191,9 +204,9 @@ def encode(state: Dict, actor: int):
                     tile_feat[31, i] = 1.0
     else:
         try:
-            hand_ids = _cvt.mjai_to_tid_list(hand)
-            riichienv_melds = _snap_melds_to_riichienv(actor_melds)
-            he = HandEvaluator(hand_ids, riichienv_melds if riichienv_melds else None)
+            hand_ids = [_to_136(t) for t in hand if _to_136(t) >= 0]
+            mahjong_melds = _snap_melds_to_mahjong(actor_melds)
+            he = HandEvaluator(hand_ids, mahjong_melds if mahjong_melds else None)
             if he.is_tenpai():
                 tile_feat[30, :] = 1.0
                 # ch31 fallback: leave 0 (get_waits() returns discardable tiles, not waits)
@@ -238,17 +251,21 @@ def encode(state: Dict, actor: int):
         tile_feat[48 + pid, :] = (s - actor_score) / 30000.0
 
     # ---- ch 56-58: 自家手牌赤宝牌 flag（broadcast） ----
-    aka_flags = {"0m": 56, "0p": 57, "0s": 58}
     for tile in hand:
-        if tile in aka_flags:
-            tile_feat[aka_flags[tile], :] = 1.0
+        t136 = _to_136(tile)
+        if t136 == FIVE_RED_MAN:
+            tile_feat[56, :] = 1.0
+        elif t136 == FIVE_RED_PIN:
+            tile_feat[57, :] = 1.0
+        elif t136 == FIVE_RED_SOU:
+            tile_feat[58, :] = 1.0
 
     # ---- ch 59-90: 舍牌巡目分段编码（4家 × 8段）----
     # 每3巡一段（0-2巡→seg0, 3-5→seg1, ..., 21+→seg7）
     for pid in range(4):
         pid_discards = discards[pid] if pid < len(discards) else []
         for turn, tile in enumerate(pid_discards):
-            idx = _tile_idx(tile)
+            idx = _to_34(tile)
             if idx < 0:
                 continue
             seg = min(turn // 3, 7)
@@ -277,9 +294,9 @@ def encode(state: Dict, actor: int):
         scalar[8] = int(state.get("waits_count", 0)) / 34.0
     else:
         try:
-            hand_ids = _cvt.mjai_to_tid_list(hand)
-            riichienv_melds = _snap_melds_to_riichienv(actor_melds)
-            he = HandEvaluator(hand_ids, riichienv_melds if riichienv_melds else None)
+            hand_ids = [_to_136(t) for t in hand if _to_136(t) >= 0]
+            mahjong_melds = _snap_melds_to_mahjong(actor_melds)
+            he = HandEvaluator(hand_ids, mahjong_melds if mahjong_melds else None)
             waits = he.get_waits()
             scalar[7] = (0 if he.is_tenpai() else calculate_shanten(hand_ids)) / 8.0
             scalar[8] = len(waits) / 34.0

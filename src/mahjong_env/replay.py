@@ -11,6 +11,66 @@ from mahjong_env.tiles import AKA_DORA_TILES
 from mahjong_env.types import MjaiEvent
 from mahjong_env.types import Action
 
+# ---------------------------------------------------------------------------
+# riichienv-based shanten/waits helpers (replaces riichi.state.PlayerState)
+# ---------------------------------------------------------------------------
+_STR_TO_136_CACHE: Dict[str, int] = {}
+
+def _build_str_to_136() -> None:
+    from mahjong.tile import TilesConverter, FIVE_RED_MAN, FIVE_RED_PIN, FIVE_RED_SOU
+    for suit, kw in (('m', 'man'), ('p', 'pin'), ('s', 'sou')):
+        for n in range(1, 10):
+            t = TilesConverter.string_to_136_array(**{kw: str(n)}, has_aka_dora=True)
+            _STR_TO_136_CACHE[f'{n}{suit}'] = t[0]
+    _STR_TO_136_CACHE['5mr'] = FIVE_RED_MAN
+    _STR_TO_136_CACHE['5pr'] = FIVE_RED_PIN
+    _STR_TO_136_CACHE['5sr'] = FIVE_RED_SOU
+    for name, z in (('E','1'),('S','2'),('W','3'),('N','4'),('P','5'),('F','6'),('C','7')):
+        _STR_TO_136_CACHE[name] = TilesConverter.string_to_136_array(honors=z)[0]
+
+_build_str_to_136()
+
+def _to_136(tile: str) -> int:
+    return _STR_TO_136_CACHE.get(tile, -1)
+
+def _snap_melds_to_riichienv(melds: List[dict]):
+    from riichienv import Meld as RiichiMeld, MeldType
+    _TYPE_MAP = {'chi': MeldType.Chi, 'pon': MeldType.Pon,
+                 'daiminkan': MeldType.Daiminkan, 'ankan': MeldType.Ankan, 'kakan': MeldType.Kakan}
+    result = []
+    for m in melds:
+        mt = _TYPE_MAP.get(m.get('type', ''))
+        if mt is None:
+            continue
+        tiles136 = [_to_136(t) for t in m.get('consumed', []) if _to_136(t) >= 0]
+        pai = m.get('pai')
+        if pai and _to_136(pai) >= 0:
+            tiles136.append(_to_136(pai))
+        result.append(RiichiMeld(mt, tiles136, m.get('type') != 'ankan'))
+    return result
+
+def _calc_shanten_waits(hand: List[str], melds: List[dict]):
+    """返回 (shanten, waits_count, waits_tile34_bools, tehai_count)。"""
+    from riichienv import calculate_shanten, HandEvaluator
+    hand_ids = [_to_136(t) for t in hand if _to_136(t) >= 0]
+    if not hand_ids:
+        return 8, 0, [False] * 34, 0
+    try:
+        rmelds = _snap_melds_to_riichienv(melds) or None
+        he = HandEvaluator(hand_ids, rmelds)
+        shanten = int(calculate_shanten(hand_ids)) if not he.is_tenpai() else 0
+        waits136 = he.get_waits() if he.is_tenpai() else []
+        waits34 = [False] * 34
+        for w in waits136:
+            idx = w // 4
+            if 0 <= idx < 34:
+                waits34[idx] = True
+        waits_count = sum(waits34)
+        tehai_count = len(hand_ids)
+        return shanten, waits_count, waits34, tehai_count
+    except Exception:
+        return 8, 0, [False] * 34, len(hand_ids)
+
 
 def _normalize_or_keep_aka(tile: str) -> str:
     if tile in AKA_DORA_TILES:
@@ -70,18 +130,6 @@ def build_supervised_samples(
     samples: List[ReplaySample] = []
     actor_names = extract_actor_names(events)
 
-    # Use libriichi's oracle state to provide a local EV proxy based on:
-    # - shanten improvement
-    # - tenpai/ukeire proxy via number of winning tiles (waits set size)
-    # - for calls (chi/pon/kan), a small penalty when shanten/waits don't improve
-    #   (chi/pon consumes concealed tiles; if it doesn't improve, it's likely wrong).
-    try:
-        import riichi  # type: ignore
-    except Exception as e:  # pragma: no cover
-        raise RuntimeError(f"riichi is required for shanten/waits value proxy: {e}") from e
-
-    riichi_states = [riichi.state.PlayerState(pid) for pid in range(4)]
-
     W_SHANTEN = 1.0
     W_WAITS = 0.05
     W_CALL_TEHAI = 0.03
@@ -107,26 +155,21 @@ def build_supervised_samples(
         waits_before_cnt: Optional[int] = None
         tehai_before_cnt: Optional[int] = None
         if collect_sample:
-            # riichi.state.PlayerState is already updated by previous events.
-            ps = riichi_states[actor]  # type: ignore[index]
-            shanten_before = int(ps.shanten)
-            waits_before_cnt = int(sum(ps.waits))
-            tehai_before_cnt = int(sum(ps.tehai))
-
-        payload = json.dumps(event, ensure_ascii=False)
-        # Terminal events (hora/ryukyoku) and end_* events in our exported mjai logs
-        # might omit `actor`, while libriichi's python bindings expect it.
-        # We only need shanten/waits for decision-time actions, so skip them.
-        if et not in {"hora", "ryukyoku", "end_kyoku", "end_game"}:
-            for s in riichi_states:
-                s.update(payload)
+            snap_before = state.snapshot(actor)
+            hand_before = snap_before.get("hand", [])
+            melds_before = (snap_before.get("melds") or [[],[],[],[]])[actor]
+            shanten_before, waits_before_cnt, _waits_before_bools, tehai_before_cnt = \
+                _calc_shanten_waits(hand_before, melds_before)
 
         if collect_sample:
-            ps_after = riichi_states[actor]  # type: ignore[index]
-            shanten_after = int(ps_after.shanten)
-            waits_after_cnt = int(sum(ps_after.waits))
-            tehai_after_cnt = int(sum(ps_after.tehai))
-
+            # Apply event first so we can compute after-state
+            apply_event(state, event)
+            snap_after = state.snapshot(actor)
+            hand_after = snap_after.get("hand", [])
+            melds_after = (snap_after.get("melds") or [[],[],[],[]])[actor]
+            shanten_after, waits_after_cnt, _waits_after_bools, tehai_after_cnt = \
+                _calc_shanten_waits(hand_after, melds_after)
+        if collect_sample:
             delta_shanten = shanten_before - shanten_after  # type: ignore[operator]
             delta_waits = waits_after_cnt - waits_before_cnt  # type: ignore[operator]
             delta_tehai = tehai_after_cnt - tehai_before_cnt  # type: ignore[operator]
@@ -145,10 +188,9 @@ def build_supervised_samples(
                     # clip to stabilize advantage weights
                     value_target_local = max(min(value_target_local, 10.0), -10.0)
 
-        if collect_sample:
             # Keep local value proxy computed above.
             actor_name = actor_names[actor] if 0 <= actor < len(actor_names) else f"p{actor}"
-            snap = state.snapshot(actor)
+            snap = snap_before
             # Only collect supervised samples when the actor hand is visible.
             if snap["hand"]:
                 # Attach shanten/waits features for the policy/value model.
@@ -157,12 +199,14 @@ def build_supervised_samples(
                 # - for dahai: waits of the resulting tenpai shape after discarding label tile
                 # - for chi/pon/kan: waits after the call (0 if not tenpai after call)
                 snap["waits_count"] = waits_after_cnt if waits_after_cnt is not None else 0
-                snap["waits_tiles"] = list(ps.waits)  # length-34 bool list, before action
+                snap["waits_tiles"] = _waits_before_bools  # length-34 bool list, before action
 
                 legal = enumerate_legal_actions(snap, actor)
                 label = dict(event)
                 if "pai" in label:
                     label["pai"] = _normalize_or_keep_aka(label["pai"])
+                if "consumed" in label:
+                    label["consumed"] = [_normalize_or_keep_aka(t) for t in label["consumed"]]
                 legal_dicts = [a.to_mjai() for a in legal]
                 # Our state reconstruction is intentionally lightweight.
                 # If the labeled action is not in enumerated legal set,
@@ -215,7 +259,8 @@ def build_supervised_samples(
                     )
                 )
 
-        apply_event(state, event)
+        if not collect_sample:
+            apply_event(state, event)
     return samples
 
 

@@ -19,7 +19,7 @@ def _snap(**kw):
 
 def test_ch30_tenpai_menzen():
     """门清听牌：ch30 全列=1。"""
-    # 123m456m789m123p 听4p
+    # 123m456m789m1234p 听1p + 4p
     hand = ["1m","2m","3m","4m","5m","6m","7m","8m","9m","1p","2p","3p","4p"]
     tf, _ = encode(_snap(hand=hand), 0)
     assert tf[30, :].min() == 1.0

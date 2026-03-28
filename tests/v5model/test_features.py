@@ -116,7 +116,7 @@ def test_shanten_self_computed_not_tenpai():
 def test_aka_flags():
     """赤宝牌 flag：ch56=赤5m, ch57=赤5p, ch58=赤5s。"""
     snap = _base_snap(
-        hand=["0m", "1m", "2m", "3m", "4m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4p"],
+        hand=["5mr", "1m", "2m", "3m", "4m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4p"],
     )
     tf, _ = encode(snap, 0)
     assert tf[56, :].max() == 1.0  # 赤5m flag

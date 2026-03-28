@@ -63,10 +63,10 @@ def test_segment_pid3_ch83():
 
 
 def test_segment_aka_normalized():
-    """弃牌 '0m'(mjai格式) 不在项目内部格式('5mr')中，_tile_idx返回-1，该弃牌不编码任何位置。"""
-    tf, _ = encode(_snap(discards=[["0m"], [], [], []]), 0)
-    # pid=0 ch59-66 全为 0（0m 被跳过）
-    assert tf[59:67, :].max() == 0.0
+    """弃牌 '5mr' 去赤后编码到 index 4（5m），ch59 第4列=1。"""
+    tf, _ = encode(_snap(discards=[["5mr"], [], [], []]), 0)
+    # pid=0 turn=0 seg=0 ch=59, tile34=4
+    assert tf[59, 4] == 1.0
 
 
 def test_segment_overwrite_same_tile_same_seg():
@@ -87,8 +87,8 @@ def test_segment_channels_95_plus_zero():
 # ---------------------------------------------------------------------------
 
 def test_aka_all_three():
-    """手牌含 0m/0p/0s → ch56/57/58 全置 1.0。"""
-    hand = ["0m","0p","0s","1m","2m","3m","4m","6m","7m","8m","9m","1p","2p"]
+    """手牌含 5mr/5pr/5sr → ch56/57/58 全置 1.0。"""
+    hand = ["5mr","5pr","5sr","1m","2m","3m","4m","6m","7m","8m","9m","1p","2p"]
     tf, _ = encode(_snap(hand=hand), 0)
     assert tf[56, :].min() == 1.0
     assert tf[57, :].min() == 1.0
@@ -96,8 +96,8 @@ def test_aka_all_three():
 
 
 def test_aka_only_0p():
-    """只有 0p → ch57=1, ch56/ch58=0。"""
-    hand = ["1m","2m","3m","4m","5m","6m","7m","8m","9m","0p","2p","3p","4p"]
+    """只有 5pr → ch57=1, ch56/ch58=0。"""
+    hand = ["1m","2m","3m","4m","5m","6m","7m","8m","9m","5pr","2p","3p","4p"]
     tf, _ = encode(_snap(hand=hand), 0)
     assert tf[56, :].max() == 0.0
     assert tf[57, :].min() == 1.0
@@ -105,9 +105,7 @@ def test_aka_only_0p():
 
 
 def test_aka_hand_count_counts_as_5():
-    """项目内部赤宝牌格式是 '5mr'，_deaka('5mr') → '5m'(index4)，计入手牌计数。
-    '0m' 不是项目内部格式，_deaka('0m') 返回 '0m'，_tile_idx 返回 -1，不计入。"""
-    # 用内部格式 '5mr'，与普通 '5m' 共2张 → ch0,ch1 应=1, ch2=0
+    """'5mr' 去赤后为 '5m'(tile34=4)，与普通 '5m' 共2张 → ch0,ch1=1, ch2=0。"""
     hand = ["5mr","5m","1m","2m","3m","4m","6m","7m","8m","9m","1p","2p","3p"]
     tf, _ = encode(_snap(hand=hand), 0)
     assert tf[0, 4] == 1.0

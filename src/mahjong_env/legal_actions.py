@@ -60,6 +60,20 @@ def _pick_chi_tile(hand: Counter, t: str) -> str:
     return t
 
 
+def _pick_consumed(hand: Counter, normalized: str, n: int) -> List[str]:
+    """从手牌中选出 n 张 normalized 牌，优先用赤宝牌版本。"""
+    aka = normalized[0] + normalized[1] + "r" if len(normalized) == 2 and normalized[0] == "5" and normalized[1] in ("m", "p", "s") else None
+    result: List[str] = []
+    # 先取赤宝牌
+    if aka and aka in AKA_DORA_TILES:
+        for _ in range(min(hand.get(aka, 0), n - len(result))):
+            result.append(aka)
+    # 再补普通牌
+    while len(result) < n:
+        result.append(normalized)
+    return result
+
+
 def _ankan_candidates(hand: Counter) -> List[str]:
     result = []
     for t, n in hand.items():
@@ -91,9 +105,11 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
             legal.append(Action(type="none", actor=actor))
             return legal
         if _can_pon(hand, tile_raw):
-            legal.append(Action(type="pon", actor=actor, target=discarder, pai=tile_raw, consumed=[tile_norm, tile_norm]))
+            consumed_pon = _pick_consumed(hand, tile_norm, 2)
+            legal.append(Action(type="pon", actor=actor, target=discarder, pai=tile_raw, consumed=consumed_pon))
         if _can_daiminkan(hand, tile_raw):
-            legal.append(Action(type="daiminkan", actor=actor, target=discarder, pai=tile_raw, consumed=[tile_norm, tile_norm, tile_norm]))
+            consumed_kan = _pick_consumed(hand, tile_norm, 3)
+            legal.append(Action(type="daiminkan", actor=actor, target=discarder, pai=tile_raw, consumed=consumed_kan))
 
         next_player = (discarder + 1) % 4
         if actor == next_player:
@@ -106,7 +122,7 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
         return legal
 
     if actor_to_move == actor:
-        # Note: mjai 会用 last_self_tsumo 的“牌面字符串”来判断 tsumogiri。
+        # Note: mjai 会用 last_self_tsumo 的"牌面字符串"来判断 tsumogiri。
         # 我们的简化状态同样用 tile 字符串进行匹配。
         for tile in hand.keys():
             pai_out = tile
@@ -129,7 +145,7 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
             legal.append(Action(type="reach", actor=actor))
         for tile in _ankan_candidates(hand):
             legal.append(Action(type="ankan", actor=actor, pai=tile, consumed=[tile] * 4))
-        # kakan（对已碰/明杠再杠）在“打牌选择”阶段可能出现。
+        # kakan（对已碰/明杠再杠）在"打牌选择"阶段可能出现。
         # 我们基于已有的 pon meld 来枚举升级可能性（不处理红牌aka精确选择）。
         for meld in state_snapshot.get("melds", [[]])[actor]:
             if meld.get("type") != "pon":
@@ -137,13 +153,15 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
             meld_pai = meld.get("pai")
             if not meld_pai:
                 continue
-            # 需要手里还剩1张“杠牌”。
-            if hand.get(meld_pai, 0) >= 1:
+            # 需要手里还剩1张"杠牌"(考虑赤宝牌等价)。
+            meld_norm = normalize_tile(meld_pai)
+            if _hand_has_tile(hand, meld_norm):
+                kakan_pai = _pick_chi_tile(hand, meld_norm)
                 legal.append(
                     Action(
                         type="kakan",
                         actor=actor,
-                        pai=meld_pai,
+                        pai=kakan_pai,
                         consumed=[meld_pai] * 3,
                     )
                 )

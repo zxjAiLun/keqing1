@@ -54,8 +54,10 @@ class V5Bot:
         hidden_dim: int = 256,
         num_res_blocks: int = 4,
         style_vec: Optional[List[float]] = None,
+        verbose: bool = False,
     ):
         self.player_id = player_id
+        self.verbose = verbose
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         # style_vec: [speed, riichi, value, defense]，均为 [-1, +1]，None 则全 0
         self.style_vec = list(style_vec) if style_vec is not None else [0.0, 0.0, 0.0, 0.0]
@@ -73,6 +75,7 @@ class V5Bot:
         self.model.to(self.device)
         self.model.eval()
 
+        self.decision_log: list = []
         self.game_state = GameState()
         try:
             import riichi as _riichi
@@ -81,6 +84,7 @@ class V5Bot:
             self._riichi_state = None
 
     def reset(self):
+        self.decision_log.clear()
         self.game_state = GameState()
         if self._riichi_state is not None:
             try:
@@ -112,22 +116,20 @@ class V5Bot:
         if etype == "tsumo" and event.get("actor") == actor:
             # 自家摸牌，需要弃牌/立直/自摸
             apply_event(state, event)
-            snap = state.snapshot(actor)
-            legal_actions = enumerate_legal_actions(snap, actor)
             needs_response = True
         elif etype == "dahai" and event.get("actor") != actor:
             # 他家弃牌，可能需要鸣牌/荣和/pass
             apply_event(state, event)
-            snap = state.snapshot(actor)
-            legal_actions = enumerate_legal_actions(snap, actor)
-            needs_response = bool(legal_actions)
+            needs_response = True
+        elif etype in ("chi", "pon", "daiminkan") and event.get("actor") == actor:
+            # 自家副露后需要打牌（riichienv 在同一 step 发此事件让玩家决策打牌）
+            apply_event(state, event)
+            needs_response = True
         else:
             apply_event(state, event)
             return None
 
-        if not needs_response or not legal_actions:
-            return None
-
+        # 先注入 shanten/waits，再枚举合法动作（shanten 影响 reach 是否合法）
         snap = state.snapshot(actor)
         if self._riichi_state is not None:
             try:
@@ -136,6 +138,10 @@ class V5Bot:
                 snap["waits_tiles"] = list(self._riichi_state.waits)
             except Exception:
                 pass
+        legal_actions = enumerate_legal_actions(snap, actor)
+
+        if not needs_response or not legal_actions:
+            return None
         tile_feat, scalar = encode(snap, actor)
         n_scalar = self.model.scalar_proj[0].weight.shape[1]
         if n_scalar >= 20:
@@ -156,4 +162,36 @@ class V5Bot:
         logits_np = np.where(mask > 0, logits_np, -1e9)
 
         chosen = _find_best_legal(logits_np, legal_dicts)
+
+
+        # 记录决策日志（供 HTML 导出）
+        scored = sorted(
+            [{"action": a, "logit": float(logits_np[action_to_idx(a)])} for a in legal_dicts],
+            key=lambda x: x["logit"], reverse=True,
+        )
+        self.decision_log.append({
+            "step": len(self.decision_log),
+            "bakaze": snap.get("bakaze", ""),
+            "kyoku": snap.get("kyoku", 0),
+            "honba": snap.get("honba", 0),
+            "scores": snap.get("scores", []),
+            "hand": snap.get("hand", []),
+            "discards": snap.get("discards", []),
+            "dora_markers": snap.get("dora_markers", []),
+            "reached": snap.get("reached", []),
+            "candidates": scored,
+            "chosen": chosen,
+        })
+
+        if self.verbose:
+            print(f"[Bot {self.player_id}] 决策:")
+            scored = []
+            for a in legal_dicts:
+                idx = action_to_idx(a)
+                scored.append((logits_np[idx], a))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            for logit, a in scored:
+                marker = " <-- 选择" if a == chosen else ""
+                print(f"  {logit:+.3f}  {a}{marker}")
+
         return chosen

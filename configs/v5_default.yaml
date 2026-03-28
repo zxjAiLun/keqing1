@@ -26,7 +26,7 @@ dropout: 0.1
 
 # 训练超参
 num_epochs: 20
-batch_size: 256            # DataLoader batch size（显存充足，直接用大 batch）
+batch_size: 1024           # DataLoader batch size（显存充足，直接用大 batch）
 accumulation_steps: 1      # batch 已够大，不需要梯度累积
 learning_rate: 0.0003
 weight_decay: 0.0001
@@ -40,7 +40,7 @@ steps_per_epoch: 5000
 val_ratio: 0.05
 
 # DataLoader workers
-num_workers: 2
+num_workers: 6
 
 # 日志打印间隔（step 数）
 log_interval: 200
