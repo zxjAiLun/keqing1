@@ -4,7 +4,15 @@
 
 ## 项目状态
 
-当前主力模型为 **v5model**（Conv1d ResNet，~1.7M 参数），已通过 smoke test，可启动训练。
+当前主力模型为 **v5model**（Conv1d ResNet，~1.7M 参数）。已完成核心功能实现并通过测试，训练中（val_acc 74.66% @ epoch 8/20）。
+
+主要完成内容：
+- 完整的 45 动作监督学习框架（dahai×34 + reach/chi/pon/kan/hora/none）
+- 立直状态三段式 legal_actions（`reached` / `pending_reach` / 普通）
+- none/pass 样本自动生成（约占总样本 16%，防止鸣牌过激进）
+- 荣和 legal_actions 基于 waits_tiles 精确判断
+- 立直后摸切样本过滤（无决策价值，约 5.5%）
+- V5Bot 支持 Mjai 协议推理 + 决策日志 HTML 导出
 
 ## 快速开始
 
@@ -172,12 +180,39 @@ Mjai JSONL (.mjson)
 
 数据目录：`artifacts/converted_mjai/ds1` ~ `ds13`，共 12870 个 `.mjson` 文件。
 
+## v5model 关键实现细节
+
+### 立直状态处理（legal_actions.py）
+
+`enumerate_legal_actions` 对立直状态实现三段式处理：
+
+| 状态 | `reached=True` | `pending_reach=True` | 普通 |
+|------|---------------|---------------------|------|
+| 含义 | 立直已被接受 | 已宣告、待打宣言牌 | 正常打牌 |
+| 合法动作 | tsumogiri + ankan | 打出后 shanten==0 的打法 | 全打法 + reach + ankan + kakan |
+| reach 可选 | 否 | 否 | 是（shanten==0 时）|
+
+`pending_reach` 字段由 `state.snapshot()` 自动提供，无需外部注入。立直宣言牌候选用 `mahjong.Shanten` 逐张判断（移除后 shanten==0）。
+
+### 训练样本过滤
+
+`build_supervised_samples` 过滤 `reached=True` 时的 dahai 事件（立直后摸切，无决策价值，约占 dahai 样本 5.5%）。训练数据实时从 `.mjson` 解析，无需重新生成数据。
+
+### waits_tiles 语义
+
+`snap["waits_tiles"]`（length-34 bool list）表示**等待牌**（摸到哪张能和），不是「可打牌」。`pending_reach` 分支中判断「打出后听牌」需重新用 Shanten 计算，不能直接用 waits_tiles 过滤。
+
+### none/pass 样本
+
+每个 dahai 事件后，对有鸣牌机会但主动放弃（下一事件为 tsumo）的玩家生成 none 样本，约占总样本 16%。缺少此类样本会导致模型鸣牌过激进。
+
 ## 注意事项
 
 - `src/` 为包根路径（`pyproject.toml` 配置），导入用 `from v5model.xxx import ...`
 - 训练 checkpoint 保存在 `artifacts/models/modelv5/`，`best.pth` 为最佳，`latest.pth` 支持断点续训
 - GPU 不可用时自动回退到 CPU
 - 数据集使用 IterableDataset 流式加载，不会全量加载进内存
+- Python 执行用 `uv run python3`，系统 `python3` 无 `riichienv`/`torch`
 
 ## 致谢
 

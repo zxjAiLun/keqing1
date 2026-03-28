@@ -60,45 +60,9 @@ from typing import Dict, List
 
 import numpy as np
 
-from mahjong.tile import TilesConverter, FIVE_RED_MAN, FIVE_RED_PIN, FIVE_RED_SOU
 from riichienv import calculate_shanten, HandEvaluator, Meld as RiichiMeld, MeldType
 
-# ---------------------------------------------------------------------------
-# 牌格式转换（项目字符串格式 → tile136 / tile34）
-# 项目格式: "1m".."9m", "5mr", "1p".."9p", "5pr", "1s".."9s", "5sr",
-#           "E","S","W","N","P","F","C"
-# ---------------------------------------------------------------------------
-_SUIT_KW = {'m': 'man', 'p': 'pin', 's': 'sou'}
-_HONOR_Z  = {'E': '1', 'S': '2', 'W': '3', 'N': '4', 'P': '5', 'F': '6', 'C': '7'}
-
-_STR_TO_136: Dict[str, int] = {}
-for _suit, _kw in _SUIT_KW.items():
-    for _n in range(1, 10):
-        _key = f'{_n}{_suit}'
-        _t = TilesConverter.string_to_136_array(**{_kw: str(_n)}, has_aka_dora=True)
-        _STR_TO_136[_key] = _t[0]
-_STR_TO_136['5mr'] = FIVE_RED_MAN
-_STR_TO_136['5pr'] = FIVE_RED_PIN
-_STR_TO_136['5sr'] = FIVE_RED_SOU
-for _name, _z in _HONOR_Z.items():
-    _STR_TO_136[_name] = TilesConverter.string_to_136_array(honors=_z)[0]
-
-_AKA_136 = frozenset({FIVE_RED_MAN, FIVE_RED_PIN, FIVE_RED_SOU})
-
-
-def _to_136(tile: str) -> int:
-    """项目字符串 → tile136；未知牌返回 -1。"""
-    return _STR_TO_136.get(tile, -1)
-
-
-def _to_34(tile: str) -> int:
-    """项目字符串 → tile34（0-33）；未知牌返回 -1。"""
-    t136 = _STR_TO_136.get(tile, -1)
-    return t136 // 4 if t136 >= 0 else -1
-
-
-def _is_aka(tile: str) -> bool:
-    return _STR_TO_136.get(tile, -1) in _AKA_136
+from mahjong_env.tiles import tile_to_136 as _to_136, tile_to_34 as _to_34, tile_is_aka as _is_aka
 
 
 # ---------------------------------------------------------------------------
@@ -252,12 +216,11 @@ def encode(state: Dict, actor: int):
 
     # ---- ch 56-58: 自家手牌赤宝牌 flag（broadcast） ----
     for tile in hand:
-        t136 = _to_136(tile)
-        if t136 == FIVE_RED_MAN:
+        if tile == '5mr':
             tile_feat[56, :] = 1.0
-        elif t136 == FIVE_RED_PIN:
+        elif tile == '5pr':
             tile_feat[57, :] = 1.0
-        elif t136 == FIVE_RED_SOU:
+        elif tile == '5sr':
             tile_feat[58, :] = 1.0
 
     # ---- ch 59-90: 舍牌巡目分段编码（4家 × 8段）----

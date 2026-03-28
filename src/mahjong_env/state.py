@@ -57,6 +57,7 @@ class GameState:
             "discards": [p.discards[:] for p in self.players],
             "melds": [p.melds[:] for p in self.players],
             "reached": [p.reached for p in self.players],
+            "pending_reach": [p.pending_reach for p in self.players],
             "actor_to_move": self.actor_to_move,
             "last_discard": self.last_discard.copy() if self.last_discard else None,
             "last_tsumo": self.last_tsumo[:],

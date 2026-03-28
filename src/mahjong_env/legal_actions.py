@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Dict, List
+from typing import List
 
-from mahjong_env.tiles import normalize_tile, AKA_DORA_TILES, tile_without_aka
+from mahjong_env.tiles import normalize_tile, AKA_DORA_TILES, tile_without_aka, tile_to_34 as _tile_to_34
 from mahjong_env.types import Action
 
 
@@ -104,6 +104,12 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
         if discarder == actor:
             legal.append(Action(type="none", actor=actor))
             return legal
+        # 荣和：检查 waits_tiles（由 bot.py/replay.py 注入）
+        waits_tiles = state_snapshot.get("waits_tiles")
+        if waits_tiles is not None:
+            tile34_idx = _tile_to_34(normalize_tile(tile_raw))
+            if tile34_idx >= 0 and tile34_idx < len(waits_tiles) and waits_tiles[tile34_idx]:
+                legal.append(Action(type="hora", actor=actor, target=discarder, pai=tile_raw))
         if _can_pon(hand, tile_raw):
             consumed_pon = _pick_consumed(hand, tile_norm, 2)
             legal.append(Action(type="pon", actor=actor, target=discarder, pai=tile_raw, consumed=consumed_pon))
@@ -122,6 +128,53 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
         return legal
 
     if actor_to_move == actor:
+        pending_reach = state_snapshot.get("pending_reach", [False, False, False, False])[actor]
+
+        if reached:
+            # 立直已被接受：只能摸切（tsumogiri），或暗杠。
+            if last_tsumo_raw is not None:
+                legal.append(Action(type="dahai", actor=actor, pai=last_tsumo_raw, tsumogiri=True))
+            elif last_tsumo is not None:
+                legal.append(Action(type="dahai", actor=actor, pai=last_tsumo, tsumogiri=True))
+            for tile in _ankan_candidates(hand):
+                legal.append(Action(type="ankan", actor=actor, pai=tile, consumed=[tile] * 4))
+            return legal
+
+        if pending_reach:
+            # 已宣告立直、等待打出立直宣言牌：只能打出让手牌保持听牌的牌。
+            # 对每张候选牌，临时移除后检验 shanten==0（听牌）。
+            from mahjong_env.tiles import tile_to_136 as _to_136
+            from mahjong.shanten import Shanten
+            from mahjong.tile import TilesConverter
+            _shanten_calc = Shanten()
+            for tile in list(hand.keys()):
+                pai_out = tile
+                if last_tsumo == tile and last_tsumo_raw is not None:
+                    pai_out = last_tsumo_raw
+                test_hand = dict(hand)
+                test_hand[tile] -= 1
+                if test_hand[tile] == 0:
+                    del test_hand[tile]
+                hand136 = []
+                for t, cnt in test_hand.items():
+                    idx136 = _to_136(t)
+                    if idx136 >= 0:
+                        hand136.extend([idx136] * cnt)
+                if not hand136:
+                    continue
+                tiles34 = TilesConverter.to_34_array(hand136)
+                if _shanten_calc.calculate_shanten(tiles34) == 0:
+                    legal.append(Action(type="dahai", actor=actor, pai=pai_out, tsumogiri=(last_tsumo == tile)))
+            if not legal:
+                # fallback：shanten 计算失败时退化为全打法
+                for tile in hand.keys():
+                    pai_out = tile
+                    if last_tsumo == tile and last_tsumo_raw is not None:
+                        pai_out = last_tsumo_raw
+                    legal.append(Action(type="dahai", actor=actor, pai=pai_out, tsumogiri=(last_tsumo == tile)))
+            return legal
+
+        # 普通打牌阶段
         # Note: mjai 会用 last_self_tsumo 的"牌面字符串"来判断 tsumogiri。
         # 我们的简化状态同样用 tile 字符串进行匹配。
         for tile in hand.keys():
@@ -141,7 +194,7 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
         # shanten 信息由 libriichi 在 mjai_bot.py 的 react() 中计算并添加到 snapshot。
         # 只有 shanten == 0 (听牌) 时才允许立直，防止模型错误选择导致 mjai_simulator 报错。
         shanten = state_snapshot.get("shanten", None)
-        if not reached and sum(hand.values()) == 14 and (shanten is None or shanten == 0):
+        if not reached and sum(hand.values()) == 14 and shanten == 0:
             legal.append(Action(type="reach", actor=actor))
         for tile in _ankan_candidates(hand):
             legal.append(Action(type="ankan", actor=actor, pai=tile, consumed=[tile] * 4))
@@ -165,7 +218,6 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
                         consumed=[meld_pai] * 3,
                     )
                 )
-        legal.append(Action(type="none", actor=actor))
         return legal
 
     if not last_discard:

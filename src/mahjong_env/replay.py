@@ -7,31 +7,13 @@ from typing import Dict, List, Optional, Sequence, Set
 
 from mahjong_env.legal_actions import enumerate_legal_actions
 from mahjong_env.state import GameState, apply_event
-from mahjong_env.tiles import AKA_DORA_TILES
+from mahjong_env.tiles import AKA_DORA_TILES, tile_to_136 as _to_136
 from mahjong_env.types import MjaiEvent
 from mahjong_env.types import Action
 
 # ---------------------------------------------------------------------------
 # riichienv-based shanten/waits helpers (replaces riichi.state.PlayerState)
 # ---------------------------------------------------------------------------
-_STR_TO_136_CACHE: Dict[str, int] = {}
-
-def _build_str_to_136() -> None:
-    from mahjong.tile import TilesConverter, FIVE_RED_MAN, FIVE_RED_PIN, FIVE_RED_SOU
-    for suit, kw in (('m', 'man'), ('p', 'pin'), ('s', 'sou')):
-        for n in range(1, 10):
-            t = TilesConverter.string_to_136_array(**{kw: str(n)}, has_aka_dora=True)
-            _STR_TO_136_CACHE[f'{n}{suit}'] = t[0]
-    _STR_TO_136_CACHE['5mr'] = FIVE_RED_MAN
-    _STR_TO_136_CACHE['5pr'] = FIVE_RED_PIN
-    _STR_TO_136_CACHE['5sr'] = FIVE_RED_SOU
-    for name, z in (('E','1'),('S','2'),('W','3'),('N','4'),('P','5'),('F','6'),('C','7')):
-        _STR_TO_136_CACHE[name] = TilesConverter.string_to_136_array(honors=z)[0]
-
-_build_str_to_136()
-
-def _to_136(tile: str) -> int:
-    return _STR_TO_136_CACHE.get(tile, -1)
 
 def _snap_melds_to_riichienv(melds: List[dict]):
     from riichienv import Meld as RiichiMeld, MeldType
@@ -121,6 +103,15 @@ def extract_actor_names(events: Sequence[MjaiEvent]) -> List[str]:
     return ["p0", "p1", "p2", "p3"]
 
 
+def _next_meaningful_event(events: List[MjaiEvent], i: int) -> Optional[MjaiEvent]:
+    """跳过 reach_accepted/dora 等元事件，返回 i 之后第一个有意义的事件。"""
+    _SKIP = {"reach_accepted", "dora", "new_dora"}
+    for j in range(i + 1, len(events)):
+        if events[j].get("type") not in _SKIP:
+            return events[j]
+    return None
+
+
 def build_supervised_samples(
     events: List[MjaiEvent],
     actor_filter: Optional[Set[int]] = None,
@@ -135,7 +126,7 @@ def build_supervised_samples(
     W_CALL_TEHAI = 0.03
     CALL_ACTIONS = {"chi", "pon", "daiminkan", "ankan", "kakan"}
 
-    for event in events:
+    for i, event in enumerate(events):
         et = event["type"]
         actor = event.get("actor")
 
@@ -144,6 +135,8 @@ def build_supervised_samples(
             and et in ACTION_TYPES_FOR_LABEL
             and state.in_game
             and (actor_filter is None or actor in actor_filter)
+            # 立直后摸切（reached=True 时的 dahai）无决策价值，跳过
+            and not (et == "dahai" and 0 <= actor < 4 and state.players[actor].reached)
         )
         if collect_sample and actor_name_filter is not None:
             actor_name = actor_names[actor] if 0 <= actor < len(actor_names) else f"p{actor}"
@@ -261,6 +254,52 @@ def build_supervised_samples(
 
         if not collect_sample:
             apply_event(state, event)
+
+        # 生成 none/pass 样本：他家打牌后，有鸣牌机会但主动放弃的玩家
+        if et == "dahai" and state.in_game:
+            discarder = event.get("actor")
+            next_ev = _next_meaningful_event(events, i)
+            if next_ev is not None:
+                next_type = next_ev.get("type")
+                next_actor = next_ev.get("actor")
+                # 只有下一个事件是 tsumo（无人鸣/荣）才是主动 pass
+                is_next_tsumo = (next_type == "tsumo")
+                for p in range(4):
+                    if p == discarder:
+                        continue
+                    if actor_filter is not None and p not in actor_filter:
+                        continue
+                    if actor_name_filter is not None:
+                        p_name = actor_names[p] if 0 <= p < len(actor_names) else f"p{p}"
+                        if p_name not in actor_name_filter:
+                            continue
+                    snap_p = state.snapshot(p)
+                    if not snap_p["hand"]:
+                        continue
+                    legal_p = enumerate_legal_actions(snap_p, p)
+                    non_none_p = [a for a in legal_p if a.type != "none"]
+                    if not non_none_p:
+                        continue
+                    if not is_next_tsumo:
+                        continue
+                    # 注入 shanten
+                    hand_p = snap_p.get("hand", [])
+                    melds_p = (snap_p.get("melds") or [[], [], [], []])[p]
+                    shanten_p, waits_cnt_p, waits_tiles_p, _ = _calc_shanten_waits(hand_p, melds_p)
+                    snap_p["shanten"] = shanten_p
+                    snap_p["waits_count"] = waits_cnt_p
+                    snap_p["waits_tiles"] = waits_tiles_p
+                    samples.append(
+                        ReplaySample(
+                            state=snap_p,
+                            actor=p,
+                            actor_name=actor_names[p] if 0 <= p < len(actor_names) else f"p{p}",
+                            label_action={"type": "none", "actor": p},
+                            legal_actions=[a.to_mjai() for a in legal_p],
+                            value_target=0.0,
+                        )
+                    )
+
     return samples
 
 

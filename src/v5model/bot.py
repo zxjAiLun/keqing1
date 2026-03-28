@@ -125,23 +125,42 @@ class V5Bot:
             # 自家副露后需要打牌（riichienv 在同一 step 发此事件让玩家决策打牌）
             apply_event(state, event)
             needs_response = True
+        elif etype == "reach" and event.get("actor") == actor:
+            # 自家立直宣告后需要打出立直宣言牌
+            apply_event(state, event)
+            needs_response = True
         else:
             apply_event(state, event)
             return None
 
         # 先注入 shanten/waits，再枚举合法动作（shanten 影响 reach 是否合法）
         snap = state.snapshot(actor)
+        injected = False
         if self._riichi_state is not None:
             try:
                 snap["shanten"] = int(self._riichi_state.shanten)
                 snap["waits_count"] = int(sum(self._riichi_state.waits))
                 snap["waits_tiles"] = list(self._riichi_state.waits)
+                injected = True
             except Exception:
                 pass
+        if not injected:
+            # fallback：用 riichienv 自算 shanten/waits
+            from mahjong_env.replay import _calc_shanten_waits
+            hand_list = snap.get("hand", [])
+            melds_list = (snap.get("melds") or [[], [], [], []])[actor]
+            shanten, waits_cnt, waits_tiles, _ = _calc_shanten_waits(hand_list, melds_list)
+            snap["shanten"] = shanten
+            snap["waits_count"] = waits_cnt
+            snap["waits_tiles"] = waits_tiles
         legal_actions = enumerate_legal_actions(snap, actor)
 
+        # 如果合法动作只有 none（无实质选择），直接返回 none 不做推理
+        non_none = [a for a in legal_actions if a.type != "none"]
         if not needs_response or not legal_actions:
             return None
+        if not non_none:
+            return {"type": "none", "actor": actor}
         tile_feat, scalar = encode(snap, actor)
         n_scalar = self.model.scalar_proj[0].weight.shape[1]
         if n_scalar >= 20:
