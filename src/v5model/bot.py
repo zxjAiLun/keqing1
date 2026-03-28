@@ -94,7 +94,7 @@ class V5Bot:
                 pass
 
     @torch.no_grad()
-    def react(self, event: dict) -> Optional[dict]:
+    def react(self, event: dict, gt_action: Optional[dict] = None) -> Optional[dict]:
         """处理单个 mjai 事件，返回需要响应时的动作 dict，否则返回 None。"""
         actor = self.player_id
         state = self.game_state
@@ -200,6 +200,7 @@ class V5Bot:
             "reached": snap.get("reached", []),
             "candidates": scored,
             "chosen": chosen,
+            "gt_action": gt_action,
         })
 
         if self.verbose:

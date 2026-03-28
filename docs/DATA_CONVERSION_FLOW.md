@@ -2,13 +2,23 @@
 
 ## 概述
 
-从天凤 6 格式数据到 v5model 训练数据的完整链路。
+从天凤牌谱链接到 v5model 训练数据的完整链路。
+
+```
+CSV（nodocchi.moe 牌谱链接）
+    └─→ [download_and_convert.py] 下载 XML + 转换
+            ├─→ tenhou_xml_to_json.py → Tenhou6 JSON（临时）
+            └─→ convlog → .mjson (mjai JSONL)
+                    └─→ [MjaiIterableDataset] → (tile_feat, scalar, mask, action, value)
+                            └─→ MahjongModel 训练
+```
+
+也可以从已有的 Tenhou6 JSON 直接转换：
 
 ```
 Tenhou6 JSON
-    └─→ [libriichi / convert 模块] → .mjson (mjai JSONL)
-            └─→ [MjaiIterableDataset] → (tile_feat, scalar, mask, action, value)
-                    └─→ MahjongModel 训练
+    └─→ convlog → .mjson (mjai JSONL)
+            └─→ [MjaiIterableDataset] → ...
 ```
 
 ---
@@ -17,7 +27,8 @@ Tenhou6 JSON
 
 | 阶段 | 路径 | 格式 |
 |------|------|------|
-| 原始天凤数据 | `dataset/tenhou6/{ds}/` | `.json` |
+| 牌谱链接 CSV | `dataset/links/csv/` | `.csv`（nodocchi.moe 导出）|
+| 原始天凤数据 | `dataset/tenhou6/{ds}/` | `.json`（Tenhou6 格式）|
 | 转换后 mjai | `artifacts/converted_mjai/{ds}/` | `.mjson`（每行一个事件）|
 | 模型输出 | `artifacts/models/modelv5/` | `.pth` checkpoint |
 

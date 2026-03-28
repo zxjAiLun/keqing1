@@ -86,4 +86,5 @@ Thumbs.db
 keqing1.code-workspace
 uv.lock
 .venv/
-# third_party/
+third_party/
+tiles/

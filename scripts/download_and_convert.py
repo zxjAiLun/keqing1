@@ -22,11 +22,11 @@ from urllib.parse import urlparse, parse_qs
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from tenhou_xml_to_json import convert_xml_to_tenhou6
-
-CONVLOG_BIN = Path(__file__).parent.parent / "third_party" / "mjai-reviewer" / "target" / "release" / "convlog"
+from convert.tenhou6_utils import CONVLOG_BIN, tenhou6_to_mjson
 
 # Tenhou XML download endpoint
 _TENHOU_LOG_URL = "https://tenhou.net/0/log/?{log_id}"
@@ -71,23 +71,6 @@ def download_xml(log_id: str, retries: int = 3) -> str | None:
 def xml_to_tenhou6_json(xml_str: str) -> dict:
     return convert_xml_to_tenhou6(xml_str)
 
-
-def tenhou6_to_mjson(t6_json: dict, output_path: Path) -> bool:
-    """Write tenhou6 JSON to a temp file then run convlog. Returns success."""
-    tmp = output_path.with_suffix(".tmp.json")
-    try:
-        tmp.write_text(json.dumps(t6_json, ensure_ascii=False), encoding="utf-8")
-        result = subprocess.run(
-            [str(CONVLOG_BIN), str(tmp), str(output_path)],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            print(f"  ERROR convlog: {result.stderr.strip()}")
-            return False
-        return True
-    finally:
-        if tmp.exists():
-            tmp.unlink()
 
 
 def parse_csv_links(csv_path: Path) -> list[str]:
