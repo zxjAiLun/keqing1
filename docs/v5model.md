@@ -2,13 +2,16 @@
 
 ## 概述
 
-v5model 是 keqing1 项目的当前主力模型，基于 Conv1d ResNet 架构，针对立直麻将监督学习设计。
+v5model 是 keqing1 项目的当前主力模型，基于 Conv1d ResNet + SE Block 架构，针对立直麻将监督学习（行为克隆）设计。
 
 **相对 v4model 的改进：**
 
 | 项目 | v4 | v5 |
 |------|----|----|`
 | 卷积方向 | Conv2d（设计有误） | Conv1d（沿 34 牌维度） |
+| 激活函数 | ReLU | Mish |
+| Channel Attention | 无 | SE Block（reduction=8） |
+| 赤宝牌特征 | 归并（丢失信息） | 独立通道 ch56-58 |
 | 动作数 | 38（不完整） | 45（完整日麻动作空间） |
 | 数据加载 | 全量进内存 | IterableDataset 流式 |
 | AMP | 无 | GradScaler + autocast |
@@ -27,215 +30,143 @@ src/v5model/
 ├── features.py          # 特征编码（state → tile_feat + scalar）
 ├── model.py             # MahjongModel 网络定义
 ├── dataset.py           # MjaiIterableDataset 流式数据集
-├── trainer.py           # 训练循环
-└── bot.py               # V5Bot 推理接口
+├── trainer.py           # 训练循环（AMP + 梯度累积）
+└── bot.py               # V5Bot 推理 Bot
 
-src/train/train_v5.py    # 训练入口脚本
-configs/v5_default.yaml  # 默认超参配置
-```
+src/mahjong_env/
+├── replay.py            # build_supervised_samples（数据标注核心）
+├── state.py             # GameState + apply_event
+├── legal_actions.py     # enumerate_legal_actions
+└── tiles.py             # 牌名常量
 
----
-
-## 动作空间（action_space.py）
-
-共 45 个动作，索引如下：
-
-```python
-DAHAI_OFFSET  = 0   # 0–33: 弃牌（按 tile_id/34 的牌种）
-REACH_IDX     = 34  # 立直
-CHI_LOW_IDX   = 35  # 吃（顺子中被吃牌在最低位）
-CHI_MID_IDX   = 36  # 吃（被吃牌在中间）
-CHI_HIGH_IDX  = 37  # 吃（被吃牌在最高位）
-PON_IDX       = 38  # 碰
-DAIMINKAN_IDX = 39  # 大明杠
-ANKAN_IDX     = 40  # 暗杠
-KAKAN_IDX     = 41  # 加杠
-HORA_IDX      = 42  # 和牌（荣和/自摸合并）
-RYUKYOKU_IDX  = 43  # 流局（九种九牌）
-NONE_IDX      = 44  # 跳过/pass
-```
-
-### ChiType 判断（对齐 Mortal）
-
-判断方法：将 `pai` 和 `consumed` 均 deaka（去赤，`tile_id % 34`），比较 `pai_rank` 与 `consumed` 的 min/max：
-
-```
-pai_rank < consumed_min  →  CHI_LOW  (35)
-consumed_min ≤ pai_rank < consumed_max  →  CHI_MID  (36)
-pai_rank ≥ consumed_max  →  CHI_HIGH  (37)
+tests/v5model/
+└── test_features.py     # features.py 单元测试（10个用例）
 ```
 
 ---
 
 ## 特征编码（features.py）
 
-### 输出
+### tile_feat: shape (128, 34)
 
-- `tile_feat`：`ndarray (128, 34)`，float32
-- `scalar`：`ndarray (16,)`，float32
-
-### tile_feat 通道含义（C=128）
-
-主要通道（其余补零）：
-
-| 通道范围 | 含义 |
-|----------|------|
-| 0–3 | 自家手牌每种数量（0/1/2/3/4 张，多热编码）|
-| 4–7 | 各家是否出现该牌（舍牌记录）|
-| 8–11 | 各家副露是否含该牌 |
-| 12–16 | dora（最多 5 张）|
-| 17–20 | 各家立直状态（广播到 34 维）|
-| 21 | 宝牌指示牌 |
-| 22–29 | 场风/自风（one-hot，广播）|
-| 30 | 向听数（归一化，广播）|
-| 31 | 是否听牌（广播）|
-
-### scalar 含义（S=16）
-
-| 索引 | 含义 |
+| 通道 | 内容 |
 |------|------|
-| 0–3 | 各家分数（除以 100000 归一化）|
-| 4 | 本场数（除以 8）|
-| 5 | 供托数（除以 8）|
-| 6 | 剩余牌数（除以 70）|
-| 7–10 | 各家巡目（除以 18）|
-| 11 | 场风（0=东, 1=南）|
-| 12 | 自风（0-3）|
-| 13 | 向听数（除以 8）|
-| 14 | 有效进张数（除以 34）|
-| 15 | 是否听牌（0/1）|
+| 0-3 | 自家手牌计数 planes（第k张同种牌） |
+| 4-7 | 自家副露 presence（每组副露占一个 ch） |
+| 8-11 | 他家副露 presence（上/对/下家各一组，最多4组用ch8-11均摊） |
+| 12-23 | 自家弃牌历史（按出牌顺序，12张） |
+| 24-35 | 他家弃牌历史（上/对/下家各4张，共12ch） |
+| 36-39 | 赤宝牌标记（自家手牌/副露/弃牌/他家）—— 按牌种 34 列 |
+| 40-47 | dora 指示牌（最多8张）each ch 全列=1 表示有 dora |
+| 48-51 | 自家手牌是否含各 dora（逐张） |
+| 52-55 | 各 dora 在已见牌中的计数 |
+| 56-58 | 赤宝牌独立通道（0m/0p/0s），手牌中有则对应列=1 |
+| 59-63 | 各家立直标记（全列） |
+| 64-67 | 各家弃牌数量（归一化） |
+| 68-71 | 各家副露数量（归一化） |
+| 72-75 | 自家 keep/next shanten discard 候选 |
+| 76-127 | 保留（全零） |
+
+### scalar: shape (N_SCALAR=20)
+
+| 索引 | 内容 | 归一化 |
+|------|------|--------|
+| 0 | bakaze（场风） | /3 |
+| 1 | jikaze（自风） | /3 |
+| 2 | kyoku（局数） | /4 |
+| 3 | honba（本场） | /4 |
+| 4 | kyotaku（供托） | /4 |
+| 5 | 自家得分 | /40000 |
+| 6 | 顺位（0=1位） | /3 |
+| 7 | 向听数 | /8 |
+| 8 | waits_count（等张数） | /34 |
+| 9 | 是否立直 | bool |
+| 10 | 副露数 | /4 |
+| 11 | 弃牌数 | /24 |
+| 12-14 | 他家立直（上/对/下家） | bool |
+| 15 | 保留 | 0 |
+| 16-19 | 风格向量 [speed, riichi, value, defense] | [-1,+1] |
 
 ---
 
-## 网络结构（model.py）
+## 副露（Meld）处理的关键细节
 
-```
-MahjongModel
-  input_proj:   Conv1d(128 → 256, k=1) + BN1d + ReLU
-  ResBlock × 4: Conv1d(256, k=3, pad=1) + BN1d + ReLU
-                Conv1d(256, k=3, pad=1) + BN1d
-                + 残差连接 + ReLU
-  global_avg_pool(dim=-1)  →  (B, 256)
-  scalar_proj:  Linear(16 → 32) + ReLU
-  concat:       (B, 256+32) = (B, 288)
-  fc_shared:    Linear(288 → 256) + ReLU + Dropout(0.1)
-  policy_head:  Linear(256 → 45)        — 未 softmax
-  value_head:   Linear(256 → 64) + ReLU
-                Linear(64 → 1) + Tanh   — 预测最终相对得分
-```
+### 手牌状态时机
 
-总参数量约 **1.7M**，BN momentum=0.01, eps=1e-3。
-权重初始化：Conv1d 用 Kaiming normal，Linear 用 Xavier uniform。
+副露后手牌处于 **3n+2** 状态（例如 chi 后11张，需要再打一张变10张），**不能**直接用 HandEvaluator 计算 waits。
 
----
+| 动作 | 手牌张数 | 状态 | 可算 shanten | 可算 waits |
+|------|---------|------|------------|----------|
+| chi 发生 | 13→11 | 3n+2 | ✓ | ✗ |
+| chi 后 dahai | 11→10 | 3n+1 | ✓ | ✓ |
+| 门清 dahai | 13→12 | — | ✓（打前13张） | ✓（打后12张） |
 
-## 数据集（dataset.py）
+### shanten 和 waits_count 的注入来源
 
-### MjaiIterableDataset
+**训练时（`build_supervised_samples`）：**
+- 使用 `riichi.state.PlayerState`（libriichi Rust 实现）维护精确状态
+- `snap["shanten"] = shanten_before`：动作发生前的向听数
+- `snap["waits_count"] = waits_after_cnt`：动作发生**后** PlayerState 更新的等待数
+  - libriichi 只在 **dahai 后（3n+1）** 调用 `update_waits_and_furiten`，所以 `waits_after_cnt` 是打出 label 牌后的真实等待数
+  - chi/pon 后（3n+2）waits 不更新，`waits_after_cnt=0` 是正确的（副露后还没打牌，等待未确定）
 
-- 继承 `torch.utils.data.IterableDataset`，流式读取 `.mjson` 文件
-- 每个样本：`(tile_feat, scalar, legal_mask, action_idx, value)`
-- shuffle buffer = 2000，每次随机 pop 减少顺序偏差
-- 多 epoch 自动重 shuffle 文件列表
+**推理时（`V5Bot.react`）：**
+- bot.py 维护 `riichi.state.PlayerState`，每次 react 先 `update` 事件
+- 在 `encode` 前注入 `snap["shanten"]` 和 `snap["waits_count"]`
+- `waits_count` 来自 PlayerState.waits（dahai 后才有非零值，chi/pon 后为0）
 
-### Value Target
+**为什么不用 `HandEvaluator.get_waits()`：**
+- HandEvaluator 只支持标准13张门清手牌
+- 副露后手牌（11/10/7/4张）传入时 `is_tenpai()` 和 `get_waits()` 均返回错误结果
 
-```python
-# 扫描全局 hora/ryukyoku 事件的 deltas，累加后归一化
-value_target = final_deltas[actor] / 30000.0
-value_target = clip(value_target, -1.0, 1.0)
-```
+### Mortal/libriichi 对比
 
-### split_files
+libriichi 的 `update_shanten_discards()` 在 chi/pon 后（3n+2）计算：
+- `keep_shanten_discards[i]`：打第 i 张牌向听不变
+- `next_shanten_discards[i]`：打第 i 张牌向听下降
 
-```python
-train_files, val_files = split_files(root_dirs, val_ratio=0.05, seed=42)
-```
+`update_waits_and_furiten()` 只在 dahai 后（3n+1）调用，才更新 `state.waits`。
+
+Mortal 的 obs_repr.rs 直接读 `state.waits`（dahai 后的值）编码特征，与我们修复后的行为一致。
 
 ---
 
-## 训练循环（trainer.py）
+## 动作空间（action_space.py）
 
-### 损失函数
+45 个动作：
 
-```
-total_loss = masked_CE(policy_logits, action_idx, legal_mask)
-           + 0.5 × MSE(value, value_target)
-```
-
-`masked_CE`：将非法动作的 logits 设为 -1e9 后再算 cross entropy。
-
-### 训练特性
-
-- **AMP**：`torch.cuda.amp.autocast` + `GradScaler`
-- **梯度累积**：默认 `accumulation_steps=4`，等效 batch=256
-- **LR schedule**：线性 warmup（500步）+ cosine decay
-- **断点续训**：checkpoint 保存 model / optimizer / scheduler / epoch / step
-
-### Checkpoint 文件
-
-| 文件 | 含义 |
+| 索引 | 动作 |
 |------|------|
-| `best.pth` | 验证集 CE loss 最低的 checkpoint |
-| `latest.pth` | 最新 epoch 结束时的 checkpoint |
-| `train_log.jsonl` | 每 epoch 的训练/验证指标 |
+| 0-33 | dahai（弃牌，34种牌，赤归并） |
+| 34 | reach（立直） |
+| 35 | chi_low（被吃牌是顺子最低位） |
+| 36 | chi_mid（被吃牌是顺子中间位） |
+| 37 | chi_high（被吃牌是顺子最高位） |
+| 38 | pon（碰） |
+| 39 | daiminkan（明杠） |
+| 40 | ankan（暗杠） |
+| 41 | kakan（加杠） |
+| 42 | hora（荣和/自摸统一） |
+| 43 | ryukyoku（九种九牌） |
+| 44 | none/pass |
+
+ChiType 判断对齐 Mortal chi_type.rs：`pai_rank < lo → chi_low`，`lo ≤ pai_rank < hi → chi_mid`，`pai_rank ≥ hi → chi_high`。
 
 ---
 
-## 推理 Bot（bot.py）
-
-```python
-from v5model.bot import V5Bot
-
-bot = V5Bot(player_id=0, model_path="artifacts/models/modelv5/best.pth", device="cuda")
-
-# 逐事件处理（Mjai 协议）
-action = bot.react(event_dict)  # 需要响应时返回动作 dict，否则返回 None
-```
-
-### 推理流程
-
-1. 接收 mjai 事件，通过 `apply_event` 更新 `GameState`
-2. 遇到自家 `tsumo` 或他家 `dahai` 时，调用 `enumerate_legal_actions`
-3. 特征编码 → 模型推理 → 非法动作 mask → argmax 选最优合法动作
-
----
-
-## 启动训练
+## 训练
 
 ```bash
-# 基本用法
-uv run python src/train/train_v5.py \
-  --data_dirs artifacts/converted_mjai/ds1 artifacts/converted_mjai/ds2 artifacts/converted_mjai/ds3 \
-  --output_dir artifacts/models/modelv5
-
-# 使用配置文件
-uv run python src/train/train_v5.py --config configs/v5_default.yaml
+# 全量训练（ds1-ds13）
+PYTHONPATH=src .venv/bin/python3 -m train.train_v5 --config configs/v5_default.yaml
 
 # 断点续训
-uv run python src/train/train_v5.py \
-  --data_dirs artifacts/converted_mjai/ds1 \
-  --output_dir artifacts/models/modelv5 \
-  --resume
+PYTHONPATH=src .venv/bin/python3 -m train.train_v5 --config configs/v5_default.yaml --resume artifacts/models/modelv5/latest.pth
 
-# 指定设备/seed
-uv run python src/train/train_v5.py \
-  --data_dirs artifacts/converted_mjai/ds1 \
-  --output_dir artifacts/models/modelv5 \
-  --device cuda --seed 42
+# 运行测试
+PYTHONPATH=src .venv/bin/python3 -m pytest -v
 ```
 
-### 监控训练
-
-```bash
-# 实时查看训练日志
-tail -f artifacts/models/modelv5/train_log.jsonl
-
-# 在 Ghostty 后台运行（& 放后台，输出重定向）
-uv run python src/train/train_v5.py \
-  --data_dirs artifacts/converted_mjai/ds1 \
-  --output_dir artifacts/models/modelv5 \
-  > artifacts/models/modelv5/stdout.log 2>&1 &
-
-echo "PID: $!"
-```
+**当前训练结果（旧数据，waits_count 未修复）：**
+- 最佳 val_acc=75.2%（epoch 6），之后过拟合
+- acc 卡在 76% 左右，部分原因是副露后 waits_count 全为 0

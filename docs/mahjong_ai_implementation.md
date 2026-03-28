@@ -257,24 +257,27 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler):
 
 ## 七、实施优先级（校正版）
 
-| 优先级 | 任务 | 说明 |
-|---|---|---|
-| P0 | IterableDataset 流式加载 | 解决内存问题，替换全量加载 |
-| P0 | CheckpointManager | 断点续训 |
-| P0 | AMP + 梯度累积 | 显存减半，等效大 batch |
-| P1 | 观测从 270 迁移到 `(obs_channels, 34)` + Conv1d | 对齐 Mortal 实际格式 |
-| P1 | 动作空间扩展到 46 | 覆盖完整日麻动作（对齐 Mortal，不是 121） |
-| P2 | mjai 协议接入 + 部署 | bot 间实战评估 |
-| P3 | torch.compile 编译优化 | 提速约 20% |
+| 优先级 | 任务 | 状态 | 说明 |
+|---|---|---|---|
+| P0 | IterableDataset 流式加载 | ✅ 已完成（v5model） | `MjaiIterableDataset`，shuffle buffer=2000 |
+| P0 | CheckpointManager | ✅ 已完成（v5model） | 保存 model/optimizer/scheduler/scaler/epoch |
+| P0 | AMP + 梯度累积 | ✅ 已完成（v5model） | GradScaler + autocast，accumulation_steps=4 |
+| P1 | 观测从 270 迁移到 `(C, 34)` + Conv1d | ✅ 已完成（v5model） | tile_feat (128,34) + scalar (16)，Conv1d ResNet |
+| P1 | 动作空间扩展到 45 | ✅ 已完成（v5model） | 45 动作（ankan/kakan 分开，不合并为 46）|
+| P2 | RiichiEnv 集成 + 对局运行 | ✅ 已完成 | V5Bot 通过 new_events()/select_action_from_mjai() 适配 |
+| P2 | torch.compile 编译优化 | 未做 | 提速约 20% |
+| P3 | BC + CQL 强化学习 | 未做 | 对齐 Mortal 训练方式 |
 
 ---
 
-## 八、值得保留的现有代码
+## 八、现有代码状态
 
-- `src/v4model/model.py`：ResidualBlock、ChannelAttention 可复用，改 Conv2d→Conv1d
-- `src/v4model/bot.py`：mjai 协议交互逻辑、动作映射
-- `src/mahjong_env/`：规则引擎，核心依赖
-- `RuleBot`：baseline 对手
+- `src/v5model/`：**当前主力**，Conv1d ResNet + SE Block，epoch 1 val_acc=72.2%
+  - `bot.py`：V5Bot，通过 `new_events()` / `select_action_from_mjai()` 与 RiichiEnv 集成
+  - `features.py`：tile_feat (128,34) + scalar (16)，N_SCALAR 与 checkpoint 需一致
+- `src/v4model/`：历史版本，保留参考；V4Bot 直接消费 `Observation` 对象
+- `src/mahjong_env/`：规则引擎（legal_actions、GameState），V5Bot 核心依赖
+- `run_game_and_export.ipynb`：对局运行与可视化入口，已更新为 V5Bot
 
 ---
 

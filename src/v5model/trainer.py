@@ -31,8 +31,8 @@ def save_checkpoint(path: Path, model: MahjongModel, optimizer, scheduler, epoch
 
 
 def load_checkpoint(path: Path, model: MahjongModel, optimizer, scheduler):
-    ckpt = torch.load(path, map_location="cpu")
-    model.load_state_dict(ckpt["model"])
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    model.load_state_dict(ckpt["model"], strict=False)
     optimizer.load_state_dict(ckpt["optimizer"])
     if scheduler is not None and ckpt.get("scheduler") is not None:
         scheduler.load_state_dict(ckpt["scheduler"])
@@ -79,11 +79,14 @@ def _run_epoch(
     step: int,
     log_interval: int = 100,
 ) -> Dict:
+    import sys
     model.train(is_train)
     total_ce = total_val_loss = total_acc = 0.0
     n_batches = 0
+    tag = "train" if is_train else "val"
 
-    optimizer.zero_grad()
+    if is_train:
+        optimizer.zero_grad()
 
     ctx = torch.enable_grad() if is_train else torch.no_grad()
     with ctx:
@@ -114,18 +117,28 @@ def _run_epoch(
                         scheduler.step()
                     step += 1
 
-                    if step % log_interval == 0:
-                        lr = optimizer.param_groups[0]["lr"]
-                        print(f"  step={step} ce={ce.item():.4f} val={val_loss.item():.4f} lr={lr:.2e}")
-
             with torch.no_grad():
-                pred = policy_logits.argmax(dim=-1)
+                masked_logits = policy_logits.masked_fill(mask == 0, -1e4)
+                pred = masked_logits.argmax(dim=-1)
                 total_acc += (pred == action_idx).float().mean().item()
 
             total_ce += ce.item()
             total_val_loss += val_loss.item()
             n_batches += 1
 
+            # 进度条：每 batch 刷新一行
+            lr_str = f" lr={optimizer.param_groups[0]['lr']:.2e}" if is_train else ""
+            sys.stdout.write(
+                f"\r  [{tag}] batch={n_batches:5d} | "
+                f"ce={total_ce/n_batches:.4f} "
+                f"val={total_val_loss/n_batches:.4f} "
+                f"acc={total_acc/n_batches:.3f}"
+                f"{lr_str}   "
+            )
+            sys.stdout.flush()
+
+    sys.stdout.write("\n")
+    sys.stdout.flush()
     n = max(1, n_batches)
     return {
         "ce": total_ce / n,

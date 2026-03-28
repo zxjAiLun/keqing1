@@ -153,7 +153,11 @@ def build_supervised_samples(
             if snap["hand"]:
                 # Attach shanten/waits features for the policy/value model.
                 snap["shanten"] = shanten_before if shanten_before is not None else 0
-                snap["waits_count"] = waits_before_cnt if waits_before_cnt is not None else 0
+                # waits_after_cnt reflects waits after this action is applied:
+                # - for dahai: waits of the resulting tenpai shape after discarding label tile
+                # - for chi/pon/kan: waits after the call (0 if not tenpai after call)
+                snap["waits_count"] = waits_after_cnt if waits_after_cnt is not None else 0
+                snap["waits_tiles"] = list(ps.waits)  # length-34 bool list, before action
 
                 legal = enumerate_legal_actions(snap, actor)
                 label = dict(event)

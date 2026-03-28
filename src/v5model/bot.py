@@ -53,24 +53,41 @@ class V5Bot:
         device: str = "cuda",
         hidden_dim: int = 256,
         num_res_blocks: int = 4,
+        style_vec: Optional[List[float]] = None,
     ):
         self.player_id = player_id
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        # style_vec: [speed, riichi, value, defense]，均为 [-1, +1]，None 则全 0
+        self.style_vec = list(style_vec) if style_vec is not None else [0.0, 0.0, 0.0, 0.0]
 
+        ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+        state_dict = ckpt.get("model", ckpt)
+        # 从 checkpoint 自动推断 n_scalar（兼容旧版 N_SCALAR=16）
+        n_scalar = state_dict["scalar_proj.0.weight"].shape[1]
         self.model = MahjongModel(
             hidden_dim=hidden_dim,
             num_res_blocks=num_res_blocks,
+            n_scalar=n_scalar,
         )
-        ckpt = torch.load(model_path, map_location="cpu")
-        state_dict = ckpt.get("model", ckpt)
         self.model.load_state_dict(state_dict)
         self.model.to(self.device)
         self.model.eval()
 
         self.game_state = GameState()
+        try:
+            import riichi as _riichi
+            self._riichi_state = _riichi.state.PlayerState(player_id)
+        except Exception:
+            self._riichi_state = None
 
     def reset(self):
         self.game_state = GameState()
+        if self._riichi_state is not None:
+            try:
+                import riichi as _riichi
+                self._riichi_state = _riichi.state.PlayerState(self.player_id)
+            except Exception:
+                pass
 
     @torch.no_grad()
     def react(self, event: dict) -> Optional[dict]:
@@ -84,17 +101,25 @@ class V5Bot:
 
         etype = event.get("type", "")
 
+        import json as _json
+        _payload = _json.dumps(event, ensure_ascii=False)
+        if self._riichi_state is not None:
+            try:
+                self._riichi_state.update(_payload)
+            except Exception:
+                pass
+
         if etype == "tsumo" and event.get("actor") == actor:
             # 自家摸牌，需要弃牌/立直/自摸
             apply_event(state, event)
             snap = state.snapshot(actor)
-            legal_actions = enumerate_legal_actions(state, actor)
+            legal_actions = enumerate_legal_actions(snap, actor)
             needs_response = True
         elif etype == "dahai" and event.get("actor") != actor:
             # 他家弃牌，可能需要鸣牌/荣和/pass
             apply_event(state, event)
             snap = state.snapshot(actor)
-            legal_actions = enumerate_legal_actions(state, actor)
+            legal_actions = enumerate_legal_actions(snap, actor)
             needs_response = bool(legal_actions)
         else:
             apply_event(state, event)
@@ -104,7 +129,18 @@ class V5Bot:
             return None
 
         snap = state.snapshot(actor)
+        if self._riichi_state is not None:
+            try:
+                snap["shanten"] = int(self._riichi_state.shanten)
+                snap["waits_count"] = int(sum(self._riichi_state.waits))
+                snap["waits_tiles"] = list(self._riichi_state.waits)
+            except Exception:
+                pass
         tile_feat, scalar = encode(snap, actor)
+        n_scalar = self.model.scalar_proj[0].weight.shape[1]
+        if n_scalar >= 20:
+            scalar[16:20] = self.style_vec  # 注入风格向量
+        scalar = scalar[:n_scalar]
 
         tile_t = torch.from_numpy(tile_feat).unsqueeze(0).to(self.device)  # (1, C, 34)
         scalar_t = torch.from_numpy(scalar).unsqueeze(0).to(self.device)   # (1, S)
@@ -112,14 +148,12 @@ class V5Bot:
         policy_logits, _ = self.model(tile_t, scalar_t)
         logits_np = policy_logits.squeeze(0).cpu().numpy()  # (45,)
 
+        # Action dataclass → mjai dict
+        legal_dicts = [a.to_mjai() for a in legal_actions]
+
         # 将非法动作设为 -1e9
-        mask = np.array(build_legal_mask(legal_actions), dtype=np.float32)
+        mask = np.array(build_legal_mask(legal_dicts), dtype=np.float32)
         logits_np = np.where(mask > 0, logits_np, -1e9)
 
-        chosen = _find_best_legal(logits_np, legal_actions)
-        # 转为 mjai dict 格式
-        if hasattr(chosen, "to_dict"):
-            return chosen.to_dict()
-        if hasattr(chosen, "__dict__"):
-            return {k: v for k, v in chosen.__dict__.items() if v is not None}
-        return dict(chosen)
+        chosen = _find_best_legal(logits_np, legal_dicts)
+        return chosen

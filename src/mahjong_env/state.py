@@ -151,8 +151,9 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
         consumed = [_normalize_or_keep_aka(x) for x in event["consumed"]]
         for t in consumed:
             _remove_tile(state.players[actor].hand, t, 1)
+        ankan_pai = _normalize_or_keep_aka(event["consumed"][0]) if "pai" not in event else _normalize_or_keep_aka(event["pai"])
         state.players[actor].melds.append(
-            {"type": "ankan", "pai": _normalize_or_keep_aka(event["pai"]), "consumed": consumed, "target": actor}
+            {"type": "ankan", "pai": ankan_pai, "consumed": consumed, "target": actor}
         )
         state.actor_to_move = actor
         state.last_discard = None

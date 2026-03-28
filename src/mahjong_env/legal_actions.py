@@ -44,6 +44,22 @@ def _can_daiminkan(hand: Counter, tile: str) -> bool:
     return hand[normalized] >= 3
 
 
+def _hand_has_tile(hand: Counter, t: str) -> bool:
+    """检查手牌中是否有牌 t，同时考虑赤宝牌（5m/5p/5s ↔ 5mr/5pr/5sr）。"""
+    if hand[t] >= 1:
+        return True
+    if len(t) == 2 and t[0] == "5" and t[1] in ("m", "p", "s"):
+        return hand[t + "r"] >= 1
+    return False
+
+
+def _pick_chi_tile(hand: Counter, t: str) -> str:
+    """从手牌中取牌 t，优先返回赤宝牌版本。"""
+    if len(t) == 2 and t[0] == "5" and t[1] in ("m", "p", "s") and hand[t + "r"] >= 1:
+        return t + "r"
+    return t
+
+
 def _ankan_candidates(hand: Counter) -> List[str]:
     result = []
     for t, n in hand.items():
@@ -82,8 +98,9 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
         next_player = (discarder + 1) % 4
         if actor == next_player:
             for c in _chi_patterns(tile_raw):
-                if hand[c[0]] >= 1 and hand[c[1]] >= 1:
-                    legal.append(Action(type="chi", actor=actor, target=discarder, pai=tile_raw, consumed=c))
+                if _hand_has_tile(hand, c[0]) and _hand_has_tile(hand, c[1]):
+                    actual_c = [_pick_chi_tile(hand, c[0]), _pick_chi_tile(hand, c[1])]
+                    legal.append(Action(type="chi", actor=actor, target=discarder, pai=tile_raw, consumed=actual_c))
 
         legal.append(Action(type="none", actor=actor))
         return legal

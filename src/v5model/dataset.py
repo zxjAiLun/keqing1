@@ -1,9 +1,9 @@
-"""流式数据集：从 .mjson 文件逐局解析，value target 使用最终相对得分。
+"""流式数据集：从 .mjson 文件逐局解析，value target 使用 build_supervised_samples 提供的 local EV proxy。
 
 设计：
 - IterableDataset，不预加载全量数据
 - 维护 shuffle_buffer（大小 2000），随机 pop 样本减少顺序偏差
-- value target = 该局 actor 最终累计 delta / 30000（归一化到 [-1, 1]）
+- value target = ReplaySample.value_target（向听数/进张数变化的即时奖励代理），clip 到 [-1, 1]
 - 多 epoch 自动重 shuffle 文件列表
 """
 
@@ -56,12 +56,14 @@ def _parse_file(path: Path) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray
 
     for s in samples:
         actor = s.actor
-        value_target = final_deltas[actor] / _VALUE_NORM
-        value_target = float(np.clip(value_target, -1.0, 1.0))
+        value_target = float(np.clip(s.value_target, -1.0, 1.0))
 
         tile_feat, scalar = encode(s.state, actor)
         mask = np.array(build_legal_mask(s.legal_actions), dtype=np.float32)
         action_idx = action_to_idx(s.label_action)
+
+        if mask[action_idx] == 0:
+            continue
 
         yield tile_feat, scalar, mask, action_idx, np.float32(value_target)
 

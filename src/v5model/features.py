@@ -17,7 +17,8 @@
   31    : 自家听牌进张（waits，有效进张 = 1.0）
   32-35 : 4家副露数量（归一化，broadcast）
   36-39 : 4家舍牌数量（归一化，broadcast）
-  40-43 : 场风/自风 one-hot（broadcast）
+  40-43 : 场风 one-hot（E/S/W/N，broadcast）
+  91-94 : 自风 one-hot（E/S/W/N，broadcast）
   44    : 宝牌指示牌数量（归一化，broadcast）
   45    : 本场数（归一化）
   46    : 供托数（归一化）
@@ -27,9 +28,13 @@
   56    : 自家手牌含赤5m（aka 0m）flag（broadcast）
   57    : 自家手牌含赤5p（aka 0p）flag（broadcast）
   58    : 自家手牌含赤5s（aka 0s）flag（broadcast）
-  59-127: 补 0（保留）
+  59-90 : 舍牌巡目分段编码（4家 × 8段，ch = 59 + pid*8 + seg）
+          seg = min(discard_turn // 3, 7)，即每3巡一段，共8段
+          第 k 张舍牌在对应段的对应牌位置置 1
+  91-94 : 自风 one-hot（E/S/W/N，broadcast）
+  95-127: 补 0（保留）
 
-N_SCALAR = 16：
+N_SCALAR = 20：
   0  : bakaze one-hot bit 0（E=1, else=0）
   1  : bakaze one-hot bit 1（S=1, else=0）
   2  : kyoku (1-4) / 4.0
@@ -43,6 +48,10 @@ N_SCALAR = 16：
   10 : 自家副露数 / 4.0
   11 : 自家舍牌数 / 24.0
   12-15: 其余各家立直 flag（pid != actor）
+  16 : style_speed   [-1,+1]  速攻(+1) vs 慢打(-1)，训练时=0
+  17 : style_riichi  [-1,+1]  立直优先(+1) vs 默听(-1)，训练时=0
+  18 : style_value   [-1,+1]  高打点(+1) vs 注重胡率(-1)，训练时=0
+  19 : style_defense [-1,+1]  铁壁防守(+1) vs 对攻(-1)，训练时=0
 """
 
 from __future__ import annotations
@@ -51,7 +60,7 @@ from typing import Dict, List
 
 import numpy as np
 
-from riichienv import calculate_shanten, HandEvaluator
+from riichienv import calculate_shanten, HandEvaluator, Meld, MeldType
 import riichienv.convert as _cvt
 
 from mahjong_env.tiles import normalize_tile, AKA_DORA_TILES
@@ -70,7 +79,7 @@ TILE_TO_IDX: Dict[str, int] = {t: i for i, t in enumerate(_TILE_NAMES)}
 N_TILES = 34
 
 C_TILE = 128
-N_SCALAR = 16
+N_SCALAR = 20
 
 _WIND_ORDER = ["E", "S", "W", "N"]
 _BAKAZE_IDX = {"E": 0, "S": 1, "W": 2, "N": 3}
@@ -84,6 +93,30 @@ def _deaka(tile: str) -> str:
 
 def _tile_idx(tile: str) -> int:
     return TILE_TO_IDX.get(_deaka(tile), -1)
+
+
+_MELD_TYPE_MAP = {
+    'chi': MeldType.Chi,
+    'pon': MeldType.Pon,
+    'daiminkan': MeldType.Daiminkan,
+    'ankan': MeldType.Ankan,
+    'kakan': MeldType.Kakan,
+}
+
+
+def _snap_melds_to_riichienv(melds: List[dict]) -> List[Meld]:
+    result = []
+    for m in melds:
+        mt = _MELD_TYPE_MAP.get(m.get('type', ''))
+        if mt is None:
+            continue
+        tiles = [_cvt.mjai_to_tid(t) for t in m.get('consumed', [])]
+        pai = m.get('pai')
+        if pai:
+            tiles.append(_cvt.mjai_to_tid(pai))
+        opened = m.get('type') != 'ankan'
+        result.append(Meld(mt, tiles, opened))
+    return result
 
 
 def encode(state: Dict, actor: int):
@@ -148,7 +181,24 @@ def encode(state: Dict, actor: int):
         if idx >= 0:
             tile_feat[25 + di, idx] = 1.0
 
-    # ch 30, 31: 听牌信息（暂时留 0，需 shanten 计算库）
+    # ---- ch 30, 31: 听牌 flag / 进张位置 ----
+    waits_tiles = state.get("waits_tiles")  # length-34 bool list injected by bot/replay
+    if waits_tiles is not None:
+        if any(waits_tiles):
+            tile_feat[30, :] = 1.0
+            for i, w in enumerate(waits_tiles[:34]):
+                if w:
+                    tile_feat[31, i] = 1.0
+    else:
+        try:
+            hand_ids = _cvt.mjai_to_tid_list(hand)
+            riichienv_melds = _snap_melds_to_riichienv(actor_melds)
+            he = HandEvaluator(hand_ids, riichienv_melds if riichienv_melds else None)
+            if he.is_tenpai():
+                tile_feat[30, :] = 1.0
+                # ch31 fallback: leave 0 (get_waits() returns discardable tiles, not waits)
+        except Exception:
+            pass
 
     # ---- ch 32-35: 各家副露数（归一化，broadcast） ----
     for pid in range(4):
@@ -160,11 +210,13 @@ def encode(state: Dict, actor: int):
         n_disc = len(discards[pid]) if pid < len(discards) else 0
         tile_feat[36 + pid, :] = n_disc / 24.0
 
-    # ---- ch 40-43: 场风/自风 one-hot（broadcast） ----
+    # ---- ch 40-43: 场风 one-hot（E/S/W/N，broadcast） ----
     bk_idx = _BAKAZE_IDX.get(bakaze, 0)
-    jikaze = (actor - oya) % 4
     tile_feat[40 + bk_idx, :] = 1.0
-    tile_feat[40 + jikaze, :] = 1.0  # 自风（可与场风重叠）
+
+    # ---- ch 91-94: 自风 one-hot（E/S/W/N，broadcast） ----
+    jikaze = (actor - oya) % 4
+    tile_feat[91 + jikaze, :] = 1.0
 
     # ---- ch 44: dora 数量（归一化，broadcast） ----
     tile_feat[44, :] = len(dora_markers) / 5.0
@@ -191,7 +243,19 @@ def encode(state: Dict, actor: int):
         if tile in aka_flags:
             tile_feat[aka_flags[tile], :] = 1.0
 
-    # ch 59-127: 保留为 0
+    # ---- ch 59-90: 舍牌巡目分段编码（4家 × 8段）----
+    # 每3巡一段（0-2巡→seg0, 3-5→seg1, ..., 21+→seg7）
+    for pid in range(4):
+        pid_discards = discards[pid] if pid < len(discards) else []
+        for turn, tile in enumerate(pid_discards):
+            idx = _tile_idx(tile)
+            if idx < 0:
+                continue
+            seg = min(turn // 3, 7)
+            ch = 59 + pid * 8 + seg
+            tile_feat[ch, idx] = 1.0
+
+    # ch 91-127: 保留为 0
 
     # ===== Scalar features =====
     scalar[0] = 1.0 if bakaze == "E" else 0.0
@@ -206,15 +270,21 @@ def encode(state: Dict, actor: int):
     scalar[6] = rank / 3.0
 
     # scalar[7]: 向听数，scalar[8]: 有效进张数
-    try:
-        tile_ids = _cvt.mjai_to_tid_list(hand)
-        shanten = calculate_shanten(tile_ids)
-        scalar[7] = shanten / 8.0
-        if shanten == 0 and len(tile_ids) == 13:
-            he = HandEvaluator(tile_ids)
-            scalar[8] = len(he.get_waits()) / 34.0
-    except Exception:
-        pass
+    # 优先使用 snap 注入的精确值（build_supervised_samples 用 riichi 库算好），
+    # 推理时 snap 无注入则 fallback 到自算
+    if "shanten" in state:
+        scalar[7] = int(state["shanten"]) / 8.0
+        scalar[8] = int(state.get("waits_count", 0)) / 34.0
+    else:
+        try:
+            hand_ids = _cvt.mjai_to_tid_list(hand)
+            riichienv_melds = _snap_melds_to_riichienv(actor_melds)
+            he = HandEvaluator(hand_ids, riichienv_melds if riichienv_melds else None)
+            waits = he.get_waits()
+            scalar[7] = (0 if he.is_tenpai() else calculate_shanten(hand_ids)) / 8.0
+            scalar[8] = len(waits) / 34.0
+        except Exception:
+            pass
 
     actor_reached = reached[actor] if actor < len(reached) else False
     scalar[9] = 1.0 if actor_reached else 0.0
