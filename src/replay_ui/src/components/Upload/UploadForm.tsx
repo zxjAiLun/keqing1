@@ -8,7 +8,7 @@ interface UploadFormProps {
 
 type InputType = 'tenhou_url' | 'mjai_json';
 
-// const DEFAULT_TENHOU_URL = 'https://tenhou.net/3/?log=2021021820gm-00a9-0000-0b6677ca&tw=2';
+const DEFAULT_TENHOU_URL = 'https://tenhou.net/3/?log=2021021820gm-00a9-0000-0b6677ca&tw=2';
 const DEFAULT_MJAI_JSON = '[{"type":"start_game","names":["遊走","武田舞彩","九紋龍史進","Nemo"],"kyoku_first":0,"aka_flag":true},{"type":"start_kyoku","bakaze":"E","dora_marker":"9p","kyoku":1,"honba":0,"kyotaku":0,"oya":0,"scores":[25000,25000,25000,25000],"tehais":[["1m","3m","6m","7m","1p","3p","6p","1s","1s","1s","2s","3s","5s"],["1m","3m","5m","6m","9p","2s","2s","2s","8s","9s","E","N","P"],["4m","5m","5pr","6p","8p","4s","6s","7s","7s","8s","9s","9s","S"],["2m","5mr","7m","8m","8m","2p","3p","8p","9p","8s","E","W","W"]]}]';
 
 export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
@@ -90,7 +90,7 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
           <input
             type="radio"
             checked={inputType === 'tenhou_url'}
-            onChange={() => setInputType('tenhou_url')}
+            onChange={() => { setInputType('tenhou_url'); setText(DEFAULT_TENHOU_URL); }}
             style={{ margin: 0, cursor: 'pointer' }}
           />
           天凤链接
@@ -99,7 +99,7 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
           <input
             type="radio"
             checked={inputType === 'mjai_json'}
-            onChange={() => setInputType('mjai_json')}
+            onChange={() => { setInputType('mjai_json'); setText(DEFAULT_MJAI_JSON); }}
             style={{ margin: 0, cursor: 'pointer' }}
           />
           mjai JSONL
@@ -222,6 +222,7 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
             }}
           >
             <option value="keqingv1" selected>KeqingV1</option>
+            <option value="keqingv2">KeqingV2</option>
             <option value="v5">V5Model</option>
           </select>
         </div>

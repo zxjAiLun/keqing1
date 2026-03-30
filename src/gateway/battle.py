@@ -40,18 +40,6 @@ def _shuffle_wall(seed: Optional[int] = None) -> List[str]:
 
 
 @dataclass
-class SeatState:
-    player_id: int
-    name: str
-    player_type: str  # "human" | "bot"
-    hand: List[str] = field(default_factory=list)
-    discards: List[Dict] = field(default_factory=list)
-    melds: List[Dict] = field(default_factory=list)
-    reached: bool = False
-    pending_reach: bool = False
-
-
-@dataclass
 class BattleConfig:
     player_count: int = 4
     players: List[Dict] = field(default_factory=list)  # [{id, name, type}]
@@ -458,20 +446,148 @@ class BattleManager:
             "fu": 30,
         }
 
-    def get_state_for_player(self, room: BattleRoom, player_id: int) -> Dict:
-        snap = room.state.snapshot(player_id)
+    def get_snap_with_shanten(self, room: BattleRoom, actor: int) -> Dict:
+        """返回注入了 shanten/waits 的 snapshot，供 legal_actions 判断立直/荣和用。"""
+        from mahjong_env.replay import _calc_shanten_waits
 
-        print(
-            f"[DEBUG] get_state_for_player: player_id={player_id}, actor_to_move={room.state.actor_to_move}, hand={snap.get('hand', [])}, last_tsumo={room.state.last_tsumo[player_id]}"
+        snap = room.state.snapshot(actor)
+        try:
+            hand_raw = snap.get("hand", [])
+            hand_list = (
+                hand_raw
+                if isinstance(hand_raw, list)
+                else [t for t, cnt in hand_raw.items() for _ in range(cnt)]
+            )
+            melds_list = (snap.get("melds") or [[], [], [], []])[actor]
+            shanten, waits_cnt, waits_tiles, _ = _calc_shanten_waits(
+                hand_list, melds_list
+            )
+            snap["shanten"] = shanten
+            snap["waits_count"] = waits_cnt
+            snap["waits_tiles"] = waits_tiles
+        except Exception as e:
+            print(f"[WARN] get_snap_with_shanten failed for actor {actor}: {e}")
+            snap["shanten"] = 8
+            snap["waits_count"] = 0
+            snap["waits_tiles"] = [False] * 34
+        return snap
+
+    def prepare_turn(self, room: BattleRoom, actor: int) -> Optional[str]:
+        """为 actor 准备回合：如需摸牌则摸牌，返回摸到的牌（或 None）。
+        适用于 bot 和人类，流局时返回 None 并设置 room.phase=ended。"""
+        last_discard = room.state.last_discard
+        is_response = last_discard and last_discard.get("actor") != actor
+        if is_response:
+            return None  # 响应他家弃牌，不需摸牌
+
+        if room.pending_rinshan:
+            if room.remaining_wall() < 1:
+                self.ryukyoku(room)
+                return None
+            return self.draw(room, actor)
+
+        if room.state.last_tsumo[actor] is not None:
+            return room.state.last_tsumo[actor]  # 已有摸牌
+
+        hand_size = sum(room.state.players[actor].hand.values())
+        if hand_size in (11, 12):  # 碰/吃后直接打牌
+            return None
+
+        if room.remaining_wall() < 1:
+            self.ryukyoku(room)
+            return None
+        return self.draw(room, actor)
+
+    def apply_action(self, room: BattleRoom, actor: int, action: Dict) -> bool:
+        """应用一个动作（dahai/pon/chi/kan/hora/reach/none），返回是否成功。
+        适用于 bot 和人类，统一入口。"""
+        action_type = action.get("type")
+        pai = action.get("pai", "")
+        consumed = action.get("consumed", [])
+        target = action.get("target", actor)
+        tsumogiri = action.get("tsumogiri", False)
+        last_discard = room.state.last_discard
+        is_response = last_discard and last_discard.get("actor") != actor
+
+        if action_type == "dahai":
+            self.discard(room, actor, pai, tsumogiri=tsumogiri)
+        elif action_type in ("pon", "chi", "daiminkan"):
+            self.handle_meld(room, action_type, actor, pai, consumed, target=target)
+        elif action_type == "ankan":
+            self.handle_meld(room, "ankan", actor, pai, consumed or [pai] * 4)
+        elif action_type == "kakan":
+            self.handle_meld(room, "kakan", actor, pai, consumed)
+        elif action_type == "reach":
+            self.reach(room, actor)
+        elif action_type == "hora":
+            is_tsumo = target == actor
+            self.hora(room, actor, target, pai, is_tsumo=is_tsumo)
+        elif action_type == "none":
+            if is_response:
+                discarder = last_discard["actor"]
+                next_actor = (actor + 1) % 4
+                if next_actor == discarder:
+                    room.state.last_discard = None
+                    room.state.actor_to_move = (discarder + 1) % 4
+                else:
+                    room.state.actor_to_move = next_actor
+            else:
+                # 摸牌回合 none → 摸切
+                tsumo = room.state.last_tsumo_raw[actor] or room.state.last_tsumo[actor]
+                if tsumo:
+                    self.discard(room, actor, tsumo, tsumogiri=True)
+        else:
+            print(f"[WARN] apply_action: unknown action type {action_type}")
+            return False
+        return True
+
+    def process_human_action(
+        self, room: BattleRoom, actor: int, action: Dict
+    ) -> Optional[str]:
+        """处理人类玩家的动作。返回 None 表示成功，返回错误字符串表示失败。"""
+        from mahjong_env.legal_actions import enumerate_legal_actions
+
+        if room.state.actor_to_move != actor:
+            return "Not your turn"
+
+        # 准备回合（摸牌/流局判断）
+        self.prepare_turn(room, actor)
+        if room.phase == "ended":
+            return None
+
+        # 枚举合法动作并验证
+        snap = self.get_snap_with_shanten(room, actor)
+        legal = enumerate_legal_actions(snap, actor)
+        action_type = action.get("type")
+        legal_types = {
+            (a.type, a.pai, tuple(a.consumed) if a.consumed else None, a.target)
+            for a in legal
+        }
+        action_key = (
+            action_type,
+            action.get("pai"),
+            tuple(action.get("consumed", [])) if action.get("consumed") else None,
+            action.get("target"),
         )
+        if action_type not in ("none", "reach") and action_key not in legal_types:
+            return "Illegal action"
+
+        # 应用动作
+        self.apply_action(room, actor, action)
+        return None
+
+    def get_state_for_player(self, room: BattleRoom, player_id: int) -> Dict:
+        snap = self.get_snap_with_shanten(room, player_id)
 
         legal = enumerate_legal_actions(snap, player_id)
-        print(
-            f"[DEBUG] enumerate_legal_actions returned: {[(a.type, a.pai) for a in legal]}"
+        # 响应弃牌时（last_discard 来自他家），保留 none（skip）
+        # 自己摸牌打牌回合，none 无意义，过滤掉
+        is_response = (
+            snap.get("last_discard") and snap["last_discard"].get("actor") != player_id
         )
         legal_actions = []
         for a in legal:
-            if a.type == "none":
+            if a.type == "none" and not is_response:
                 continue
             action_dict = {
                 "type": a.type,

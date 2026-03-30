@@ -80,7 +80,7 @@ export interface ReplayData {
 export interface ReplayMeta {
   replay_id: string;
   created_at: string;
-  bot_type: 'keqingv1' | 'v5model';
+  bot_type: 'keqingv1' | 'keqingv2' | 'v5model';
   kyoku_count: number;
   total_steps: number;
   player_names: string[];
@@ -90,7 +90,7 @@ export interface ReplayMeta {
 export interface ReplaySubmitRequest {
   input_type: 'tenhou_url' | 'tenhou6_json' | 'mjson_file' | 'mjson_text';
   content: string;
-  bot_type: 'keqingv1' | 'v5model';
+  bot_type: 'keqingv1' | 'keqingv2' | 'v5model';
   player_ids: number[];
   checkpoint?: string;
 }

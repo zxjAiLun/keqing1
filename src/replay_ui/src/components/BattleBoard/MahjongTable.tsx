@@ -1,5 +1,5 @@
 // src/replay_ui/src/components/BattleBoard/MahjongTable.tsx
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { Tile } from "./Tile";
 import { TileBack } from "./Tile";
 import { ActionBar } from "./ActionBar";
@@ -12,8 +12,6 @@ import { sortHand } from "../../utils/tileUtils";
 // ---------------------------------------------------------------------------
 const SEAT_COLORS = ["var(--seat-0)", "var(--seat-1)", "var(--seat-2)", "var(--seat-3)"];
 
-const TABLE_W = 780;
-const TABLE_H = 500;
 const DISC_COLS = 6;
 
 // ---------------------------------------------------------------------------
@@ -29,25 +27,85 @@ function chunkDiscards(discards: DiscardEntry[], cols: number): DiscardEntry[][]
 
 
 // ---------------------------------------------------------------------------
-// 中央弃牌堆（每家6张一行，最多3行）
+// 弃牌堆 tile 尺寸
 // ---------------------------------------------------------------------------
-function DiscardPond({ discards }: { discards: DiscardEntry[] }) {
+const DISC_W = 22;  // 单张弃牌宽度（正常大小）
+const DISC_H = 30;  // 单张弃牌高度
+const DISC_GAP = 2; // 间距
+// 6张一列宽度（用于中心正方形边长）
+export const CENTER_SIZE = DISC_COLS * DISC_W + (DISC_COLS - 1) * DISC_GAP; // 142px
+
+function DiscardTile({ d, rotated }: { d: DiscardEntry; rotated?: boolean }) {
+  // 正常：容器 DISC_W×DISC_H，旋转90°：容器 DISC_H×DISC_W
+  const cw = rotated ? DISC_H : DISC_W;
+  const ch = rotated ? DISC_W : DISC_H;
+  return (
+    <div style={{ width: cw, height: ch, position: "relative", flexShrink: 0, overflow: "hidden" }}>
+      <div style={{
+        width: 22, height: 30,
+        transformOrigin: "top left",
+        transform: rotated ? `rotate(90deg) translate(0, -${cw}px)` : undefined,
+        position: "absolute", top: 0, left: 0,
+        filter: d.tsumogiri ? "brightness(0.6)" : undefined,
+      }}>
+        <Tile tile={d.pai} size="small" />
+      </div>
+    </div>
+  );
+}
+
+// 自家（底部）：左下角起，行左→右，新行向下
+function DiscardPondSouth({ discards }: { discards: DiscardEntry[] }) {
   const rows = chunkDiscards(discards, DISC_COLS);
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: DISC_GAP, alignItems: "flex-start" }}>
       {rows.map((row, ri) => (
-        <div key={ri} style={{ display: "flex", gap: 1 }}>
-          {row.map((d, ci) => (
-            <div key={ci} style={{ width: 22, height: 30, position: "relative", flexShrink: 0 }}>
-              <Tile tile={d.pai} size="small" />
-              {d.tsumogiri && (
-                <div style={{
-                  position: "absolute", top: 1, right: 1,
-                  width: 3, height: 5,
-                  background: "var(--gold)",
-                  borderRadius: 1,
-                }} />
-              )}
+        <div key={ri} style={{ display: "flex", flexDirection: "row", gap: DISC_GAP }}>
+          {row.map((d, di) => <DiscardTile key={di} d={d} />)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// 对家（顶部）：右上角起，行右→左，新行向上（column-reverse）
+function DiscardPondNorth({ discards }: { discards: DiscardEntry[] }) {
+  const rows = chunkDiscards(discards, DISC_COLS);
+  return (
+    <div style={{ display: "flex", flexDirection: "column-reverse", gap: DISC_GAP, alignItems: "flex-end" }}>
+      {rows.map((row, ri) => (
+        <div key={ri} style={{ display: "flex", flexDirection: "row-reverse", gap: DISC_GAP }}>
+          {row.map((d, di) => <DiscardTile key={di} d={d} />)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// 左家（上家）：牌旋转90°，列从上→下，新列向左
+function DiscardPondLeft({ discards }: { discards: DiscardEntry[] }) {
+  const cols = chunkDiscards(discards, DISC_COLS);
+  return (
+    <div style={{ display: "flex", flexDirection: "row-reverse", gap: DISC_GAP, alignItems: "flex-start" }}>
+      {cols.map((col, ci) => (
+        <div key={ci} style={{ display: "flex", flexDirection: "column", gap: DISC_GAP }}>
+          {col.map((d, di) => <DiscardTile key={di} d={d} rotated />)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// 右家（下家）：牌旋转90°+180°=270°，列从下→上，新列向右
+function DiscardPondRight({ discards }: { discards: DiscardEntry[] }) {
+  const cols = chunkDiscards(discards, DISC_COLS);
+  return (
+    <div style={{ display: "flex", flexDirection: "row", gap: DISC_GAP, alignItems: "flex-end" }}>
+      {cols.map((col, ci) => (
+        <div key={ci} style={{ display: "flex", flexDirection: "column-reverse", gap: DISC_GAP }}>
+          {col.map((d, di) => (
+            <div key={di} style={{ transform: "rotate(180deg)" }}>
+              <DiscardTile d={d} rotated />
             </div>
           ))}
         </div>
@@ -65,7 +123,9 @@ function PlayerZone({
   playerName,
   hand,
   tsumoPai,
-  discards,
+  // discards: 弃牌已移至中央 DiscardPond，这里不再使用
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  discards: _discards,
   melds,
   reached,
   isActive,
@@ -91,7 +151,18 @@ function PlayerZone({
 
   // ── 自家（south）──
   if (position === "south") {
-    const sortedHand = sortHand(hand, tsumoPai);
+    // 去掉 tsumoPai 后的手牌，用 useMemo 缓存排序避免摸牌时重排闪烁
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    const sortedHand = useMemo(() => {
+      const arr = [...hand];
+      if (tsumoPai) {
+        const idx = arr.lastIndexOf(tsumoPai);
+        if (idx >= 0) arr.splice(idx, 1);
+      }
+      return sortHand(arr, null);
+    // 只依赖 hand 的内容（不含 tsumo），tsumo 变化不触发重排
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [hand.filter(t => t !== tsumoPai).join(",")]);
 
     return (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5 }}>
@@ -105,7 +176,7 @@ function PlayerZone({
           ))}
           {tsumoPai && (
             <div
-              style={{ width: 34, height: 46, border: "2px solid var(--gold)", borderRadius: 4, boxShadow: "0 0 10px rgba(212,168,83,0.45)", flexShrink: 0, cursor: onTileClick ? "pointer" : undefined }}
+              style={{ width: 34, height: 46, outline: "2px solid var(--gold)", outlineOffset: "1px", borderRadius: 4, boxShadow: "0 0 10px rgba(212,168,83,0.45)", flexShrink: 0, cursor: onTileClick ? "pointer" : undefined, marginLeft: 6 }}
               onClick={() => onTileClick?.(tsumoPai, sortedHand.length)}
             >
               <Tile tile={tsumoPai} size="normal" selected={sortedHand.length === highlightIdx} />
@@ -151,175 +222,100 @@ function PlayerZone({
     );
   }
 
-  // ── 对面（north）──
+  // ── 对面（north）── 整体旋转180deg
   if (position === "north") {
     return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5 }}>
-
+      <div style={{ transform: "rotate(180deg)", display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
         {/* 玩家标签 */}
-        <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 2 }}>
-          {isActive && <div style={{
-            width: 8, height: 8, borderRadius: "50%", background: color,
-            animation: "seatPulse 1.5s ease-in-out infinite",
-          }} />}
-          <span style={{ fontWeight: 700, fontSize: 12, color }}>{playerName}</span>
-          <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{jikaze}</span>
-          {reached && (
-            <span style={{
-              fontSize: 9, padding: "1px 4px", borderRadius: 3,
-              background: "var(--gold-bg)", color: "var(--gold)",
-              border: "1px solid var(--gold-border)", fontWeight: 700,
-              animation: "riichiPulse 2s ease-in-out infinite",
-            }}>立</span>
-          )}
-        </div>
-
-        {/* 舍牌已移至中央弃牌堆 */}
-
-        {/* 副露 */}
-        {melds.length > 0 && (
-          <div style={{ display: "flex", gap: 3 }}>
-            {melds.map((m, mi) => (
-              <div key={mi} style={{ display: "flex", gap: 1 }}>
-                {m.consumed.map((t, ci) => (
-                  <div key={ci} style={{ width: 26, height: 34, flexShrink: 0 }}>
-                    <Tile tile={t} size="small" />
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* 暗手 */}
-        <div style={{ display: "flex", gap: 2 }}>
-          {Array.from({ length: 13 }, (_, i) => (
-            <div key={i} style={{ width: 34, height: 46, flexShrink: 0 }}>
-              <TileBack size="normal" />
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  // ── 左家（east）──
-  if (position === "east") {
-    return (
-      <div style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
-
-        {/* 玩家标签 */}
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-          {isActive && <div style={{
-            width: 8, height: 8, borderRadius: "50%", background: color,
-            animation: "seatPulse 1.5s ease-in-out infinite",
-          }} />}
-          <span style={{ fontWeight: 700, fontSize: 12, color }}>{playerName}</span>
-          <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{jikaze}</span>
-          {reached && (
-            <span style={{
-              fontSize: 9, padding: "1px 4px", borderRadius: 3,
-              background: "var(--gold-bg)", color: "var(--gold)",
-              border: "1px solid var(--gold-border)", fontWeight: 700,
-              animation: "riichiPulse 2s ease-in-out infinite",
-            }}>立</span>
-          )}
-        </div>
-
-        {/* 舍牌已移至中央弃牌堆 */}
-
-        {/* 副露 */}
-        {melds.length > 0 && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            {melds.map((m, mi) => (
-              <div key={mi} style={{ display: "flex", gap: 1 }}>
-                {m.consumed.map((t, ci) => (
-                  <div key={ci} style={{ width: 26, height: 34, flexShrink: 0 }}>
-                    <Tile tile={t} size="small" />
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* 暗手（竖向，旋转90度） */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          {Array.from({ length: 13 }, (_, i) => (
-            <div key={i} style={{ width: 34, height: 46, flexShrink: 0 }}>
-              <TileBack size="normal" rotated />
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  // ── 右家（west）──
-  return (
-    <div style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 6 }}>
-
-      {/* 暗手（竖向，旋转90度） */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        {Array.from({ length: 13 }, (_, i) => (
-          <div key={i} style={{ width: 34, height: 46, flexShrink: 0 }}>
-            <TileBack size="normal" rotated />
-          </div>
-        ))}
-      </div>
-
-      {/* 副露 */}
-      {melds.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          {melds.map((m, mi) => (
-            <div key={mi} style={{ display: "flex", gap: 1 }}>
-              {m.consumed.map((t, ci) => (
-                <div key={ci} style={{ width: 26, height: 34, flexShrink: 0 }}>
-                  <Tile tile={t} size="small" />
+        <PlayerLabel color={color} playerName={playerName} jikaze={jikaze} reached={reached} isActive={isActive} />
+        {/* 暗手 + 副露（横向） */}
+        <div style={{ display: "flex", gap: 2, alignItems: "flex-end" }}>
+          {melds.length > 0 && (
+            <div style={{ display: "flex", gap: 3, marginRight: 4 }}>
+              {[...melds].reverse().map((m, mi) => (
+                <div key={mi} style={{ display: "flex", gap: 1 }}>
+                  {m.consumed.map((t, ci) => (
+                    <div key={ci} style={{ width: 22, height: 30, flexShrink: 0 }}><Tile tile={t} size="small" /></div>
+                  ))}
                 </div>
               ))}
             </div>
+          )}
+          {Array.from({ length: 13 }, (_, i) => (
+            <div key={i} style={{ width: 28, height: 38, flexShrink: 0 }}><TileBack size="normal" /></div>
           ))}
         </div>
-      )}
-
-      {/* 舍牌（横向，最新牌在内侧） */}
-      {discards.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "row", gap: 2, flexWrap: "wrap", maxWidth: 168, alignItems: "center" }}>
-          {[...discards].reverse().map((d, ci) => (
-            <div key={ci} style={{ width: 26, height: 34, position: "relative", flexShrink: 0 }}>
-              <Tile tile={d.pai} size="small" />
-              {d.tsumogiri && (
-                <div style={{
-                  position: "absolute", top: 1, right: 1,
-                  width: 3, height: 6,
-                  background: "var(--gold)",
-                  borderRadius: 1,
-                  boxShadow: "0 0 3px rgba(251,191,36,0.6)",
-                }} />
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* 玩家标签 */}
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-        {isActive && <div style={{
-          width: 8, height: 8, borderRadius: "50%", background: color,
-          animation: "seatPulse 1.5s ease-in-out infinite",
-        }} />}
-        <span style={{ fontWeight: 700, fontSize: 12, color }}>{playerName}</span>
-        <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{jikaze}</span>
-        {reached && (
-          <span style={{
-            fontSize: 9, padding: "1px 4px", borderRadius: 3,
-            background: "var(--gold-bg)", color: "var(--gold)",
-            border: "1px solid var(--gold-border)", fontWeight: 700,
-            animation: "riichiPulse 2s ease-in-out infinite",
-          }}>立</span>
-        )}
       </div>
+    );
+  }
+
+  // ── 左家（east）── 竖列暗牌贴左边，名称显示在牌右侧偏上（不旋转）
+  if (position === "east") {
+    return (
+      <div style={{ position: "relative", display: "flex", flexDirection: "row" }}>
+        {/* 竖列暗牌 */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {melds.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: 4 }}>
+              {[...melds].reverse().map((m, mi) => (
+                <div key={mi} style={{ display: "flex", flexDirection: "row", gap: 1 }}>
+                  {m.consumed.map((t, ci) => (
+                    <div key={ci} style={{ width: 22, height: 30, flexShrink: 0 }}><Tile tile={t} size="small" /></div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+          {Array.from({ length: 13 }, (_, i) => (
+            <div key={i} style={{ width: 38, height: 28, flexShrink: 0 }}><TileBack size="normal" rotated /></div>
+          ))}
+        </div>
+        {/* 名称：正向显示，在牌右侧偏上 */}
+        <div style={{ position: "absolute", left: "100%", top: 4, marginLeft: 4 }}>
+          <PlayerLabel color={color} playerName={playerName} jikaze={jikaze} reached={reached} isActive={isActive} />
+        </div>
+      </div>
+    );
+  }
+
+  // ── 右家（west）── 竖列暗牌贴右边，名称显示在牌左侧偏上（不旋转）
+  return (
+    <div style={{ position: "relative", display: "flex", flexDirection: "row" }}>
+      {/* 名称：正向显示，在牌左侧偏上 */}
+      <div style={{ position: "absolute", right: "100%", top: 4, marginRight: 4 }}>
+        <PlayerLabel color={color} playerName={playerName} jikaze={jikaze} reached={reached} isActive={isActive} />
+      </div>
+      {/* 竖列暗牌 */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        {melds.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: 4 }}>
+            {[...melds].reverse().map((m, mi) => (
+              <div key={mi} style={{ display: "flex", flexDirection: "row", gap: 1 }}>
+                {m.consumed.map((t, ci) => (
+                  <div key={ci} style={{ width: 22, height: 30, flexShrink: 0 }}><Tile tile={t} size="small" /></div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+          {Array.from({ length: 13 }, (_, i) => (
+          <div key={i} style={{ width: 38, height: 28, flexShrink: 0 }}><TileBack size="normal" rotated /></div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// 玩家标签子组件
+function PlayerLabel({ color, playerName, jikaze, reached, isActive }: {
+  color: string; playerName: string; jikaze: string; reached: boolean; isActive: boolean;
+}) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+      {isActive && <div style={{ width: 7, height: 7, borderRadius: "50%", background: color, animation: "seatPulse 1.5s ease-in-out infinite" }} />}
+      <span style={{ fontWeight: 700, fontSize: 11, color }}>{playerName}</span>
+      <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{jikaze}</span>
+      {reached && <span style={{ fontSize: 9, padding: "1px 4px", borderRadius: 3, background: "var(--gold-bg)", color: "var(--gold)", border: "1px solid var(--gold-border)", fontWeight: 700 }}>立</span>}
     </div>
   );
 }
@@ -335,7 +331,7 @@ function CenterPanel({ bakaze, honba, kyotaku, dora_markers }: {
       position: "absolute",
       top: "50%", left: "50%",
       transform: "translate(-50%, -50%)",
-      width: 118, height: 118,
+      width: CENTER_SIZE, height: CENTER_SIZE,
       background: "var(--card-bg)",
       border: "2px solid var(--table-border)",
       borderRadius: 12,
@@ -409,6 +405,7 @@ const TABLECLOTH_OPTIONS = [
 
 export function MahjongTable({
   state, onAction, isMyTurn, selectedTile, selectedTileIdx, onTileSelect,
+  autoHora, setAutoHora, noMeld, setNoMeld, autoTsumogiri, setAutoTsumogiri,
 }: {
   state: BattleState;
   onAction: (action: Action) => void;
@@ -416,7 +413,14 @@ export function MahjongTable({
   selectedTile: string | null;
   selectedTileIdx?: number | null;
   onTileSelect: (tile: string | null, idx?: number | null) => void;
+  autoHora: boolean;
+  setAutoHora: (v: boolean) => void;
+  noMeld: boolean;
+  setNoMeld: (v: boolean) => void;
+  autoTsumogiri: boolean;
+  setAutoTsumogiri: (v: boolean) => void;
 }) {
+  const [reachPending, setReachPending] = useState(false);
   const {
     player_info, hand, tsumo_pai, discards, melds, reached,
     dora_markers, scores, actor_to_move, bakaze, kyoku, honba, kyotaku,
@@ -442,6 +446,12 @@ export function MahjongTable({
 
   const handleTileClick = useCallback((tile: string, idx: number) => {
     if (!isMyTurn) return;
+    if (reachPending) {
+      // 立直选牌模式：只允许选合法 dahai 牌
+      const a = findDahaiAction(tile);
+      if (a) { onAction(a); setReachPending(false); onTileSelect(null, null); }
+      return;
+    }
     if (selectedTileIdx === idx && selectedTile === tile) {
       // 二次点击同一张牌（同tile同index）=> 立即打出
       const a = findDahaiAction(tile);
@@ -451,26 +461,30 @@ export function MahjongTable({
         onTileSelect(tile, idx);
       }
     }
-  }, [isMyTurn, selectedTile, selectedTileIdx, findDahaiAction, onAction, onTileSelect]);
+  }, [isMyTurn, reachPending, selectedTile, selectedTileIdx, findDahaiAction, onAction, onTileSelect]);
 
   const handleAction = useCallback((action: Action) => {
+    if (action.type === "reach") {
+      // 点立直：先发 reach 动作，然后进入立直选牌模式
+      onAction(action);
+      setReachPending(true);
+      onTileSelect(null, null);
+      return;
+    }
     if (selectedTile && action.type === "dahai" && action.pai !== selectedTile) {
       const a = findDahaiAction(selectedTile);
-      if (a) { onAction(a); onTileSelect(null); return; }
+      if (a) { onAction(a); onTileSelect(null, null); return; }
     }
     onAction(action);
-    onTileSelect(null);
+    onTileSelect(null, null);
+    setReachPending(false);
   }, [selectedTile, findDahaiAction, onAction, onTileSelect]);
 
   const tableBg = tablecloth === "default"
     ? "var(--table-bg)"
     : TABLECLOTH_OPTIONS.find(t => t.id === tablecloth)?.color ?? "var(--table-bg)";
 
-  // 桌面坐标
-  const southX = TABLE_W / 2;   const southY = TABLE_H - 55;
-  const northX = TABLE_W / 2;   const northY = 55;
-  const eastX  = 70;             const eastY  = TABLE_H / 2;
-  const westX  = TABLE_W - 70;  const westY  = TABLE_H / 2;
+  // 桌面坐标 — 全部改为百分比，适配任意尺寸
 
   return (
     <div className="flex flex-col h-full overflow-hidden" style={{ background: "var(--page-bg)" }}>
@@ -578,13 +592,13 @@ export function MahjongTable({
 
       {/* 牌桌主体 */}
       <div style={{
-        flex: 1, display: "flex", alignItems: "center", justifyContent: "center",
-        padding: 16,
+        flex: 1, display: "flex", alignItems: "stretch", justifyContent: "stretch",
+        padding: 0, position: "relative",
         background: "var(--page-bg)",
         transition: "background var(--transition)",
       }}>
         <div style={{
-          width: TABLE_W, height: TABLE_H,
+          width: "100%", height: "100%",
           background: tableBg,
           borderRadius: 16,
           border: "2px solid var(--table-border)",
@@ -596,26 +610,27 @@ export function MahjongTable({
           {/* 中心面板 */}
           <CenterPanel bakaze={bakaze} honba={honba} kyotaku={kyotaku} dora_markers={dora_markers} />
 
-          {/* 中央弃牌堆 */}
-          {/* 南家弃牌（中心下方） */}
-          <div style={{ position: "absolute", left: "50%", top: "57%", transform: "translateX(-50%)" }}>
-            <DiscardPond discards={discards[humanId] || []} />
+          {/* 中央弃牌堆 — 以自家为主视角，紧贴 CenterPanel 四角，全部用 top/left */}
+          {/* 自家（底部）：正方形左下角，行左→右，向下扩展 */}
+          <div style={{ position: "absolute", left: `calc(50% - ${CENTER_SIZE/2}px)`, top: `calc(50% + ${CENTER_SIZE/2}px)` }}>
+            <DiscardPondSouth discards={discards[humanId] || []} />
           </div>
-          {/* 北家弃牌（中心上方） */}
-          <div style={{ position: "absolute", left: "50%", top: "18%", transform: "translateX(-50%) rotate(180deg)" }}>
-            <DiscardPond discards={discards[oppTop] || []} />
+          {/* 对家（顶部）：第一张牌右下角对齐正方形右上角，行右→左，新行向上 */}
+          <div style={{ position: "absolute", left: `calc(50% + ${CENTER_SIZE/2}px)`, top: `calc(50% - ${CENTER_SIZE/2}px)`, transform: "translate(-100%, -100%)" }}>
+            <DiscardPondNorth discards={discards[oppTop] || []} />
           </div>
-          {/* 西家弃牌（中心右方） */}
-          <div style={{ position: "absolute", left: "63%", top: "50%", transform: "translateY(-50%) rotate(90deg)" }}>
-            <DiscardPond discards={discards[oppRight] || []} />
+          {/* 左家（上家）：第一张牌左上角对齐正方形左上角，列上→下，新列向左 */}
+          <div style={{ position: "absolute", left: `calc(50% - ${CENTER_SIZE/2}px)`, top: `calc(50% - ${CENTER_SIZE/2}px)`, transform: "translateX(-100%)" }}>
+            <DiscardPondLeft discards={discards[oppLeft] || []} />
           </div>
-          {/* 东家弃牌（中心左方） */}
-          <div style={{ position: "absolute", left: "24%", top: "50%", transform: "translateY(-50%) rotate(-90deg)" }}>
-            <DiscardPond discards={discards[oppLeft] || []} />
+          {/* 右家（下家）：第一张牌左上角对齐正方形右下角，横向，向上扩展 */}
+          <div style={{ position: "absolute", left: `calc(50% + ${CENTER_SIZE/2}px)`, top: `calc(50% + ${CENTER_SIZE/2}px)`, transform: "translateY(-100%)" }}>
+            <DiscardPondRight discards={discards[oppRight] || []} />
           </div>
 
+
           {/* 南（自家） */}
-          <div style={{ position: "absolute", left: southX, top: southY, transform: "translateX(-50%)" }}>
+          <div style={{ position: "absolute", left: "50%", bottom: 0, transform: "translateX(-50%)" }}>
             <PlayerZone
               pid={humanId} position="south"
               playerName={player_info[humanId]?.name || `P${humanId}`}
@@ -627,7 +642,7 @@ export function MahjongTable({
           </div>
 
           {/* 北（对面） */}
-          <div style={{ position: "absolute", left: northX, top: northY, transform: "translateX(-50%)" }}>
+          <div style={{ position: "absolute", left: "50%", top: 0, transform: "translateX(-50%)" }}>
             <PlayerZone
               pid={oppTop} position="north"
               playerName={player_info[oppTop]?.name || `P${oppTop}`}
@@ -638,7 +653,7 @@ export function MahjongTable({
           </div>
 
           {/* 东（左） */}
-          <div style={{ position: "absolute", left: eastX, top: eastY, transform: "translateY(-50%)" }}>
+          <div style={{ position: "absolute", left: 0, top: "50%", transform: "translateY(-50%)" }}>
             <PlayerZone
               pid={oppLeft} position="east"
               playerName={player_info[oppLeft]?.name || `P${oppLeft}`}
@@ -649,7 +664,7 @@ export function MahjongTable({
           </div>
 
           {/* 西（右） */}
-          <div style={{ position: "absolute", left: westX, top: westY, transform: "translateY(-50%)" }}>
+          <div style={{ position: "absolute", right: 0, top: "50%", transform: "translateY(-50%)" }}>
             <PlayerZone
               pid={oppRight} position="west"
               playerName={player_info[oppRight]?.name || `P${oppRight}`}
@@ -659,8 +674,9 @@ export function MahjongTable({
             />
           </div>
 
-          {/* 行动中指示（呼吸脉冲动画） */}
-          {actor_to_move !== null && actor_to_move !== humanId && (
+          {/* 行动中指示（呼吸脉冲动画）：只在 bot 摸牌打牌回合显示，不在 bot pass 响应他家弃牌时显示 */}
+          {actor_to_move !== null && actor_to_move !== humanId &&
+           (!state.last_discard || state.last_discard.actor === actor_to_move) && (
             <div style={{
               position: "absolute", top: "50%", left: "50%",
               transform: "translate(-50%, -50%)", zIndex: 30, pointerEvents: "none",
@@ -683,31 +699,69 @@ export function MahjongTable({
         </div>
       </div>
 
-      {/* 动作栏 */}
-      {isMyTurn && (
+      {/* 动作栏 overlay — 绝对定位在牌桌底部，不压缩牌桌空间 */}
+      {isMyTurn && !reachPending && !state.pending_reach[humanId] && (
         <div style={{
-          borderTop: "1px solid var(--border)",
-          background: "var(--sidebar-bg)",
-          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-          padding: "8px 24px",
-          backdropFilter: "blur(12px)",
-          transition: "background var(--transition), border-color var(--transition)",
-          gap: 4,
+          position: "absolute", bottom: 44, left: 0, right: 0,
+          display: "flex", justifyContent: "center", zIndex: 50, pointerEvents: "none",
         }}>
-          {state.pending_reach[humanId] && (
-            <div style={{
-              fontSize: 12, color: "var(--gold)", fontWeight: 700,
-              padding: "2px 10px", borderRadius: 4,
-              background: "var(--gold-bg)", border: "1px solid var(--gold-border)",
-            }}>
-              立直宣言中 — 请点击要打出的牌
-            </div>
-          )}
-          <div style={{ width: "100%", maxWidth: 560 }}>
+          <div style={{ pointerEvents: "auto" }}>
             <ActionBar legalActions={state.legal_actions} onAction={handleAction} disabled={!isMyTurn} />
           </div>
         </div>
       )}
+      {isMyTurn && (reachPending || state.pending_reach[humanId]) && (
+        <div style={{
+          position: "absolute", bottom: 44, left: 0, right: 0,
+          display: "flex", justifyContent: "center", zIndex: 50,
+        }}>
+          <div style={{
+            fontSize: 12, color: "var(--gold)", fontWeight: 700,
+            padding: "4px 14px", borderRadius: 6,
+            background: "rgba(0,0,0,0.7)", border: "1px solid var(--gold-border)",
+          }}>
+            立直宣言中 — 请点击要打出的牌
+          </div>
+        </div>
+      )}
+
+      {/* 底部固定设置栏 — 始终占位，不影响牌桌大小 */}
+      <div style={{
+        height: 44, flexShrink: 0,
+        borderTop: "1px solid var(--border)",
+        background: "var(--sidebar-bg)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        gap: 12, padding: "0 16px",
+        backdropFilter: "blur(12px)",
+      }}>
+        {[
+          { label: "自动胡牌", value: autoHora, set: setAutoHora, defaultOn: true },
+          { label: "不响应附露", value: noMeld, set: setNoMeld, defaultOn: false },
+          { label: "自动摸切", value: autoTsumogiri, set: setAutoTsumogiri, defaultOn: false },
+        ].map(({ label, value, set }) => (
+          <button
+            key={label}
+            onClick={() => set(!value)}
+            style={{
+              padding: "4px 12px",
+              borderRadius: 6,
+              border: `1px solid ${value ? "var(--accent)" : "var(--border)"}`,
+              background: value ? "var(--accent)" : "var(--card-bg)",
+              color: value ? "#fff" : "var(--text-muted)",
+              fontSize: 12, fontWeight: 600, cursor: "pointer",
+              transition: "all 0.15s",
+              display: "flex", alignItems: "center", gap: 5,
+            }}
+          >
+            <span style={{
+              width: 8, height: 8, borderRadius: "50%",
+              background: value ? "#4ade80" : "#6b7280",
+              display: "inline-block", flexShrink: 0,
+            }} />
+            {label}
+          </button>
+        ))}
+      </div>
 
       {/* 全局 CSS 动画 */}
       <style>{`

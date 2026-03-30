@@ -1,18 +1,19 @@
 # Keqing1 — 立直麻将 AI
 
-基于监督学习的立直麻将策略机器人，使用 Conv1d ResNet 架构（v5model），支持 Mjai 协议推理。
+基于监督学习的立直麻将策略机器人，使用 Conv1d ResNet 架构，支持 Mjai 协议推理。
 
 ## 项目状态
 
-当前主力模型为 **v5model**（Conv1d ResNet，~1.7M 参数）。已完成核心功能实现并通过测试，训练中（val_acc 74.66% @ epoch 8/20）。
+当前主力模型为 **keqingv2**（Conv1d ResNet ~1.7M 参数，keqingv1 + Meld Value Ranking Loss）。
 
-主要完成内容：
+主要特性：
 - 完整的 45 动作监督学习框架（dahai×34 + reach/chi/pon/kan/hora/none）
+- Meld Value Ranking Loss：value head 学习区分值得副露 vs 不值得副露
 - 立直状态三段式 legal_actions（`reached` / `pending_reach` / 普通）
-- none/pass 样本自动生成（约占总样本 16%，防止鸣牌过激进）
-- 荣和 legal_actions 基于 waits_tiles 精确判断
-- 立直后摸切样本过滤（无决策价值，约 5.5%）
-- V5Bot 支持 Mjai 协议推理 + 决策日志 HTML 导出
+- none/pass 样本自动生成（约占总样本 16%）
+- 振听系统、荣和精确判断
+- 立直后摸切样本过滤（约 5.5%）
+- KeqingBot 支持 Mjai 协议推理 + beam search value 重排
 
 ## 快速开始
 
@@ -22,38 +23,39 @@
 uv sync
 ```
 
-### 启动训练（v5model）
+### 预处理数据
 
 ```bash
-# 先用 ds1-ds3 验证（约 2970 个 .mjson 文件）
-uv run python src/train/train_v5.py \
-  --data_dirs artifacts/converted_mjai/ds1 artifacts/converted_mjai/ds2 artifacts/converted_mjai/ds3 \
-  --output_dir artifacts/models/modelv5
+# 普通数据（ds1-ds6, ds8-ds13 合并到 processed_v2_new/ds1）
+uv run python scripts/preprocess_v2.py \
+  --data_dirs artifacts/converted_mjai/ds1 artifacts/converted_mjai/ds2 ... \
+  --output_dir processed_v2_new/ds1 --workers 16
 
-# 完整数据集 ds1-ds13（12870 个文件）
-uv run python src/train/train_v5.py \
-  --data_dirs artifacts/converted_mjai/ds1 ... artifacts/converted_mjai/ds13 \
-  --output_dir artifacts/models/modelv5
-
-# 断点续训
-uv run python src/train/train_v5.py \
-  --data_dirs artifacts/converted_mjai/ds1 \
-  --output_dir artifacts/models/modelv5 \
-  --resume
+# NAGA 视角数据（ds7 → processed_v2_new/ds2）
+uv run python scripts/preprocess_v2.py \
+  --data_dirs artifacts/converted_mjai/ds7 \
+  --output_dir processed_v2_new/ds2 --workers 16 \
+  --actor_name_filter 'ⓝNAGA25'
 ```
 
-### 使用配置文件
+### 启动训练（keqingv2）
 
 ```bash
-uv run python src/train/train_v5.py --config configs/v5_default.yaml
+# 从 keqingv1 权重迁移（推荐）
+uv run python src/train/train_v2.py \
+  --config configs/keqingv2_default.yaml \
+  --resume artifacts/models/keqingv1/best.pth --weights-only
+
+# 断点续训
+uv run python src/train/train_v2.py \
+  --config configs/keqingv2_default.yaml \
+  --resume artifacts/models/keqingv2/latest.pth
 ```
 
 ### 运行测试
 
 ```bash
 uv run pytest
-# 单个文件
-uv run pytest tests/test_replay_log.py
 ```
 
 ## 项目架构
@@ -61,14 +63,17 @@ uv run pytest tests/test_replay_log.py
 ```text
 keqing1/
 ├── src/
-│   ├── v5model/                  # 当前主力模型（Conv1d ResNet）
-│   │   ├── __init__.py
+│   ├── keqingv1/                 # v1 基础模型（复用）
 │   │   ├── action_space.py       # 45 个动作的索引映射
-│   │   ├── features.py           # 特征编码 (128, 34) + 标量 (16,)
+│   │   ├── features.py           # 特征编码 (54,34) tile_feat + (48,) scalar
 │   │   ├── model.py              # MahjongModel (~1.7M 参数)
-│   │   ├── dataset.py            # IterableDataset 流式加载
+│   │   ├── cached_dataset.py     # IterableDataset 流式加载（npz）
 │   │   ├── trainer.py            # 训练循环（AMP + 梯度累积）
-│   │   └── bot.py                # V5Bot（Mjai 协议推理）
+│   │   └── bot.py                # KeqingBot（Mjai 协议推理 + beam search）
+│   │
+│   ├── keqingv2/                 # v2 扩展（Meld Value Ranking Loss）
+│   │   ├── cached_dataset.py     # 预编码 rank pair，batch 返回 10-tuple
+│   │   └── trainer.py            # rank loss 训练循环
 │   │
 │   ├── mahjong_env/              # 麻将环境（游戏状态、合法动作）
 │   │   ├── state.py
@@ -78,12 +83,12 @@ keqing1/
 │   │   └── types.py
 │   │
 │   ├── train/
-│   │   └── train_v5.py           # 训练入口脚本
+│   │   └── train_v2.py           # keqingv2 训练入口
 │   │
-│   └── convert/                  # 数据转换（天凤/雀魂 → Mjai JSONL）
+│   └── gateway/                  # Bot 对战网关
 │
 ├── configs/
-│   └── v5_default.yaml           # v5model 训练超参
+│   └── keqingv2_default.yaml     # keqingv2 训练超参
 │
 ├── artifacts/
 │   ├── converted_mjai/           # 转换后的训练数据（ds1-ds13）

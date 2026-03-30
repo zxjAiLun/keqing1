@@ -95,10 +95,18 @@ async def replay(
 
         elif input_type == "mjai":
             lines = text.splitlines()
-            if all(_is_json_line(l) for l in lines if l.strip()):
+            if len(lines) > 1:
                 events = [json.loads(l) for l in lines if l.strip()]
             else:
-                events = [json.loads(text)]
+                # 单行：判断是 JSON 数组还是普通 JSON 对象
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, list):
+                        events = parsed  # JSON 数组直接使用
+                    else:
+                        events = [parsed]  # 单个 JSON 对象包装成列表
+                except json.JSONDecodeError:
+                    events = [json.loads(l) for l in lines if l.strip()]
             bot = run_replay_single_raw(events, player_id=player_id, checkpoint=checkpoint or None, input_type="mjai", bot_type=bot_type)
 
         else:
@@ -244,11 +252,3 @@ async def replay_page():
 async def spa_fallback(path: str):
     """所有未匹配路由都 fallback 到 index.html，由 React Router 处理。"""
     return (_REACT_DIST / "index.html").read_text(encoding="utf-8")
-
-
-def _is_json_line(line: str) -> bool:
-    try:
-        json.loads(line)
-        return True
-    except Exception:
-        return False

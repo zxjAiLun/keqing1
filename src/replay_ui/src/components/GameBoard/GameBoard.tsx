@@ -279,7 +279,7 @@ export function GameBoard({
     const LEFT_DISC_X = 30;
     const LEFT_DISC_Y = H_H / 2 - 120;
 
-    const RIGHT_DISC_X = W - 30 - TILE_H;
+    const RIGHT_DISC_X = W - 30 - 6 * (TILE_W * 0.65 + 1);
     const RIGHT_DISC_Y = H_H / 2 - 120;
 
     const playerColors = [colors.seat0, colors.seat1, colors.seat2, colors.seat3];

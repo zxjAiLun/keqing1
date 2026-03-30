@@ -198,6 +198,9 @@ export function BotBattlePage() {
         isMyTurn={false}
         selectedTile={null}
         onTileSelect={() => {}}
+        autoHora={false} setAutoHora={() => {}}
+        noMeld={false} setNoMeld={() => {}}
+        autoTsumogiri={false} setAutoTsumogiri={() => {}}
       />
     </div>
   );

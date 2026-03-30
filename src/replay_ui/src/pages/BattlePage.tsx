@@ -2,6 +2,8 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { MahjongTable } from "../components/BattleBoard/MahjongTable";
 import { startBattle, doAction, closeBattle, fetchWithTimeout } from "../api/battleApi";
+import { useAutoActions } from "../hooks/useAutoActions";
+import { useBattlePolling } from "../hooks/useBattlePolling";
 import type { BattleState, Action, StartBattleRequest } from "../types/battle";
 
 export function BattlePage() {
@@ -12,17 +14,17 @@ export function BattlePage() {
   const [selectedTile, setSelectedTile] = useState<string | null>(null);
   const [selectedTileIdx, setSelectedTileIdx] = useState<number | null>(null);
   const [playerName, setPlayerName] = useState("玩家");
-  const pollingRef = useRef<number | null>(null);
-  const mountedRef = useRef(true);
+  const [botModel, setBotModel] = useState("modelv5");
+  const [autoHora, setAutoHora] = useState(true);       // 自动胡牌，默认开
+  const [noMeld, setNoMeld] = useState(false);           // 不响应附露，默认关
+  const [autoTsumogiri, setAutoTsumogiri] = useState(false); // 自动摸切，默认关
   const pendingActionRef = useRef(false);
-
-  const isMyTurn = state?.actor_to_move === state?.human_player_id && state?.phase === "playing";
 
   const startNewGame = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const req: StartBattleRequest = { player_name: playerName, bot_count: 3 };
+      const req: StartBattleRequest = { player_name: playerName, bot_count: 3, bot_model: botModel };
       const res = await startBattle(req);
       setGameId(res.game_id);
       setState(res.state);
@@ -69,26 +71,41 @@ export function BattlePage() {
     }
   }, [gameId]);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => { mountedRef.current = false; };
-  }, []);
+  const { isMyTurn, legalActions, hasHora, hasMeld, hasDahai, hasNone, hasRealChoice, needsDecision } = useAutoActions({
+    state,
+    autoHora,
+    noMeld,
+    autoTsumogiri,
+  });
 
+  // 自动化：自动胡牌 / 不响应附露 / 自动摸切 / 仅none自动跳过
   useEffect(() => {
-    if (!gameId || state?.phase !== "playing") return;
-    if (pollingRef.current) clearInterval(pollingRef.current);
-    pollingRef.current = window.setInterval(async () => {
-      try {
-        const res = await fetch(`/api/battle/state/${gameId}?player_id=0`);
-        if (!res.ok) return;
-        const data = await res.json();
-        if (mountedRef.current && !pendingActionRef.current) {
-          setState(data.state);
-        }
-      } catch { /* ignore */ }
-    }, 500);
-    return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
-  }, [gameId]);
+    if (!isMyTurn || !gameId || pendingActionRef.current) return;
+    if (autoHora && hasHora) {
+      const horaAction = legalActions.find(a => a.type === "hora");
+      if (horaAction) { handleAction(horaAction); return; }
+    }
+    if (noMeld && hasMeld && !hasHora) {
+      const noneAction = legalActions.find(a => a.type === "none");
+      if (noneAction) { handleAction(noneAction); return; }
+    }
+    if (autoTsumogiri && hasDahai) {
+      const tsumogiriAction = legalActions.find(a => a.type === "dahai" && a.tsumogiri);
+      if (tsumogiriAction) { handleAction(tsumogiriAction); return; }
+    }
+    if (hasNone && !hasRealChoice) {
+      const noneAction = legalActions.find(a => a.type === "none");
+      if (noneAction) { handleAction(noneAction); return; }
+    }
+  }, [isMyTurn, gameId, state?.legal_actions, autoHora, noMeld, autoTsumogiri, hasHora, hasMeld, hasDahai, hasNone, hasRealChoice, legalActions, handleAction]);
+
+  useBattlePolling({
+    gameId,
+    state,
+    needsDecision,
+    pendingActionRef,
+    onStateUpdate: setState,
+  });
 
   if (!state) {
     return (
@@ -152,6 +169,24 @@ export function BattlePage() {
               onFocus={(e) => (e.target.style.borderColor = '#3498db')}
               onBlur={(e) => (e.target.style.borderColor = '#d1d5db')}
             />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <label style={{ fontSize: 12, color: '#6b7280', fontWeight: 500 }}>对手模型</label>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {['modelv5', 'modelv5_naga', 'keqingv1', 'keqingv2'].map(m => (
+                  <button
+                    key={m}
+                    onClick={() => setBotModel(m)}
+                    style={{
+                      padding: '5px 12px', borderRadius: 6, fontSize: 13, fontWeight: 500,
+                      border: `2px solid ${botModel === m ? '#1e4a7a' : '#d1d5db'}`,
+                      background: botModel === m ? '#1e4a7a' : '#f9fafb',
+                      color: botModel === m ? '#fff' : '#374151',
+                      cursor: 'pointer', transition: 'all 0.15s',
+                    }}
+                  >{m}</button>
+                ))}
+              </div>
+            </div>
             <button
               onClick={startNewGame}
               disabled={loading}
@@ -341,6 +376,9 @@ export function BattlePage() {
         selectedTile={selectedTile}
         selectedTileIdx={selectedTileIdx}
         onTileSelect={(tile, idx) => { setSelectedTile(tile); setSelectedTileIdx(idx ?? null); }}
+        autoHora={autoHora} setAutoHora={setAutoHora}
+        noMeld={noMeld} setNoMeld={setNoMeld}
+        autoTsumogiri={autoTsumogiri} setAutoTsumogiri={setAutoTsumogiri}
       />
     </div>
   );

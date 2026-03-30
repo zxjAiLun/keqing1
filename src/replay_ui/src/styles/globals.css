@@ -164,8 +164,8 @@
   --tile-back-bg: linear-gradient(145deg, #1a2a3a 0%, #0d1a26 60%, #08101a 100%);
 
   /* Canvas 牌桌绘制色（modern 主题） */
-  --canvas-tile-face: #2a3a4a;
-  --canvas-tile-stroke: #3d4f5f;
+  --canvas-tile-face: #ddd8cc;
+  --canvas-tile-stroke: #a09888;
   --canvas-tile-back-start: #1a2a3a;
   --canvas-tile-back-end: #0d1a26;
   --canvas-highlight-red: #f87171;
@@ -776,6 +776,43 @@ textarea:focus {
   border-radius: 2px;
 }
 
+/* 现代主题：麻将牌正面 */
+[data-theme="modern"] .tile-3d {
+  background: #ddd8cc;
+  box-shadow: 2px 2px 0px #a09888, 4px 4px 0px #8c8278, 5px 5px 10px rgba(0,0,0,0.4);
+}
+
+/* 现代主题：麻将牌正面顶部/右边高光 */
+[data-theme="modern"] .tile-3d::before {
+  background: linear-gradient(90deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.85) 25%, rgba(255,255,255,1) 100%);
+}
+
+[data-theme="modern"] .tile-3d::after {
+  background: linear-gradient(180deg, rgba(255,255,255,0.85) 0%, rgba(255,255,255,0.5) 30%, rgba(255,255,255,0.2) 100%);
+}
+
+[data-theme="modern"] .tile-3d.selected {
+  box-shadow: 0 0 0 3px #fbbf24, 4px 4px 0px #a09888, 6px 6px 0px #8c8278, 8px 8px 16px rgba(0,0,0,0.5);
+}
+
+[data-theme="modern"] .tile-3d.highlighted {
+  box-shadow: 0 0 0 2px #f87171, 2px 2px 0px #a09888, 4px 4px 0px #8c8278, 5px 5px 12px rgba(0,0,0,0.4);
+}
+
+/* 现代主题：麻将牌背面 */
+[data-theme="modern"] .tile-3d-back {
+  background: linear-gradient(135deg, #1a2a3a 0%, #0d1a26 100%);
+  box-shadow: 2px 2px 0px #2a3a4a, 4px 4px 0px #1e2e3e, 5px 5px 10px rgba(0,0,0,0.5);
+}
+
+[data-theme="modern"] .tile-3d-back::before {
+  background: linear-gradient(90deg, rgba(255,255,255,0.08) 0%, rgba(255,255,255,0.5) 30%, rgba(255,255,255,0.8) 100%);
+}
+
+[data-theme="modern"] .tile-3d-back::after {
+  background: repeating-linear-gradient(45deg, rgba(255,255,255,0.04) 0px, rgba(255,255,255,0.04) 2px, transparent 2px, transparent 10px);
+}
+
 /* ---------- 13. 座位指示器 ---------- */
 @keyframes seat-pulse {
   0%, 100% { opacity: 0.6; transform: scale(1); }
@@ -792,6 +829,12 @@ textarea:focus {
 .text-red { color: #e74c3c; }
 .text-green { color: #27ae60; }
 .text-purple { color: #8e44ad; }
+
+[data-theme="modern"] .text-blue { color: #60a5fa; }
+[data-theme="modern"] .text-gold { color: #fbbf24; }
+[data-theme="modern"] .text-red { color: #f87171; }
+[data-theme="modern"] .text-green { color: #34d399; }
+[data-theme="modern"] .text-purple { color: #a78bfa; }
 
 .rounded-lg { border-radius: 10px; }
 .rounded-xl { border-radius: 16px; }

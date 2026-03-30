@@ -70,6 +70,7 @@ export interface StartBattleRequest {
   player_name: string;
   bot_count?: number;
   seed?: number;
+  bot_model?: string; // "modelv5" | "modelv5_naga" | "keqingv1" | "keqingv2"
 }
 
 export interface StartBattleResponse {

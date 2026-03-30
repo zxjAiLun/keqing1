@@ -15,25 +15,34 @@ from mahjong_env.types import Action
 # riichienv-based shanten/waits helpers (replaces riichi.state.PlayerState)
 # ---------------------------------------------------------------------------
 
+
 def _snap_melds_to_riichienv(melds: List[dict]):
     from riichienv import Meld as RiichiMeld, MeldType
-    _TYPE_MAP = {'chi': MeldType.Chi, 'pon': MeldType.Pon,
-                 'daiminkan': MeldType.Daiminkan, 'ankan': MeldType.Ankan, 'kakan': MeldType.Kakan}
+
+    _TYPE_MAP = {
+        "chi": MeldType.Chi,
+        "pon": MeldType.Pon,
+        "daiminkan": MeldType.Daiminkan,
+        "ankan": MeldType.Ankan,
+        "kakan": MeldType.Kakan,
+    }
     result = []
     for m in melds:
-        mt = _TYPE_MAP.get(m.get('type', ''))
+        mt = _TYPE_MAP.get(m.get("type", ""))
         if mt is None:
             continue
-        tiles136 = [_to_136(t) for t in m.get('consumed', []) if _to_136(t) >= 0]
-        pai = m.get('pai')
+        tiles136 = [_to_136(t) for t in m.get("consumed", []) if _to_136(t) >= 0]
+        pai = m.get("pai")
         if pai and _to_136(pai) >= 0:
             tiles136.append(_to_136(pai))
-        result.append(RiichiMeld(mt, tiles136, m.get('type') != 'ankan'))
+        result.append(RiichiMeld(mt, tiles136, m.get("type") != "ankan"))
     return result
+
 
 def _calc_shanten_waits(hand: List[str], melds: List[dict]):
     """返回 (shanten, waits_count, waits_tile34_bools, tehai_count)。"""
     from riichienv import calculate_shanten, HandEvaluator
+
     hand_ids = [_to_136(t) for t in hand if _to_136(t) >= 0]
     if not hand_ids:
         return 8, 0, [False] * 34, 0
@@ -41,12 +50,12 @@ def _calc_shanten_waits(hand: List[str], melds: List[dict]):
         rmelds = _snap_melds_to_riichienv(melds) or None
         he = HandEvaluator(hand_ids, rmelds)
         shanten = int(calculate_shanten(hand_ids)) if not he.is_tenpai() else 0
-        waits136 = he.get_waits() if he.is_tenpai() else []
+        # get_waits() 返回的是 tile34（0-33），不是 tile136
+        waits_raw = he.get_waits() if he.is_tenpai() else []
         waits34 = [False] * 34
-        for w in waits136:
-            idx = w // 4
-            if 0 <= idx < 34:
-                waits34[idx] = True
+        for w in waits_raw:
+            if 0 <= w < 34:
+                waits34[w] = True
         waits_count = sum(waits34)
         tehai_count = len(hand_ids)
         return shanten, waits_count, waits34, tehai_count
@@ -98,7 +107,11 @@ def read_mjai_jsonl(path: str | Path) -> List[MjaiEvent]:
 
 def extract_actor_names(events: Sequence[MjaiEvent]) -> List[str]:
     for e in events:
-        if e.get("type") == "start_game" and isinstance(e.get("names"), list) and len(e["names"]) == 4:
+        if (
+            e.get("type") == "start_game"
+            and isinstance(e.get("names"), list)
+            and len(e["names"]) == 4
+        ):
             return [str(x) for x in e["names"]]
     return ["p0", "p1", "p2", "p3"]
 
@@ -112,7 +125,9 @@ def _next_meaningful_event(events: List[MjaiEvent], i: int) -> Optional[MjaiEven
     return None
 
 
-def _next_actor_dahai(events: List[MjaiEvent], i: int, actor: int) -> Optional[MjaiEvent]:
+def _next_actor_dahai(
+    events: List[MjaiEvent], i: int, actor: int
+) -> Optional[MjaiEvent]:
     """在副露事件 i 后找到同 actor 的 dahai 事件（副露后必须打牌）。"""
     _SKIP = {"reach_accepted", "dora", "new_dora"}
     for j in range(i + 1, len(events)):
@@ -154,7 +169,9 @@ def build_supervised_samples(
             and not (et == "dahai" and 0 <= actor < 4 and state.players[actor].reached)
         )
         if collect_sample and actor_name_filter is not None:
-            actor_name = actor_names[actor] if 0 <= actor < len(actor_names) else f"p{actor}"
+            actor_name = (
+                actor_names[actor] if 0 <= actor < len(actor_names) else f"p{actor}"
+            )
             collect_sample = actor_name in actor_name_filter
 
         # Compute local EV proxy for labeled actions (before->after riichi update).
@@ -165,18 +182,20 @@ def build_supervised_samples(
         if collect_sample:
             snap_before = state.snapshot(actor)
             hand_before = snap_before.get("hand", [])
-            melds_before = (snap_before.get("melds") or [[],[],[],[]])[actor]
-            shanten_before, waits_before_cnt, _waits_before_bools, tehai_before_cnt = \
+            melds_before = (snap_before.get("melds") or [[], [], [], []])[actor]
+            shanten_before, waits_before_cnt, _waits_before_bools, tehai_before_cnt = (
                 _calc_shanten_waits(hand_before, melds_before)
+            )
 
         if collect_sample:
             # Apply event first so we can compute after-state
             apply_event(state, event)
             snap_after = state.snapshot(actor)
             hand_after = snap_after.get("hand", [])
-            melds_after = (snap_after.get("melds") or [[],[],[],[]])[actor]
-            shanten_after, waits_after_cnt, _waits_after_bools, tehai_after_cnt = \
+            melds_after = (snap_after.get("melds") or [[], [], [], []])[actor]
+            shanten_after, waits_after_cnt, _waits_after_bools, tehai_after_cnt = (
                 _calc_shanten_waits(hand_after, melds_after)
+            )
             # 副露+打牌联合 value_target：找到紧接着的 dahai，用副露+打牌后的状态计算 delta
             # snap[waits_count] 使用副露+打牌联合后的值（waits_after_cnt_vt），
             # 与 value_target 计算保持一致
@@ -191,13 +210,18 @@ def build_supervised_samples(
                     try:
                         hand_after_dahai.remove(discard_tile)
                     except ValueError:
-                        norm = discard_tile[:-1] if discard_tile.endswith('r') else discard_tile
+                        norm = (
+                            discard_tile[:-1]
+                            if discard_tile.endswith("r")
+                            else discard_tile
+                        )
                         try:
                             hand_after_dahai.remove(norm)
                         except ValueError:
                             pass
-                    shanten_after_vt, waits_after_cnt_vt, _, tehai_after_cnt_vt = \
+                    shanten_after_vt, waits_after_cnt_vt, _, tehai_after_cnt_vt = (
                         _calc_shanten_waits(hand_after_dahai, melds_after)
+                    )
         if collect_sample:
             delta_shanten = shanten_before - shanten_after_vt  # type: ignore[operator]
             delta_waits = waits_after_cnt_vt - waits_before_cnt  # type: ignore[operator]
@@ -209,7 +233,9 @@ def build_supervised_samples(
                 if isinstance(sd, list) and len(sd) == 4:
                     value_target_local = float(sd[actor]) / _VALUE_NORM * 1.5
                 else:
-                    value_target_local = float(W_SHANTEN * delta_shanten + W_WAITS * delta_waits)
+                    value_target_local = float(
+                        W_SHANTEN * delta_shanten + W_WAITS * delta_waits
+                    )
             elif et == "ryukyoku":
                 sd = event.get("deltas")
                 if isinstance(sd, list) and len(sd) == 4:
@@ -217,7 +243,9 @@ def build_supervised_samples(
                 else:
                     value_target_local = 0.0
             else:
-                value_target_local = float(W_SHANTEN * delta_shanten + W_WAITS * delta_waits)
+                value_target_local = float(
+                    W_SHANTEN * delta_shanten + W_WAITS * delta_waits
+                )
                 if et in CALL_ACTIONS:
                     value_target_local += float(W_CALL_TEHAI * delta_tehai)
                     value_target_local = max(min(value_target_local, 10.0), -10.0)
@@ -234,7 +262,9 @@ def build_supervised_samples(
                             value_target_local = float(sd[actor]) / _VALUE_NORM
 
             # Keep local value proxy computed above.
-            actor_name = actor_names[actor] if 0 <= actor < len(actor_names) else f"p{actor}"
+            actor_name = (
+                actor_names[actor] if 0 <= actor < len(actor_names) else f"p{actor}"
+            )
             snap = snap_before
             # Only collect supervised samples when the actor hand is visible.
             if snap["hand"]:
@@ -242,18 +272,22 @@ def build_supervised_samples(
                 snap["shanten"] = shanten_before if shanten_before is not None else 0
                 # tsumo_pai：摸牌事件时注入当前摸到的牌（raw，含赤宝牌），其余为 None
                 snap["tsumo_pai"] = event.get("pai") if et == "tsumo" else None
-                # waits_count: waits after this action (and subsequent discard for calls):
-                # - for dahai: waits after discarding label tile
-                # - for chi/pon/kan: waits after call+discard (waits_after_cnt_vt)
-                snap["waits_count"] = waits_after_cnt_vt if waits_after_cnt_vt is not None else 0
-                snap["waits_tiles"] = _waits_before_bools  # length-34 bool list, before action
+                # waits_count/waits_tiles: 与 snap_before（决策时刻）对应，两者保持同一时间点
+                snap["waits_count"] = (
+                    waits_before_cnt if waits_before_cnt is not None else 0
+                )
+                snap["waits_tiles"] = (
+                    _waits_before_bools  # length-34 bool list, before action
+                )
 
                 legal = enumerate_legal_actions(snap, actor)
                 label = dict(event)
                 if "pai" in label:
                     label["pai"] = _normalize_or_keep_aka(label["pai"])
                 if "consumed" in label:
-                    label["consumed"] = [_normalize_or_keep_aka(t) for t in label["consumed"]]
+                    label["consumed"] = [
+                        _normalize_or_keep_aka(t) for t in label["consumed"]
+                    ]
                 legal_dicts = [a.to_mjai() for a in legal]
                 # Our state reconstruction is intentionally lightweight.
                 # If the labeled action is not in enumerated legal set,
@@ -302,7 +336,11 @@ def build_supervised_samples(
                         actor_name=actor_name,
                         label_action=label,
                         legal_actions=legal_dicts,
-                        value_target=float(value_target_local if value_target_local is not None else 0.0),
+                        value_target=float(
+                            value_target_local
+                            if value_target_local is not None
+                            else 0.0
+                        ),
                     )
                 )
 
@@ -317,14 +355,16 @@ def build_supervised_samples(
                 next_type = next_ev.get("type")
                 next_actor = next_ev.get("actor")
                 # 只有下一个事件是 tsumo（无人鸣/荣）才是主动 pass
-                is_next_tsumo = (next_type == "tsumo")
+                is_next_tsumo = next_type == "tsumo"
                 for p in range(4):
                     if p == discarder:
                         continue
                     if actor_filter is not None and p not in actor_filter:
                         continue
                     if actor_name_filter is not None:
-                        p_name = actor_names[p] if 0 <= p < len(actor_names) else f"p{p}"
+                        p_name = (
+                            actor_names[p] if 0 <= p < len(actor_names) else f"p{p}"
+                        )
                         if p_name not in actor_name_filter:
                             continue
                     snap_p = state.snapshot(p)
@@ -339,7 +379,9 @@ def build_supervised_samples(
                     # 注入 shanten
                     hand_p = snap_p.get("hand", [])
                     melds_p = (snap_p.get("melds") or [[], [], [], []])[p]
-                    shanten_p, waits_cnt_p, waits_tiles_p, _ = _calc_shanten_waits(hand_p, melds_p)
+                    shanten_p, waits_cnt_p, waits_tiles_p, _ = _calc_shanten_waits(
+                        hand_p, melds_p
+                    )
                     snap_p["shanten"] = shanten_p
                     snap_p["waits_count"] = waits_cnt_p
                     snap_p["waits_tiles"] = waits_tiles_p
@@ -347,7 +389,9 @@ def build_supervised_samples(
                         ReplaySample(
                             state=snap_p,
                             actor=p,
-                            actor_name=actor_names[p] if 0 <= p < len(actor_names) else f"p{p}",
+                            actor_name=actor_names[p]
+                            if 0 <= p < len(actor_names)
+                            else f"p{p}",
                             label_action={"type": "none", "actor": p},
                             legal_actions=[a.to_mjai() for a in legal_p],
                             value_target=0.0,
@@ -363,10 +407,11 @@ def replay_validate_label_legal(samples: List[ReplaySample]) -> List[str]:
         label = sample.label_action
         legal = sample.legal_actions
         if label["type"] == "dahai":
-            found = any(a["type"] == "dahai" and a.get("pai") == label.get("pai") for a in legal)
+            found = any(
+                a["type"] == "dahai" and a.get("pai") == label.get("pai") for a in legal
+            )
         else:
             found = any(a["type"] == label["type"] for a in legal)
         if not found:
             errors.append(f"sample#{idx}: label {label} not in legal set")
     return errors
-

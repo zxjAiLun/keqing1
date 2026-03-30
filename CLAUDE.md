@@ -8,36 +8,47 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # 安装依赖
 uv sync
 
-# 安装额外包（如 mahjong、pytest）
-uv pip install mahjong pytest
-
 # 运行所有测试
-uv run python3 -m pytest tests/v5model/
+uv run pytest
 
-# 运行单个测试文件
-uv run python3 -m pytest tests/v5model/test_features.py
+# 预处理（普通数据）
+uv run python scripts/preprocess_v2.py \
+  --data_dirs artifacts/converted_mjai/ds1 ... \
+  --output_dir processed_v2_new/ds1 --workers 16
 
-# 训练（配置文件方式）
-uv run python src/train/train_v5.py --config configs/v5_default.yaml
+# 预处理（NAGA 视角）
+uv run python scripts/preprocess_v2.py \
+  --data_dirs artifacts/converted_mjai/ds7 \
+  --output_dir processed_v2_new/ds2 --workers 16 \
+  --actor_name_filter 'ⓝNAGA25'
+
+# 训练 keqingv2（从 v1 权重迁移）
+uv run python src/train/train_v2.py \
+  --config configs/keqingv2_default.yaml \
+  --resume artifacts/models/keqingv1/best.pth --weights-only
 
 # 断点续训
-uv run python src/train/train_v5.py --config configs/v5_default.yaml --resume artifacts/models/modelv5/latest.pth
+uv run python src/train/train_v2.py \
+  --config configs/keqingv2_default.yaml \
+  --resume artifacts/models/keqingv2/latest.pth
 ```
 
-`uv run` 是唯一正确的 Python 执行方式，系统 `python3` 没有 `riichienv`/`torch`。`mahjong` 包需单独 `uv pip install mahjong`（不在 pyproject.toml 依赖中）。
+`uv run` 是唯一正确的 Python 执行方式，系统 `python3` 没有 `riichienv`/`torch`。
 
 ## 架构概述
 
-项目是立直麻将监督学习 Bot（行为克隆），数据流：
+当前主力模型为 **keqingv2**（keqingv1 + Meld Value Ranking Loss）。数据流：
 
 ```
 mjai JSONL (.mjson)
-  → mahjong_env.replay.build_supervised_samples()  # 标注 label + legal_actions
-  → v5model.dataset.MjaiIterableDataset            # 流式加载
-  → v5model.features.encode()                      # (128,34) tile_feat + (20,) scalar
-  → v5model.model.MahjongModel                     # Conv1d ResNet + SE Block (~1.7M 参数)
+  → scripts/preprocess_v2.py               # 生成 .npz（含 snap_json，无离线花色增强）
+  → keqingv2.cached_dataset                # 流式加载，在线花色增强（aug_perms=2）
+  → keqingv1.features.encode()             # (54,34) tile_feat + (48,) scalar
+  → keqingv1.model.MahjongModel            # Conv1d ResNet (~1.7M 参数)
   → policy logits (45) + value scalar
 ```
+
+v5model 已弃用，keqingv1 代码不修改，keqingv2 在 `src/keqingv2/` 实现。
 
 ## 牌格式约定（关键）
 
@@ -89,16 +100,26 @@ chi 类型判断对齐 Mortal `chi_type.rs`：`pai_rank < lo → chi_low`，`lo 
 
 ## shanten/waits 注入协议
 
-训练时 `replay.build_supervised_samples` 向 snap 注入：
-- `snap["shanten"]` — 动作前向听数（libriichi PlayerState.shanten）
-- `snap["waits_count"]` — 动作后进张数
-- `snap["waits_tiles"]` — length-34 bool list（libriichi PlayerState.waits）
+训练和推理的 snap 均对应**决策时刻（snap_before）**：
+- `snap["shanten"]` — 动作前向听数
+- `snap["waits_count"]` — 动作前进张数（与 waits_tiles 同一时间点）
+- `snap["waits_tiles"]` — length-34 bool list，动作前进张位置
 
-推理时（bot.py）无注入则 fallback 到 `riichienv.HandEvaluator` 自算。`HandEvaluator` 要求 `riichienv.Meld`，不接受 `mahjong.meld.Meld`。
+推理时（bot.py）分事件类型处理：tsumo 在 apply 后计算（14张），dahai/副露/reach 在 apply 前记录手牌再计算。`HandEvaluator` 要求 `riichienv.Meld`，不接受 `mahjong.meld.Meld`。
 
-## bot.py 推理过滤
+## Meld Value Ranking Loss（keqingv2）
 
-`V5Bot.react` 在枚举 legal_actions 后，若所有合法动作均为 none（无实质选择），直接返回 none 不进入模型推理，避免无意义决策打印。
+- trainer 对 meld/none 样本做 rank loss：`relu(margin + v_none - v_meld)`（GT=meld）
+- snap_json 存储副露前状态，DataLoader worker 内预编码为 tf_none/sc_none/tf_meld/sc_meld
+- batch 返回 10-tuple，trainer 直接接收预编码 tensor，无主线程 JSON/encode 开销
+- 花色增强时对置换后的 snap_json 重新调用 encode（不能直接置换 tf 数组，encode 内部有字符串计算）
+- rank_signs: +1=GT副露, -1=GT none, 0=非 meld/none 样本（trainer 直接过滤）
+- rank_loss_weight=0.1 起步，收敛后可调至 0.3
+
+## 花色增强
+
+- 离线增强：preprocess_v2.py 默认关闭（default=False），**不要开启**
+- 在线增强：cached_dataset，`aug_perms=1`（config 默认），字牌不受影响（不在 _SUIT_SLICES 内）
 
 ## 立直状态处理（legal_actions.py + state.py）
 

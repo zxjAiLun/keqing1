@@ -7,9 +7,32 @@ HONORS = ("E", "S", "W", "N", "P", "F", "C")
 
 AKA_DORA_TILES = ("5mr", "5pr", "5sr")
 
-NORMAL_SUITED_TILES = ("1m", "2m", "3m", "4m", "6m", "7m", "8m", "9m",
-                       "1p", "2p", "3p", "4p", "6p", "7p", "8p", "9p",
-                       "1s", "2s", "3s", "4s", "6s", "7s", "8s", "9s")
+NORMAL_SUITED_TILES = (
+    "1m",
+    "2m",
+    "3m",
+    "4m",
+    "6m",
+    "7m",
+    "8m",
+    "9m",
+    "1p",
+    "2p",
+    "3p",
+    "4p",
+    "6p",
+    "7p",
+    "8p",
+    "9p",
+    "1s",
+    "2s",
+    "3s",
+    "4s",
+    "6s",
+    "7s",
+    "8s",
+    "9s",
+)
 
 
 def normalize_tile(tile: str) -> str:
@@ -54,25 +77,45 @@ def tile_without_aka(tile: str) -> str:
 # ---------------------------------------------------------------------------
 _STR_TO_136: Dict[str, int] = {}
 
+
 def _build_str_to_136() -> None:
     try:
-        from mahjong.tile import TilesConverter, FIVE_RED_MAN, FIVE_RED_PIN, FIVE_RED_SOU
+        from mahjong.tile import (
+            TilesConverter,
+            FIVE_RED_MAN,
+            FIVE_RED_PIN,
+            FIVE_RED_SOU,
+        )
     except ImportError:
         return
-    for suit, kw in (('m', 'man'), ('p', 'pin'), ('s', 'sou')):
+    for suit, kw in (("m", "man"), ("p", "pin"), ("s", "sou")):
         for n in range(1, 10):
             t = TilesConverter.string_to_136_array(**{kw: str(n)}, has_aka_dora=True)
-            _STR_TO_136[f'{n}{suit}'] = t[0]
-    _STR_TO_136['5mr'] = FIVE_RED_MAN
-    _STR_TO_136['5pr'] = FIVE_RED_PIN
-    _STR_TO_136['5sr'] = FIVE_RED_SOU
-    for name, z in (('E','1'),('S','2'),('W','3'),('N','4'),('P','5'),('F','6'),('C','7')):
+            _STR_TO_136[f"{n}{suit}"] = t[0]
+    _STR_TO_136["5mr"] = FIVE_RED_MAN
+    _STR_TO_136["5pr"] = FIVE_RED_PIN
+    _STR_TO_136["5sr"] = FIVE_RED_SOU
+    for name, z in (
+        ("E", "1"),
+        ("S", "2"),
+        ("W", "3"),
+        ("N", "4"),
+        ("P", "5"),
+        ("F", "6"),
+        ("C", "7"),
+    ):
         _STR_TO_136[name] = TilesConverter.string_to_136_array(honors=z)[0]
+
 
 _build_str_to_136()
 
 try:
-    from mahjong.tile import FIVE_RED_MAN as _FRM, FIVE_RED_PIN as _FRP, FIVE_RED_SOU as _FRS
+    from mahjong.tile import (
+        FIVE_RED_MAN as _FRM,
+        FIVE_RED_PIN as _FRP,
+        FIVE_RED_SOU as _FRS,
+    )
+
     _AKA_136: frozenset = frozenset({_FRM, _FRP, _FRS})
 except ImportError:
     _AKA_136 = frozenset()
