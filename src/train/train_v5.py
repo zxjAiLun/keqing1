@@ -17,6 +17,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from v5model.dataset import MjaiIterableDataset, split_files
+from v5model.cached_dataset import CachedMjaiDataset, split_cached_files
 from v5model.model import MahjongModel
 from v5model.trainer import train
 
@@ -38,6 +39,10 @@ def main():
                         help="覆盖 config 中的 output_dir")
     parser.add_argument("--resume", type=str, default=None,
                         help="checkpoint 路径，用于断点续训")
+    parser.add_argument("--weights-only", action="store_true",
+                        help="只加载模型权重，optimizer/scheduler/epoch 全部重置（换数据集微调时使用）")
+    parser.add_argument("--cached", action="store_true",
+                        help="使用预处理缓存数据集（.npz），需先运行 scripts/preprocess_cached.py")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -60,31 +65,45 @@ def main():
     set_seed(args.seed)
 
     # 收集数据文件
+    use_cached = args.cached or cfg.get("use_cached", False)
     data_dirs = [Path(d) for d in cfg.get("data_dirs", ["artifacts/converted_mjai/ds1"])]
-    train_files, val_files = split_files(
-        data_dirs,
-        val_ratio=cfg.get("val_ratio", 0.05),
-        seed=args.seed,
-    )
-    print(f"Train files: {len(train_files)}, Val files: {len(val_files)}")
 
     batch_size = cfg.get("batch_size", 64)
     num_workers = cfg.get("num_workers", 2)
 
-    train_ds = MjaiIterableDataset(train_files, shuffle=True, seed=args.seed)
-    val_ds = MjaiIterableDataset(val_files, shuffle=False)
+    if use_cached:
+        train_files, val_files = split_cached_files(
+            data_dirs,
+            val_ratio=cfg.get("val_ratio", 0.05),
+            seed=args.seed,
+        )
+        print(f"[cached] Train files: {len(train_files)}, Val files: {len(val_files)}")
+        aug_perms = cfg.get("aug_perms", 2)
+        train_ds = CachedMjaiDataset(train_files, shuffle=True, seed=args.seed, aug_perms=aug_perms)
+        val_ds = CachedMjaiDataset(val_files, shuffle=False, aug_perms=0)
+        collate_fn = CachedMjaiDataset.collate
+    else:
+        train_files, val_files = split_files(
+            data_dirs,
+            val_ratio=cfg.get("val_ratio", 0.05),
+            seed=args.seed,
+        )
+        print(f"Train files: {len(train_files)}, Val files: {len(val_files)}")
+        train_ds = MjaiIterableDataset(train_files, shuffle=True, seed=args.seed)
+        val_ds = MjaiIterableDataset(val_files, shuffle=False)
+        collate_fn = MjaiIterableDataset.collate
 
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        collate_fn=MjaiIterableDataset.collate,
+        collate_fn=collate_fn,
         num_workers=num_workers,
         pin_memory=(args.device == "cuda"),
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
-        collate_fn=MjaiIterableDataset.collate,
+        collate_fn=collate_fn,
         num_workers=num_workers,
         pin_memory=(args.device == "cuda"),
     )
@@ -108,6 +127,7 @@ def main():
         cfg=cfg,
         output_dir=output_dir,
         resume_path=resume_path,
+        weights_only=args.weights_only,
         device_str=args.device,
     )
 

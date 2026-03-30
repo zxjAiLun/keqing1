@@ -112,6 +112,20 @@ def _next_meaningful_event(events: List[MjaiEvent], i: int) -> Optional[MjaiEven
     return None
 
 
+def _next_actor_dahai(events: List[MjaiEvent], i: int, actor: int) -> Optional[MjaiEvent]:
+    """在副露事件 i 后找到同 actor 的 dahai 事件（副露后必须打牌）。"""
+    _SKIP = {"reach_accepted", "dora", "new_dora"}
+    for j in range(i + 1, len(events)):
+        ev = events[j]
+        if ev.get("type") in _SKIP:
+            continue
+        if ev.get("type") == "dahai" and ev.get("actor") == actor:
+            return ev
+        # 如果遇到非 skip 的其他事件则停止（副露后紧接着就是 dahai）
+        break
+    return None
+
+
 def build_supervised_samples(
     events: List[MjaiEvent],
     actor_filter: Optional[Set[int]] = None,
@@ -121,10 +135,11 @@ def build_supervised_samples(
     samples: List[ReplaySample] = []
     actor_names = extract_actor_names(events)
 
-    W_SHANTEN = 1.0
-    W_WAITS = 0.05
-    W_CALL_TEHAI = 0.03
+    W_SHANTEN = 0.05
+    W_WAITS = 0.008
+    W_CALL_TEHAI = 0.003
     CALL_ACTIONS = {"chi", "pon", "daiminkan", "ankan", "kakan"}
+    _VALUE_NORM = 30000.0
 
     for i, event in enumerate(events):
         et = event["type"]
@@ -162,24 +177,61 @@ def build_supervised_samples(
             melds_after = (snap_after.get("melds") or [[],[],[],[]])[actor]
             shanten_after, waits_after_cnt, _waits_after_bools, tehai_after_cnt = \
                 _calc_shanten_waits(hand_after, melds_after)
+            # 副露+打牌联合 value_target：找到紧接着的 dahai，用副露+打牌后的状态计算 delta
+            # snap[waits_count] 使用副露+打牌联合后的值（waits_after_cnt_vt），
+            # 与 value_target 计算保持一致
+            shanten_after_vt = shanten_after
+            waits_after_cnt_vt = waits_after_cnt
+            tehai_after_cnt_vt = tehai_after_cnt
+            if et in CALL_ACTIONS and et not in ("ankan", "kakan"):
+                next_dahai = _next_actor_dahai(events, i, actor)
+                if next_dahai is not None:
+                    discard_tile = _normalize_or_keep_aka(next_dahai["pai"])
+                    hand_after_dahai = list(hand_after)
+                    try:
+                        hand_after_dahai.remove(discard_tile)
+                    except ValueError:
+                        norm = discard_tile[:-1] if discard_tile.endswith('r') else discard_tile
+                        try:
+                            hand_after_dahai.remove(norm)
+                        except ValueError:
+                            pass
+                    shanten_after_vt, waits_after_cnt_vt, _, tehai_after_cnt_vt = \
+                        _calc_shanten_waits(hand_after_dahai, melds_after)
         if collect_sample:
-            delta_shanten = shanten_before - shanten_after  # type: ignore[operator]
-            delta_waits = waits_after_cnt - waits_before_cnt  # type: ignore[operator]
-            delta_tehai = tehai_after_cnt - tehai_before_cnt  # type: ignore[operator]
+            delta_shanten = shanten_before - shanten_after_vt  # type: ignore[operator]
+            delta_waits = waits_after_cnt_vt - waits_before_cnt  # type: ignore[operator]
+            delta_tehai = tehai_after_cnt_vt - tehai_before_cnt  # type: ignore[operator]
 
             # Terminal override: winning should reflect final score deltas.
             if et == "hora":
-                sd = event.get("score_delta")
+                sd = event.get("deltas") or event.get("score_delta")
                 if isinstance(sd, list) and len(sd) == 4:
-                    value_target_local = float(sd[actor]) / 12000.0
+                    value_target_local = float(sd[actor]) / _VALUE_NORM * 1.5
                 else:
                     value_target_local = float(W_SHANTEN * delta_shanten + W_WAITS * delta_waits)
+            elif et == "ryukyoku":
+                sd = event.get("deltas")
+                if isinstance(sd, list) and len(sd) == 4:
+                    value_target_local = float(sd[actor]) / _VALUE_NORM
+                else:
+                    value_target_local = 0.0
             else:
                 value_target_local = float(W_SHANTEN * delta_shanten + W_WAITS * delta_waits)
                 if et in CALL_ACTIONS:
                     value_target_local += float(W_CALL_TEHAI * delta_tehai)
-                    # clip to stabilize advantage weights
                     value_target_local = max(min(value_target_local, 10.0), -10.0)
+                # 放铳检测：dahai 后下一个有意义事件是对手 hora，覆盖为放铳损失
+                if et == "dahai":
+                    next_ev = _next_meaningful_event(events, i)
+                    if (
+                        next_ev is not None
+                        and next_ev.get("type") == "hora"
+                        and next_ev.get("actor") != actor
+                    ):
+                        sd = next_ev.get("deltas") or next_ev.get("score_delta")
+                        if isinstance(sd, list) and len(sd) == 4:
+                            value_target_local = float(sd[actor]) / _VALUE_NORM
 
             # Keep local value proxy computed above.
             actor_name = actor_names[actor] if 0 <= actor < len(actor_names) else f"p{actor}"
@@ -188,10 +240,12 @@ def build_supervised_samples(
             if snap["hand"]:
                 # Attach shanten/waits features for the policy/value model.
                 snap["shanten"] = shanten_before if shanten_before is not None else 0
-                # waits_after_cnt reflects waits after this action is applied:
-                # - for dahai: waits of the resulting tenpai shape after discarding label tile
-                # - for chi/pon/kan: waits after the call (0 if not tenpai after call)
-                snap["waits_count"] = waits_after_cnt if waits_after_cnt is not None else 0
+                # tsumo_pai：摸牌事件时注入当前摸到的牌（raw，含赤宝牌），其余为 None
+                snap["tsumo_pai"] = event.get("pai") if et == "tsumo" else None
+                # waits_count: waits after this action (and subsequent discard for calls):
+                # - for dahai: waits after discarding label tile
+                # - for chi/pon/kan: waits after call+discard (waits_after_cnt_vt)
+                snap["waits_count"] = waits_after_cnt_vt if waits_after_cnt_vt is not None else 0
                 snap["waits_tiles"] = _waits_before_bools  # length-34 bool list, before action
 
                 legal = enumerate_legal_actions(snap, actor)

@@ -105,7 +105,7 @@ def main() -> None:
             [
                 sys.executable,
                 "-m",
-                "tools.replay_bot",
+                "replay.bot",
                 "--log-path",
                 replay_log,
                 "--checkpoint",

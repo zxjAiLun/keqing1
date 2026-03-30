@@ -33,8 +33,8 @@
 - **方案**：训练开始时跑一遍数据集统计实际 steps，写入 cfg 再传给 trainer
 
 ### 4. value_loss_weight 调参
-- **当前**：`value_loss_weight=0.5`
-- **建议**：policy acc 已到 0.789，可降低到 0.2~0.3，让模型更专注 policy
+- **当前（keqingv1）**：`value_loss_weight=0.5`（已从 1.5 降低，原值过高压制 policy 学习）
+- **建议**：如 acc 稳定提升可进一步降到 0.2~0.3
 - **前提**：先确认 value MSE 趋势正常（持续下降）再调
 
 ### 5. global avg pool 位置信息丢失
@@ -57,6 +57,23 @@
 - 当前训练状态：显存占用 ~1094MiB，GPU 利用率 98%，温度 87°C
 - 瓶颈是算力，不是显存 —— 显存有余量但 GPU 已满载
 - 下版本若扩参数，需先评估 batch_size 能否维持，或改用梯度累积
+
+---
+
+## 已完成修复（keqingv1 训练链路）
+
+- `replay.py` call 样本 `waits_count` 改用副露+打牌后状态（`waits_after_cnt_vt`）
+- `trainer.py` mask 填充值统一为 `-1e9`
+- `keqingv1/features.py` ch 24-55 改为相对 slot 编码，消除绝对 pid 不一致
+- `keqingv1/features.py` scalar[12] 改为自家舍牌数（原为 min 各家）
+- `keqing_default.yaml` `value_loss_weight` 1.5 → 0.5
+- `keqingv1/features.py` scalar[10/21/22] 冗余清零，scalar[13-16/28-35] 改为相对 slot
+- `keqingv1/features.py` ch 8-16 重构（删 presence，保留立直宣言+手切），ch 14-16 改为他家副露 presence
+- `keqingv1/features.py` ch 18 改为 dora 实际牌（累加），ch 19-22 空闲
+- `keqingv1/features.py` ch 57 改为最新立直家立直后其他家打过的牌
+- `_DORA_NEXT` 提升为模块级常量
+
+**待完成（下一步）：** 删除所有空闲槽，C_TILE 64→54，N_SCALAR 64→48，重新映射所有索引
 
 ---
 

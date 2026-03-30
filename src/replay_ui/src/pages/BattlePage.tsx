@@ -1,0 +1,347 @@
+// src/replay_ui/src/pages/BattlePage.tsx
+import { useState, useCallback, useEffect, useRef } from "react";
+import { MahjongTable } from "../components/BattleBoard/MahjongTable";
+import { startBattle, doAction, closeBattle, fetchWithTimeout } from "../api/battleApi";
+import type { BattleState, Action, StartBattleRequest } from "../types/battle";
+
+export function BattlePage() {
+  const [gameId, setGameId] = useState<string | null>(null);
+  const [state, setState] = useState<BattleState | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedTile, setSelectedTile] = useState<string | null>(null);
+  const [selectedTileIdx, setSelectedTileIdx] = useState<number | null>(null);
+  const [playerName, setPlayerName] = useState("玩家");
+  const pollingRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
+  const pendingActionRef = useRef(false);
+
+  const isMyTurn = state?.actor_to_move === state?.human_player_id && state?.phase === "playing";
+
+  const startNewGame = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const req: StartBattleRequest = { player_name: playerName, bot_count: 3 };
+      const res = await startBattle(req);
+      setGameId(res.game_id);
+      setState(res.state);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "启动失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [playerName]);
+
+  const handleAction = useCallback(
+    async (action: Action) => {
+      if (!gameId) return;
+      pendingActionRef.current = true;
+      setLoading(true);
+      try {
+        const res = await doAction({ game_id: gameId, action });
+        setState(res.state);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "操作失败");
+      } finally {
+        setLoading(false);
+        pendingActionRef.current = false;
+      }
+    },
+    [gameId]
+  );
+
+  const downloadExport = useCallback(async (format: "mjai" | "tenhou6") => {
+    if (!gameId) return;
+    try {
+      const endpoint = format === "mjai" ? "export_mjai" : "export_tenhou6";
+      const res = await fetchWithTimeout(`/api/battle/${endpoint}/${gameId}`);
+      if (!res.ok) throw new Error("导出失败");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${gameId}_${format}.${format === "mjai" ? "jsonl" : "json"}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      alert("导出失败");
+    }
+  }, [gameId]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!gameId || state?.phase !== "playing") return;
+    if (pollingRef.current) clearInterval(pollingRef.current);
+    pollingRef.current = window.setInterval(async () => {
+      try {
+        const res = await fetch(`/api/battle/state/${gameId}?player_id=0`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (mountedRef.current && !pendingActionRef.current) {
+          setState(data.state);
+        }
+      } catch { /* ignore */ }
+    }, 500);
+    return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
+  }, [gameId]);
+
+  if (!state) {
+    return (
+      <div
+        style={{
+          background: '#f0f2f5',
+          minHeight: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 24,
+        }}
+      >
+        {/* 麻将图标 + 旋转动画 */}
+        <div
+          style={{
+            width: 64,
+            height: 64,
+            borderRadius: 16,
+            background: 'linear-gradient(135deg, #1e4a7a 0%, #0f2d4a 100%)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: '0 8px 24px rgba(30,74,122,0.3)',
+            marginBottom: 8,
+            animation: loading ? "spinIcon 1.5s linear infinite" : "floatIcon 3s ease-in-out infinite",
+          }}
+        >
+          <span style={{ color: '#fff', fontWeight: 700, fontSize: 24 }}>麻</span>
+        </div>
+        <h1 style={{ fontSize: 28, fontWeight: 700, color: '#1f2937' }}>立直麻将对战</h1>
+
+        <div
+          style={{
+            background: '#fff',
+            border: '1px solid #e5e7eb',
+            borderRadius: 12,
+            padding: 20,
+            width: 320,
+            boxShadow: '0 4px 16px rgba(0,0,0,0.07)',
+          }}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <input
+              type="text"
+              placeholder="你的名字"
+              value={playerName}
+              onChange={(e) => setPlayerName(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '9px 12px',
+                border: '1px solid #d1d5db',
+                borderRadius: 8,
+                fontSize: 14,
+                background: '#f9fafb',
+                color: '#1f2937',
+                outline: 'none',
+                transition: 'border-color 0.15s',
+              }}
+              onFocus={(e) => (e.target.style.borderColor = '#3498db')}
+              onBlur={(e) => (e.target.style.borderColor = '#d1d5db')}
+            />
+            <button
+              onClick={startNewGame}
+              disabled={loading}
+              style={{
+                width: '100%',
+                padding: '10px',
+                borderRadius: 8,
+                border: 'none',
+                background: loading
+                  ? 'linear-gradient(135deg, #9ca3af 0%, #8b9298 100%)'
+                  : 'linear-gradient(135deg, #1e4a7a 0%, #0f2d4a 100%)',
+                color: '#fff',
+                fontSize: 15,
+                fontWeight: 600,
+                cursor: loading ? 'not-allowed' : 'pointer',
+                boxShadow: loading ? 'none' : '0 4px 12px rgba(30,74,122,0.25)',
+                transition: 'all 0.2s',
+              }}
+            >
+              {loading ? (
+                <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                  <span style={{ animation: "dotPulse 1.2s ease-in-out infinite" }}>●</span>
+                  洗牌中...
+                </span>
+              ) : '开始对战'}
+            </button>
+            {error && (
+              <div style={{
+                fontSize: 13, textAlign: 'center', color: '#dc2626',
+                background: '#fef2f2', padding: '6px 10px', borderRadius: 6, border: '1px solid #fecaca'
+              }}>
+                {error}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <p style={{ fontSize: 13, color: '#9ca3af' }}>你将与 3 个 Bot 对战</p>
+
+        <style>{`
+          @keyframes spinIcon { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+          @keyframes floatIcon { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+          @keyframes dotPulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+        `}</style>
+      </div>
+    );
+  }
+
+  if (state.phase === "ended") {
+    const winner = state.winner;
+    const isWinner = winner === state.human_player_id;
+    const seatColors = ["#e74c3c", "#3498db", "#8e44ad", "#27ae60"];
+
+    return (
+      <div
+        style={{
+          background: '#f0f2f5',
+          minHeight: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 32,
+        }}
+      >
+        {/* 胜利/失败图标 */}
+        <div style={{
+          width: 72, height: 72, borderRadius: '50%',
+          background: isWinner
+            ? 'linear-gradient(135deg, #d4a853 0%, #b8922e 100%)'
+            : 'linear-gradient(135deg, #9ca3af 0%, #6b7280 100%)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          boxShadow: isWinner
+            ? '0 8px 32px rgba(212,168,83,0.4)'
+            : '0 8px 24px rgba(0,0,0,0.15)',
+          animation: isWinner ? "floatIcon 2.5s ease-in-out infinite" : "none",
+        }}>
+          <span style={{ color: '#fff', fontWeight: 700, fontSize: 28 }}>
+            {isWinner ? '勝' : '負'}
+          </span>
+        </div>
+
+        <h1 style={{ fontSize: 36, fontWeight: 700, color: isWinner ? '#d4a853' : '#6b7280' }}>
+          {isWinner ? '你赢了！' : `${state.player_info[winner ?? 0]?.name} 获胜`}
+        </h1>
+
+        <div
+          style={{
+            background: '#fff',
+            border: '1px solid #e5e7eb',
+            borderRadius: 16,
+            padding: 28,
+            boxShadow: '0 4px 20px rgba(0,0,0,0.07)',
+          }}
+        >
+          <div style={{ display: 'flex', gap: 32 }}>
+            {state.scores.map((score, i) => (
+              <div key={i} style={{ textAlign: 'center', minWidth: 80 }}>
+                <div style={{
+                  width: 14, height: 14, borderRadius: '50%',
+                  background: seatColors[i], margin: '0 auto 8px',
+                  boxShadow: `0 0 6px ${seatColors[i]}60`,
+                }} />
+                <div style={{ fontWeight: 700, marginBottom: 4, color: seatColors[i] }}>
+                  {state.player_info[i]?.name}
+                </div>
+                <div style={{
+                  fontSize: 20, fontWeight: 700,
+                  fontFamily: 'Menlo, monospace',
+                  color: score === Math.max(...state.scores) ? '#d4a853' : '#6b7280',
+                }}>
+                  {score.toLocaleString()}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <button
+          onClick={async () => {
+            if (gameId) await closeBattle(gameId);
+            setState(null);
+            setGameId(null);
+            setSelectedTile(null);
+          }}
+          style={{
+            padding: '10px 28px',
+            borderRadius: 8,
+            border: 'none',
+            background: 'linear-gradient(135deg, #1e4a7a 0%, #0f2d4a 100%)',
+            color: '#fff',
+            fontSize: 15,
+            fontWeight: 600,
+            cursor: 'pointer',
+            boxShadow: '0 4px 12px rgba(30,74,122,0.25)',
+          }}
+        >
+          再来一局
+        </button>
+
+        <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
+          <button
+            onClick={() => downloadExport("mjai")}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 6,
+              border: '1px solid #3498db',
+              background: '#fff',
+              color: '#3498db',
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            导出 Mjai Log
+          </button>
+          <button
+            onClick={() => downloadExport("tenhou6")}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 6,
+              border: '1px solid #27ae60',
+              background: '#fff',
+              color: '#27ae60',
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            导出 Tenhou6
+          </button>
+        </div>
+
+        <style>{`
+          @keyframes floatIcon { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+        `}</style>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ height: '100%', padding: 16, background: '#f0f2f5' }}>
+      <MahjongTable
+        state={state}
+        onAction={handleAction}
+        isMyTurn={isMyTurn}
+        selectedTile={selectedTile}
+        selectedTileIdx={selectedTileIdx}
+        onTileSelect={(tile, idx) => { setSelectedTile(tile); setSelectedTileIdx(idx ?? null); }}
+      />
+    </div>
+  );
+}

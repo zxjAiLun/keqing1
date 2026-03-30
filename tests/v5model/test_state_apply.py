@@ -63,7 +63,7 @@ def test_dahai_removes_from_hand():
     state = _make_state()
     apply_event(state, {"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False})
     assert state.players[0].hand["1m"] == 12
-    assert "1m" in state.players[0].discards
+    assert any(d["pai"] == "1m" for d in state.players[0].discards)
 
 
 def test_dahai_advances_actor_to_move():

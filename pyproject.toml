@@ -8,11 +8,16 @@ version = "0.1.0"
 description = "Riichi Mahjong MVP with mjai stream training and bot inference."
 requires-python = ">=3.12"
 dependencies = [
+  "fastapi>=0.135.2",
   "ipykernel>=7.2.0",
   "numpy>=1.24",
+  "python-dotenv>=1.2.2",
+  "python-multipart>=0.0.20",
   "pyyaml>=6.0",
   "riichienv>=0.4.7",
   "torch>=2.11.0",
+  "uvicorn>=0.42.0",
+  "websockets==10.2",
 ]
 
 [tool.setuptools]

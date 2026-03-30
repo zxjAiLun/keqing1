@@ -37,7 +37,7 @@ def vectorize_state_py(state: Dict, actor: int) -> List[float]:
             x[idx] = float(c)
 
     for pid in range(4):
-        disc = Counter(state["discards"][pid])
+        disc = Counter((d["pai"] if isinstance(d, dict) else d) for d in state["discards"][pid])
         base = 34 + pid * 34
         for t, c in disc.items():
             idx = TILE_INDEX.get(t)

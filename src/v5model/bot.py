@@ -188,6 +188,7 @@ class V5Bot:
             [{"action": a, "logit": float(logits_np[action_to_idx(a)])} for a in legal_dicts],
             key=lambda x: x["logit"], reverse=True,
         )
+        tsumo_pai = event.get("pai") if etype == "tsumo" else None
         self.decision_log.append({
             "step": len(self.decision_log),
             "bakaze": snap.get("bakaze", ""),
@@ -198,6 +199,7 @@ class V5Bot:
             "discards": snap.get("discards", []),
             "dora_markers": snap.get("dora_markers", []),
             "reached": snap.get("reached", []),
+            "tsumo_pai": tsumo_pai,
             "candidates": scored,
             "chosen": chosen,
             "gt_action": gt_action,

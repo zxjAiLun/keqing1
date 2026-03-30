@@ -1,0 +1,42 @@
+# keqingv1 缓存数据集训练配置（ds1-ds6全视角 + ds7 NAGA视角）
+# 预处理：
+#   uv run python scripts/preprocess_cached.py --data_dirs artifacts/converted_mjai/ds1 ds2 ds3 ds4 ds5 ds6 ds8 ds9 ds10 ds11 ds12 ds13 --output_dir processed --workers 16
+#   uv run python scripts/preprocess_cached.py --data_dirs artifacts/converted_mjai/ds7 --output_dir processed_naga --workers 16 --actor_name_filter 'ⓝNAGA25'
+# 训练：
+#   uv run python src/train/train_keqing.py --config configs/keqing_cached_naga.yaml
+
+data_dirs:
+  - processed/ds1
+  - processed/ds2
+  - processed/ds3
+  - processed/ds4
+  - processed/ds5
+  - processed/ds6
+  - processed/ds8
+  - processed/ds9
+  - processed/ds10
+  - processed/ds11
+  - processed/ds12
+  - processed/ds13
+  - processed_naga/ds7
+
+use_cached: true
+aug_perms: 2
+
+output_dir: artifacts/models/keqingv1
+
+hidden_dim: 256
+num_res_blocks: 4
+dropout: 0.1
+
+num_epochs: 10
+batch_size: 1024
+accumulation_steps: 1
+learning_rate: 0.0003
+weight_decay: 0.0001
+warmup_steps: 2000
+value_loss_weight: 0.5
+
+val_ratio: 0.05
+num_workers: 8
+log_interval: 200

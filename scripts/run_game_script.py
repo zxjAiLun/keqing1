@@ -1,13 +1,13 @@
-"""运行 V5Model 对局的脚本"""
+"""运行 KeqingV1 对局的脚本"""
 import sys, json
 sys.path.insert(0, 'src')
 
 import torch
 from riichienv import RiichiEnv
-from v5model.bot import V5Bot
+from keqingv1.bot import KeqingBot
 
 # 加载模型
-MODEL_PATH = "artifacts/models/modelv5/best.pth"
+MODEL_PATH = "artifacts/models/keqingv1/best.pth"
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Using device: {DEVICE}")
 
@@ -15,7 +15,7 @@ print(f"Using device: {DEVICE}")
 print("创建4个Agent...")
 bots = {}
 for pid in range(4):
-    bots[pid] = V5Bot(
+    bots[pid] = KeqingBot(
         player_id=pid,
         model_path=MODEL_PATH,
         device=DEVICE

@@ -17,10 +17,14 @@ def _normalize_or_keep_aka(tile: str) -> str:
 @dataclass
 class PlayerState:
     hand: Counter = field(default_factory=Counter)
-    discards: List[str] = field(default_factory=list)
+    discards: List[dict] = field(default_factory=list)  # each: {"pai": str, "tsumogiri": bool, "reach_declared": bool}
     melds: List[dict] = field(default_factory=list)
     reached: bool = False
     pending_reach: bool = False
+    furiten: bool = False          # 舍牌振听 or 立直振听
+    sutehai_furiten: bool = False  # 舍牌振听（自己曾打出进张牌）
+    riichi_furiten: bool = False   # 立直振听（立直后摸到进张但未自摸）
+    doujun_furiten: bool = False   # 同巡振听（本巡放弃荣和）
 
 
 @dataclass
@@ -62,6 +66,10 @@ class GameState:
             "last_discard": self.last_discard.copy() if self.last_discard else None,
             "last_tsumo": self.last_tsumo[:],
             "last_tsumo_raw": self.last_tsumo_raw[:],
+            "furiten": [p.furiten for p in self.players],
+            "sutehai_furiten": [p.sutehai_furiten for p in self.players],
+            "riichi_furiten": [p.riichi_furiten for p in self.players],
+            "doujun_furiten": [p.doujun_furiten for p in self.players],
         }
 
 
@@ -111,6 +119,8 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
             state.last_tsumo_raw[actor] = None
         state.actor_to_move = actor
         state.last_discard = None
+        # 摸牌时解除同巡振听
+        state.players[actor].doujun_furiten = False
         return
 
     if et == "dahai":
@@ -118,7 +128,9 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
         pai_raw = event["pai"]
         tile_key = _normalize_or_keep_aka(pai_raw)
         _remove_tile(state.players[actor].hand, tile_key, 1)
-        state.players[actor].discards.append(tile_key)
+        tsumogiri = bool(event.get("tsumogiri", False))
+        reach_declared = state.players[actor].pending_reach
+        state.players[actor].discards.append({"pai": tile_key, "tsumogiri": tsumogiri, "reach_declared": reach_declared})
         state.last_discard = {"actor": actor, "pai": tile_key, "pai_raw": pai_raw}
         state.last_tsumo[actor] = None
         state.last_tsumo_raw[actor] = None
@@ -199,7 +211,7 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
 def visible_tiles_for_actor(state: GameState, actor: int) -> Set[str]:
     visible: Set[str] = set(state.players[actor].hand.keys())
     for p in state.players:
-        visible.update(p.discards)
+        visible.update(d["pai"] if isinstance(d, dict) else d for d in p.discards)
         for meld in p.melds:
             visible.update(meld.get("consumed", []))
             if "pai" in meld:

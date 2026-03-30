@@ -80,10 +80,9 @@ def test_meld_count_ch32():
 
 
 def test_discard_count_ch36():
-    """pid=1 有3张弃牌 → ch37 全列 = 3/24。"""
+    """ch36-39 已删除，应全为 0。"""
     tf, _ = encode(_snap(discards=[[], ["1m","2m","3m"], [], []]), 0)
-    assert abs(tf[37, 0] - 3/24.0) < 1e-6
-    assert abs(tf[36, 0]) < 1e-6
+    assert tf[36:40, :].max() == 0.0
 
 
 def test_bakaze_onehot_E_ch40():
@@ -123,10 +122,10 @@ def test_jikaze_wraps_actor0_oya2():
 
 
 def test_turn_estimate_ch47():
-    """自家弃牌6张 → ch47 = 6/24。"""
+    """ch47 已删除，应全为 0。"""
     discs = [["1m","2m","3m","4m","5m","6m"], [], [], []]
     tf, _ = encode(_snap(discards=discs), 0)
-    assert abs(tf[47, 0] - 6/24.0) < 1e-6
+    assert tf[47, :].max() == 0.0
 
 
 def test_score_diff_ch48_equal():

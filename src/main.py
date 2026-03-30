@@ -1,0 +1,143 @@
+"""IceLatte 统一入口：牌谱 Review + Bot 对战服务。
+
+用法:
+    python -m main serve      # 启动 FastAPI + Gateway (默认)
+    python -m main serve --replay-only  # 仅启动牌谱 Review (不启动 Gateway)
+    python -m main replay    # 仅启动牌谱 Review 服务
+    python -m main gateway   # 仅启动 Gateway (天凤接入)
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import sys
+import threading
+from pathlib import Path
+
+# 确保 src 在 path 中
+_SRC_DIR = Path(__file__).parent
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+from gateway import settings as gateway_settings
+
+
+def setup_logging(service: str, log_file: Path | None = None) -> logging.Logger:
+    """配置独立日志服务。
+
+    Args:
+        service: 服务名称 (gateway / replay / main)
+        log_file: 可选的日志文件路径
+    """
+    logger = logging.getLogger(service)
+    logger.setLevel(logging.DEBUG if service != "replay" else logging.INFO)
+
+    # 避免重复添加 handler
+    if logger.handlers:
+        return logger
+
+    fmt = f"[%(levelname)s] %(message)s" if service != "main" else "%(message)s"
+    formatter = logging.Formatter(fmt)
+
+    # 控制台 Handler
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    logger.addHandler(console)
+
+    # 文件 Handler (可选)
+    if log_file:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+    return logger
+
+
+def run_replay_server(port: int, logger: logging.Logger) -> None:
+    """启动牌谱 Review FastAPI 服务。"""
+    import uvicorn
+    from replay.server import app
+
+    logger.info(f"启动牌谱 Review 服务 (端口 {port})")
+    # 配置 uvicorn 日志使用 replay logger
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+
+
+def run_gateway_server(logger: logging.Logger) -> None:
+    """启动 mjai-gateway (天凤协议转换)。"""
+    from gateway.main import main as gateway_main
+
+    gateway_main(logger)
+
+
+async def start_gateway_async(debug: bool, logger: logging.Logger) -> None:
+    """异步启动 Gateway TCP 服务器。"""
+    from gateway.main import tcp_server
+
+    gateway_settings.DEBUG = debug
+    gateway_settings.LOGGING = {**gateway_settings.LOGGING}
+
+    server = await asyncio.start_server(
+        tcp_server, gateway_settings.HOST, gateway_settings.PORT
+    )
+    logger.info(f"Gateway 监听 {gateway_settings.HOST}:{gateway_settings.PORT}")
+    async with server:
+        await server.serve_forever()
+
+
+def run_merged(port: int, debug: bool, replay_only: bool, logger: logging.Logger) -> None:
+    """同时启动 FastAPI 服务和 Gateway。"""
+    async def run_all() -> None:
+        tasks = []
+        if not replay_only:
+            gateway_logger = logging.getLogger("gateway")
+            tasks.append(asyncio.create_task(start_gateway_async(debug, gateway_logger)))
+        await asyncio.gather(*tasks)
+
+    def gateway_thread_target() -> None:
+        asyncio.run(run_all())
+
+    if not replay_only:
+        gateway_thread = threading.Thread(target=gateway_thread_target, daemon=True)
+        gateway_thread.start()
+        logger.info(f"Gateway 已在后台线程启动 (端口 {gateway_settings.PORT})")
+
+    replay_logger = logging.getLogger("replay")
+    run_replay_server(port, replay_logger)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="IceLatte 统一入口")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("serve", help="启动 FastAPI + Gateway")
+    sub.add_parser("replay", help="仅启动牌谱 Review 服务")
+    sub.add_parser("gateway", help="仅启动 Gateway (天凤接入)")
+
+    parser.add_argument("--port", "-p", type=int, default=8000, help="FastAPI 端口 (默认 8000)")
+    parser.add_argument("--gateway-port", type=int, default=11600, help="Gateway 端口 (默认 11600)")
+    parser.add_argument("--debug", "-d", action="store_true", help="Gateway 调试模式")
+    parser.add_argument("--replay-only", action="store_true", help="serve 命令下仅启动牌谱服务")
+
+    args = parser.parse_args()
+
+    # 主日志器
+    main_logger = setup_logging("main")
+
+    # 设置 gateway 端口
+    gateway_settings.PORT = args.gateway_port
+
+    if args.command == "serve":
+        run_merged(args.port, args.debug, args.replay_only, main_logger)
+    elif args.command == "replay":
+        replay_logger = setup_logging("replay")
+        run_replay_server(args.port, replay_logger)
+    elif args.command == "gateway":
+        gateway_logger = setup_logging("gateway")
+        gateway_settings.DEBUG = args.debug
+        run_gateway_server(gateway_logger)
+
+
+if __name__ == "__main__":
+    main()

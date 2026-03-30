@@ -32,7 +32,7 @@ def vectorize_state(state: Dict, actor: int) -> np.ndarray:
         if t in TILE_INDEX:
             x[TILE_INDEX[t]] = c
     for pid in range(4):
-        disc = Counter(state["discards"][pid])
+        disc = Counter((d["pai"] if isinstance(d, dict) else d) for d in state["discards"][pid])
         base = 34 + pid * 34
         for t, c in disc.items():
             if t in TILE_INDEX:

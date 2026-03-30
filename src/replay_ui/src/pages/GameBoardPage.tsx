@@ -1,0 +1,261 @@
+// src/replay_ui/src/pages/GameBoardPage.tsx
+import { useState, useEffect } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { GameBoard } from '../components/GameBoard/GameBoard';
+import { Loader2, ChevronLeft, ChevronRight, SkipBack, SkipForward } from 'lucide-react';
+import { replayApi } from '../api/replayApi';
+import type { ReplayData } from '../types/replay';
+import type { DecisionLogEntry } from '../types/replay';
+import { SEAT_NAMES_CN, BAKAZE_CN } from '../utils/constants';
+
+export function GameBoardPage() {
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  const [data, setData] = useState<ReplayData | null>(null);
+  const [currentStep, setCurrentStep] = useState(0);
+  const [playerId, setPlayerId] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const state = location.state as { replayData?: ReplayData; replayId?: string } | null;
+    if (state?.replayData) {
+      setData(state.replayData);
+      setLoading(false);
+    } else if (state?.replayId) {
+      replayApi.get(state.replayId)
+        .then(d => { setData(d); setLoading(false); })
+        .catch(e => { setError(String(e)); setLoading(false); });
+    } else {
+      const params = new URLSearchParams(location.search);
+      const replayId = params.get('id');
+      if (replayId) {
+        replayApi.get(replayId)
+          .then(d => { setData(d); setLoading(false); })
+          .catch(e => { setError(String(e)); setLoading(false); });
+      } else {
+        setError('未找到回放数据，请从首页上传牌谱');
+        setLoading(false);
+      }
+    }
+  }, [location]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (!data) return;
+      if (e.key === 'ArrowLeft' || e.key === 'h') { e.preventDefault(); setCurrentStep(c => Math.max(0, c - 1)); }
+      if (e.key === 'ArrowRight' || e.key === 'l') { e.preventDefault(); setCurrentStep(c => Math.min(data.log.length - 1, c + 1)); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [data]);
+
+  if (loading) {
+    return (
+      <div
+        className="h-full flex flex-col items-center justify-center gap-3"
+        style={{ background: '#f0f2f5' }}
+      >
+        <Loader2 size={36} className="animate-spin" style={{ color: '#3498db' }} />
+        <p style={{ color: '#6b7280', fontSize: 14 }}>加载回放数据中...</p>
+      </div>
+    );
+  }
+
+  if (error || !data) {
+    return (
+      <div
+        className="h-full flex flex-col items-center justify-center gap-3"
+        style={{ background: '#f0f2f5' }}
+      >
+        <p style={{ color: '#dc2626', fontSize: 14 }}>{error || '未找到回放数据'}</p>
+        <button
+          onClick={() => navigate('/')}
+          style={{ color: '#3498db', fontSize: 14, background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+        >
+          返回首页
+        </button>
+      </div>
+    );
+  }
+
+  const entry: DecisionLogEntry | null = data.log[currentStep] ?? null;
+  const total = data.log.length;
+  const pid = data.player_id ?? 0;
+
+  const highlightTile = entry?.chosen?.type === 'dahai' ? entry.chosen.pai ?? null : null;
+  const gtTile = entry?.gt_action?.type === 'dahai' ? entry.gt_action.pai ?? null : null;
+  const activeActor = entry?.actor_to_move ?? null;
+
+  const kyoku = entry?.kyoku_key ?? { bakaze: 'E', kyoku: 1, honba: 0 };
+  const kyokuLabel = `第${BAKAZE_CN[kyoku.bakaze] ?? kyoku.bakaze}${kyoku.kyoku}局 ${kyoku.honba}本场`;
+
+  return (
+    <div className="h-full flex flex-col" style={{ background: '#f0f2f5' }}>
+      {/* 顶部信息栏 — 浅色 */}
+      <div
+        className="px-4 py-2 flex items-center gap-3 flex-shrink-0"
+        style={{ borderBottom: '1px solid #e5e7eb', background: '#fff' }}
+      >
+        <span className="text-sm font-semibold" style={{ color: '#1e3a5f' }}>
+          {SEAT_NAMES_CN[pid]}视角
+        </span>
+        <span style={{ color: '#d1d5db' }}>|</span>
+        <span className="text-xs" style={{ color: '#6b7280' }}>{kyokuLabel}</span>
+
+        <select
+          value={playerId}
+          onChange={e => setPlayerId(parseInt(e.target.value))}
+          style={{
+            marginLeft: 'auto',
+            padding: '4px 8px',
+            border: '1px solid #d1d5db',
+            borderRadius: 6,
+            fontSize: 12,
+            background: '#fff',
+            color: '#1f2937',
+          }}
+        >
+          {[0, 1, 2, 3].map(i => (
+            <option key={i} value={i}>{SEAT_NAMES_CN[i]}视角</option>
+          ))}
+        </select>
+
+        <button
+          onClick={() => navigate('/')}
+          style={{
+            padding: '4px 10px',
+            border: '1px solid #d1d5db',
+            borderRadius: 4,
+            fontSize: 12,
+            background: '#f3f4f6',
+            color: '#374151',
+            cursor: 'pointer',
+          }}
+        >
+          🏠
+        </button>
+      </div>
+
+      {/* 牌桌区域 */}
+      <div className="flex-1 min-h-0 p-3">
+        <div
+          className="h-full rounded-2xl overflow-hidden"
+          style={{
+            border: '1px solid #e5e7eb',
+            boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
+          }}
+        >
+          <GameBoard
+            entry={entry}
+            playerId={playerId}
+            activeActor={activeActor}
+            highlightTile={highlightTile}
+            gtTile={gtTile}
+          />
+        </div>
+      </div>
+
+      {/* 底部控制条 — 浅色 */}
+      <div
+        className="px-4 py-2 flex items-center gap-3 flex-shrink-0"
+        style={{ borderTop: '1px solid #e5e7eb', background: '#fff' }}
+      >
+        {/* 步进控制 */}
+        <button
+          onClick={() => setCurrentStep(0)}
+          disabled={currentStep === 0}
+          style={{
+            padding: 6,
+            borderRadius: 6,
+            border: '1px solid #d1d5db',
+            background: '#f3f4f6',
+            color: '#374151',
+            opacity: currentStep === 0 ? 0.4 : 1,
+            cursor: currentStep === 0 ? 'not-allowed' : 'pointer',
+          }}
+          title="第一步"
+        >
+          <SkipBack size={14} />
+        </button>
+        <button
+          onClick={() => setCurrentStep(c => Math.max(0, c - 1))}
+          disabled={currentStep === 0}
+          style={{
+            padding: 6,
+            borderRadius: 6,
+            border: '1px solid #d1d5db',
+            background: '#f3f4f6',
+            color: '#374151',
+            opacity: currentStep === 0 ? 0.4 : 1,
+            cursor: currentStep === 0 ? 'not-allowed' : 'pointer',
+          }}
+          title="上一步 (←)"
+        >
+          <ChevronLeft size={14} />
+        </button>
+
+        {/* 进度条 */}
+        <div className="flex-1 flex flex-col gap-1">
+          <input
+            type="range"
+            min={0}
+            max={total - 1}
+            value={currentStep}
+            onChange={e => setCurrentStep(parseInt(e.target.value))}
+            style={{ width: '100%', accentColor: '#3498db' }}
+          />
+          <div className="flex justify-between text-xs" style={{ color: '#9ca3af' }}>
+            <span>Step {currentStep + 1} / {total}</span>
+            <span>{Math.round((currentStep + 1) / total * 100)}%</span>
+          </div>
+        </div>
+
+        <button
+          onClick={() => setCurrentStep(c => Math.min(total - 1, c + 1))}
+          disabled={currentStep === total - 1}
+          style={{
+            padding: 6,
+            borderRadius: 6,
+            border: '1px solid #d1d5db',
+            background: '#f3f4f6',
+            color: '#374151',
+            opacity: currentStep === total - 1 ? 0.4 : 1,
+            cursor: currentStep === total - 1 ? 'not-allowed' : 'pointer',
+          }}
+          title="下一步 (→)"
+        >
+          <ChevronRight size={14} />
+        </button>
+        <button
+          onClick={() => setCurrentStep(total - 1)}
+          disabled={currentStep === total - 1}
+          style={{
+            padding: 6,
+            borderRadius: 6,
+            border: '1px solid #d1d5db',
+            background: '#f3f4f6',
+            color: '#374151',
+            opacity: currentStep === total - 1 ? 0.4 : 1,
+            cursor: currentStep === total - 1 ? 'not-allowed' : 'pointer',
+          }}
+          title="最后一步"
+        >
+          <SkipForward size={14} />
+        </button>
+
+        {/* 当前动作信息 */}
+        <div className="ml-4 text-xs min-w-[120px]" style={{ color: '#6b7280' }}>
+          {entry?.chosen && (
+            <span style={{ color: '#3498db', fontWeight: 600 }}>
+              Bot: {entry.chosen.type === 'dahai' ? `打 ${entry.chosen.pai}` : entry.chosen.type}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

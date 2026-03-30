@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import random
+import re
+import tempfile
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
@@ -28,30 +30,53 @@ _VALUE_NORM = 30000.0
 # shuffle buffer 大小
 _BUFFER_SIZE = 2000
 
+# m/p/s 三色全排列（slot 0=万, 1=饼, 2=索）
+_SUIT_PERMS = [
+    (0, 1, 2),  # 原始
+    (0, 2, 1),
+    (1, 0, 2),
+    (1, 2, 0),
+    (2, 0, 1),
+    (2, 1, 0),
+]
+_SUITS = ('m', 'p', 's')
 
-def _mirror_tile_feat(tile_feat: np.ndarray) -> np.ndarray:
-    """m/p 镜像：交换 tile_feat 的 col 0-8（万子）和 col 9-17（饼子）。"""
-    mirrored = tile_feat.copy()
-    mirrored[:, 0:9] = tile_feat[:, 9:18]
-    mirrored[:, 9:18] = tile_feat[:, 0:9]
-    return mirrored
-
-
-def _mirror_mask(mask: np.ndarray) -> np.ndarray:
-    """m/p 镜像：交换 mask 中 dahai idx 0-8（万子）和 9-17（饼子）。"""
-    mirrored = mask.copy()
-    mirrored[0:9] = mask[9:18]
-    mirrored[9:18] = mask[0:9]
-    return mirrored
+# 匹配 JSON 字符串值中的牌名："Nm" / "Np" / "Ns" / "5mr" / "5pr" / "5sr"
+_PAI_RE = re.compile(r'"([1-9])([mps])r?"')
 
 
-def _mirror_action_idx(idx: int) -> int:
-    """m/p 镜像：dahai 万子↔饼子，其余动作不变。"""
-    if 0 <= idx <= 8:
-        return idx + 9
-    if 9 <= idx <= 17:
-        return idx - 9
-    return idx
+def _permute_mjson_text(text: str, perm: tuple) -> str:
+    """对 mjson 文本中所有牌名做花色置换，不影响 JSON 键名和非牌字段。"""
+    dst = _SUITS
+    src_to_dst = {_SUITS[src_slot]: dst[dst_slot] for dst_slot, src_slot in enumerate(perm)}
+
+    def replace_pai(m: re.Match) -> str:
+        num, suit = m.group(1), m.group(2)
+        new_suit = src_to_dst[suit]
+        full = m.group(0)  # 包含引号，如 "5mr"
+        # 赤宝牌：原字符串含 r
+        if full.endswith('r"'):
+            return f'"{num}{new_suit}r"'
+        return f'"{num}{new_suit}"'
+
+    return _PAI_RE.sub(replace_pai, text)
+
+
+def _parse_events(events: List[dict]) -> Iterator[Tuple]:
+    """从已解析事件列表生成训练样本。"""
+    try:
+        samples = build_supervised_samples(events)
+    except Exception:
+        return
+    for s in samples:
+        actor = s.actor
+        value_target = float(np.clip(s.value_target, -1.0, 1.0))
+        tile_feat, scalar = encode(s.state, actor)
+        mask = np.array(build_legal_mask(s.legal_actions), dtype=np.float32)
+        action_idx = action_to_idx(s.label_action)
+        if mask[action_idx] == 0:
+            continue
+        yield tile_feat, scalar, mask, action_idx, np.float32(value_target)
 
 
 def _extract_final_deltas(events: List[dict]) -> List[int]:
@@ -65,32 +90,31 @@ def _extract_final_deltas(events: List[dict]) -> List[int]:
     return totals
 
 
-def _parse_file(path: Path) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray, int, float]]:
-    """解析单个 .mjson 文件，yield (tile_feat, scalar, legal_mask, action_idx, value)。"""
+def _parse_file(path: Path, augment: bool = False) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray, int, float]]:
+    """解析单个 .mjson 文件，yield (tile_feat, scalar, legal_mask, action_idx, value)。
+    augment=True 时额外生成 5 种 m/p/s 花色置换版本。
+    """
     try:
+        text = path.read_text(encoding='utf-8')
         events = read_mjai_jsonl(path)
     except Exception:
         return
 
-    final_deltas = _extract_final_deltas(events)
+    yield from _parse_events(events)
 
-    try:
-        samples = build_supervised_samples(events)
-    except Exception:
-        return
-
-    for s in samples:
-        actor = s.actor
-        value_target = float(np.clip(s.value_target, -1.0, 1.0))
-
-        tile_feat, scalar = encode(s.state, actor)
-        mask = np.array(build_legal_mask(s.legal_actions), dtype=np.float32)
-        action_idx = action_to_idx(s.label_action)
-
-        if mask[action_idx] == 0:
-            continue
-
-        yield tile_feat, scalar, mask, action_idx, np.float32(value_target)
+    if augment:
+        for perm in _SUIT_PERMS[1:]:
+            permuted_text = _permute_mjson_text(text, perm)
+            tmp = Path(tempfile.mktemp(suffix='.mjson'))
+            try:
+                tmp.write_text(permuted_text, encoding='utf-8')
+                perm_events = read_mjai_jsonl(tmp)
+            except Exception:
+                continue
+            finally:
+                if tmp.exists():
+                    tmp.unlink()
+            yield from _parse_events(perm_events)
 
 
 class MjaiIterableDataset(IterableDataset):
@@ -100,7 +124,7 @@ class MjaiIterableDataset(IterableDataset):
         shuffle: bool = True,
         buffer_size: int = _BUFFER_SIZE,
         seed: Optional[int] = None,
-        augment: bool = True,
+        augment: bool = False,
     ):
         self.file_paths = list(file_paths)
         self.shuffle = shuffle
@@ -120,11 +144,8 @@ class MjaiIterableDataset(IterableDataset):
         buffer: List[Tuple] = []
 
         for path in paths:
-            for sample in _parse_file(path):
+            for sample in _parse_file(path, augment=self.augment):
                 buffer.append(sample)
-                if self.augment:
-                    tf, sc, mk, ai, vt = sample
-                    buffer.append((_mirror_tile_feat(tf), sc, _mirror_mask(mk), _mirror_action_idx(ai), vt))
                 while len(buffer) >= self.buffer_size:
                     idx = rng.randrange(len(buffer))
                     yield buffer[idx]

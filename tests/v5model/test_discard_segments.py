@@ -76,10 +76,10 @@ def test_segment_overwrite_same_tile_same_seg():
     assert tf[59, 0] == 1.0
 
 
-def test_segment_channels_95_plus_zero():
-    """ch95-127 应全为 0（保留）。"""
+def test_segment_channels_109_plus_zero():
+    """ch109-127 应全为 0（保留）。"""
     tf, _ = encode(_snap(), 0)
-    assert tf[95:, :].max() == 0.0
+    assert tf[109:, :].max() == 0.0
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -13,6 +14,28 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from v5model.model import MahjongModel
+
+# action index → 类型名（dahai 合并为一个大类，chi_*/kan 系列合并显示）
+_ACTION_LABELS = (
+    ["dahai"] * 34
+    + ["reach", "chi_low", "chi_mid", "chi_high", "pon", "daiminkan", "ankan", "kakan", "hora", "ryukyoku", "none"]
+)
+
+# 合并显示时的分组映射
+_MERGE_MAP = {
+    "chi_low": "chi",
+    "chi_mid": "chi",
+    "chi_high": "chi",
+    "daiminkan": "kan",
+    "ankan": "kan",
+    "kakan": "kan",
+}
+
+
+def _action_type_name(idx: int) -> str:
+    if 0 <= idx < len(_ACTION_LABELS):
+        return _ACTION_LABELS[idx]
+    return f"unknown_{idx}"
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +108,10 @@ def _run_epoch(
     n_batches = 0
     tag = "train" if is_train else "val"
 
+    # 按动作类型统计
+    correct_by_type: Dict[str, int] = defaultdict(int)
+    total_by_type: Dict[str, int] = defaultdict(int)
+
     if is_train:
         optimizer.zero_grad()
 
@@ -120,7 +147,15 @@ def _run_epoch(
             with torch.no_grad():
                 masked_logits = policy_logits.masked_fill(mask == 0, -1e4)
                 pred = masked_logits.argmax(dim=-1)
-                total_acc += (pred == action_idx).float().mean().item()
+                correct_mask = pred == action_idx
+                total_acc += correct_mask.float().mean().item()
+
+                # 按动作类型统计
+                for atype, correct in zip(action_idx, correct_mask):
+                    name = _action_type_name(atype.item())
+                    total_by_type[name] += 1
+                    if correct:
+                        correct_by_type[name] += 1
 
             total_ce += ce.item()
             total_val_loss += val_loss.item()
@@ -139,12 +174,32 @@ def _run_epoch(
 
     sys.stdout.write("\n")
     sys.stdout.flush()
+
+    # 打印动作类型准确率（chi_*/kan 合并为 chi/kan 后显示）
+    merged_cor: Dict[str, int] = defaultdict(int)
+    merged_tot: Dict[str, int] = defaultdict(int)
+    for name in total_by_type:
+        group = _MERGE_MAP.get(name, name)
+        merged_cor[group] += correct_by_type[name]
+        merged_tot[group] += total_by_type[name]
+    acc_lines = []
+    for name in sorted(merged_tot):
+        tot = merged_tot[name]
+        cor = merged_cor[name]
+        acc = cor / tot if tot > 0 else 0.0
+        acc_lines.append(f"    {name:>8s}: {cor:5d}/{tot:5d} = {acc:.3f}")
+    if acc_lines:
+        print("\n".join(acc_lines))
+
     n = max(1, n_batches)
+    acc_by_type = {k: correct_by_type[k] / total_by_type[k] for k in total_by_type}
     return {
         "ce": total_ce / n,
         "val_loss": total_val_loss / n,
         "acc": total_acc / n,
         "step": step,
+        "acc_by_type": acc_by_type,
+        "total_by_type": dict(total_by_type),
     }
 
 
@@ -155,6 +210,7 @@ def train(
     cfg: Dict,
     output_dir: Path,
     resume_path: Optional[Path] = None,
+    weights_only: bool = False,
     device_str: str = "cuda",
 ):
     device = torch.device(device_str if torch.cuda.is_available() else "cpu")
@@ -166,11 +222,12 @@ def train(
         weight_decay=cfg.get("weight_decay", 1e-4),
     )
 
-    # 粗略估计 total_steps（用 epoch 数 * 每 epoch 预估步数）
-    steps_per_epoch = cfg.get("steps_per_epoch", 5000)
     num_epochs = cfg.get("num_epochs", 10)
     accumulation_steps = cfg.get("accumulation_steps", 4)
     warmup_steps = cfg.get("warmup_steps", 500)
+    # steps_per_epoch 未指定时用估算值，第一个 epoch 后用实际值重建 scheduler
+    steps_per_epoch_cfg = cfg.get("steps_per_epoch", None)
+    steps_per_epoch = steps_per_epoch_cfg if steps_per_epoch_cfg is not None else 5000
     total_steps = steps_per_epoch * num_epochs
 
     scheduler = build_scheduler(optimizer, warmup_steps, total_steps)
@@ -181,22 +238,34 @@ def train(
     best_val_loss = float("inf")
 
     if resume_path is not None and resume_path.exists():
-        start_epoch, global_step, best_val_loss = load_checkpoint(resume_path, model, optimizer, scheduler)
-        print(f"Resumed from {resume_path} (epoch={start_epoch}, step={global_step})")
+        if weights_only:
+            ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
+            model.load_state_dict(ckpt["model"], strict=False)
+            print(f"Loaded weights from {resume_path} (optimizer/scheduler/epoch reset)")
+        else:
+            start_epoch, global_step, best_val_loss = load_checkpoint(resume_path, model, optimizer, scheduler)
+            print(f"Resumed from {resume_path} (epoch={start_epoch}, step={global_step})")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     value_loss_weight = cfg.get("value_loss_weight", 0.5)
     log_interval = cfg.get("log_interval", 100)
 
-    for epoch in range(start_epoch, num_epochs):
+    end_epoch = start_epoch + num_epochs
+    for epoch in range(start_epoch, end_epoch):
         t0 = time.time()
-        print(f"\n[Epoch {epoch+1}/{num_epochs}]")
+        print(f"\n[Epoch {epoch+1}/{end_epoch}]")
 
         train_stats = _run_epoch(
             model, train_loader, optimizer, scheduler, scaler,
             device, accumulation_steps, value_loss_weight,
             is_train=True, step=global_step, log_interval=log_interval,
         )
+        if epoch == start_epoch and steps_per_epoch_cfg is None:
+            actual_spe = train_stats["step"] - global_step
+            print(f"  [auto] 实际 steps/epoch={actual_spe}，重建 scheduler（原估算={steps_per_epoch}）")
+            remaining_epochs = end_epoch - start_epoch - 1
+            scheduler = build_scheduler(optimizer, warmup_steps, actual_spe * remaining_epochs)
+
         global_step = train_stats["step"]
 
         val_stats = _run_epoch(
@@ -236,6 +305,8 @@ def train(
                 "train_acc": train_stats["acc"],
                 "val_ce": val_stats["ce"],
                 "val_acc": val_stats["acc"],
+                "val_acc_by_type": val_stats.get("acc_by_type", {}),
+                "val_total_by_type": val_stats.get("total_by_type", {}),
             }) + "\n")
 
     print(f"\nTraining complete. Best val_ce={best_val_loss:.4f}")

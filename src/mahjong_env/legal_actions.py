@@ -95,40 +95,45 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
     # a "call reaction" stage. Even if `actor_to_move` was advanced
     # simplistically, we must not generate `dahai` here.
     if last_discard and last_discard.get("actor") != actor:
-        if not last_discard:
-            legal.append(Action(type="none", actor=actor))
-            return legal
         discarder = last_discard["actor"]
         tile_norm = last_discard["pai"]
         tile_raw = last_discard.get("pai_raw", tile_norm)
-        if discarder == actor:
-            legal.append(Action(type="none", actor=actor))
-            return legal
-        # 荣和：检查 waits_tiles（由 bot.py/replay.py 注入）
+        # 荣和：检查 waits_tiles（由 bot.py/replay.py 注入），振听时不能荣和
+        furiten_list = state_snapshot.get("furiten", [False] * 4)
+        actor_furiten = furiten_list[actor] if actor < len(furiten_list) else False
         waits_tiles = state_snapshot.get("waits_tiles")
-        if waits_tiles is not None:
+        if waits_tiles is not None and not actor_furiten:
             tile34_idx = _tile_to_34(normalize_tile(tile_raw))
             if tile34_idx >= 0 and tile34_idx < len(waits_tiles) and waits_tiles[tile34_idx]:
                 legal.append(Action(type="hora", actor=actor, target=discarder, pai=tile_raw))
-        if _can_pon(hand, tile_raw):
-            consumed_pon = _pick_consumed(hand, tile_norm, 2)
-            legal.append(Action(type="pon", actor=actor, target=discarder, pai=tile_raw, consumed=consumed_pon))
-        if _can_daiminkan(hand, tile_raw):
-            consumed_kan = _pick_consumed(hand, tile_norm, 3)
-            legal.append(Action(type="daiminkan", actor=actor, target=discarder, pai=tile_raw, consumed=consumed_kan))
+        if not reached:
+            if _can_pon(hand, tile_raw):
+                consumed_pon = _pick_consumed(hand, tile_norm, 2)
+                legal.append(Action(type="pon", actor=actor, target=discarder, pai=tile_raw, consumed=consumed_pon))
+            if _can_daiminkan(hand, tile_raw):
+                consumed_kan = _pick_consumed(hand, tile_norm, 3)
+                legal.append(Action(type="daiminkan", actor=actor, target=discarder, pai=tile_raw, consumed=consumed_kan))
 
-        next_player = (discarder + 1) % 4
-        if actor == next_player:
-            for c in _chi_patterns(tile_raw):
-                if _hand_has_tile(hand, c[0]) and _hand_has_tile(hand, c[1]):
-                    actual_c = [_pick_chi_tile(hand, c[0]), _pick_chi_tile(hand, c[1])]
-                    legal.append(Action(type="chi", actor=actor, target=discarder, pai=tile_raw, consumed=actual_c))
+            next_player = (discarder + 1) % 4
+            if actor == next_player:
+                for c in _chi_patterns(tile_raw):
+                    if _hand_has_tile(hand, c[0]) and _hand_has_tile(hand, c[1]):
+                        actual_c = [_pick_chi_tile(hand, c[0]), _pick_chi_tile(hand, c[1])]
+                        legal.append(Action(type="chi", actor=actor, target=discarder, pai=tile_raw, consumed=actual_c))
 
         legal.append(Action(type="none", actor=actor))
         return legal
 
     if actor_to_move == actor:
         pending_reach = state_snapshot.get("pending_reach", [False, False, False, False])[actor]
+
+        # 自摸：摸到进张时可以自摸（振听不影响自摸）
+        waits_tiles = state_snapshot.get("waits_tiles")
+        if waits_tiles is not None and last_tsumo is not None:
+            tsumo_34 = _tile_to_34(normalize_tile(last_tsumo))
+            if tsumo_34 >= 0 and tsumo_34 < len(waits_tiles) and waits_tiles[tsumo_34]:
+                tsumo_pai_out = last_tsumo_raw if last_tsumo_raw is not None else last_tsumo
+                legal.append(Action(type="hora", actor=actor, target=actor, pai=tsumo_pai_out))
 
         if reached:
             # 立直已被接受：只能摸切（tsumogiri），或暗杠。
