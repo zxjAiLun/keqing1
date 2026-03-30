@@ -246,6 +246,66 @@ async def export_tenhou6(game_id: str):
     return tenhou_data
 
 
+class QuitResponse(BaseModel):
+    success: bool
+
+
+@router.post("/heartbeat/{game_id}")
+async def heartbeat(game_id: str) -> Dict[str, Any]:
+    """前端定期发送心跳，维持在线状态。"""
+    import time
+
+    room = manager.get_room(game_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Game not found")
+    room.last_heartbeat = time.time()
+    room.disconnected = False
+    return {"ok": True, "phase": room.phase}
+
+
+@router.get("/reconnect/{game_id}")
+async def reconnect(game_id: str, player_id: int = 0) -> Dict[str, Any]:
+    """断线重连：返回当前完整游戏状态。"""
+    import time
+
+    room = manager.get_room(game_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Game not found")
+    room.last_heartbeat = time.time()
+    room.disconnected = False
+    # 若轮到人类但牌还没摸，先摸牌
+    if (
+        room.phase == "playing"
+        and room.state.actor_to_move == player_id
+        and room.human_player_id == player_id
+        and room.state.last_tsumo[player_id] is None
+        and not room.state.last_discard
+        and room.remaining_wall() >= 1
+    ):
+        hand_size = sum(room.state.players[player_id].hand.values())
+        if hand_size not in (11, 12):
+            manager.draw(room, player_id)
+    state = manager.get_state_for_player(room, player_id=player_id)
+    return {"reconnected": True, "state": state}
+
+
+@router.post("/quit/{game_id}", response_model=QuitResponse)
+async def quit_battle(game_id: str) -> QuitResponse:
+    """人类玩家主动退出，将其座位移交给 bot 接管，游戏继续（4-bot 模式）。"""
+    room = manager.get_room(game_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Game not found")
+    human_id = room.human_player_id
+    room.human_player_id = -1  # 标记为全 bot 模式
+    room.disconnected = True
+    # 补充第 human_id 号 bot
+    get_or_create_bot(human_id).reset()
+    # 后台继续跑完对局
+    if room.phase == "playing":
+        asyncio.create_task(bot_driver.run_4bot_game_from_current(room))
+    return QuitResponse(success=True)
+
+
 @router.post("/action", response_model=ActionResponse)
 async def do_action(req: ActionRequest) -> ActionResponse:
     room = manager.get_room(req.game_id)

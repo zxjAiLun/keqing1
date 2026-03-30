@@ -95,7 +95,7 @@
       padding: 10px 14px; background: #fff;
       box-shadow: 0 1px 3px rgba(0,0,0,0.06);
       display: flex; flex-direction: column;
-      height: 300px;
+      min-height: 300px;
     }
     .step-top {
       flex: 0 0 auto;
@@ -131,9 +131,9 @@
     .action-chip.none  { background: #f3f4f6; color: #6b7280; border: 1px solid #e5e7eb; }
 
     .hand-row {
-      flex: 1;
+      flex: 0 0 auto;
       display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0;
-      margin-top: auto;
+      margin-top: 4px;
       margin-bottom: 4px;
     }
     .tile-slot {
@@ -196,6 +196,15 @@
       border-radius: 4px;
     }
     @keyframes shimmer { to { background-position: -200% 0; } }
+  .cand-table { margin-top:6px; font-size:11px; overflow-x:auto; }
+  .cand-table table { border-collapse:collapse; width:100%; }
+  .cand-table th { background:#f1f5f9; padding:2px 8px; text-align:left; font-weight:600; color:#475569; border-bottom:1px solid #e2e8f0; }
+  .cand-table td { padding:2px 8px; border-bottom:1px solid #f1f5f9; }
+  .cand-table .mono { font-family:monospace; text-align:right; }
+  .cand-table .cand-marks { color:#666; font-size:10px; white-space:nowrap; }
+  .cand-table tr.cand-bot { background:#fff0f0; font-weight:600; color:#c0392b; }
+  .cand-table tr.cand-gt  { background:#f0fff4; color:#166534; }
+  .cand-table tr.cand-both { background:#fdf4ff; font-weight:600; color:#6b21a8; }
   </style>
 </head>
 <body>
@@ -295,6 +304,7 @@
         <div class="step-top">
           <div class="step-header">
             {{ entry.bakaze }}{{ entry.kyoku }}局 {{ entry.honba }}本场 · Step {{ entry.step }}
+            <span v-if="entry.value !== undefined" style="font-size:11px;color:#64748b;margin-left:8px;font-family:monospace">V={{ entry.value.toFixed(3) }}</span>
           </div>
           <div class="step-top-right">
             <span
@@ -318,8 +328,8 @@
           </div>
         </div>
 
-        <!-- dahai / none：柱状图（填满剩余空间） -->
-        <div v-if="entry.chosen.type === 'dahai' || entry.chosen.type === 'none'" style="flex:1;display:flex;flex-direction:column;min-height:0;">
+        <!-- dahai / none：柱状图 + 候选表格 -->
+        <div v-if="entry.chosen.type === 'dahai' || entry.chosen.type === 'none'" style="display:flex;flex-direction:column;">
           <div class="hand-row">
             <div
               v-for="tile in sortedHand(entry)"
@@ -328,27 +338,56 @@
               :class="[tileCssClass(tile, entry), { 'is-tsumo': tile.isTsumo }]"
             >
               <div class="bar-wrap" :class="barWrapClass(tile, entry)">
-                <div v-if="tile.logit !== undefined && tile.logit > 0" class="bar-label">{{ barLabel(tile, entry) }}</div>
-                <div v-if="tile.logit !== undefined && tile.logit > 0" class="bar" :class="barRoundClass(tile)"
+                <div v-if="tile.score !== undefined" class="bar-label">{{ barLabel(tile, entry) }}</div>
+                <div v-if="tile.score !== undefined" class="bar" :class="barRoundClass(tile)"
                   :style="{ height: barHeight(tile) + 'px', background: barColor(tile, entry) }">
                 </div>
               </div>
               <img class="tile-img" :src="tileUrl(tile.name)" width="38" :title="tile.name">
             </div>
           </div>
+          <!-- 候选评分表格 -->
+          <div v-if="entry.candidates && entry.candidates.length" class="cand-table">
+            <table>
+              <thead><tr>
+                <th>动作</th>
+                <th>Logit</th>
+                <th v-if="entry.candidates.some(c => c.beam_score !== undefined)">Beam</th>
+                <th></th>
+              </tr></thead>
+              <tbody>
+                <tr v-for="c in entry.candidates" :key="c.action.type+(c.action.pai||'')"
+                  :class="candRowClass(c, entry)">
+                  <td>{{ actionLabel(c.action) }}</td>
+                  <td class="mono">{{ c.logit.toFixed(3) }}</td>
+                  <td class="mono" v-if="entry.candidates.some(x => x.beam_score !== undefined)">{{ c.beam_score !== undefined ? c.beam_score.toFixed(3) : '—' }}</td>
+                  <td class="cand-marks">{{ candMarks(c, entry) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
-        <!-- 非 dahai -->
-        <div v-else style="flex:1;display:flex;flex-direction:column;min-height:0;justify-content:center;align-items:center;">
-          <div class="nondahai-box">
-            <div v-if="entry.chosen.type !== 'none'">
-              <span style="font-size:12px;color:#6b7280">Bot: </span>
-              <b>{{ actionLabel(entry.chosen) }}</b>
-            </div>
-            <div v-if="entry.gt_action && entry.gt_action.type !== 'none'">
-              <span style="font-size:12px;color:#27ae60">实际: </span>
-              <b style="color:#166534">{{ actionLabel(entry.gt_action) }}</b>
-            </div>
+        <!-- 非 dahai：候选表格 -->
+        <div v-else style="display:flex;flex-direction:column;padding:4px 0">
+          <div v-if="entry.candidates && entry.candidates.length" class="cand-table" style="width:100%">
+            <table>
+              <thead><tr>
+                <th>动作</th>
+                <th>Logit</th>
+                <th v-if="entry.candidates.some(c => c.beam_score !== undefined)">Beam</th>
+                <th></th>
+              </tr></thead>
+              <tbody>
+                <tr v-for="c in entry.candidates" :key="c.action.type+(c.action.pai||'')"
+                  :class="candRowClass(c, entry)">
+                  <td>{{ actionLabel(c.action) }}</td>
+                  <td class="mono">{{ c.logit.toFixed(3) }}</td>
+                  <td class="mono" v-if="entry.candidates.some(x => x.beam_score !== undefined)">{{ c.beam_score !== undefined ? c.beam_score.toFixed(3) : '—' }}</td>
+                  <td class="cand-marks">{{ candMarks(c, entry) }}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -483,30 +522,41 @@ createApp({
     function buildSortedTiles(entry) {
       const hand = entry.hand || [];
       const tsumo_pai = entry.tsumo_pai || null;
-      const tileLogit = {};
-      let minLogit = 0, maxLogit = 1;
+      const tileLogit = {}, tileBeam = {};
       if (entry.candidates && entry.candidates.length) {
         entry.candidates.forEach(c => {
           if (c.action && c.action.type === 'dahai' && c.action.pai) {
             tileLogit[c.action.pai] = c.logit;
+            if (c.beam_score !== undefined) tileBeam[c.action.pai] = c.beam_score;
           }
         });
-        const vals = Object.values(tileLogit);
-        if (vals.length > 1) { minLogit = Math.min(...vals); maxLogit = Math.max(...vals); }
-        else if (vals.length === 1) { minLogit = maxLogit = vals[0]; }
       }
-      const logitRange = Math.max(maxLogit - minLogit, 0.001);
+      // 柱高依据：优先用 beam_score，否则用 logit
+      const hasBeam = Object.keys(tileBeam).length > 0;
+      const scoreMap = hasBeam ? tileBeam : tileLogit;
+      const vals = Object.values(scoreMap);
+      let minScore = 0, maxScore = 1;
+      if (vals.length > 1) { minScore = Math.min(...vals); maxScore = Math.max(...vals); }
+      else if (vals.length === 1) { minScore = maxScore = vals[0]; }
+      const scoreRange = Math.max(maxScore - minScore, 0.001);
       const others = hand.filter(t => t !== tsumo_pai);
       others.sort((a, b) => (_TILE_ORDER[a] ?? 99) - (_TILE_ORDER[b] ?? 99));
       const sorted = tsumo_pai ? [...others, tsumo_pai] : others;
-      return sorted.map(name => ({ name, logit: tileLogit[name], minLogit, logitRange, isTsumo: name === tsumo_pai }));
+      return sorted.map(name => ({
+        name,
+        logit: tileLogit[name],
+        beamScore: tileBeam[name],
+        score: scoreMap[name],
+        minScore, scoreRange,
+        isTsumo: name === tsumo_pai,
+      }));
     }
 
     function sortedHand(entry) { return buildSortedTiles(entry); }
 
     function barHeight(tile) {
-      if (tile.logit === undefined) return 0;
-      const pct = Math.max(1, (tile.logit - tile.minLogit) / tile.logitRange * 100);
+      if (tile.score === undefined) return 0;
+      const pct = Math.max(1, (tile.score - tile.minScore) / tile.scoreRange * 100);
       return Math.max(3, Math.round(pct / 100 * MAX_BAR_H));
     }
     function barRoundClass(tile) {
@@ -529,7 +579,9 @@ createApp({
       return '';
     }
     function barLabel(tile, entry) {
-      if (tile.logit === undefined) return '';
+      if (tile.score === undefined) return '';
+      if (tile.beamScore !== undefined)
+        return tile.beamScore.toFixed(2) + ' (L:' + tile.logit.toFixed(2) + ')';
       return tile.logit.toFixed(2);
     }
     function tileCssClass(tile, entry) {
@@ -553,6 +605,23 @@ createApp({
       if (!g) return 'none';
       if (c && c.type === g.type && c.pai === g.pai) return 'both';
       return 'gt';
+    }
+
+    function candRowClass(c, entry) {
+      const isBot = JSON.stringify(c.action) === JSON.stringify(entry.chosen);
+      const isGt  = entry.gt_action && JSON.stringify(c.action) === JSON.stringify(entry.gt_action);
+      if (isBot && isGt) return 'cand-both';
+      if (isBot) return 'cand-bot';
+      if (isGt)  return 'cand-gt';
+      return '';
+    }
+    function candMarks(c, entry) {
+      const isBot = JSON.stringify(c.action) === JSON.stringify(entry.chosen);
+      const isGt  = entry.gt_action && JSON.stringify(c.action) === JSON.stringify(entry.gt_action);
+      let m = '';
+      if (isBot) m += '✓Bot ';
+      if (isGt)  m += '★玩家';
+      return m;
     }
 
     function prevKyoku() { if (curKyoku.value > 0) curKyoku.value--; }

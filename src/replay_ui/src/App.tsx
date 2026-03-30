@@ -5,6 +5,7 @@ import { HomePage } from './pages/HomePage';
 import { ReviewPage } from './pages/ReviewPage';
 import { ReplayViewPage } from './pages/ReplayViewPage';
 import { GameBoardPage } from './pages/GameBoardPage';
+import { GameBoardReplayPage } from './pages/GameBoardReplayPage';
 import { BattlePage } from './pages/BattlePage';
 import { BotBattlePage } from './pages/BotBattlePage';
 import { ThemeProvider } from './context/ThemeContext';
@@ -21,6 +22,7 @@ export default function App() {
             <Route path="/bot-battle" element={<BotBattlePage />} />
             <Route path="/review" element={<ReviewPage />} />
             <Route path="/game" element={<GameBoardPage />} />
+            <Route path="/game-replay" element={<GameBoardReplayPage />} />
             <Route path="/replay" element={<ReplayViewPage />} />
           </Route>
           <Route path="/home" element={<HomePage />} />

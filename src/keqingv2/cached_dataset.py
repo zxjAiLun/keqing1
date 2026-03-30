@@ -23,7 +23,7 @@ import torch
 from torch.utils.data import IterableDataset
 
 # 复用 v1 的花色置换常量
-_BUFFER_SIZE = 2000
+_BUFFER_SIZE = 1000
 _SUIT_SLICES = [slice(0, 9), slice(9, 18), slice(18, 27)]
 _SUIT_PERMS = [
     (0, 2, 1),

@@ -4,6 +4,7 @@ import { MahjongTable } from "../components/BattleBoard/MahjongTable";
 import { startBattle, doAction, closeBattle, fetchWithTimeout } from "../api/battleApi";
 import { useAutoActions } from "../hooks/useAutoActions";
 import { useBattlePolling } from "../hooks/useBattlePolling";
+import { useConnectionManager } from "../hooks/useConnectionManager";
 import type { BattleState, Action, StartBattleRequest } from "../types/battle";
 
 export function BattlePage() {
@@ -105,6 +106,26 @@ export function BattlePage() {
     needsDecision,
     pendingActionRef,
     onStateUpdate: setState,
+  });
+
+  // 退出对局
+  const [showQuitConfirm, setShowQuitConfirm] = useState(false);
+  const handleQuit = useCallback(async () => {
+    if (!gameId) return;
+    try {
+      await fetch(`/api/battle/quit/${gameId}`, { method: 'POST' });
+    } catch { /* ignore */ }
+    setGameId(null);
+    setState(null);
+    setShowQuitConfirm(false);
+  }, [gameId]);
+
+  // 连接管理（心跳/断线/重连）
+  const { status: connStatus, reconnectAttempts } = useConnectionManager({
+    gameId: state?.phase === 'playing' ? gameId : null,
+    playerId: state?.human_player_id ?? 0,
+    onStateUpdate: setState,
+    onGiveUp: () => { setGameId(null); setState(null); },
   });
 
   if (!state) {
@@ -368,7 +389,7 @@ export function BattlePage() {
   }
 
   return (
-    <div style={{ height: '100%', padding: 16, background: '#f0f2f5' }}>
+    <div style={{ height: '100%', padding: 16, background: '#f0f2f5', position: 'relative' }}>
       <MahjongTable
         state={state}
         onAction={handleAction}
@@ -380,6 +401,77 @@ export function BattlePage() {
         noMeld={noMeld} setNoMeld={setNoMeld}
         autoTsumogiri={autoTsumogiri} setAutoTsumogiri={setAutoTsumogiri}
       />
+
+      {/* 退出按钮 */}
+      <button
+        onClick={() => setShowQuitConfirm(true)}
+        style={{
+          position: 'absolute', top: 24, right: 24, zIndex: 100,
+          padding: '6px 14px', borderRadius: 6, border: '1px solid #e74c3c',
+          background: 'rgba(255,255,255,0.9)', color: '#e74c3c',
+          fontSize: 13, fontWeight: 600, cursor: 'pointer',
+        }}
+      >
+        退出对局
+      </button>
+
+      {/* 退出确认对话框 */}
+      {showQuitConfirm && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200,
+        }}>
+          <div style={{
+            background: '#fff', borderRadius: 12, padding: 28, minWidth: 280,
+            boxShadow: '0 8px 32px rgba(0,0,0,0.2)', textAlign: 'center',
+          }}>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>确认退出对局？</div>
+            <div style={{ fontSize: 13, color: '#666', marginBottom: 20 }}>退出后该座位将由 Bot 接管，对局继续。</div>
+            <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+              <button onClick={() => setShowQuitConfirm(false)}
+                style={{ padding: '8px 20px', borderRadius: 6, border: '1px solid #ccc', background: '#fff', cursor: 'pointer', fontSize: 13 }}>
+                取消
+              </button>
+              <button onClick={handleQuit}
+                style={{ padding: '8px 20px', borderRadius: 6, border: 'none', background: '#e74c3c', color: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+                确认退出
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 断线/重连提示覆盖层 */}
+      {connStatus === 'disconnected' && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 300,
+        }}>
+          <div style={{
+            background: '#fff', borderRadius: 12, padding: 32, minWidth: 300,
+            boxShadow: '0 8px 32px rgba(0,0,0,0.3)', textAlign: 'center',
+          }}>
+            <div style={{ fontSize: 32, marginBottom: 12 }}>⚠️</div>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>连接已断开</div>
+            <div style={{ fontSize: 13, color: '#666', marginBottom: 4 }}>正在尝试重连... ({reconnectAttempts}/5)</div>
+            <div style={{ fontSize: 12, color: '#999' }}>若长时间无法重连，可以放弃本局。</div>
+            <button onClick={() => { setGameId(null); setState(null); }}
+              style={{ marginTop: 20, padding: '8px 20px', borderRadius: 6, border: '1px solid #ccc', background: '#fff', cursor: 'pointer', fontSize: 13 }}>
+              放弃本局
+            </button>
+          </div>
+        </div>
+      )}
+
+      {connStatus === 'reconnecting' && (
+        <div style={{
+          position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+          background: 'rgba(0,0,0,0.75)', color: '#fff', borderRadius: 20,
+          padding: '8px 20px', fontSize: 13, zIndex: 300,
+        }}>
+          重连中... ({reconnectAttempts}/5)
+        </div>
+      )}
     </div>
   );
 }

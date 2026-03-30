@@ -1,9 +1,9 @@
 // src/replay_ui/src/components/BattleBoard/MahjongTable.tsx
 import { useState, useCallback, useMemo } from "react";
-import { Tile } from "./Tile";
-import { TileBack } from "./Tile";
+import { Tile, TileBack } from "./Tile";
 import { ActionBar } from "./ActionBar";
 import type { BattleState, Action, DiscardEntry } from "../../types/battle";
+import type { LogitTileData } from "../../utils/replayAdapter";
 import { BAKAZE_CN, JIKAZE_CN } from "../../utils/constants";
 import { sortHand } from "../../utils/tileUtils";
 
@@ -36,17 +36,43 @@ const DISC_GAP = 2; // 间距
 export const CENTER_SIZE = DISC_COLS * DISC_W + (DISC_COLS - 1) * DISC_GAP; // 142px
 
 function DiscardTile({ d, rotated }: { d: DiscardEntry; rotated?: boolean }) {
-  // 正常：容器 DISC_W×DISC_H，旋转90°：容器 DISC_H×DISC_W
-  const cw = rotated ? DISC_H : DISC_W;
-  const ch = rotated ? DISC_W : DISC_H;
+  // rotated: 左右家固有旋转（牌横向摆放）
+  // reachRotated: 立直宣言牌横置
+  //   - South/North（rotated=false）：宣言牌额外旋转90° → 容器变宽
+  //   - East/West（rotated=true）：宣言牌取消旋转 → 容器变回竖
+  const isExtraRotated = !rotated && d.reach_declared;  // South/North 宣言牌旋转
+  const isCancelRotated = rotated && d.reach_declared;  // East/West 宣言牌取消旋转
+
+  let cw: number, ch: number;
+  let transform: string | undefined;
+
+  if (isCancelRotated) {
+    // 取消旋转：变回竖向
+    cw = DISC_W; ch = DISC_H;
+    transform = undefined;
+  } else if (isExtraRotated) {
+    // 额外旋转90°（South/North 宣言牌）
+    cw = DISC_H; ch = DISC_W;
+    transform = `rotate(90deg) translate(0, -${cw}px)`;
+  } else if (rotated) {
+    cw = DISC_H; ch = DISC_W;
+    transform = `rotate(90deg) translate(0, -${cw}px)`;
+  } else {
+    cw = DISC_W; ch = DISC_H;
+    transform = undefined;
+  }
+
   return (
     <div style={{ width: cw, height: ch, position: "relative", flexShrink: 0, overflow: "hidden" }}>
       <div style={{
         width: 22, height: 30,
         transformOrigin: "top left",
-        transform: rotated ? `rotate(90deg) translate(0, -${cw}px)` : undefined,
+        transform,
         position: "absolute", top: 0, left: 0,
         filter: d.tsumogiri ? "brightness(0.6)" : undefined,
+        outline: d.reach_declared ? "2px solid var(--gold)" : undefined,
+        outlineOffset: "1px",
+        borderRadius: d.reach_declared ? 3 : undefined,
       }}>
         <Tile tile={d.pai} size="small" />
       </div>
@@ -104,9 +130,23 @@ function DiscardPondRight({ discards }: { discards: DiscardEntry[] }) {
       {cols.map((col, ci) => (
         <div key={ci} style={{ display: "flex", flexDirection: "column-reverse", gap: DISC_GAP }}>
           {col.map((d, di) => (
-            <div key={di} style={{ transform: "rotate(180deg)" }}>
-              <DiscardTile d={d} rotated />
-            </div>
+            // 宣言牌：取消内部旋转后外层180°= 牌倒置竖放；改为外层0°+ rotated=false → 竖置正常，需特殊处理
+            d.reach_declared ? (
+              // 宣言牌在右家：270°方向立直 = 竖置倒转（180°），外层不转，内部不转
+              <div key={di} style={{ width: DISC_W, height: DISC_H, position: "relative", flexShrink: 0, overflow: "hidden" }}>
+                <div style={{ width: 22, height: 30, position: "absolute", top: 0, left: 0,
+                  transform: "rotate(180deg)", transformOrigin: "center center",
+                  filter: d.tsumogiri ? "brightness(0.6)" : undefined,
+                  outline: "2px solid var(--gold)", outlineOffset: "1px", borderRadius: 3,
+                }}>
+                  <Tile tile={d.pai} size="small" />
+                </div>
+              </div>
+            ) : (
+              <div key={di} style={{ transform: "rotate(180deg)" }}>
+                <DiscardTile d={d} rotated />
+              </div>
+            )
           ))}
         </div>
       ))}
@@ -131,6 +171,7 @@ function PlayerZone({
   isActive,
   highlightIdx,
   onTileClick,
+  logitData,
 }: {
   pid: number;
   position: "south" | "north" | "east" | "west";
@@ -145,6 +186,7 @@ function PlayerZone({
   highlightTile?: string | null;
   highlightIdx?: number | null;
   onTileClick?: (tile: string, idx: number) => void;
+  logitData?: LogitTileData[];
 }) {
   const color   = SEAT_COLORS[pid];
   const jikaze = JIKAZE_CN[pid];
@@ -167,21 +209,57 @@ function PlayerZone({
     return (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5 }}>
 
-        {/* 明手（微微上浮营造立体感） */}
-        <div style={{ display: "flex", gap: 2, flexWrap: "nowrap", transform: "translateY(-2px)" }}>
-          {sortedHand.map((tile, i) => (
-            <div key={`${tile}-${i}`} style={{ width: 34, height: 46, flexShrink: 0 }}>
-              <Tile tile={tile} size="normal" selected={i === highlightIdx} onClick={() => onTileClick?.(tile, i)} />
-            </div>
-          ))}
-          {tsumoPai && (
-            <div
-              style={{ width: 34, height: 46, outline: "2px solid var(--gold)", outlineOffset: "1px", borderRadius: 4, boxShadow: "0 0 10px rgba(212,168,83,0.45)", flexShrink: 0, cursor: onTileClick ? "pointer" : undefined, marginLeft: 6 }}
-              onClick={() => onTileClick?.(tsumoPai, sortedHand.length)}
-            >
-              <Tile tile={tsumoPai} size="normal" selected={sortedHand.length === highlightIdx} />
+        {/* 明手（微微上浮营造立体感）+ 可选柱状图叠加 */}
+        <div style={{ position: "relative" }}>
+          {/* 柱状图层（回放模式，绝对定位在手牌上方） */}
+          {logitData && logitData.length > 0 && (
+            <div style={{
+              position: "absolute", bottom: "100%", left: 0,
+              display: "flex", gap: 2, paddingBottom: 3,
+              pointerEvents: "none", alignItems: "flex-end",
+            }}>
+              {[...sortedHand, ...(tsumoPai ? [tsumoPai] : [])].map((tile, i) => {
+                const d = logitData.find(x => x.pai === tile && x.isTsumo === (tsumoPai ? i === sortedHand.length : false))
+                  ?? logitData.find(x => x.pai === tile);
+                const h = d ? Math.max(3, Math.round(d.pct / 100 * 48)) : 2;
+                const barColor = d?.isChosen && d?.isGt ? "#8e44ad"
+                  : d?.isChosen ? "#e74c3c"
+                  : d?.isGt ? "#27ae60"
+                  : d?.score !== undefined ? "var(--accent)"
+                  : "rgba(150,150,150,0.25)";
+                return (
+                  <div key={`bar-${tile}-${i}`} style={{
+                    width: i === sortedHand.length ? 34 : 34,
+                    marginLeft: i === sortedHand.length && tsumoPai ? 6 : 0,
+                    display: "flex", alignItems: "flex-end", justifyContent: "center", flexShrink: 0,
+                  }}>
+                    <div style={{
+                      width: 20, height: h,
+                      background: barColor,
+                      borderRadius: "2px 2px 0 0",
+                      transition: "height 0.15s ease",
+                    }} />
+                  </div>
+                );
+              })}
             </div>
           )}
+          {/* 手牌 */}
+          <div style={{ display: "flex", gap: 2, flexWrap: "nowrap", transform: "translateY(-2px)" }}>
+            {sortedHand.map((tile, i) => (
+              <div key={`${tile}-${i}`} style={{ width: 34, height: 46, flexShrink: 0 }}>
+                <Tile tile={tile} size="normal" selected={i === highlightIdx} onClick={() => onTileClick?.(tile, i)} />
+              </div>
+            ))}
+            {tsumoPai && (
+              <div
+                style={{ width: 34, height: 46, outline: "2px solid var(--gold)", outlineOffset: "1px", borderRadius: 4, boxShadow: "0 0 10px rgba(212,168,83,0.45)", flexShrink: 0, cursor: onTileClick ? "pointer" : undefined, marginLeft: 6 }}
+                onClick={() => onTileClick?.(tsumoPai, sortedHand.length)}
+              >
+                <Tile tile={tsumoPai} size="normal" selected={sortedHand.length === highlightIdx} />
+              </div>
+            )}
+          </div>
         </div>
 
         {/* 副露 */}
@@ -406,6 +484,8 @@ const TABLECLOTH_OPTIONS = [
 export function MahjongTable({
   state, onAction, isMyTurn, selectedTile, selectedTileIdx, onTileSelect,
   autoHora, setAutoHora, noMeld, setNoMeld, autoTsumogiri, setAutoTsumogiri,
+  mode = "battle",
+  logitData,
 }: {
   state: BattleState;
   onAction: (action: Action) => void;
@@ -419,6 +499,8 @@ export function MahjongTable({
   setNoMeld: (v: boolean) => void;
   autoTsumogiri: boolean;
   setAutoTsumogiri: (v: boolean) => void;
+  mode?: "battle" | "replay";
+  logitData?: LogitTileData[];
 }) {
   const [reachPending, setReachPending] = useState(false);
   const {
@@ -637,7 +719,9 @@ export function MahjongTable({
               hand={hand} tsumoPai={tsumo_pai}
               discards={discards[humanId] || []} melds={melds[humanId] || []}
               reached={reached[humanId]} isActive={actor_to_move === humanId}
-              isHuman={true} highlightTile={selectedTile} highlightIdx={selectedTileIdx} onTileClick={handleTileClick}
+              isHuman={true} highlightTile={selectedTile} highlightIdx={selectedTileIdx}
+              onTileClick={mode === "replay" ? undefined : handleTileClick}
+              logitData={logitData}
             />
           </div>
 
@@ -674,8 +758,8 @@ export function MahjongTable({
             />
           </div>
 
-          {/* 行动中指示（呼吸脉冲动画）：只在 bot 摸牌打牌回合显示，不在 bot pass 响应他家弃牌时显示 */}
-          {actor_to_move !== null && actor_to_move !== humanId &&
+          {/* 行动中指示（呼吸脉冲动画）：game 模式且 bot 摸牌打牌回合才显示 */}
+          {mode === "battle" && actor_to_move !== null && actor_to_move !== humanId &&
            (!state.last_discard || state.last_discard.actor === actor_to_move) && (
             <div style={{
               position: "absolute", top: "50%", left: "50%",
@@ -700,7 +784,7 @@ export function MahjongTable({
       </div>
 
       {/* 动作栏 overlay — 绝对定位在牌桌底部，不压缩牌桌空间 */}
-      {isMyTurn && !reachPending && !state.pending_reach[humanId] && (
+      {mode === "battle" && isMyTurn && !reachPending && !state.pending_reach[humanId] && (
         <div style={{
           position: "absolute", bottom: 44, left: 0, right: 0,
           display: "flex", justifyContent: "center", zIndex: 50, pointerEvents: "none",
@@ -710,7 +794,7 @@ export function MahjongTable({
           </div>
         </div>
       )}
-      {isMyTurn && (reachPending || state.pending_reach[humanId]) && (
+      {mode === "battle" && isMyTurn && (reachPending || state.pending_reach[humanId]) && (
         <div style={{
           position: "absolute", bottom: 44, left: 0, right: 0,
           display: "flex", justifyContent: "center", zIndex: 50,
@@ -725,8 +809,9 @@ export function MahjongTable({
         </div>
       )}
 
-      {/* 底部固定设置栏 — 始终占位，不影响牌桌大小 */}
-      <div style={{
+      {/* 底部固定设置栏 — battle 模式始终占位，replay 模式隐藏 */}
+      {mode === "replay" ? <div style={{ height: 8, flexShrink: 0 }} /> : null}
+      {mode === "battle" && <div style={{
         height: 44, flexShrink: 0,
         borderTop: "1px solid var(--border)",
         background: "var(--sidebar-bg)",
@@ -761,7 +846,7 @@ export function MahjongTable({
             {label}
           </button>
         ))}
-      </div>
+      </div>}
 
       {/* 全局 CSS 动画 */}
       <style>{`

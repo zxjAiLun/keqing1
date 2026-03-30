@@ -19,14 +19,16 @@ from keqingv1.action_space import action_to_idx as _action_to_idx_k1
 
 # bot 类型 → run_replay_from_source 内部创建 Bot 时用
 _BOT_CLASSES = {
-    "v5":       _V5Bot,
+    "v5": _V5Bot,
     "keqingv1": _KeqingBot,
+    "keqingv2": _KeqingBot,
 }
 
 PLAYER_NAMES = ["East", "South", "West", "North"]
 
 # tenhou6 / mjlog 解析
 import sys as _sys
+
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 _SCRIPTS_DIR = _PROJECT_ROOT / "scripts"
 for _dir in (str(_SCRIPTS_DIR), str(_PROJECT_ROOT)):
@@ -35,17 +37,31 @@ for _dir in (str(_SCRIPTS_DIR), str(_PROJECT_ROOT)):
 
 # 默认 checkpoint 路径（按 bot 类型，相对于 PROJECT_ROOT）
 _DEFAULT_CHECKPOINTS = {
-    "v5":    _PROJECT_ROOT / "artifacts/models/modelv5/latest.pth",
+    "v5": _PROJECT_ROOT / "artifacts/models/modelv5/latest.pth",
     "keqingv1": _PROJECT_ROOT / "artifacts/models/keqingv1/latest.pth",
+    "keqingv2": _PROJECT_ROOT / "artifacts/models/keqingv2/best.pth",
 }
 
 
 def _is_mjai_dict(data: dict) -> bool:
     """判断 dict 是否是 mjai JSONL 格式（根对象有 type 字段且为已知 mjai 类型）。"""
     return data.get("type") in (
-        "start_game", "start_kyoku", "tsumo", "dahai",
-        "reach", "reach_accepted", "chi", "pon", "daiminkan",
-        "ankan", "kakan", "hora", "ryukyoku", "dora", "end_kyoku", "end_game",
+        "start_game",
+        "start_kyoku",
+        "tsumo",
+        "dahai",
+        "reach",
+        "reach_accepted",
+        "chi",
+        "pon",
+        "daiminkan",
+        "ankan",
+        "kakan",
+        "hora",
+        "ryukyoku",
+        "dora",
+        "end_kyoku",
+        "end_game",
     )
 
 
@@ -103,6 +119,7 @@ def _load_events_from_source(
 
         if input_type == "tenhou6":
             from convert.tenhou6_utils import tenhou6_to_mjson as _tenhou6_to_mjson
+
             tmp_mjson = Path(tempfile.mktemp(suffix=".mjson"))
             if not _tenhou6_to_mjson(data, tmp_mjson):
                 raise RuntimeError("tenhou6_to_mjson 转换失败")
@@ -176,39 +193,108 @@ def run_replay_from_source(
     events = _load_events_from_source(source, input_type=input_type)
     bot_cls = _BOT_CLASSES[bot_type]
     bot = bot_cls(player_id=player_id, model_path=checkpoint)
+    bot.player_names: list[str] = []  # 从 start_game 提取
 
+    _MELD_TYPES = {"chi", "pon", "daiminkan", "ankan", "kakan"}
+    # 其他家操作类型（需要记录观察步）
+    _OBS_TYPES = {
+        "dahai",
+        "chi",
+        "pon",
+        "daiminkan",
+        "ankan",
+        "kakan",
+        "reach",
+        "hora",
+        "ryukyoku",
+    }
     for event in events:
-        if _is_player_action(event, player_id) and bot.decision_log:
+        if event.get("type") == "start_game" and isinstance(event.get("names"), list):
+            bot.player_names = [str(n) for n in event["names"]]
+        if bot.decision_log:
             last = bot.decision_log[-1]
             if last.get("gt_action") is None:
-                last["gt_action"] = event
+                if _is_player_action(event, player_id):
+                    last["gt_action"] = event
+                elif event.get("actor") != player_id and event.get(
+                    "type"
+                ) in _MELD_TYPES | {"dahai", "tsumo"}:
+                    candidates = last.get("candidates", [])
+                    has_meld_candidate = any(
+                        c.get("action", {}).get("type") in _MELD_TYPES
+                        for c in candidates
+                    )
+                    if has_meld_candidate:
+                        last["gt_action"] = {"type": "none", "actor": player_id}
         bot.react(event)
+        # 记录其他家的操作观察步（棋盘快照，无 bot 推理数据）
+        ev_actor = event.get("actor")
+        ev_type = event.get("type", "")
+        if ev_actor is not None and ev_actor != player_id and ev_type in _OBS_TYPES:
+            snap = bot.game_state.snapshot(player_id)
+            obs_entry = {
+                "step": len(bot.decision_log),
+                "bakaze": snap.get("bakaze", ""),
+                "kyoku": snap.get("kyoku", 0),
+                "honba": snap.get("honba", 0),
+                "scores": snap.get("scores", []),
+                "hand": snap.get("hand", []),
+                "discards": snap.get("discards", []),
+                "melds": snap.get("melds", []),
+                "dora_markers": snap.get("dora_markers", []),
+                "reached": snap.get("reached", []),
+                "actor_to_move": ev_actor,
+                "last_discard": snap.get("last_discard"),
+                "tsumo_pai": None,
+                "candidates": [],
+                "chosen": event,  # 他家实际执行的动作
+                "value": None,
+                "gt_action": event,
+                "is_obs": True,  # 标记为观察步（非自家决策）
+            }
+            bot.decision_log.append(obs_entry)
 
     html = render_html(bot)
     return bot, html
+
 
 # 牌字符串 -> SVG 文件名映射
 _TILE_SVG = {
     **{f"{n}m": f"Man{n}" for n in range(1, 10)},
     **{f"{n}p": f"Pin{n}" for n in range(1, 10)},
     **{f"{n}s": f"Sou{n}" for n in range(1, 10)},
-    "5mr": "Man5-Dora", "5pr": "Pin5-Dora", "5sr": "Sou5-Dora",
-    "E": "Ton", "S": "Nan", "W": "Shaa", "N": "Pei",
-    "P": "Haku", "F": "Hatsu", "C": "Chun",
+    "5mr": "Man5-Dora",
+    "5pr": "Pin5-Dora",
+    "5sr": "Sou5-Dora",
+    "E": "Ton",
+    "S": "Nan",
+    "W": "Shaa",
+    "N": "Pei",
+    "P": "Haku",
+    "F": "Hatsu",
+    "C": "Chun",
 }
 
 # 排序权重：m(0-8) p(9-17) s(18-26) 字(27-33)
 _TILE_ORDER = {
-    **{f"{n}m": n-1 for n in range(1,10)},
+    **{f"{n}m": n - 1 for n in range(1, 10)},
     "5mr": 4,
-    **{f"{n}p": 9+n-1 for n in range(1,10)},
+    **{f"{n}p": 9 + n - 1 for n in range(1, 10)},
     "5pr": 13,
-    **{f"{n}s": 18+n-1 for n in range(1,10)},
+    **{f"{n}s": 18 + n - 1 for n in range(1, 10)},
     "5sr": 22,
-    "E":27,"S":28,"W":29,"N":30,"P":31,"F":32,"C":33,
+    "E": 27,
+    "S": 28,
+    "W": 29,
+    "N": 30,
+    "P": 31,
+    "F": 32,
+    "C": 33,
 }
 
-_SVG_DIR = Path(__file__).parent.parent.parent / "tiles" / "riichi-mahjong-tiles" / "Regular"
+_SVG_DIR = (
+    Path(__file__).parent.parent.parent / "tiles" / "riichi-mahjong-tiles" / "Regular"
+)
 
 
 def _svg_b64(tile: str) -> str:
@@ -227,7 +313,9 @@ def _sort_hand(hand: list[str], tsumo_pai: str | None = None) -> list[str]:
     """排序手牌，tsumo_pai 放在最右边。"""
     others = [t for t in hand if t != tsumo_pai or tsumo_pai is None]
     if tsumo_pai and tsumo_pai in hand:
-        others = sorted([t for t in hand if t != tsumo_pai], key=lambda t: _TILE_ORDER.get(t, 99))
+        others = sorted(
+            [t for t in hand if t != tsumo_pai], key=lambda t: _TILE_ORDER.get(t, 99)
+        )
         return others + [tsumo_pai]
     return sorted(hand, key=lambda t: _TILE_ORDER.get(t, 99))
 
@@ -242,31 +330,50 @@ def action_label(a: dict) -> str:
     t = a.get("type", "?")
     if t == "dahai":
         tsumogiri = " (摸切)" if a.get("tsumogiri") else ""
-        return f"打 {a.get('pai','?')}{tsumogiri}"
-    if t == "reach":      return "立直"
-    if t == "chi":        return f"吃 {a.get('pai','?')} ({','.join(a.get('consumed',[]))})"
-    if t == "pon":        return f"碰 {a.get('pai','?')}"
-    if t == "daiminkan":  return f"大明杠 {a.get('pai','?')}"
-    if t == "ankan":      return f"暗杠 {a.get('pai','?')}"
-    if t == "kakan":      return f"加杠 {a.get('pai','?')}"
-    if t == "hora":       return "胡牌"
-    if t == "ryukyoku":   return "流局"
-    if t == "none":       return "过"
+        return f"打 {a.get('pai', '?')}{tsumogiri}"
+    if t == "reach":
+        return "立直"
+    if t == "chi":
+        return f"吃 {a.get('pai', '?')} ({','.join(a.get('consumed', []))})"
+    if t == "pon":
+        return f"碰 {a.get('pai', '?')}"
+    if t == "daiminkan":
+        return f"大明杠 {a.get('pai', '?')}"
+    if t == "ankan":
+        return f"暗杠 {a.get('pai', '?')}"
+    if t == "kakan":
+        return f"加杠 {a.get('pai', '?')}"
+    if t == "hora":
+        return "胡牌"
+    if t == "ryukyoku":
+        return "流局"
+    if t == "none":
+        return "过"
     return t
 
 
 def _action_pai(a: dict) -> str | None:
     """从动作中提取主要牌（用于在手牌上标注）。"""
     t = a.get("type", "")
-    if t == "dahai":     return a.get("pai")
-    if t == "reach":     return None  # 立直本身不标注单张
-    if t == "chi":       return a.get("pai")
-    if t == "pon":       return a.get("pai")
-    if t == "daiminkan": return a.get("pai")
+    if t == "dahai":
+        return a.get("pai")
+    if t == "reach":
+        return None  # 立直本身不标注单张
+    if t == "chi":
+        return a.get("pai")
+    if t == "pon":
+        return a.get("pai")
+    if t == "daiminkan":
+        return a.get("pai")
     return None
 
 
-def _render_hand_tiles(hand: list[str], highlight_pai: str | None, tsumo_pai: str | None = None, highlight_color: str = "#e74c3c") -> str:
+def _render_hand_tiles(
+    hand: list[str],
+    highlight_pai: str | None,
+    tsumo_pai: str | None = None,
+    highlight_color: str = "#e74c3c",
+) -> str:
     """渲染手牌图片行，highlight_pai 对应的牌加红框标注，tsumo_pai 放最右。"""
     sorted_hand = _sort_hand(hand, tsumo_pai)
     imgs = []
@@ -279,7 +386,9 @@ def _render_hand_tiles(hand: list[str], highlight_pai: str | None, tsumo_pai: st
     return "".join(imgs)
 
 
-def _render_candidates_logit(candidates: list[dict], chosen: dict, gt_action: dict | None) -> str:
+def _render_candidates_logit(
+    candidates: list[dict], chosen: dict, gt_action: dict | None
+) -> str:
     """模式1：传统 logit 条形图表格。"""
     if not candidates:
         return ""
@@ -291,17 +400,23 @@ def _render_candidates_logit(candidates: list[dict], chosen: dict, gt_action: di
         a = c["action"]
         logit = c["logit"]
         label = action_label(a)
-        is_chosen = (a == chosen)
-        is_gt = (gt_action is not None and a == gt_action)
+        is_chosen = a == chosen
+        is_gt = gt_action is not None and a == gt_action
         pct = max(0, (logit - min_logit) / logit_range * 100)
         bar_color = "#e74c3c" if is_chosen else "#3498db"
         marks = ""
-        if is_chosen: marks += " ✓Bot"
-        if is_gt:     marks += " ★玩家"
-        row_style = "background:#fff3cd;" if is_chosen else ("background:#d4edda;" if is_gt else "")
+        if is_chosen:
+            marks += " ✓Bot"
+        if is_gt:
+            marks += " ★玩家"
+        row_style = (
+            "background:#fff3cd;"
+            if is_chosen
+            else ("background:#d4edda;" if is_gt else "")
+        )
         rows.append(f"""
           <tr style="{row_style}">
-            <td style="padding:2px 8px;font-weight:{'bold' if is_chosen else 'normal'}">{label}{marks}</td>
+            <td style="padding:2px 8px;font-weight:{"bold" if is_chosen else "normal"}">{label}{marks}</td>
             <td style="padding:2px 8px;text-align:right;font-family:monospace">{logit:+.3f}</td>
             <td style="padding:2px 8px;width:180px">
               <div style="background:#eee;border-radius:3px;height:14px;width:180px">
@@ -316,7 +431,7 @@ def _render_candidates_logit(candidates: list[dict], chosen: dict, gt_action: di
         <th style="padding:2px 8px">Logit</th>
         <th style="padding:2px 8px">相对强度</th>
       </tr>
-      {''.join(rows)}
+      {"".join(rows)}
     </table>"""
 
 
@@ -333,8 +448,8 @@ def _render_candidates_tile(
     sorted_hand = _sort_hand(hand, tsumo_pai)
     imgs = []
     for tile in sorted_hand:
-        is_bot = (tile == bot_pai)
-        is_gt  = (tile == gt_pai)
+        is_bot = tile == bot_pai
+        is_gt = tile == gt_pai
         if is_bot and is_gt:
             label_html = '<div style="text-align:center;font-size:10px;color:#8e44ad;font-weight:bold">✓★</div>'
         elif is_bot:
@@ -344,9 +459,13 @@ def _render_candidates_tile(
         else:
             label_html = '<div style="height:14px"></div>'
         border = ""
-        if is_bot:   border = "border:2px solid #e74c3c;"
-        elif is_gt:  border = "border:2px solid #27ae60;"
-        imgs.append(f'<div style="display:inline-block;text-align:center;margin:1px">{label_html}{_tile_img(tile, width=38, style=border+"border-radius:3px;")}</div>')
+        if is_bot:
+            border = "border:2px solid #e74c3c;"
+        elif is_gt:
+            border = "border:2px solid #27ae60;"
+        imgs.append(
+            f'<div style="display:inline-block;text-align:center;margin:1px">{label_html}{_tile_img(tile, width=38, style=border + "border-radius:3px;")}</div>'
+        )
     # 非 dahai 动作补充文字
     extra = ""
     if chosen.get("type") not in ("dahai", "none"):
@@ -388,8 +507,8 @@ def _render_candidates_bar(
     for tile in sorted_hand:
         logit = tile_logit.get(tile, min_logit)
         pct = max(1, (logit - min_logit) / logit_range * 100)
-        is_bot = (tile == bot_pai)
-        is_gt  = (tile == gt_pai)
+        is_bot = tile == bot_pai
+        is_gt = tile == gt_pai
 
         if is_bot and is_gt:
             bar_color = "#8e44ad"
@@ -407,8 +526,10 @@ def _render_candidates_bar(
         MAX_BAR_H = 60  # 柱最高 60px
         bar_height = max(4, int(pct / 100 * MAX_BAR_H))
         border = ""
-        if is_bot:   border = "border:2px solid #e74c3c;"
-        elif is_gt:  border = "border:2px solid #27ae60;"
+        if is_bot:
+            border = "border:2px solid #e74c3c;"
+        elif is_gt:
+            border = "border:2px solid #27ae60;"
         # tile 渲染为 38px 宽，SVG 原始 300x400，等比高度 ≈ 38*400/300 ≈ 51px
         TILE_H = 51
         # 每列：tile 固定在底部，bar 叠在 tile 上方，bar 底部紧贴 tile 顶部往上长
@@ -416,9 +537,9 @@ def _render_candidates_bar(
             f'<div style="display:inline-block;width:38px;text-align:center;margin:0 1px;vertical-align:bottom;position:relative">'
             f'<div style="position:absolute;bottom:{TILE_H}px;left:0;width:38px;height:{bar_height}px;background:{bar_color};border-radius:{bar_height}px {bar_height}px 0 0;display:flex;align-items:center;justify-content:center;overflow:hidden">'
             f'<span style="font-size:9px;color:#fff;font-weight:bold;white-space:nowrap">{marks}</span>'
-            f'</div>'
-            f'{_tile_img(tile, width=38, style=border+"border-radius:3px;")}'
-            f'</div>'
+            f"</div>"
+            f"{_tile_img(tile, width=38, style=border + 'border-radius:3px;')}"
+            f"</div>"
         )
 
     extra = ""
@@ -442,23 +563,80 @@ def render_replay_json(bot: KeqingBot) -> dict:
             seen_keys.add(key)
             kyoku_order.append({"bakaze": key[0], "kyoku": key[1], "honba": key[2]})
 
+    # 重新按顺序编排 step（obs 步插入后编号可能乱）
+    for i, entry in enumerate(log):
+        entry["step"] = i
+
     # 补 kyoku_key 方便前端过滤
     for entry in log:
         entry["kyoku_key"] = {
             "bakaze": entry["bakaze"],
-            "kyoku":  entry["kyoku"],
-            "honba":  entry["honba"],
+            "kyoku": entry["kyoku"],
+            "honba": entry["honba"],
         }
 
-    total_ops = len(log)
-    matches = sum(1 for e in log if e.get("gt_action") and e["gt_action"] == e["chosen"])
+    # total_ops/matches 只统计自家决策步（排除 obs 步）
+    own_log = [e for e in log if not e.get("is_obs")]
+    total_ops = len(own_log)
+    matches = sum(
+        1 for e in own_log if e.get("gt_action") and e["gt_action"] == e["chosen"]
+    )
+
+    # Rating: 方案3 — exp(-alpha * delta_score)，alpha=0.5
+    # delta = bot_best_score - gt_score，使用 beam_score 优先，fallback 到 logit
+    import math
+
+    _ALPHA = 0.5
+    rating_scores = []
+    for e in log:
+        gt = e.get("gt_action")
+        if not gt:
+            continue
+        candidates = e.get("candidates", [])
+        if not candidates:
+            continue
+        has_beam = any("beam_score" in c for c in candidates)
+        score_key = "beam_score" if has_beam else "logit"
+        # bot 最优 score（chosen 对应的 score）
+        chosen = e.get("chosen", {})
+
+        def _act_key(a):
+            return (
+                a.get("type"),
+                a.get("pai", ""),
+                tuple(sorted(a.get("consumed", []))),
+            )
+
+        chosen_key = _act_key(chosen) if chosen else None
+        gt_key = _act_key(gt)
+        bot_score = None
+        gt_score = None
+        for c in candidates:
+            ck = _act_key(c["action"])
+            s = c.get(score_key, c.get("logit"))
+            if ck == chosen_key and bot_score is None:
+                bot_score = s
+            if ck == gt_key and gt_score is None:
+                gt_score = s
+        if bot_score is None or gt_score is None:
+            continue
+        delta = bot_score - gt_score  # >= 0 when bot != gt
+        rating_scores.append(math.exp(-_ALPHA * max(delta, 0.0)))
+
+    rating = (
+        round(100.0 * sum(rating_scores) / len(rating_scores), 1)
+        if rating_scores
+        else None
+    )
 
     return {
-        "log":          log,
-        "kyoku_order":  kyoku_order,
-        "total_ops":    total_ops,
-        "match_count":  matches,
-        "player_id":    bot.player_id,
+        "log": log,
+        "kyoku_order": kyoku_order,
+        "total_ops": total_ops,
+        "match_count": matches,
+        "rating": rating,
+        "player_id": bot.player_id,
+        "player_names": getattr(bot, "player_names", []),
     }
 
 
@@ -481,27 +659,33 @@ def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
 
     # 统计 matches
     total_ops = len(log)
-    matches = sum(1 for e in log if e.get("gt_action") and e["gt_action"] == e["chosen"])
+    matches = sum(
+        1 for e in log if e.get("gt_action") and e["gt_action"] == e["chosen"]
+    )
 
     step_divs = []
     for i, entry in enumerate(log):
-        hand        = entry["hand"]
-        dora        = entry["dora_markers"]
-        scores      = entry["scores"]
-        reached     = entry["reached"]
-        bakaze      = entry["bakaze"]
-        kyoku       = entry["kyoku"]
-        honba       = entry["honba"]
-        chosen      = entry["chosen"]
-        candidates  = entry["candidates"]
-        gt_action   = entry.get("gt_action")
-        tsumo_pai  = entry.get("tsumo_pai")
-        kyoku_key   = (bakaze, kyoku, honba)
-        kyoku_idx   = kyoku_order.index(kyoku_key)
+        hand = entry["hand"]
+        dora = entry["dora_markers"]
+        scores = entry["scores"]
+        reached = entry["reached"]
+        bakaze = entry["bakaze"]
+        kyoku = entry["kyoku"]
+        honba = entry["honba"]
+        chosen = entry["chosen"]
+        candidates = entry["candidates"]
+        gt_action = entry.get("gt_action")
+        tsumo_pai = entry.get("tsumo_pai")
+        kyoku_key = (bakaze, kyoku, honba)
+        kyoku_idx = kyoku_order.index(kyoku_key)
 
-        score_str = "  ".join(f"P{i2}({'R' if reached[i2] else ''}):{scores[i2]}" for i2 in range(4))
+        score_str = "  ".join(
+            f"P{i2}({'R' if reached[i2] else ''}):{scores[i2]}" for i2 in range(4)
+        )
         dora_imgs = "".join(_tile_img(t, 32) for t in dora)
-        bar_mode_content = _render_candidates_bar(candidates, chosen, gt_action, hand, tsumo_pai)
+        bar_mode_content = _render_candidates_bar(
+            candidates, chosen, gt_action, hand, tsumo_pai
+        )
 
         gt_label = action_label(gt_action) if gt_action else "—"
         gt_color = "#27ae60" if (gt_action and gt_action == chosen) else "#c0392b"
@@ -514,13 +698,17 @@ def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
             next_gt = next_entry.get("gt_action")
             if next_chosen.get("type") == "dahai":
                 bot_pai = next_chosen.get("pai", "?")
-                gt_pai = next_gt.get("pai", "?") if next_gt and next_gt.get("type") == "dahai" else "—"
+                gt_pai = (
+                    next_gt.get("pai", "?")
+                    if next_gt and next_gt.get("type") == "dahai"
+                    else "—"
+                )
                 reach_dahai_str = f' <span style="font-size:12px;color:#888">（宣言牌 Bot: <b>{bot_pai}</b> 玩家: <b>{gt_pai}</b>）</span>'
 
         step_id = f"step{entry['step']}"
         step_divs.append(f"""
         <div class="step" data-kyoku="{kyoku_idx}" id="{step_id}" style="margin:10px 0;border:1px solid #ddd;border-radius:6px;padding:10px;font-family:sans-serif;font-size:13px">
-          <div style="font-weight:bold;margin-bottom:4px">Step {entry['step']} | {bakaze}{kyoku}局 {honba}本场</div>
+          <div style="font-weight:bold;margin-bottom:4px">Step {entry["step"]} | {bakaze}{kyoku}局 {honba}本场</div>
           <div style="color:#555;margin-bottom:4px">点数: {score_str}</div>
           <div style="margin-bottom:4px">Dora指示: {dora_imgs}</div>
           <div style="margin-bottom:4px;font-size:12px">
@@ -533,11 +721,11 @@ def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
     num_kyoku = len(kyoku_order)
     # 构建小局标题列表供 JS 使用
     kyoku_labels_js = "["
-    for (bk, ky, hb) in kyoku_order:
+    for bk, ky, hb in kyoku_order:
         kyoku_labels_js += f'"第{bk}{ky}局 {hb}本场",'
     kyoku_labels_js += "]"
 
-    match_pct = f"{matches/total_ops*100:.1f}" if total_ops > 0 else "0.0"
+    match_pct = f"{matches / total_ops * 100:.1f}" if total_ops > 0 else "0.0"
 
     script = f"""
     <script>
@@ -609,7 +797,9 @@ def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
     </script>
     """
 
-    btn_style = "padding:5px 12px;font-size:13px;margin-right:6px;cursor:pointer;flex-shrink:0"
+    btn_style = (
+        "padding:5px 12px;font-size:13px;margin-right:6px;cursor:pointer;flex-shrink:0"
+    )
     nav_style = "position:sticky;top:0;z-index:100;background:#f0f2f5;padding:8px 0;margin-bottom:10px;display:flex;align-items:center;flex-wrap:wrap;gap:6px;border-bottom:1px solid #ddd"
     return f"""
     <html><head><meta charset='utf-8'></head><body style='font-family:sans-serif'>
@@ -628,7 +818,7 @@ def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
       </span>
       <span style="margin-left:12px;font-size:11px;color:#888">快捷键: ←/→局  ↑/↓步</span>
     </div>
-    {''.join(step_divs)}
+    {"".join(step_divs)}
     </body></html>
     """
 
@@ -636,29 +826,58 @@ def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
 def render_replay_html(bot: KeqingBot) -> str:
     """返回嵌入到 result-view 的 HTML 内容片段（无外层 html/body）。"""
     html = render_html(bot)
-    start = html.find('<body')
+    start = html.find("<body")
     if start == -1:
         return html
-    start = html.find('>', start) + 1
-    end = html.rfind('</body>')
+    start = html.find(">", start) + 1
+    end = html.rfind("</body>")
     return html[start:end].strip()
 
 
 def _is_player_action(event: dict, player_id: int) -> bool:
     """判断此事件是否是 player_id 的实际动作（非元事件）。"""
-    ACTION_TYPES = {"dahai", "reach", "chi", "pon", "daiminkan", "ankan", "kakan", "hora", "ryukyoku", "none"}
+    ACTION_TYPES = {
+        "dahai",
+        "reach",
+        "chi",
+        "pon",
+        "daiminkan",
+        "ankan",
+        "kakan",
+        "hora",
+        "ryukyoku",
+        "none",
+    }
     return event.get("type") in ACTION_TYPES and event.get("actor") == player_id
 
 
 def main():
     parser = argparse.ArgumentParser(description="跑谱 Review 系统")
-    parser.add_argument("--input",       required=True, help="tenhou6 JSON / mjai JSONL 文件路径，或直接粘贴 JSON 文本")
-    parser.add_argument("--player-id",   type=int, default=0, help="review 哪个座位 (0-3)")
-    parser.add_argument("--checkpoint",  default=None, help="模型 checkpoint 路径（默认根据 --bot-type 使用内置路径）")
-    parser.add_argument("--bot-type",    default="keqingv1", choices=["v5", "keqingv1"],
-                        help="Bot 类型：v5（V5Bot）或 keqingv1（KeqingBot）")
-    parser.add_argument("--output",      default=None, help="HTML 输出路径")
-    parser.add_argument("--tiles-dir",   default=None, help="SVG 牌图目录（默认 tiles/riichi-mahjong-tiles/Regular）")
+    parser.add_argument(
+        "--input",
+        required=True,
+        help="tenhou6 JSON / mjai JSONL 文件路径，或直接粘贴 JSON 文本",
+    )
+    parser.add_argument(
+        "--player-id", type=int, default=0, help="review 哪个座位 (0-3)"
+    )
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help="模型 checkpoint 路径（默认根据 --bot-type 使用内置路径）",
+    )
+    parser.add_argument(
+        "--bot-type",
+        default="keqingv1",
+        choices=["v5", "keqingv1"],
+        help="Bot 类型：v5（V5Bot）或 keqingv1（KeqingBot）",
+    )
+    parser.add_argument("--output", default=None, help="HTML 输出路径")
+    parser.add_argument(
+        "--tiles-dir",
+        default=None,
+        help="SVG 牌图目录（默认 tiles/riichi-mahjong-tiles/Regular）",
+    )
     args = parser.parse_args()
 
     checkpoint = Path(args.checkpoint) if args.checkpoint else None
@@ -672,11 +891,16 @@ def main():
         bot_type=args.bot_type,
     )
 
-    out_path = Path(args.output) if args.output else Path(f"artifacts/replays/review_p{args.player_id}.html")
+    out_path = (
+        Path(args.output)
+        if args.output
+        else Path(f"artifacts/replays/review_p{args.player_id}.html")
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(render_html(bot, tiles_dir=tiles_dir), encoding="utf-8")
     print(f"Review 完成：{len(bot.decision_log)} 步决策 -> {out_path}")
     import webbrowser
+
     webbrowser.open(out_path.resolve().as_uri())
 
 

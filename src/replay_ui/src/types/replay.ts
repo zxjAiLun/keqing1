@@ -57,10 +57,12 @@ export interface DecisionLogEntry {
   actor_to_move: number;
   tsumo_pai: string | null;
   last_discard: { actor: number; pai: string } | null;
-  /** 当前视角 Bot 的决策 */
+  /** 是否为其他家的观察步（无 bot 推理数据） */
+  is_obs?: boolean;
+  /** 当前视角 Bot 的决策（obs 步为他家实际动作） */
   chosen: Action;
-  /** 所有合法动作候选 + logit */
-  candidates: Array<{ action: Action; logit: number }>;
+  /** 所有合法动作候选 + logit (+ beam_score if beam search enabled)，obs 步为空 */
+  candidates: Array<{ action: Action; logit: number; beam_score?: number }>;
   /** 当前视角 Bot 的 value loss 预测 */
   value?: number;
   /** ground truth：玩家实际动作 */
@@ -74,7 +76,9 @@ export interface ReplayData {
   kyoku_order: KyokuInfo[];
   total_ops: number;
   match_count: number;
+  rating: number | null;
   player_id: number;
+  player_names?: string[];
 }
 
 export interface ReplayMeta {

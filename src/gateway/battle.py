@@ -57,6 +57,10 @@ class BattleRoom:
     human_player_id: int = 0  # 人类玩家所在的座位，-1 表示全Bot模式
     events: List[Dict] = field(default_factory=list)  # mjai 格式事件日志
     pending_rinshan: bool = False  # 是否需要摸岭上牌（大明杠/暗杠/加杠后）
+    last_heartbeat: float = field(
+        default_factory=lambda: __import__("time").time()
+    )  # 最后心跳时间
+    disconnected: bool = False  # 人类玩家是否已断线
 
     def draw_tile(self) -> Optional[str]:
         if self.wall_index >= len(self.wall):

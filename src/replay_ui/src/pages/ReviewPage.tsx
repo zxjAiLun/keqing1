@@ -77,11 +77,11 @@ export function ReviewPage() {
             {/* 视图选择按钮 */}
             <div className="flex gap-3" style={{ flexWrap: 'wrap' }}>
               <button
-                onClick={() => navigate('/game', { state: { replayData: uploadedData } })}
+                onClick={() => navigate('/game-replay', { state: { replayData: uploadedData } })}
                 className="btn-primary"
                 style={{ height: 38, padding: '0 24px', fontSize: 14 }}
               >
-                ▶ 牌桌视图
+                ▶ 牌桌回放
               </button>
               <button
                 onClick={() => navigate('/replay', { state: { replayData: uploadedData } })}

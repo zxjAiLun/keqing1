@@ -20,6 +20,8 @@ export function useReplayPlayer(data: ReplayData | null) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [speed, setSpeed] = useState<PlaybackSpeed>(1);
   const intervalRef = useRef<number | null>(null);
+  const dataRef = useRef<ReplayData | null>(data);
+  useEffect(() => { dataRef.current = data; }, [data]);
 
   const totalSteps = data?.log.length ?? 0;
   const totalKyoku = data?.kyoku_order.length ?? 0;
@@ -77,12 +79,40 @@ export function useReplayPlayer(data: ReplayData | null) {
     }
   }, [isPlaying, play, pause]);
 
+  /** →：逐步前进（所有玩家） */
   const stepForward = useCallback(() => {
     setCurrentStep(prev => Math.min(prev + 1, totalSteps - 1));
   }, [totalSteps]);
 
+  /** ←：逐步后退（所有玩家） */
   const stepBackward = useCallback(() => {
     setCurrentStep(prev => Math.max(prev - 1, 0));
+  }, []);
+
+  /** ↓/滚轮下：跳到下一个自家（player_id）决策步 */
+  const stepToNextAction = useCallback(() => {
+    const log = dataRef.current?.log;
+    const pid = dataRef.current?.player_id;
+    if (!log || pid === undefined) return;
+    setCurrentStep(prev => {
+      for (let i = prev + 1; i < log.length; i++) {
+        if (!log[i].is_obs) return i;
+      }
+      return prev;
+    });
+  }, []);
+
+  /** ↑/滚轮上：跳到上一个自家（player_id）决策步 */
+  const stepToPrevAction = useCallback(() => {
+    const log = dataRef.current?.log;
+    const pid = dataRef.current?.player_id;
+    if (!log || pid === undefined) return;
+    setCurrentStep(prev => {
+      for (let i = prev - 1; i >= 0; i--) {
+        if (!log[i].is_obs) return i;
+      }
+      return prev;
+    });
   }, []);
 
   const goToStart = useCallback(() => {
@@ -130,6 +160,8 @@ export function useReplayPlayer(data: ReplayData | null) {
     togglePlay,
     stepForward,
     stepBackward,
+    stepToNextAction,
+    stepToPrevAction,
     goToStart,
     goToEnd,
     goToStep,

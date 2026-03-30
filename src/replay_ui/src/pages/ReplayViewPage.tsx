@@ -1,5 +1,5 @@
 // src/replay_ui/src/pages/ReplayViewPage.tsx
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import type { ReplayData } from '../types/replay';
@@ -88,9 +88,61 @@ function tileCssClass(tile: TileWithMeta, entry: DecisionLogEntry): string {
 }
 
 // ---------------------------------------------------------------------------
+// 候选评分表
+// ---------------------------------------------------------------------------
+function CandidateTable({
+  candidates,
+  chosen,
+  gtAction,
+}: {
+  candidates: Array<{ action: import('../types/replay').Action; logit: number; beam_score?: number }>;
+  chosen: import('../types/replay').Action | null;
+  gtAction: import('../types/replay').Action | null;
+}) {
+  const hasBeam = candidates.some(c => c.beam_score !== undefined);
+  const actKey = (a: import('../types/replay').Action | null) =>
+    a ? `${a.type}|${a.pai ?? ''}|${(a.consumed ?? []).join(',')}` : '';
+  const chosenKey = actKey(chosen);
+  const gtKey = actKey(gtAction);
+  return (
+    <div style={{ marginTop: 6, fontSize: 11, overflowX: 'auto' }}>
+      <table style={{ borderCollapse: 'collapse', width: '100%' }}>
+        <thead>
+          <tr style={{ background: '#f1f5f9' }}>
+            <th style={{ padding: '2px 8px', textAlign: 'left', color: '#475569', borderBottom: '1px solid #e2e8f0' }}>动作</th>
+            <th style={{ padding: '2px 8px', textAlign: 'right', color: '#475569', borderBottom: '1px solid #e2e8f0', fontFamily: 'monospace' }}>Logit</th>
+            {hasBeam && <th style={{ padding: '2px 8px', textAlign: 'right', color: '#475569', borderBottom: '1px solid #e2e8f0', fontFamily: 'monospace' }}>Beam</th>}
+            <th style={{ padding: '2px 8px', borderBottom: '1px solid #e2e8f0' }}></th>
+          </tr>
+        </thead>
+        <tbody>
+          {candidates.map((c, i) => {
+            const key = actKey(c.action);
+            const isBot = key === chosenKey;
+            const isGt  = key === gtKey && gtKey !== '';
+            const isBoth = isBot && isGt;
+            const bg = isBoth ? '#fdf4ff' : isBot ? '#fff0f0' : isGt ? '#f0fff4' : (i % 2 === 0 ? '#fff' : '#f9fafb');
+            const color = isBoth ? '#6b21a8' : isBot ? '#c0392b' : isGt ? '#166534' : '#374151';
+            const marks = (isBot ? '✓Bot ' : '') + (isGt ? '★玩家' : '');
+            return (
+              <tr key={i} style={{ background: bg, color, fontWeight: isBot || isBoth ? 600 : 400 }}>
+                <td style={{ padding: '2px 8px', borderBottom: '1px solid #f1f5f9' }}>{actionLabel(c.action)}</td>
+                <td style={{ padding: '2px 8px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #f1f5f9' }}>{c.logit >= 0 ? '+' : ''}{c.logit.toFixed(3)}</td>
+                {hasBeam && <td style={{ padding: '2px 8px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #f1f5f9' }}>{c.beam_score !== undefined ? (c.beam_score >= 0 ? '+' : '') + c.beam_score.toFixed(3) : '—'}</td>}
+                <td style={{ padding: '2px 8px', fontSize: 10, color: '#666', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>{marks}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 统计面板
 // ---------------------------------------------------------------------------
-function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () => void }) {
+export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () => void }) {
   const log = data.log;
   const total = log.length;
   const match = data.match_count || 0;
@@ -129,6 +181,16 @@ function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () => void }
             <div className="pct">{pct}%</div>
             <div className="sub">Bot 与玩家一致率 ({match} / {total})</div>
           </div>
+
+          {data.rating !== null && data.rating !== undefined && (
+            <div style={{ textAlign: 'center', margin: '8px 0 4px' }}>
+              <span style={{ fontSize: 28, fontWeight: 700, color: data.rating >= 80 ? '#27ae60' : data.rating >= 60 ? '#3498db' : '#e74c3c' }}>
+                {data.rating.toFixed(1)}
+              </span>
+              <span style={{ fontSize: 13, color: '#64748b', marginLeft: 4 }}>/ 100 Rating</span>
+              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>基于 logit 差距的相似度评分</div>
+            </div>
+          )}
 
           <div className="stats-summary">
             {[
@@ -304,20 +366,24 @@ function StepCard({ entry }: { entry: DecisionLogEntry }) {
         </div>
       )}
 
+      {/* dahai 候选评分表 */}
+      {isDahai && entry.candidates && entry.candidates.length > 0 && (
+        <CandidateTable candidates={entry.candidates} chosen={entry.chosen} gtAction={entry.gt_action} />
+      )}
+
       {/* 非 dahai */}
       {!isDahai && (
         <div className="nondahai-box">
-          {entry.chosen?.type !== 'none' && (
-            <div>
-              Bot: <b>{actionLabel(entry.chosen)}</b>
-            </div>
-          )}
-          {entry.gt_action && entry.gt_action.type !== 'none' && (
-            <div style={{ color: '#166534' }}>
-              实际: <b>{actionLabel(entry.gt_action)}</b>
-            </div>
+          <div>Bot: <b>{entry.chosen?.type === 'none' ? '过' : actionLabel(entry.chosen)}</b></div>
+          {entry.gt_action && (
+            <div style={{ color: '#166534' }}>实际: <b>{entry.gt_action.type === 'none' ? '过' : actionLabel(entry.gt_action)}</b></div>
           )}
         </div>
+      )}
+
+      {/* 非 dahai 候选评分表 */}
+      {!isDahai && entry.candidates && entry.candidates.length > 0 && (
+        <CandidateTable candidates={entry.candidates} chosen={entry.chosen} gtAction={entry.gt_action} />
       )}
     </div>
   );
@@ -335,6 +401,9 @@ export function ReplayViewPage() {
   const [showStats, setShowStats] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const stepRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const [scrollToStep, setScrollToStep] = useState<number | null>(null);
+  const focusedStep = useRef<number>(-1);
 
   useEffect(() => {
     const state = location.state as { replayData?: ReplayData; replayId?: string } | null;
@@ -371,6 +440,63 @@ export function ReplayViewPage() {
     const ko = data.kyoku_order[curKyoku];
     return k.bakaze === ko?.bakaze && k.kyoku === ko?.kyoku && k.honba === ko?.honba;
   }) : [];
+
+  const isDiff = useCallback((e: DecisionLogEntry) =>
+    data !== null &&
+    e.actor_to_move === data.player_id &&
+    e.gt_action !== null &&
+    (e.chosen.type !== e.gt_action.type || e.chosen.pai !== e.gt_action.pai)
+  , [data]);
+
+  const jumpToPrevDiff = useCallback(() => {
+    if (!data) return;
+    const from = focusedStep.current >= 0 ? focusedStep.current - 1 : (data.log.length - 1);
+    for (let i = from; i >= 0; i--) {
+      const e = data.log[i];
+      if (!isDiff(e)) continue;
+      const ki = data.kyoku_order.findIndex(
+        k => k.bakaze === e.kyoku_key.bakaze && k.kyoku === e.kyoku_key.kyoku && k.honba === e.kyoku_key.honba
+      );
+      if (ki < 0) continue;
+      focusedStep.current = e.step;
+      setCurKyoku(ki);
+      setScrollToStep(e.step);
+      return;
+    }
+  }, [data, isDiff]);
+
+  const jumpToNextDiff = useCallback(() => {
+    if (!data) return;
+    const from = focusedStep.current >= 0 ? focusedStep.current + 1 : 0;
+    for (let i = from; i < data.log.length; i++) {
+      const e = data.log[i];
+      if (!isDiff(e)) continue;
+      const ki = data.kyoku_order.findIndex(
+        k => k.bakaze === e.kyoku_key.bakaze && k.kyoku === e.kyoku_key.kyoku && k.honba === e.kyoku_key.honba
+      );
+      if (ki < 0) continue;
+      focusedStep.current = e.step;
+      setCurKyoku(ki);
+      setScrollToStep(e.step);
+      return;
+    }
+  }, [data, isDiff]);
+
+  // scroll 到目标 step（在 curKyoku 切换并重新渲染后执行）
+  useEffect(() => {
+    if (scrollToStep === null) return;
+    // defer until after DOM paint so new kyoku's cards are mounted
+    const id = setTimeout(() => {
+      const el = stepRefs.current.get(scrollToStep);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      setScrollToStep(null);
+    }, 50);
+    return () => clearTimeout(id);
+  }, [scrollToStep, curKyoku]);
+
+
 
   const handleExportHtml = useCallback(() => {
     if (!data) return;
@@ -438,8 +564,11 @@ export function ReplayViewPage() {
         </button>
 
         <span style={{ marginLeft: 8, display: 'flex', gap: 8 }}>
+          <button className="btn" onClick={jumpToPrevDiff} title="上一个与Bot不同的决策">⏮差异</button>
+          <button className="btn" onClick={jumpToNextDiff} title="下一个与Bot不同的决策">差异⏭</button>
           <button className="btn" onClick={() => setShowStats(true)}>📊统计</button>
           <button className="btn" onClick={handleExportHtml}>💾导出</button>
+          <button className="btn" onClick={() => navigate('/game-replay', { state: { replayData: data } })} title="切换到牌桌视图">🀄牌桌</button>
         </span>
 
         <button className="btn" onClick={() => navigate('/')}>🏠</button>
@@ -453,7 +582,9 @@ export function ReplayViewPage() {
       <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
         <div style={{ maxWidth: 860, margin: '0 auto' }}>
           {visibleSteps.map(entry => (
-            <StepCard key={entry.step} entry={entry} />
+            <div key={entry.step} ref={el => { if (el) stepRefs.current.set(entry.step, el); else stepRefs.current.delete(entry.step); }}>
+              <StepCard entry={entry} />
+            </div>
           ))}
           {visibleSteps.length === 0 && (
             <p style={{ textAlign: 'center', color: '#9ca3af', fontSize: 14, padding: '48px 0' }}>

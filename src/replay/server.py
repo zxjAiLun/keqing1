@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import numpy as np
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Annotated
@@ -11,7 +12,18 @@ from urllib.request import urlopen, Request
 from urllib.parse import urlparse, parse_qs
 
 from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+
+
+class _NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 from fastapi.staticfiles import StaticFiles
 
 BASE_DIR = Path(__file__).parent
@@ -113,7 +125,10 @@ async def replay(
             return JSONResponse(status_code=400, content={"error": f"未知的 input_type：{input_type}"})
 
         result = render_replay_json(bot)
-        return JSONResponse(content=result)
+        return Response(
+            content=json.dumps(result, cls=_NumpyEncoder, ensure_ascii=False),
+            media_type="application/json",
+        )
 
     except json.JSONDecodeError as e:
         return JSONResponse(status_code=400, content={"error": f"JSON 解析失败: {e}"})

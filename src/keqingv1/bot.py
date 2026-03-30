@@ -86,6 +86,7 @@ def _dahai_beam_search(
         hand = list(snap.get("hand", []))
         # 移除手牌中第一张匹配的牌（赤宝牌等价处理）
         from mahjong_env.tiles import normalize_tile
+
         norm_pai = normalize_tile(pai)
         removed = False
         new_hand = []
@@ -110,7 +111,7 @@ def _dahai_beam_search(
             _, value_t = model(tile_t, scalar_t)
         value = float(value_t.squeeze().cpu().item())
 
-        score = policy_logits[action_to_idx(a)] + beam_lambda * value
+        score = float(policy_logits[action_to_idx(a)]) + beam_lambda * value
         value_scores[action_to_idx(a)] = score
         if score > best_score:
             best_score = score
@@ -137,7 +138,7 @@ def _meld_value_eval(
     from mahjong_env.tiles import normalize_tile
 
     best_score = -1e18
-    best_action = (none_actions[0] if none_actions else meld_actions[0])
+    best_action = none_actions[0] if none_actions else meld_actions[0]
     value_scores: dict = {}
 
     # 计算 none baseline：policy logit + beam_lambda * v_none（与 meld 评估对称）
@@ -150,7 +151,7 @@ def _meld_value_eval(
             _, v_none_t = model(tile_t_none, scalar_t_none)
         v_none = float(v_none_t.squeeze().cpu().item())
         for a in none_actions:
-            s = policy_logits[action_to_idx(a)] + beam_lambda * v_none
+            s = float(policy_logits[action_to_idx(a)]) + beam_lambda * v_none
             value_scores[action_to_idx(a)] = s
             if s > none_score:
                 none_score = s
@@ -176,7 +177,13 @@ def _meld_value_eval(
 
         # 更新 melds（追加完整 dict，与 state.snapshot() / encode() 格式一致）
         melds = [list(m) for m in snap.get("melds", [[], [], [], []])]
-        melds[actor] = melds[actor] + [{"type": meld_type, "pai": normalize_tile(pai), "consumed": [normalize_tile(c) for c in consumed]}]
+        melds[actor] = melds[actor] + [
+            {
+                "type": meld_type,
+                "pai": normalize_tile(pai),
+                "consumed": [normalize_tile(c) for c in consumed],
+            }
+        ]
         fake_snap["melds"] = melds
 
         tile_feat, scalar = encode(fake_snap, actor)
@@ -186,7 +193,7 @@ def _meld_value_eval(
             _, value_t = model(tile_t, scalar_t)
         value = float(value_t.squeeze().cpu().item())
 
-        score = policy_logits[action_to_idx(a)] + beam_lambda * value
+        score = float(policy_logits[action_to_idx(a)]) + beam_lambda * value
         value_scores[action_to_idx(a)] = score
         if score > best_score:
             best_score = score
@@ -218,13 +225,15 @@ def _reach_value_eval(
     with torch.no_grad():
         _, value_t = model(tile_t, scalar_t)
     reach_value = float(value_t.squeeze().cpu().item())
-    reach_score = policy_logits[action_to_idx(reach_action)] + beam_lambda * reach_value
+    reach_score = (
+        float(policy_logits[action_to_idx(reach_action)]) + beam_lambda * reach_value
+    )
 
     value_scores: dict = {action_to_idx(reach_action): reach_score}
     best_score = reach_score
     best_action = reach_action
     for a in other_actions:
-        s = policy_logits[action_to_idx(a)]
+        s = float(policy_logits[action_to_idx(a)])
         value_scores[action_to_idx(a)] = s
         if s > best_score:
             best_score = s
@@ -250,7 +259,9 @@ class KeqingBot:
         self.verbose = verbose
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         # style_vec: [speed, riichi, value, defense]，均为 [-1, +1]，None 则全 0
-        self.style_vec = list(style_vec) if style_vec is not None else [0.0, 0.0, 0.0, 0.0]
+        self.style_vec = (
+            list(style_vec) if style_vec is not None else [0.0, 0.0, 0.0, 0.0]
+        )
         # beam_k > 0 时，dahai 阶段对 top-k 候选做 value beam search
         self.beam_k = beam_k
         self.beam_lambda = beam_lambda
@@ -272,6 +283,7 @@ class KeqingBot:
         self.game_state = GameState()
         try:
             import riichi as _riichi
+
             self._riichi_state = _riichi.state.PlayerState(player_id)
         except Exception:
             self._riichi_state = None
@@ -282,6 +294,7 @@ class KeqingBot:
         if self._riichi_state is not None:
             try:
                 import riichi as _riichi
+
                 self._riichi_state = _riichi.state.PlayerState(self.player_id)
             except Exception:
                 pass
@@ -299,6 +312,7 @@ class KeqingBot:
         etype = event.get("type", "")
 
         import json as _json
+
         _payload = _json.dumps(event, ensure_ascii=False)
         if self._riichi_state is not None:
             try:
@@ -354,6 +368,7 @@ class KeqingBot:
         if not injected:
             # fallback 或非 tsumo 场景：用决策时刻手牌计算 waits
             from mahjong_env.replay import _calc_shanten_waits
+
             if _pre_apply_hand is not None:
                 # dahai响应/副露/reach：用 apply 前手牌
                 hand_list = _pre_apply_hand
@@ -362,7 +377,9 @@ class KeqingBot:
                 # tsumo fallback：apply 后 14 张
                 hand_list = snap.get("hand", [])
                 melds_list = (snap.get("melds") or [[], [], [], []])[actor]
-            shanten, waits_cnt, waits_tiles, _ = _calc_shanten_waits(hand_list, melds_list)
+            shanten, waits_cnt, waits_tiles, _ = _calc_shanten_waits(
+                hand_list, melds_list
+            )
             snap["shanten"] = shanten
             snap["waits_count"] = waits_cnt
             snap["waits_tiles"] = waits_tiles
@@ -371,9 +388,13 @@ class KeqingBot:
         p = state.players[actor]
         if waits_tiles is not None:
             from mahjong_env.tiles import tile_to_34 as _t34, normalize_tile as _norm
+
             wait_set = {i for i, w in enumerate(waits_tiles) if w}
             # 舍牌振听：自家舍牌中有进张牌
-            actor_disc_set = {_t34(_norm(d["pai"] if isinstance(d, dict) else d)) for d in state.players[actor].discards}
+            actor_disc_set = {
+                _t34(_norm(d["pai"] if isinstance(d, dict) else d))
+                for d in state.players[actor].discards
+            }
             p.sutehai_furiten = bool(wait_set & actor_disc_set)
             # 立直振听：立直后上一次摸到进张但打出去了（摸切了进张）
             if p.reached and state.last_tsumo[actor] is None:
@@ -397,7 +418,7 @@ class KeqingBot:
         tile_feat, scalar = encode(snap, actor)
 
         tile_t = torch.from_numpy(tile_feat).unsqueeze(0).to(self.device)  # (1, C, 34)
-        scalar_t = torch.from_numpy(scalar).unsqueeze(0).to(self.device)   # (1, S)
+        scalar_t = torch.from_numpy(scalar).unsqueeze(0).to(self.device)  # (1, S)
 
         policy_logits, value_t = self.model(tile_t, scalar_t)
         logits_np = policy_logits.squeeze(0).cpu().numpy()  # (45,)
@@ -412,40 +433,72 @@ class KeqingBot:
 
         # beam search：分动作类型做 value head 重排
         legal_dahai = [a for a in legal_dicts if a.get("type") == "dahai"]
-        legal_meld = [a for a in legal_dicts if a.get("type") in ("chi", "pon", "daiminkan", "ankan", "kakan")]
+        legal_meld = [
+            a
+            for a in legal_dicts
+            if a.get("type") in ("chi", "pon", "daiminkan", "ankan", "kakan")
+        ]
         legal_reach = [a for a in legal_dicts if a.get("type") == "reach"]
         legal_none = [a for a in legal_dicts if a.get("type") == "none"]
 
         beam_value_scores: dict = {}  # action_idx -> beam combined score (for logging)
         if self.beam_k > 0 and legal_meld:
             # 副露决策：对 chi/pon/kan 做 value 评估，与 none 对比
-            non_meld = [a for a in legal_dicts if a.get("type") not in ("chi", "pon", "daiminkan", "ankan", "kakan")]
+            non_meld = [
+                a
+                for a in legal_dicts
+                if a.get("type") not in ("chi", "pon", "daiminkan", "ankan", "kakan")
+            ]
             chosen, beam_value_scores = _meld_value_eval(
-                self.model, self.device, snap, actor,
-                logits_np, legal_meld, legal_none,
+                self.model,
+                self.device,
+                snap,
+                actor,
+                logits_np,
+                legal_meld,
+                legal_none,
                 beam_lambda=self.beam_lambda,
             )
             # 若 chosen 是 none 但还有 hora/dahai 等更优选项，回退到 _find_best_legal
             if chosen.get("type") == "none" and len(non_meld) > 1:
-                chosen = _find_best_legal(logits_np, non_meld, value=value_scalar, style_lambda=self.style_vec[0])
+                chosen = _find_best_legal(
+                    logits_np,
+                    non_meld,
+                    value=value_scalar,
+                    style_lambda=self.style_vec[0],
+                )
         elif self.beam_k > 0 and legal_reach:
             # 立直决策：对 reach 做 value 评估
             non_reach = [a for a in legal_dicts if a.get("type") != "reach"]
             chosen, beam_value_scores = _reach_value_eval(
-                self.model, self.device, snap, actor,
-                logits_np, legal_reach[0], non_reach,
+                self.model,
+                self.device,
+                snap,
+                actor,
+                logits_np,
+                legal_reach[0],
+                non_reach,
                 beam_lambda=self.beam_lambda,
             )
         elif self.beam_k > 0 and len(legal_dahai) > 1:
             # 打牌决策：top-k dahai value beam search
             chosen, beam_value_scores = _dahai_beam_search(
-                self.model, self.device, snap, actor,
-                logits_np, legal_dahai,
+                self.model,
+                self.device,
+                snap,
+                actor,
+                logits_np,
+                legal_dahai,
                 beam_k=self.beam_k,
                 beam_lambda=self.beam_lambda,
             )
         else:
-            chosen = _find_best_legal(logits_np, legal_dicts, value=value_scalar, style_lambda=self.style_vec[0])
+            chosen = _find_best_legal(
+                logits_np,
+                legal_dicts,
+                value=value_scalar,
+                style_lambda=self.style_vec[0],
+            )
 
         # 同巡振听：如果有 hora 选项但选了 none，则设置同巡振听
         if chosen.get("type") == "none":
@@ -460,29 +513,40 @@ class KeqingBot:
                 {
                     "action": a,
                     "logit": float(logits_np[action_to_idx(a)]),
-                    **(({"beam_score": beam_value_scores[action_to_idx(a)]} if action_to_idx(a) in beam_value_scores else {}))
+                    **(
+                        {"beam_score": float(beam_value_scores[action_to_idx(a)])}
+                        if action_to_idx(a) in beam_value_scores
+                        else {}
+                    ),
                 }
                 for a in legal_dicts
             ],
-            key=lambda x: x["logit"], reverse=True,
+            key=lambda x: x["logit"],
+            reverse=True,
         )
         tsumo_pai = event.get("pai") if etype == "tsumo" else None
-        self.decision_log.append({
-            "step": len(self.decision_log),
-            "bakaze": snap.get("bakaze", ""),
-            "kyoku": snap.get("kyoku", 0),
-            "honba": snap.get("honba", 0),
-            "scores": snap.get("scores", []),
-            "hand": snap.get("hand", []),
-            "discards": snap.get("discards", []),
-            "dora_markers": snap.get("dora_markers", []),
-            "reached": snap.get("reached", []),
-            "tsumo_pai": tsumo_pai,
-            "candidates": scored,
-            "chosen": chosen,
-            "value": value_scalar,
-            "gt_action": gt_action,
-        })
+        self.decision_log.append(
+            {
+                "step": len(self.decision_log),
+                "bakaze": snap.get("bakaze", ""),
+                "kyoku": snap.get("kyoku", 0),
+                "honba": snap.get("honba", 0),
+                "scores": snap.get("scores", []),
+                "hand": snap.get("hand", []),
+                "discards": snap.get("discards", []),
+                "dora_markers": snap.get("dora_markers", []),
+                "reached": snap.get("reached", []),
+                "actor_to_move": snap.get(
+                    "actor_to_move", event.get("actor", self.player_id)
+                ),
+                "last_discard": snap.get("last_discard"),
+                "tsumo_pai": tsumo_pai,
+                "candidates": scored,
+                "chosen": chosen,
+                "value": value_scalar,
+                "gt_action": gt_action,
+            }
+        )
 
         if self.verbose:
             print(f"[Bot {self.player_id}] 决策:")

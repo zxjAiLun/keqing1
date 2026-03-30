@@ -77,7 +77,51 @@ class BotDriver:
                 snap, event = self._build_snap_and_event(room, actor, do_draw=True)
 
                 chosen_dict = await self._call_bot(room, actor, snap, event)
-                self.validate_and_apply(room, actor, chosen_dict, snap)
+                applied = self.validate_and_apply(room, actor, chosen_dict, snap)
+                if not applied:
+                    logger.warning(
+                        "Bot %d invalid action %s in run_4bot_game, falling back to none",
+                        actor,
+                        chosen_dict.get("type"),
+                    )
+                    self.validate_and_apply(
+                        room, actor, {"type": "none", "actor": actor}, snap
+                    )
+
+                await asyncio.sleep(0.1)
+
+            if room.phase != "ended":
+                break
+            if self.manager.is_game_ended(room):
+                room.events.append({"type": "end_game"})
+                break
+            if not self.manager.next_kyoku(room):
+                room.events.append({"type": "end_game"})
+                break
+
+            self.manager.start_kyoku(room, seed=None)
+            await asyncio.sleep(0.1)
+
+    async def run_4bot_game_from_current(self, room: BattleRoom) -> None:
+        """从当前局面继续跑完 4-Bot 游戏（人类退出后接管）。"""
+        while True:
+            while room.phase == "playing":
+                actor = room.state.actor_to_move
+                if actor is None:
+                    break
+
+                if room.remaining_wall() < 1:
+                    self.manager.ryukyoku(room)
+                    break
+
+                snap, event = self._build_snap_and_event(room, actor, do_draw=True)
+
+                chosen_dict = await self._call_bot(room, actor, snap, event)
+                applied = self.validate_and_apply(room, actor, chosen_dict, snap)
+                if not applied:
+                    self.validate_and_apply(
+                        room, actor, {"type": "none", "actor": actor}, snap
+                    )
 
                 await asyncio.sleep(0.1)
 

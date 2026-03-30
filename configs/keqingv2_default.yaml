@@ -33,6 +33,6 @@ rank_loss_every_n: 4     # 每 N batch 计算一次 rank loss，降低 CPU encod
 
 aug_perms: 1
 val_ratio: 0.05
-num_workers: 8
+num_workers: 4
 log_interval: 200
 files_per_epoch_ratio: 0.3  # 每 epoch 随机抽取 30% 训练文件，加快迭代速度

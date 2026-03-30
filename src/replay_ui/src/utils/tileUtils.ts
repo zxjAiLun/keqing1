@@ -72,8 +72,13 @@ export function actionLabel(action: { type: string; pai?: string; tsumogiri?: bo
       return '立直';
     case 'reach_accepted':
       return '立直接受';
-    case 'chi':
+    case 'chi': {
+      if (action.consumed && action.consumed.length >= 2) {
+        const sorted = [...action.consumed].sort((a, b) => (TILE_ORDER[a] ?? 99) - (TILE_ORDER[b] ?? 99));
+        return `吃 ${sorted.join('')}+${action.pai}`;
+      }
       return `吃 ${action.pai}`;
+    }
     case 'pon':
       return `碰 ${action.pai}`;
     case 'daiminkan':
