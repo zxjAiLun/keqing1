@@ -5,41 +5,48 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import sys as _sys
 import tempfile
 from pathlib import Path
 from typing import Optional, Union
 
 from mahjong_env.replay import read_mjai_jsonl
 
-# 支持 v5model（V5Bot）和 keqingv1（KeqingBot）
-from v5model.bot import V5Bot as _V5Bot
-from v5model.action_space import action_to_idx as _action_to_idx_v5
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+_SRC_DIR = _PROJECT_ROOT / "src"
+_SCRIPTS_DIR = _PROJECT_ROOT / "scripts"
+for _dir in (str(_SRC_DIR), str(_SCRIPTS_DIR), str(_PROJECT_ROOT)):
+    if _dir not in _sys.path:
+        _sys.path.insert(0, _dir)
+
+# 支持 keqingv1 / keqingv2，v5model 缺失时允许按可选依赖处理
+try:
+    from v5model.bot import V5Bot as _V5Bot
+    from v5model.action_space import action_to_idx as _action_to_idx_v5
+except ModuleNotFoundError:
+    _V5Bot = None
+    _action_to_idx_v5 = None
+
 from keqingv1.bot import KeqingBot as _KeqingBot
 from keqingv1.action_space import action_to_idx as _action_to_idx_k1
 
 # bot 类型 → run_replay_from_source 内部创建 Bot 时用
 _BOT_CLASSES = {
-    "v5": _V5Bot,
     "keqingv1": _KeqingBot,
     "keqingv2": _KeqingBot,
+    "keqingv3": _KeqingBot,
 }
+if _V5Bot is not None:
+    _BOT_CLASSES["v5"] = _V5Bot
 
 PLAYER_NAMES = ["East", "South", "West", "North"]
-
-# tenhou6 / mjlog 解析
-import sys as _sys
-
-_PROJECT_ROOT = Path(__file__).parent.parent.parent
-_SCRIPTS_DIR = _PROJECT_ROOT / "scripts"
-for _dir in (str(_SCRIPTS_DIR), str(_PROJECT_ROOT)):
-    if _dir not in _sys.path:
-        _sys.path.insert(0, _dir)
 
 # 默认 checkpoint 路径（按 bot 类型，相对于 PROJECT_ROOT）
 _DEFAULT_CHECKPOINTS = {
     "v5": _PROJECT_ROOT / "artifacts/models/modelv5/latest.pth",
     "keqingv1": _PROJECT_ROOT / "artifacts/models/keqingv1/latest.pth",
     "keqingv2": _PROJECT_ROOT / "artifacts/models/keqingv2/best.pth",
+    "keqingv3": _PROJECT_ROOT / "artifacts/models/keqingv3/best.pth",
 }
 
 
@@ -208,24 +215,32 @@ def run_replay_from_source(
         "hora",
         "ryukyoku",
     }
-    for event in events:
+
+    def _find_pending_decision() -> dict | None:
+        for entry in reversed(bot.decision_log):
+            if entry.get("is_obs"):
+                continue
+            if entry.get("gt_action") is None:
+                return entry
+        return None
+
+    for event_index, event in enumerate(events):
         if event.get("type") == "start_game" and isinstance(event.get("names"), list):
             bot.player_names = [str(n) for n in event["names"]]
-        if bot.decision_log:
-            last = bot.decision_log[-1]
-            if last.get("gt_action") is None:
-                if _is_player_action(event, player_id):
-                    last["gt_action"] = event
-                elif event.get("actor") != player_id and event.get(
-                    "type"
-                ) in _MELD_TYPES | {"dahai", "tsumo"}:
-                    candidates = last.get("candidates", [])
-                    has_meld_candidate = any(
-                        c.get("action", {}).get("type") in _MELD_TYPES
-                        for c in candidates
-                    )
-                    if has_meld_candidate:
-                        last["gt_action"] = {"type": "none", "actor": player_id}
+        pending = _find_pending_decision()
+        if pending is not None:
+            if _is_player_action(event, player_id):
+                pending["gt_action"] = event
+            else:
+                chosen = pending.get("chosen") or {}
+                candidates = pending.get("candidates", [])
+                has_non_none_candidate = any(
+                    c.get("action", {}).get("type") != "none" for c in candidates
+                )
+                # 响应窗口已越过且当前步选择的是“过”，需要把真实动作补成显式 none，
+                # 不能留成 null，否则前端会把它当成“没有实际选择”。
+                if chosen.get("type") == "none" and has_non_none_candidate:
+                    pending["gt_action"] = {"type": "none", "actor": player_id}
         bot.react(event)
         # 记录其他家的操作观察步（棋盘快照，无 bot 推理数据）
         ev_actor = event.get("actor")
@@ -237,13 +252,14 @@ def run_replay_from_source(
                 "bakaze": snap.get("bakaze", ""),
                 "kyoku": snap.get("kyoku", 0),
                 "honba": snap.get("honba", 0),
+                "oya": snap.get("oya", 0),
                 "scores": snap.get("scores", []),
                 "hand": snap.get("hand", []),
                 "discards": snap.get("discards", []),
                 "melds": snap.get("melds", []),
                 "dora_markers": snap.get("dora_markers", []),
                 "reached": snap.get("reached", []),
-                "actor_to_move": ev_actor,
+                "actor_to_move": snap.get("actor_to_move"),
                 "last_discard": snap.get("last_discard"),
                 "tsumo_pai": None,
                 "candidates": [],
@@ -251,6 +267,17 @@ def run_replay_from_source(
                 "value": None,
                 "gt_action": event,
                 "is_obs": True,  # 标记为观察步（非自家决策）
+                "obs_kind": (
+                    "discard"
+                    if ev_type == "dahai"
+                    else "meld"
+                    if ev_type in _MELD_TYPES
+                    else "reach"
+                    if ev_type == "reach"
+                    else "terminal"
+                ),
+                "board_phase": "after_action",
+                "source_event_index": event_index,
             }
             bot.decision_log.append(obs_entry)
 
@@ -318,6 +345,25 @@ def _sort_hand(hand: list[str], tsumo_pai: str | None = None) -> list[str]:
         )
         return others + [tsumo_pai]
     return sorted(hand, key=lambda t: _TILE_ORDER.get(t, 99))
+
+
+def _action_cmp_key(action: dict | None) -> tuple | None:
+    if not action:
+        return None
+    action_type = action.get("type")
+    if action_type == "pass":
+        action_type = "none"
+    return (
+        action_type,
+        action.get("pai", ""),
+        action.get("target"),
+        tuple(sorted(action.get("consumed", []))),
+        bool(action.get("tsumogiri", False)),
+    )
+
+
+def _same_action(a: dict | None, b: dict | None) -> bool:
+    return _action_cmp_key(a) == _action_cmp_key(b) and _action_cmp_key(a) is not None
 
 
 def _tile_img(tile: str, width: int = 40, style: str = "") -> str:
@@ -578,9 +624,7 @@ def render_replay_json(bot: KeqingBot) -> dict:
     # total_ops/matches 只统计自家决策步（排除 obs 步）
     own_log = [e for e in log if not e.get("is_obs")]
     total_ops = len(own_log)
-    matches = sum(
-        1 for e in own_log if e.get("gt_action") and e["gt_action"] == e["chosen"]
-    )
+    matches = sum(1 for e in own_log if _same_action(e.get("chosen"), e.get("gt_action")))
 
     # Rating: 方案3 — exp(-alpha * delta_score)，alpha=0.5
     # delta = bot_best_score - gt_score，使用 beam_score 优先，fallback 到 logit
@@ -600,19 +644,12 @@ def render_replay_json(bot: KeqingBot) -> dict:
         # bot 最优 score（chosen 对应的 score）
         chosen = e.get("chosen", {})
 
-        def _act_key(a):
-            return (
-                a.get("type"),
-                a.get("pai", ""),
-                tuple(sorted(a.get("consumed", []))),
-            )
-
-        chosen_key = _act_key(chosen) if chosen else None
-        gt_key = _act_key(gt)
+        chosen_key = _action_cmp_key(chosen)
+        gt_key = _action_cmp_key(gt)
         bot_score = None
         gt_score = None
         for c in candidates:
-            ck = _act_key(c["action"])
+            ck = _action_cmp_key(c["action"])
             s = c.get(score_key, c.get("logit"))
             if ck == chosen_key and bot_score is None:
                 bot_score = s
@@ -657,11 +694,10 @@ def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
             kyoku_steps[key] = []
         kyoku_steps[key].append(entry["step"])
 
-    # 统计 matches
-    total_ops = len(log)
-    matches = sum(
-        1 for e in log if e.get("gt_action") and e["gt_action"] == e["chosen"]
-    )
+    # 统计 matches（排除 obs 步）
+    own_log = [e for e in log if not e.get("is_obs")]
+    total_ops = len(own_log)
+    matches = sum(1 for e in own_log if _same_action(e.get("chosen"), e.get("gt_action")))
 
     step_divs = []
     for i, entry in enumerate(log):
@@ -690,20 +726,24 @@ def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
         gt_label = action_label(gt_action) if gt_action else "—"
         gt_color = "#27ae60" if (gt_action and gt_action == chosen) else "#c0392b"
 
-        # 立直步骤：从下一条 log 取出宣言牌信息并附加显示
+        # 立直步骤：从下一条 log 取出宣言牌信息（跳过 obs 步）
         reach_dahai_str = ""
-        if chosen.get("type") == "reach" and i + 1 < len(log):
-            next_entry = log[i + 1]
-            next_chosen = next_entry["chosen"]
-            next_gt = next_entry.get("gt_action")
-            if next_chosen.get("type") == "dahai":
-                bot_pai = next_chosen.get("pai", "?")
-                gt_pai = (
-                    next_gt.get("pai", "?")
-                    if next_gt and next_gt.get("type") == "dahai"
-                    else "—"
-                )
-                reach_dahai_str = f' <span style="font-size:12px;color:#888">（宣言牌 Bot: <b>{bot_pai}</b> 玩家: <b>{gt_pai}</b>）</span>'
+        if chosen.get("type") == "reach":
+            for j in range(i + 1, len(log)):
+                next_entry = log[j]
+                if next_entry.get("is_obs"):
+                    continue
+                next_chosen = next_entry["chosen"]
+                next_gt = next_entry.get("gt_action")
+                if next_chosen.get("type") == "dahai":
+                    bot_pai = next_chosen.get("pai", "?")
+                    gt_pai = (
+                        next_gt.get("pai", "?")
+                        if next_gt and next_gt.get("type") == "dahai"
+                        else "—"
+                    )
+                    reach_dahai_str = f' <span style="font-size:12px;color:#888">（宣言牌 Bot: <b>{bot_pai}</b> 玩家: <b>{gt_pai}</b>）</span>'
+                break
 
         step_id = f"step{entry['step']}"
         step_divs.append(f"""

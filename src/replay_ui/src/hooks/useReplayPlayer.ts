@@ -40,17 +40,22 @@ export function useReplayPlayer(data: ReplayData | null) {
     );
   })();
 
-  // 播放定时器
+  // 播放定时器（自动跳过 obs 步）
   useEffect(() => {
     if (isPlaying && totalSteps > 0) {
       const interval = 800 / speed;
       intervalRef.current = window.setInterval(() => {
         setCurrentStep(prev => {
-          if (prev >= totalSteps - 1) {
+          let next = prev + 1;
+          // 跳过 obs 步
+          while (next < totalSteps && dataRef.current?.log[next]?.is_obs) {
+            next++;
+          }
+          if (next >= totalSteps) {
             setIsPlaying(false);
             return prev;
           }
-          return prev + 1;
+          return next;
         });
       }, interval);
     }
@@ -89,27 +94,29 @@ export function useReplayPlayer(data: ReplayData | null) {
     setCurrentStep(prev => Math.max(prev - 1, 0));
   }, []);
 
-  /** ↓/滚轮下：跳到下一个自家（player_id）决策步 */
+  function isActionStep(entry: DecisionLogEntry | undefined): boolean {
+    return Boolean(entry?.chosen);
+  }
+
+  /** ↓/滚轮下：跳到下一个玩家动作步（包含 obs 步） */
   const stepToNextAction = useCallback(() => {
     const log = dataRef.current?.log;
-    const pid = dataRef.current?.player_id;
-    if (!log || pid === undefined) return;
+    if (!log) return;
     setCurrentStep(prev => {
       for (let i = prev + 1; i < log.length; i++) {
-        if (!log[i].is_obs) return i;
+        if (isActionStep(log[i])) return i;
       }
       return prev;
     });
   }, []);
 
-  /** ↑/滚轮上：跳到上一个自家（player_id）决策步 */
+  /** ↑/滚轮上：跳到上一个玩家动作步（包含 obs 步） */
   const stepToPrevAction = useCallback(() => {
     const log = dataRef.current?.log;
-    const pid = dataRef.current?.player_id;
-    if (!log || pid === undefined) return;
+    if (!log) return;
     setCurrentStep(prev => {
       for (let i = prev - 1; i >= 0; i--) {
-        if (!log[i].is_obs) return i;
+        if (isActionStep(log[i])) return i;
       }
       return prev;
     });

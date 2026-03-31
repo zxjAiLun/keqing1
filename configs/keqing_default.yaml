@@ -5,17 +5,6 @@
 data_dirs:
   - artifacts/converted_mjai/ds1
   - artifacts/converted_mjai/ds2
-  - artifacts/converted_mjai/ds3
-  - artifacts/converted_mjai/ds4
-  - artifacts/converted_mjai/ds5
-  - artifacts/converted_mjai/ds6
-  - artifacts/converted_mjai/ds7
-  - artifacts/converted_mjai/ds8
-  - artifacts/converted_mjai/ds9
-  - artifacts/converted_mjai/ds10
-  - artifacts/converted_mjai/ds11
-  - artifacts/converted_mjai/ds12
-  - artifacts/converted_mjai/ds13
 
 output_dir: artifacts/models/keqingv1
 

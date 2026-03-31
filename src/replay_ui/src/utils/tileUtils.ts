@@ -97,3 +97,35 @@ export function actionLabel(action: { type: string; pai?: string; tsumogiri?: bo
       return action.type;
   }
 }
+
+type ComparableAction = {
+  type: string;
+  pai?: string;
+  target?: number;
+  consumed?: string[];
+  tsumogiri?: boolean;
+};
+
+function normalizeReplayActionType(type: string | undefined): string {
+  if (type === "pass") return "none";
+  return type ?? "";
+}
+
+export function actionComparableKey(action: ComparableAction | null | undefined): string {
+  if (!action) return '';
+  return JSON.stringify({
+    type: normalizeReplayActionType(action.type),
+    pai: action.pai ?? '',
+    target: action.target ?? null,
+    consumed: [...(action.consumed ?? [])].sort(),
+    tsumogiri: Boolean(action.tsumogiri),
+  });
+}
+
+export function sameReplayAction(
+  a: ComparableAction | null | undefined,
+  b: ComparableAction | null | undefined,
+): boolean {
+  if (!a || !b) return false;
+  return actionComparableKey(a) === actionComparableKey(b);
+}

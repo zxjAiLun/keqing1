@@ -14,7 +14,12 @@ export function MainLayout() {
       <Sidebar />
       <main
         className="flex-1 overflow-hidden"
-        style={{ background: 'var(--page-bg)', transition: 'background var(--transition)' }}
+        style={{
+          background: 'var(--page-bg)',
+          transition: 'background var(--transition)',
+          minWidth: 0,
+          paddingTop: 'var(--mobile-shell-offset, 0px)',
+        }}
       >
         <Outlet />
       </main>

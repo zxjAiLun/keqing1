@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from typing import List, Optional
 
@@ -23,15 +24,12 @@ from keqingv1.action_space import (
     build_legal_mask,
     chi_type_idx,
 )
-from keqingv1.features import encode
-from keqingv1.model import MahjongModel
-
-
 def _find_best_legal(
     policy_logits: np.ndarray,
     legal_actions: list,
     value: float = 0.0,
     style_lambda: float = 0.0,
+    aux_bonus: float = 0.0,
 ) -> dict:
     """根据 policy logits 在合法动作中选分数最高的。
 
@@ -47,14 +45,77 @@ def _find_best_legal(
         score = policy_logits[NONE_IDX if idx == NONE_IDX else idx]
         if a.get("type") != "none":
             score += style_lambda * value
+            score += aux_bonus
         if score > best_score:
             best_score = score
             best_action = a
     return best_action
 
 
+def _legal_score(
+    policy_logits: np.ndarray,
+    action: dict,
+    value: float = 0.0,
+    style_lambda: float = 0.0,
+    aux_bonus: float = 0.0,
+) -> float:
+    """与 _find_best_legal 保持一致的单动作打分。"""
+    idx = action_to_idx(action)
+    score = float(policy_logits[NONE_IDX if idx == NONE_IDX else idx])
+    if action.get("type") != "none":
+        score += style_lambda * value
+        score += aux_bonus
+    return score
+
+
+def _get_aux_outputs(
+    model: torch.nn.Module,
+) -> dict[str, float]:
+    if not hasattr(model, "get_last_aux_outputs"):
+        return {"score_delta": 0.0, "win_prob": 0.0, "dealin_prob": 0.0}
+    try:
+        aux = model.get_last_aux_outputs()
+    except Exception:
+        return {"score_delta": 0.0, "win_prob": 0.0, "dealin_prob": 0.0}
+    return {
+        "score_delta": float(aux["score_delta"].squeeze().detach().cpu().item()),
+        "win_prob": float(torch.sigmoid(aux["win_prob"].squeeze()).detach().cpu().item()),
+        "dealin_prob": float(torch.sigmoid(aux["dealin_prob"].squeeze()).detach().cpu().item()),
+    }
+
+
+def _aux_bonus(
+    aux_outputs: dict[str, float],
+    score_delta_lambda: float,
+    win_prob_lambda: float,
+    dealin_prob_lambda: float,
+) -> float:
+    return (
+        score_delta_lambda * aux_outputs.get("score_delta", 0.0)
+        + win_prob_lambda * aux_outputs.get("win_prob", 0.0)
+        - dealin_prob_lambda * aux_outputs.get("dealin_prob", 0.0)
+    )
+
+
+def _eval_snapshot_outputs(
+    model: torch.nn.Module,
+    encode_fn,
+    device: torch.device,
+    snap: dict,
+    actor: int,
+) -> tuple[float, dict[str, float]]:
+    tile_feat, scalar = encode_fn(snap, actor)
+    tile_t = torch.from_numpy(tile_feat).unsqueeze(0).to(device)
+    scalar_t = torch.from_numpy(scalar).unsqueeze(0).to(device)
+    with torch.no_grad():
+        _, value_t = model(tile_t, scalar_t)
+    value = float(value_t.squeeze().cpu().item())
+    return value, _get_aux_outputs(model)
+
+
 def _dahai_beam_search(
     model: torch.nn.Module,
+    encode_fn,
     device: torch.device,
     snap: dict,
     actor: int,
@@ -62,6 +123,9 @@ def _dahai_beam_search(
     legal_dahai: list,
     beam_k: int,
     beam_lambda: float,
+    score_delta_lambda: float,
+    win_prob_lambda: float,
+    dealin_prob_lambda: float,
 ) -> dict:
     """对 dahai 候选做 value beam search。
 
@@ -103,15 +167,15 @@ def _dahai_beam_search(
         discards = [list(d) for d in snap.get("discards", [[], [], [], []])]
         discards[actor] = discards[actor] + [pai]
         fake_snap["discards"] = discards
+        # 打牌后不应再保留当前摸牌高亮
+        fake_snap["tsumo_pai"] = None
 
-        tile_feat, scalar = encode(fake_snap, actor)
-        tile_t = torch.from_numpy(tile_feat).unsqueeze(0).to(device)
-        scalar_t = torch.from_numpy(scalar).unsqueeze(0).to(device)
-        with torch.no_grad():
-            _, value_t = model(tile_t, scalar_t)
-        value = float(value_t.squeeze().cpu().item())
-
-        score = float(policy_logits[action_to_idx(a)]) + beam_lambda * value
+        value, aux = _eval_snapshot_outputs(model, encode_fn, device, fake_snap, actor)
+        score = (
+            float(policy_logits[action_to_idx(a)])
+            + beam_lambda * value
+            + _aux_bonus(aux, score_delta_lambda, win_prob_lambda, dealin_prob_lambda)
+        )
         value_scores[action_to_idx(a)] = score
         if score > best_score:
             best_score = score
@@ -122,6 +186,7 @@ def _dahai_beam_search(
 
 def _meld_value_eval(
     model: torch.nn.Module,
+    encode_fn,
     device: torch.device,
     snap: dict,
     actor: int,
@@ -129,6 +194,9 @@ def _meld_value_eval(
     meld_actions: list,
     none_actions: list,
     beam_lambda: float,
+    score_delta_lambda: float,
+    win_prob_lambda: float,
+    dealin_prob_lambda: float,
 ) -> dict:
     """对副露候选（chi/pon/kan）做 value beam search，与 none 对比后返回最优动作。
 
@@ -144,14 +212,12 @@ def _meld_value_eval(
     # 计算 none baseline：policy logit + beam_lambda * v_none（与 meld 评估对称）
     none_score = -1e18
     if none_actions:
-        tile_feat_none, scalar_none = encode(snap, actor)
-        tile_t_none = torch.from_numpy(tile_feat_none).unsqueeze(0).to(device)
-        scalar_t_none = torch.from_numpy(scalar_none).unsqueeze(0).to(device)
-        with torch.no_grad():
-            _, v_none_t = model(tile_t_none, scalar_t_none)
-        v_none = float(v_none_t.squeeze().cpu().item())
+        v_none, aux_none = _eval_snapshot_outputs(model, encode_fn, device, snap, actor)
+        none_bonus = _aux_bonus(aux_none, score_delta_lambda, win_prob_lambda, dealin_prob_lambda)
         for a in none_actions:
             s = float(policy_logits[action_to_idx(a)]) + beam_lambda * v_none
+            if a.get("type") != "none":
+                s += none_bonus
             value_scores[action_to_idx(a)] = s
             if s > none_score:
                 none_score = s
@@ -186,14 +252,12 @@ def _meld_value_eval(
         ]
         fake_snap["melds"] = melds
 
-        tile_feat, scalar = encode(fake_snap, actor)
-        tile_t = torch.from_numpy(tile_feat).unsqueeze(0).to(device)
-        scalar_t = torch.from_numpy(scalar).unsqueeze(0).to(device)
-        with torch.no_grad():
-            _, value_t = model(tile_t, scalar_t)
-        value = float(value_t.squeeze().cpu().item())
-
-        score = float(policy_logits[action_to_idx(a)]) + beam_lambda * value
+        value, aux = _eval_snapshot_outputs(model, encode_fn, device, fake_snap, actor)
+        score = (
+            float(policy_logits[action_to_idx(a)])
+            + beam_lambda * value
+            + _aux_bonus(aux, score_delta_lambda, win_prob_lambda, dealin_prob_lambda)
+        )
         value_scores[action_to_idx(a)] = score
         if score > best_score:
             best_score = score
@@ -204,6 +268,7 @@ def _meld_value_eval(
 
 def _reach_value_eval(
     model: torch.nn.Module,
+    encode_fn,
     device: torch.device,
     snap: dict,
     actor: int,
@@ -211,6 +276,9 @@ def _reach_value_eval(
     reach_action: dict,
     other_actions: list,
     beam_lambda: float,
+    score_delta_lambda: float,
+    win_prob_lambda: float,
+    dealin_prob_lambda: float,
 ) -> dict:
     """对 reach 决策做 value 评估：模拟立直后状态与其他动作对比。"""
     # reach 后状态：手牌不变，但 reached 标记开启
@@ -219,14 +287,11 @@ def _reach_value_eval(
     reached[actor] = True
     fake_snap["reached"] = reached
 
-    tile_feat, scalar = encode(fake_snap, actor)
-    tile_t = torch.from_numpy(tile_feat).unsqueeze(0).to(device)
-    scalar_t = torch.from_numpy(scalar).unsqueeze(0).to(device)
-    with torch.no_grad():
-        _, value_t = model(tile_t, scalar_t)
-    reach_value = float(value_t.squeeze().cpu().item())
+    reach_value, reach_aux = _eval_snapshot_outputs(model, encode_fn, device, fake_snap, actor)
     reach_score = (
-        float(policy_logits[action_to_idx(reach_action)]) + beam_lambda * reach_value
+        float(policy_logits[action_to_idx(reach_action)])
+        + beam_lambda * reach_value
+        + _aux_bonus(reach_aux, score_delta_lambda, win_prob_lambda, dealin_prob_lambda)
     )
 
     value_scores: dict = {action_to_idx(reach_action): reach_score}
@@ -254,6 +319,10 @@ class KeqingBot:
         verbose: bool = False,
         beam_k: int = 3,
         beam_lambda: float = 1.0,
+        score_delta_lambda: float = 0.20,
+        win_prob_lambda: float = 0.20,
+        dealin_prob_lambda: float = 0.25,
+        model_version: Optional[str] = None,
     ):
         self.player_id = player_id
         self.verbose = verbose
@@ -265,14 +334,30 @@ class KeqingBot:
         # beam_k > 0 时，dahai 阶段对 top-k 候选做 value beam search
         self.beam_k = beam_k
         self.beam_lambda = beam_lambda
+        self.score_delta_lambda = score_delta_lambda
+        self.win_prob_lambda = win_prob_lambda
+        self.dealin_prob_lambda = dealin_prob_lambda
 
         ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
         state_dict = ckpt.get("model", ckpt)
-        # 从 checkpoint 自动推断 n_scalar（兼容旧版 N_SCALAR=16）
+        c_tile = state_dict["input_proj.0.weight"].shape[1]
         n_scalar = state_dict["scalar_proj.0.weight"].shape[1]
-        self.model = MahjongModel(
+        inferred_version = model_version or (
+            "keqingv3" if (c_tile == 57 and n_scalar == 56) else "keqingv1"
+        )
+        if inferred_version == "keqingv3":
+            features_mod = importlib.import_module("keqingv3.features")
+            model_mod = importlib.import_module("keqingv3.model")
+        else:
+            features_mod = importlib.import_module("keqingv1.features")
+            model_mod = importlib.import_module("keqingv1.model")
+        self._model_version = inferred_version
+        self._encode = features_mod.encode
+        model_cls = model_mod.MahjongModel
+        self.model = model_cls(
             hidden_dim=hidden_dim,
             num_res_blocks=num_res_blocks,
+            c_tile=c_tile,
             n_scalar=n_scalar,
         )
         self.model.load_state_dict(state_dict)
@@ -330,6 +415,12 @@ class KeqingBot:
             needs_response = True
         elif etype == "dahai" and event.get("actor") != actor:
             # 他家弃牌，可能需要鸣牌/荣和/pass；决策时自家手牌未变，apply 前记录
+            _pre_snap = state.snapshot(actor)
+            _pre_apply_hand = _pre_snap.get("hand", [])
+            _pre_apply_melds = (_pre_snap.get("melds") or [[], [], [], []])[actor]
+            apply_event(state, event)
+            needs_response = True
+        elif etype == "kakan" and event.get("actor") != actor:
             _pre_snap = state.snapshot(actor)
             _pre_apply_hand = _pre_snap.get("hand", [])
             _pre_apply_melds = (_pre_snap.get("melds") or [[], [], [], []])[actor]
@@ -415,7 +506,7 @@ class KeqingBot:
             return None
         if not non_none:
             return {"type": "none", "actor": actor}
-        tile_feat, scalar = encode(snap, actor)
+        tile_feat, scalar = self._encode(snap, actor)
 
         tile_t = torch.from_numpy(tile_feat).unsqueeze(0).to(self.device)  # (1, C, 34)
         scalar_t = torch.from_numpy(scalar).unsqueeze(0).to(self.device)  # (1, S)
@@ -423,6 +514,13 @@ class KeqingBot:
         policy_logits, value_t = self.model(tile_t, scalar_t)
         logits_np = policy_logits.squeeze(0).cpu().numpy()  # (45,)
         value_scalar = float(value_t.squeeze().cpu().item())  # scalar
+        aux_outputs = _get_aux_outputs(self.model)
+        aux_bonus = _aux_bonus(
+            aux_outputs,
+            self.score_delta_lambda,
+            self.win_prob_lambda,
+            self.dealin_prob_lambda,
+        )
 
         # Action dataclass → mjai dict
         legal_dicts = [a.to_mjai() for a in legal_actions]
@@ -451,6 +549,7 @@ class KeqingBot:
             ]
             chosen, beam_value_scores = _meld_value_eval(
                 self.model,
+                self._encode,
                 self.device,
                 snap,
                 actor,
@@ -458,20 +557,39 @@ class KeqingBot:
                 legal_meld,
                 legal_none,
                 beam_lambda=self.beam_lambda,
+                score_delta_lambda=self.score_delta_lambda,
+                win_prob_lambda=self.win_prob_lambda,
+                dealin_prob_lambda=self.dealin_prob_lambda,
             )
-            # 若 chosen 是 none 但还有 hora/dahai 等更优选项，回退到 _find_best_legal
-            if chosen.get("type") == "none" and len(non_meld) > 1:
-                chosen = _find_best_legal(
+            # meld beam 之外的合法动作（如 hora）仍需参与最终比较
+            if non_meld:
+                fallback = _find_best_legal(
                     logits_np,
                     non_meld,
                     value=value_scalar,
                     style_lambda=self.style_vec[0],
+                    aux_bonus=aux_bonus,
                 )
+                if _legal_score(
+                    logits_np,
+                    fallback,
+                    value=value_scalar,
+                    style_lambda=self.style_vec[0],
+                    aux_bonus=aux_bonus,
+                ) > _legal_score(
+                    logits_np,
+                    chosen,
+                    value=value_scalar,
+                    style_lambda=self.style_vec[0],
+                    aux_bonus=aux_bonus,
+                ):
+                    chosen = fallback
         elif self.beam_k > 0 and legal_reach:
             # 立直决策：对 reach 做 value 评估
             non_reach = [a for a in legal_dicts if a.get("type") != "reach"]
             chosen, beam_value_scores = _reach_value_eval(
                 self.model,
+                self._encode,
                 self.device,
                 snap,
                 actor,
@@ -479,11 +597,15 @@ class KeqingBot:
                 legal_reach[0],
                 non_reach,
                 beam_lambda=self.beam_lambda,
+                score_delta_lambda=self.score_delta_lambda,
+                win_prob_lambda=self.win_prob_lambda,
+                dealin_prob_lambda=self.dealin_prob_lambda,
             )
         elif self.beam_k > 0 and len(legal_dahai) > 1:
             # 打牌决策：top-k dahai value beam search
             chosen, beam_value_scores = _dahai_beam_search(
                 self.model,
+                self._encode,
                 self.device,
                 snap,
                 actor,
@@ -491,6 +613,9 @@ class KeqingBot:
                 legal_dahai,
                 beam_k=self.beam_k,
                 beam_lambda=self.beam_lambda,
+                score_delta_lambda=self.score_delta_lambda,
+                win_prob_lambda=self.win_prob_lambda,
+                dealin_prob_lambda=self.dealin_prob_lambda,
             )
         else:
             chosen = _find_best_legal(
@@ -498,6 +623,7 @@ class KeqingBot:
                 legal_dicts,
                 value=value_scalar,
                 style_lambda=self.style_vec[0],
+                aux_bonus=aux_bonus,
             )
 
         # 同巡振听：如果有 hora 选项但选了 none，则设置同巡振听
@@ -531,9 +657,11 @@ class KeqingBot:
                 "bakaze": snap.get("bakaze", ""),
                 "kyoku": snap.get("kyoku", 0),
                 "honba": snap.get("honba", 0),
+                "oya": snap.get("oya", 0),
                 "scores": snap.get("scores", []),
                 "hand": snap.get("hand", []),
                 "discards": snap.get("discards", []),
+                "melds": snap.get("melds", []),
                 "dora_markers": snap.get("dora_markers", []),
                 "reached": snap.get("reached", []),
                 "actor_to_move": snap.get(
@@ -544,6 +672,7 @@ class KeqingBot:
                 "candidates": scored,
                 "chosen": chosen,
                 "value": value_scalar,
+                "aux_outputs": aux_outputs,
                 "gt_action": gt_action,
             }
         )

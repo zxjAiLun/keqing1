@@ -5,8 +5,9 @@ import { Loader2 } from 'lucide-react';
 import type { ReplayData } from '../types/replay';
 import type { DecisionLogEntry } from '../types/replay';
 import { replayApi } from '../api/replayApi';
-import { actionLabel } from '../utils/tileUtils';
+import { actionComparableKey, actionLabel, sameReplayAction } from '../utils/tileUtils';
 import { CN_BAKAZE, SEAT_NAMES_CN } from '../utils/constants';
+import { normalizeReplayPlayerNames, replayPlayerDisplayName } from '../utils/replayNames';
 
 const TILE_BASE = '/tiles';
 const TILE_SVG: Record<string, string> = {
@@ -100,8 +101,7 @@ function CandidateTable({
   gtAction: import('../types/replay').Action | null;
 }) {
   const hasBeam = candidates.some(c => c.beam_score !== undefined);
-  const actKey = (a: import('../types/replay').Action | null) =>
-    a ? `${a.type}|${a.pai ?? ''}|${(a.consumed ?? []).join(',')}` : '';
+  const actKey = (a: import('../types/replay').Action | null) => actionComparableKey(a);
   const chosenKey = actKey(chosen);
   const gtKey = actKey(gtAction);
   return (
@@ -143,9 +143,9 @@ function CandidateTable({
 // 统计面板
 // ---------------------------------------------------------------------------
 export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () => void }) {
-  const log = data.log;
+  const log = data.log.filter(e => !e.is_obs);
   const total = log.length;
-  const match = data.match_count || 0;
+  const match = log.filter((e) => sameReplayAction(e.chosen, e.gt_action)).length;
   const pct = total ? (match / total * 100).toFixed(1) : '0.0';
   const dahaiCount = log.filter(e => e.chosen?.type === 'dahai').length;
   const dahaiRate = total ? ((dahaiCount / total) * 100).toFixed(0) : '0';
@@ -155,7 +155,7 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
     const t = e.chosen?.type || '?';
     if (!byType[t]) byType[t] = { total: 0, match: 0 };
     byType[t].total++;
-    if (e.gt_action && e.chosen?.type === e.gt_action.type && e.chosen?.pai === e.gt_action.pai) byType[t].match++;
+    if (sameReplayAction(e.chosen, e.gt_action)) byType[t].match++;
   });
   const labels: Record<string, string> = { dahai:'打牌', none:'过', reach:'立直', chi:'吃', pon:'碰', daiminkan:'大明杠', ankan:'暗杠', kakan:'加杠', hora:'胡', ryukyoku:'流局' };
 
@@ -165,7 +165,7 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
     const t = e.chosen?.pai || '?';
     if (!byTile[t]) byTile[t] = { total: 0, match: 0 };
     byTile[t].total++;
-    if (e.gt_action?.type === 'dahai' && e.chosen?.pai === e.gt_action?.pai) byTile[t].match++;
+    if (e.gt_action?.type === 'dahai' && sameReplayAction(e.chosen, e.gt_action)) byTile[t].match++;
   });
 
   return (
@@ -248,7 +248,26 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
 // ---------------------------------------------------------------------------
 // 单步卡片
 // ---------------------------------------------------------------------------
-function StepCard({ entry }: { entry: DecisionLogEntry }) {
+function StepCard({ entry, playerNames }: { entry: DecisionLogEntry; playerNames: string[] }) {
+  // obs 步：简化渲染
+  if (entry.is_obs) {
+    const k = entry.kyoku_key || entry;
+    const kyokuLabel = `${CN_BAKAZE[k.bakaze] || k.bakaze}${k.kyoku}局 ${k.honba}本场`;
+    const actor = entry.actor_to_move ?? entry.chosen?.actor ?? '?';
+    return (
+      <div className="step-card" style={{ opacity: 0.6, borderLeft: '3px solid #3498db' }}>
+        <div className="step-top">
+          <div className="step-header">{kyokuLabel} · Step {entry.step}</div>
+          <div className="step-meta-right">
+            <span className="action-chip none">
+              {replayPlayerDisplayName(playerNames, Number(actor))}: {actionLabel(entry.chosen)}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const tiles = buildSortedTiles(entry);
   const isDahai = entry.chosen?.type === 'dahai' || entry.chosen?.type === 'none';
 
@@ -268,9 +287,7 @@ function StepCard({ entry }: { entry: DecisionLogEntry }) {
     return 'gt';
   })();
 
-  const isMatch = entry.gt_action !== null
-    && entry.chosen?.type === entry.gt_action.type
-    && entry.chosen?.pai === entry.gt_action.pai;
+  const isMatch = sameReplayAction(entry.chosen, entry.gt_action);
 
   const k = entry.kyoku_key || entry;
   const kyokuLabel = `${CN_BAKAZE[k.bakaze] || k.bakaze}${k.kyoku}局 ${k.honba}本场`;
@@ -443,9 +460,10 @@ export function ReplayViewPage() {
 
   const isDiff = useCallback((e: DecisionLogEntry) =>
     data !== null &&
+    !e.is_obs &&
     e.actor_to_move === data.player_id &&
     e.gt_action !== null &&
-    (e.chosen.type !== e.gt_action.type || e.chosen.pai !== e.gt_action.pai)
+    !sameReplayAction(e.chosen, e.gt_action)
   , [data]);
 
   const jumpToPrevDiff = useCallback(() => {
@@ -538,6 +556,7 @@ export function ReplayViewPage() {
   const ko = data.kyoku_order[curKyoku];
   const kyokuLabel = ko ? `第${CN_BAKAZE[ko.bakaze] || ko.bakaze}${ko.kyoku}局 ${ko.honba}本场 (${curKyoku + 1}/${numKyoku})` : '';
   const pid = data.player_id || 0;
+  const playerNames = normalizeReplayPlayerNames(data);
 
   return (
     <div style={{ background: 'var(--page-bg)', height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -583,7 +602,7 @@ export function ReplayViewPage() {
         <div style={{ maxWidth: 860, margin: '0 auto' }}>
           {visibleSteps.map(entry => (
             <div key={entry.step} ref={el => { if (el) stepRefs.current.set(entry.step, el); else stepRefs.current.delete(entry.step); }}>
-              <StepCard entry={entry} />
+              <StepCard entry={entry} playerNames={playerNames} />
             </div>
           ))}
           {visibleSteps.length === 0 && (

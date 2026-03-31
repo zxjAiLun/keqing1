@@ -117,6 +117,8 @@ const containerStyle: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   gap: 8,
+  width: '100%',
+  maxWidth: 920,
   padding: '10px 14px',
   borderRadius: 'var(--radius-md)',
   background: 'var(--card-bg)',
@@ -127,13 +129,14 @@ const containerStyle: React.CSSProperties = {
 
 function btnStyle(type: string): React.CSSProperties {
   const base: React.CSSProperties = {
-    padding: '7px 18px',
+    padding: '6px 14px',
     borderRadius: 'var(--radius-sm)',
     border: 'none',
     fontWeight: 700,
-    fontSize: 13,
+    fontSize: 12,
     cursor: 'pointer',
     transition: 'opacity 0.15s',
+    whiteSpace: 'nowrap',
   };
   switch (type) {
     case "hora":

@@ -65,7 +65,7 @@ def get_or_create_bot(bot_id: int) -> Any:
             os.path.dirname(os.path.dirname(v5model.__file__))
         )
         model_name = current_bot_model
-        if model_name in ("keqingv1", "keqingv2"):
+        if model_name in ("keqingv1", "keqingv2", "keqingv3"):
             from keqingv1.bot import KeqingBot
 
             model_path = os.path.join(
@@ -73,7 +73,7 @@ def get_or_create_bot(bot_id: int) -> Any:
             )
             print(f"[Bot] Loading {model_name} model from: {model_path}")
             bots[bot_id] = KeqingBot(
-                player_id=bot_id, model_path=model_path, device="cpu", verbose=False
+                player_id=bot_id, model_path=model_path, device="cuda", verbose=False
             )
         else:
             from v5model.bot import V5Bot
@@ -83,13 +83,29 @@ def get_or_create_bot(bot_id: int) -> Any:
             )
             print(f"[Bot] Loading {model_name} model from: {model_path}")
             bots[bot_id] = V5Bot(
-                player_id=bot_id, model_path=model_path, device="cpu", verbose=False
+                player_id=bot_id, model_path=model_path, device="cuda", verbose=False
             )
     return bots[bot_id]
 
 
 bot_driver = BotDriver(manager, get_or_create_bot)
 _advance_lock = asyncio.Lock()
+
+
+def _prepare_player_state(room: BattleRoom, player_id: int) -> Dict[str, Any]:
+    """返回玩家可见状态；若轮到该玩家摸牌，先做幂等补摸。"""
+    if (
+        room.phase == "playing"
+        and room.state.actor_to_move == player_id
+        and room.state.last_tsumo[player_id] is None
+        and room.human_player_id == player_id
+        and room.remaining_wall() >= 1
+        and not room.state.last_discard
+    ):
+        hand_size = sum(room.state.players[player_id].hand.values())
+        if hand_size not in (11, 12):
+            manager.draw(room, player_id)
+    return manager.get_state_for_player(room, player_id=player_id)
 
 
 class PlayerInfo(BaseModel):
@@ -102,7 +118,7 @@ class StartBattleRequest(BaseModel):
     player_name: str = "Player"
     bot_count: int = 3
     seed: Optional[int] = None
-    bot_model: str = "modelv5"  # modelv5 / modelv5_naga / keqingv1 / keqingv2
+    bot_model: str = "modelv5"  # modelv5 / keqingv1 / keqingv2 / keqingv3
 
 
 class StartBattleResponse(BaseModel):
@@ -154,7 +170,7 @@ async def start_battle(req: StartBattleRequest) -> StartBattleResponse:
     for bot_id in range(1, 4):
         get_or_create_bot(bot_id).reset()
 
-    state = manager.get_state_for_player(room, player_id=0)
+    state = _prepare_player_state(room, player_id=0)
     return StartBattleResponse(game_id=room.game_id, state=state)
 
 
@@ -198,20 +214,7 @@ async def get_state(game_id: str, player_id: int = 0) -> GetStateResponse:
     if not room:
         raise HTTPException(status_code=404, detail="Game not found")
 
-    # 幂等摸牌：只有在人类玩家摸牌回合（非 chi/pon 后打牌）才摸牌
-    if (
-        room.phase == "playing"
-        and room.state.actor_to_move == player_id
-        and room.state.last_tsumo[player_id] is None
-        and room.human_player_id == player_id
-        and room.remaining_wall() >= 1
-        and not room.state.last_discard  # 有弃牌时是响应弃牌阶段，不摸牌
-    ):
-        hand_size = sum(room.state.players[player_id].hand.values())
-        if hand_size not in (11, 12):  # chi后11张，pon后12张，不摸牌
-            manager.draw(room, player_id)
-
-    state = manager.get_state_for_player(room, player_id=player_id)
+    state = _prepare_player_state(room, player_id=player_id)
     return GetStateResponse(state=state)
 
 
@@ -273,19 +276,7 @@ async def reconnect(game_id: str, player_id: int = 0) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Game not found")
     room.last_heartbeat = time.time()
     room.disconnected = False
-    # 若轮到人类但牌还没摸，先摸牌
-    if (
-        room.phase == "playing"
-        and room.state.actor_to_move == player_id
-        and room.human_player_id == player_id
-        and room.state.last_tsumo[player_id] is None
-        and not room.state.last_discard
-        and room.remaining_wall() >= 1
-    ):
-        hand_size = sum(room.state.players[player_id].hand.values())
-        if hand_size not in (11, 12):
-            manager.draw(room, player_id)
-    state = manager.get_state_for_player(room, player_id=player_id)
+    state = _prepare_player_state(room, player_id=player_id)
     return {"reconnected": True, "state": state}
 
 
@@ -322,9 +313,7 @@ async def do_action(req: ActionRequest) -> ActionResponse:
         raise HTTPException(status_code=400, detail=error)
 
     human_player_id = room.human_player_id
-    state = manager.get_state_for_player(
-        room, player_id=human_player_id if human_player_id >= 0 else 0
-    )
+    state = _prepare_player_state(room, player_id=human_player_id if human_player_id >= 0 else 0)
     return ActionResponse(success=True, state=state, bot_action=None)
 
 
@@ -342,11 +331,29 @@ async def advance_bot(game_id: str) -> ActionResponse:
         if room.phase != "ended":
             next_actor = room.state.actor_to_move
             if next_actor is not None and next_actor != human_player_id:
-                last_bot_action = await bot_driver.take_turn(room, next_actor)
+                is_discard_response = bool(
+                    room.state.last_discard
+                    and room.state.last_discard.get("actor") != next_actor
+                )
+                is_kakan_response = bool(
+                    room.state.last_kakan
+                    and room.state.last_kakan.get("actor") != next_actor
+                )
+                needs_draw_stage = (
+                    not is_discard_response
+                    and not is_kakan_response
+                    and room.replay_draw_actor != next_actor
+                    and room.state.last_tsumo[next_actor] is None
+                )
 
-    state = manager.get_state_for_player(
-        room, player_id=human_player_id if human_player_id >= 0 else 0
-    )
+                if needs_draw_stage:
+                    draw_tile = manager.prepare_turn(room, next_actor)
+                    if room.phase != "ended" and draw_tile is None and room.replay_draw_actor != next_actor:
+                        last_bot_action = await bot_driver.take_turn(room, next_actor)
+                elif room.replay_draw_actor == next_actor or is_discard_response or is_kakan_response:
+                    last_bot_action = await bot_driver.take_turn(room, next_actor)
+
+    state = _prepare_player_state(room, player_id=human_player_id if human_player_id >= 0 else 0)
     return ActionResponse(success=True, state=state, bot_action=last_bot_action)
 
 

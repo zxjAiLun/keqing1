@@ -34,11 +34,12 @@ export function BattlePage() {
     } finally {
       setLoading(false);
     }
-  }, [playerName]);
+  }, [playerName, botModel]);
 
   const handleAction = useCallback(
     async (action: Action) => {
       if (!gameId) return;
+      if (pendingActionRef.current) return;
       pendingActionRef.current = true;
       setLoading(true);
       try {
@@ -78,6 +79,12 @@ export function BattlePage() {
     noMeld,
     autoTsumogiri,
   });
+
+  useEffect(() => {
+    if (isMyTurn) return;
+    setSelectedTile(null);
+    setSelectedTileIdx(null);
+  }, [isMyTurn, state?.game_id, state?.actor_to_move, state?.last_discard]);
 
   // 自动化：自动胡牌 / 不响应附露 / 自动摸切 / 仅none自动跳过
   useEffect(() => {
@@ -400,6 +407,7 @@ export function BattlePage() {
         autoHora={autoHora} setAutoHora={setAutoHora}
         noMeld={noMeld} setNoMeld={setNoMeld}
         autoTsumogiri={autoTsumogiri} setAutoTsumogiri={setAutoTsumogiri}
+        actionPending={loading}
       />
 
       {/* 退出按钮 */}

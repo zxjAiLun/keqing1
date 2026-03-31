@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef } from "react";
 import { MahjongTable } from "../components/BattleBoard/MahjongTable";
 import { fetchWithTimeout } from "../api/battleApi";
+import { PageHeader, PageShell, SectionTitle, subtleButtonStyle } from "../components/Layout/PageScaffold";
 
 export function BotBattlePage() {
   const [gameId, setGameId] = useState<string | null>(null);
@@ -68,17 +69,23 @@ export function BotBattlePage() {
 
   if (!state) {
     return (
-      <div
-        style={{
-          background: "var(--page-bg)",
-          minHeight: "100%",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 24,
-        }}
-      >
+      <PageShell width={720}>
+        <PageHeader
+          eyebrow="Bot Arena"
+          title="4 Bot 对战"
+          description="用于观察模型之间的完整对局流程。适合快速回看回合推进和导出实验牌谱。"
+        />
+        <div
+          style={{
+            background: "var(--page-bg)",
+            minHeight: "60vh",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 24,
+          }}
+        >
         <div
           style={{
             width: 64,
@@ -99,6 +106,7 @@ export function BotBattlePage() {
         </h1>
 
         <div className="card" style={{ maxWidth: 320 }}>
+          <SectionTitle title="开始一局自动对战" description="启动后会持续轮询局面，结束后可导出实验结果。" />
           <button
             onClick={startBotBattle}
             disabled={loading}
@@ -127,12 +135,18 @@ export function BotBattlePage() {
         <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
           4个 AI 自动对战
         </p>
-      </div>
+        </div>
+      </PageShell>
     );
   }
 
   return (
-    <div style={{ height: "100%", padding: 16, background: "var(--page-bg)" }}>
+    <PageShell width={1400}>
+      <PageHeader
+        eyebrow="Bot Arena"
+        title="4 Bot 对战"
+        description="实时观察自动对战流程。结束后可以直接导出 Mjai 或 Tenhou6 牌谱。"
+      />
       {state.phase === "ended" && (
         <div
           style={{
@@ -140,6 +154,7 @@ export function BotBattlePage() {
             gap: 12,
             marginBottom: 12,
             justifyContent: "center",
+            flexWrap: "wrap",
           }}
         >
           <button
@@ -176,32 +191,24 @@ export function BotBattlePage() {
           </button>
           <button
             onClick={() => { setState(null); setGameId(null); }}
-            style={{
-              padding: "8px 16px",
-              borderRadius: "var(--radius-sm)",
-              border: "1px solid var(--border)",
-              background: "var(--card-bg)",
-              color: "var(--text-primary)",
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: "pointer",
-              transition: "background var(--transition), border-color var(--transition)",
-            }}
+            style={subtleButtonStyle}
           >
             再来一局
           </button>
         </div>
       )}
-      <MahjongTable
-        state={state}
-        onAction={() => {}}
-        isMyTurn={false}
-        selectedTile={null}
-        onTileSelect={() => {}}
-        autoHora={false} setAutoHora={() => {}}
-        noMeld={false} setNoMeld={() => {}}
-        autoTsumogiri={false} setAutoTsumogiri={() => {}}
-      />
-    </div>
+      <div style={{ height: "calc(100dvh - 180px)", minHeight: 640, background: "var(--page-bg)" }}>
+        <MahjongTable
+          state={state}
+          onAction={() => {}}
+          isMyTurn={false}
+          selectedTile={null}
+          onTileSelect={() => {}}
+          autoHora={false} setAutoHora={() => {}}
+          noMeld={false} setNoMeld={() => {}}
+          autoTsumogiri={false} setAutoTsumogiri={() => {}}
+        />
+      </div>
+    </PageShell>
   );
 }

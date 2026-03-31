@@ -33,17 +33,17 @@ function TenhouUrlInput({ value, onChange }: { value: string; onChange: (v: stri
         style={{
           width: '100%',
           padding: '10px 12px',
-          border: '1px solid #d1d5db',
-          borderRadius: 6,
+          border: '1px solid var(--border)',
+          borderRadius: 8,
           fontSize: 13,
           fontFamily: '"Menlo", "Consolas", monospace',
-          color: '#1f2937',
-          background: '#fff',
+          color: 'var(--text-primary)',
+          background: 'var(--card-bg)',
           outline: 'none',
           boxSizing: 'border-box',
         }}
       />
-      <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 4 }}>
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
         视角将自动从链接的 <code>tw=</code> 参数解析，无需手动选择
       </div>
     </div>
@@ -67,7 +67,8 @@ function MjaiJsonInput({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const addFiles = (incoming: File[]) => {
-    onFilesChange([...files, ...incoming.filter(f => !files.some(p => p.name === f.name))]);
+    const next = incoming.find(Boolean);
+    onFilesChange(next ? [next] : []);
   };
 
   return (
@@ -78,23 +79,23 @@ function MjaiJsonInput({
         onDragOver={e => e.preventDefault()}
         onDrop={e => { e.preventDefault(); addFiles(Array.from(e.dataTransfer.files)); }}
         style={{
-          border: '2px dashed #d1d5db',
+          border: '2px dashed var(--border)',
           borderRadius: 8,
           padding: 16,
           textAlign: 'center',
           cursor: 'pointer',
-          color: '#9ca3af',
+          color: 'var(--text-muted)',
           fontSize: 13,
           marginBottom: 8,
-          transition: 'border-color 0.2s',
+          background: 'var(--page-bg)',
+          transition: 'border-color 0.2s, background 0.2s',
         }}
       >
-        📁 点击或拖拽 .json / .jsonl 文件
+        📁 点击或拖拽一个 .json / .jsonl 文件
         <input
           ref={fileInputRef}
           type="file"
           accept=".json,.jsonl,.txt"
-          multiple
           style={{ display: 'none' }}
           onChange={e => addFiles(Array.from(e.target.files || []))}
         />
@@ -104,11 +105,11 @@ function MjaiJsonInput({
       {files.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
           {files.map(f => (
-            <div key={f.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: '#f3f4f6', border: '1px solid #e5e7eb', borderRadius: 4, padding: '2px 8px', fontSize: 12 }}>
+            <div key={f.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'var(--page-bg)', border: '1px solid var(--border)', borderRadius: 999, padding: '4px 10px', fontSize: 12, color: 'var(--text-secondary)' }}>
               📄 {f.name}
               <span
                 onClick={() => onFilesChange(files.filter(p => p.name !== f.name))}
-                style={{ cursor: 'pointer', color: '#9ca3af', fontWeight: 'bold' }}
+                style={{ cursor: 'pointer', color: 'var(--text-muted)', fontWeight: 'bold' }}
               >×</span>
             </div>
           ))}
@@ -124,18 +125,18 @@ function MjaiJsonInput({
           width: '100%',
           height: 110,
           padding: '10px 12px',
-          border: '1px solid #d1d5db',
-          borderRadius: 6,
+          border: '1px solid var(--border)',
+          borderRadius: 8,
           fontSize: 13,
           fontFamily: '"Menlo", "Consolas", monospace',
           resize: 'vertical',
-          color: '#1f2937',
-          background: '#fff',
+          color: 'var(--text-primary)',
+          background: 'var(--card-bg)',
           outline: 'none',
           boxSizing: 'border-box',
         }}
       />
-      <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 4 }}>mjai JSONL 格式；需手动选择视角</div>
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>支持粘贴或上传单个 mjai / JSON 文件；需手动选择视角</div>
     </div>
   );
 }
@@ -221,11 +222,11 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
     padding: '7px 20px',
     fontSize: 13,
     fontWeight: active ? 600 : 400,
-    color: active ? '#fff' : '#6b7280',
-    background: active ? '#3498db' : 'transparent',
+    color: active ? '#fff' : 'var(--text-secondary)',
+    background: active ? 'var(--accent)' : 'transparent',
     border: '1px solid',
-    borderColor: active ? '#3498db' : '#d1d5db',
-    borderRadius: 6,
+    borderColor: active ? 'var(--accent)' : 'var(--border)',
+    borderRadius: 8,
     cursor: 'pointer',
     transition: 'all 0.15s',
   });
@@ -233,11 +234,11 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
   const selectStyle: React.CSSProperties = {
     width: '100%',
     padding: '8px 12px',
-    border: '1px solid #d1d5db',
-    borderRadius: 6,
+    border: '1px solid var(--border)',
+    borderRadius: 8,
     fontSize: 14,
-    background: '#fff',
-    color: '#1f2937',
+    background: 'var(--card-bg)',
+    color: 'var(--text-primary)',
   };
 
   return (
@@ -261,7 +262,7 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
 
         {/* 视角座位 */}
         <div style={{ flex: 1, minWidth: 160 }}>
-          <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 6, display: 'block' }}>视角座位</label>
+          <label style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, display: 'block' }}>视角座位</label>
           <select value={playerId} onChange={e => setPlayerId(e.target.value)} style={selectStyle}>
             {inputType === 'tenhou_url' && <option value="auto">自动（来自链接 tw=）</option>}
             <option value="0">东家</option>
@@ -273,7 +274,7 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
 
         {/* 模型类型 */}
         <div style={{ flex: 1, minWidth: 130 }}>
-          <label style={{ fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 6, display: 'block' }}>模型类型</label>
+          <label style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, display: 'block' }}>模型类型</label>
           <select value={botModel} onChange={e => setBotModel(e.target.value)} style={selectStyle}>
             <option value={LATEST_MODEL}>最新（{MODEL_LIST[0].label}）</option>
             {MODEL_LIST.slice(1).map(m => (
@@ -289,8 +290,8 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
           style={{
             height: 40,
             padding: '0 28px',
-            background: '#3498db',
-            color: '#fff',
+            background: 'var(--btn-primary-bg)',
+            color: 'var(--btn-primary-text)',
             border: 'none',
             borderRadius: 8,
             fontSize: 15,
@@ -310,8 +311,8 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
         </button>
       </div>
 
-      {error   && <div style={{ marginTop: 10, fontSize: 13, color: '#dc2626' }}>{error}</div>}
-      {success && <div style={{ marginTop: 10, fontSize: 13, color: '#16a34a' }}>{success}</div>}
+      {error   && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--error)' }}>{error}</div>}
+      {success && <div style={{ marginTop: 10, fontSize: 13, color: 'var(--success)' }}>{success}</div>}
     </form>
   );
 }

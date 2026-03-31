@@ -95,14 +95,16 @@ export function Tile({ tile, size = "normal", selected, highlighted, onClick, cl
 interface TileBackProps {
   size?: "small" | "normal" | "large";
   className?: string;
-  rotated?: boolean;
+  orientation?: 0 | 90 | 180 | 270;
 }
 
-export function TileBack({ size = "normal", className = "", rotated = false }: TileBackProps) {
+export function TileBack({ size = "normal", className = "", orientation = 0 }: TileBackProps) {
   const dim = TILE_SIZES[size];
+  const rotated = orientation === 90 || orientation === 270;
+  const isFlipped = orientation === 180 || orientation === 270;
 
-  // 旋转90deg后，阴影的X偏移要取反（右下→左下）
-  const shadowOffsetX = rotated ? -3 : 3;
+  const shadowOffsetX = orientation === 90 ? -3 : orientation === 270 ? 3 : 3;
+  const shadowOffsetY = isFlipped ? -4 : 4;
 
   // 旋转后内部高光方向跟着转
   const topGrad = rotated
@@ -123,13 +125,13 @@ export function TileBack({ size = "normal", className = "", rotated = false }: T
         borderRadius: 4,
         background: "var(--tile-back-bg)",
         boxShadow: [
-          `${shadowOffsetX}px 4px 0px #b0bac8`,
-          `${shadowOffsetX * 2}px 6px 0px #9aa5b0`,
-          `${shadowOffsetX * 2 + 2}px 8px 6px rgba(0,0,0,0.4)`,
+          `${shadowOffsetX}px ${shadowOffsetY}px 0px #b0bac8`,
+          `${shadowOffsetX * 2}px ${shadowOffsetY + 2}px 0px #9aa5b0`,
+          `${shadowOffsetX * 2 + 2}px ${shadowOffsetY + 4}px 6px rgba(0,0,0,0.4)`,
         ].join(", "),
         flexShrink: 0,
         overflow: "hidden",
-        transform: rotated ? "rotate(90deg)" : undefined,
+        transform: orientation ? `rotate(${orientation}deg)` : undefined,
         transition: "transform 0.2s ease",
       }}
     >

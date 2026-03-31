@@ -52,6 +52,58 @@ if _REACT_DIST.exists():
 from replay.storage import get_storage
 
 
+def _normalize_replay_decisions(decisions: dict, meta: dict | None = None) -> dict:
+    from replay.bot import _same_action
+
+    if not isinstance(decisions, dict):
+        return decisions
+
+    log = decisions.get("log", [])
+    player_id = decisions.get("player_id")
+    response_action_types = {"chi", "pon", "daiminkan", "ankan", "kakan", "hora"}
+    pending_idx: int | None = None
+    for idx, entry in enumerate(log):
+        if not entry.get("is_obs") and entry.get("gt_action") is None:
+            pending_idx = idx
+        if pending_idx is None:
+            continue
+        if idx == pending_idx:
+            continue
+        pending = log[pending_idx]
+        if pending.get("gt_action") is not None:
+            pending_idx = None
+            continue
+        chosen = pending.get("chosen") or {}
+        candidates = pending.get("candidates", [])
+        has_none_candidate = any(
+            c.get("action", {}).get("type") == "none" for c in candidates
+        )
+        has_non_none_candidate = any(
+            c.get("action", {}).get("type") != "none" for c in candidates
+        )
+        if chosen.get("type") == "none" and has_non_none_candidate:
+            pending["gt_action"] = {"type": "none", "actor": player_id}
+            pending_idx = None
+        elif chosen.get("type") in response_action_types and has_none_candidate:
+            pending["gt_action"] = {
+                **chosen,
+                "actor": chosen.get("actor", player_id),
+            }
+            pending_idx = None
+
+    own_log = [e for e in log if not e.get("is_obs")]
+    total_ops = len(own_log)
+    match_count = sum(1 for e in own_log if _same_action(e.get("chosen"), e.get("gt_action")))
+    return {
+        **decisions,
+        "log": log,
+        "total_ops": total_ops,
+        "match_count": match_count,
+        "bot_type": (meta or {}).get("bot_type", decisions.get("bot_type")),
+        "player_names": decisions.get("player_names") or (meta or {}).get("player_names"),
+    }
+
+
 # ========== 旧接口（兼容） ==========
 
 @app.post("/api/replay")
@@ -71,12 +123,17 @@ async def replay(
 
     try:
         if has_files:
-            return JSONResponse(status_code=400, content={"error": "多文件模式暂不支持"})
-
-        if not json_text.strip():
+            valid_files = [f for f in files if f.filename]
+            if len(valid_files) > 1:
+                return JSONResponse(status_code=400, content={"error": "暂不支持多文件跑谱，请一次上传一个文件"})
+            upload = valid_files[0]
+            text = (await upload.read()).decode("utf-8", errors="replace").strip()
+            if not text:
+                return JSONResponse(status_code=400, content={"error": "上传文件为空"})
+        elif not json_text.strip():
             return JSONResponse(status_code=400, content={"error": "请上传文件或粘贴 JSON 文本"})
-
-        text = json_text.strip()
+        else:
+            text = json_text.strip()
 
         if input_type == "url":
             parsed = urlparse(text)
@@ -124,7 +181,7 @@ async def replay(
         else:
             return JSONResponse(status_code=400, content={"error": f"未知的 input_type：{input_type}"})
 
-        result = render_replay_json(bot)
+        result = _normalize_replay_decisions(render_replay_json(bot))
         return Response(
             content=json.dumps(result, cls=_NumpyEncoder, ensure_ascii=False),
             media_type="application/json",
@@ -173,6 +230,9 @@ async def get_replay(replay_id: str):
     decisions = storage.load_decisions(replay_id)
     if decisions is None:
         return JSONResponse(status_code=404, content={"error": f"回放 {replay_id} 不存在"})
+    meta = storage.load_meta(replay_id) or {}
+    if isinstance(decisions, dict):
+        decisions = _normalize_replay_decisions(decisions, meta=meta)
     return JSONResponse(content=decisions)
 
 
@@ -201,6 +261,71 @@ async def get_replay_events(replay_id: str, from_step: int = 0, limit: int = 50)
         "total": total,
         "next_step": from_step + len(paged) if from_step + len(paged) < total else None,
     })
+
+
+def _collect_replay_groups():
+    """递归聚合项目中的回放导出清单。"""
+    project_root = BASE_DIR.parent.parent
+    groups = []
+
+    manifest_paths = []
+    for pattern in ("**/replays/manifest.json", "**/anomaly_replays/manifest.json"):
+        manifest_paths.extend(project_root.glob(pattern))
+
+    for manifest_path in sorted(
+        manifest_paths,
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    ):
+        export_dir = manifest_path.parent
+        run_dir = export_dir.parent
+        collection_type = export_dir.name
+
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        stats_path = run_dir / "stats.json"
+        stats = None
+        if stats_path.exists():
+            try:
+                stats = json.loads(stats_path.read_text(encoding="utf-8"))
+            except Exception:
+                stats = None
+
+        groups.append(
+            {
+                "output_dir": run_dir.name,
+                "output_dir_path": str(run_dir),
+                "manifest_path": str(manifest_path),
+                "collection_type": collection_type,
+                "updated_at": manifest_path.stat().st_mtime,
+                "stats": {
+                    "games": stats.get("games"),
+                    "completed_games": stats.get("completed_games"),
+                    "error_games": len(stats.get("error_games", [])),
+                    "seconds_per_game": stats.get("seconds_per_game"),
+                    "avg_turns": stats.get("avg_turns"),
+                }
+                if isinstance(stats, dict)
+                else None,
+                "items": manifest,
+            }
+        )
+    return groups
+
+
+@app.get("/api/selfplay/replay-collections", response_class=JSONResponse)
+async def list_selfplay_replay_collections():
+    """列出项目内通用对局回放清单，供 ReplayUI 浏览。"""
+    return JSONResponse(content={"groups": _collect_replay_groups()})
+
+
+@app.get("/api/selfplay/anomaly-replays", response_class=JSONResponse)
+async def list_selfplay_anomaly_replays():
+    """兼容旧接口，返回相同的聚合对局回放清单。"""
+    return JSONResponse(content={"groups": _collect_replay_groups()})
 
 
 @app.delete("/api/replay/{replay_id}", response_class=JSONResponse)

@@ -15,7 +15,15 @@ export function useAutoActions({
   noMeld,
   autoTsumogiri,
 }: UseAutoActionsOptions) {
-  const isMyTurn = state?.actor_to_move === state?.human_player_id && state?.phase === "playing";
+  const humanId = state?.human_player_id ?? 0;
+  const isOwnDrawTurn =
+    state?.phase === "playing" && state?.actor_to_move === humanId;
+  const isResponseTurn =
+    state?.phase === "playing" &&
+    !!state?.last_discard &&
+    state.last_discard.actor !== humanId &&
+    (state.legal_actions?.some(a => a.actor === humanId) ?? false);
+  const isMyTurn = Boolean(isOwnDrawTurn || isResponseTurn);
   const legalActions = state?.legal_actions ?? [];
 
   const hasHora    = isMyTurn && legalActions.some(a => a.type === "hora");

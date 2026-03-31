@@ -1,12 +1,14 @@
 // src/replay_ui/src/components/DecisionPanel/ReplayDecisionPanel.tsx
 import type { DecisionLogEntry } from '../../types/replay';
-import { actionLabel } from '../../utils/tileUtils';
+import { actionLabel, sameReplayAction } from '../../utils/tileUtils';
 import { CN_BAKAZE } from '../../utils/constants';
 
 interface ReplayDecisionPanelProps {
   entry: DecisionLogEntry | null;
   step: number;
   totalSteps: number;
+  compact?: boolean;
+  playerNames?: string[];
 }
 
 /** 候选动作的显示值：beam_score 优先，没有则用 logit */
@@ -35,20 +37,10 @@ function shortLabel(action: { type: string; pai?: string; consumed?: string[] })
   }
 }
 
-function isSameAction(
-  a: { type: string; pai?: string },
-  b: { type: string; pai?: string } | null | undefined
-): boolean {
-  if (!b) return false;
-  if (a.type !== b.type) return false;
-  if (a.type === 'dahai' || a.type === 'reach') return a.pai === b.pai;
-  return true;
-}
-
-export function ReplayDecisionPanel({ entry, step, totalSteps }: ReplayDecisionPanelProps) {
+export function ReplayDecisionPanel({ entry, step, totalSteps, compact = false, playerNames = [] }: ReplayDecisionPanelProps) {
   if (!entry) {
     return (
-      <div style={panelStyle}>
+      <div style={panelStyle(compact)}>
         <div style={{ color: 'var(--text-muted)', fontSize: 12, padding: 16 }}>无数据</div>
       </div>
     );
@@ -61,13 +53,13 @@ export function ReplayDecisionPanel({ entry, step, totalSteps }: ReplayDecisionP
   if (entry.is_obs) {
     const actor = entry.actor_to_move;
     return (
-      <div style={panelStyle}>
+      <div style={panelStyle(compact)}>
         <div style={sectionStyle}>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
             Step {step + 1} / {totalSteps} · {kyokuLabel}
           </div>
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>
-            P{actor} 的操作
+            {actor !== null && actor !== undefined ? (playerNames[actor] ?? `P${actor}`) : '未知玩家'} 的操作
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={badgeStyle('#3498db')}>动作</span>
@@ -94,10 +86,10 @@ export function ReplayDecisionPanel({ entry, step, totalSteps }: ReplayDecisionP
   const isUsingBeam = sorted.some(c => c.beam_score !== undefined);
   const scoreTypeLabelShort = isUsingBeam ? 'Beam' : 'Logit';
 
-  const chosenIsGt = chosen && gt_action && isSameAction(chosen, gt_action);
+  const chosenIsGt = chosen && gt_action && sameReplayAction(chosen, gt_action);
 
   return (
-    <div style={panelStyle}>
+    <div style={panelStyle(compact)}>
       {/* 步骤信息 */}
       <div style={sectionStyle}>
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
@@ -146,8 +138,8 @@ export function ReplayDecisionPanel({ entry, step, totalSteps }: ReplayDecisionP
         {/* 行 */}
         <div style={{ flex: 1, overflowY: 'auto' }}>
           {sorted.map((c, idx) => {
-            const isChosen = isSameAction(c.action, chosen);
-            const isGt = isSameAction(c.action, gt_action);
+            const isChosen = sameReplayAction(c.action, chosen);
+            const isGt = sameReplayAction(c.action, gt_action);
             const score = displayScore(c);
             const pct = Math.max(4, Math.round(((score - minScore) / scoreRange) * 100));
 
@@ -233,17 +225,20 @@ export function ReplayDecisionPanel({ entry, step, totalSteps }: ReplayDecisionP
 // ---------------------------------------------------------------------------
 const COL1_W = 52;
 
-const panelStyle: React.CSSProperties = {
-  width: 220,
+const panelStyle = (compact: boolean): React.CSSProperties => ({
+  width: compact ? '100%' : 220,
+  minHeight: compact ? 240 : undefined,
+  maxHeight: compact ? 300 : undefined,
   flexShrink: 0,
-  height: '100%',
+  height: compact ? 'auto' : '100%',
   background: 'var(--sidebar-bg)',
-  borderLeft: '1px solid var(--border)',
+  borderLeft: compact ? 'none' : '1px solid var(--border)',
+  borderTop: compact ? '1px solid var(--border)' : 'none',
   display: 'flex',
   flexDirection: 'column',
   overflow: 'hidden',
   transition: 'background var(--transition)',
-};
+});
 
 const sectionStyle: React.CSSProperties = {
   padding: '10px 12px',

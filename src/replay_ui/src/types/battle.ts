@@ -27,6 +27,29 @@ export interface Action {
   target?: number;
   consumed?: string[];
   tsumogiri?: boolean;
+  is_tsumo?: boolean;
+  deltas?: number[];
+  scores?: number[];
+  han?: number;
+  fu?: number;
+  yaku?: string[];
+  yaku_details?: Array<{
+    key: string;
+    name: string;
+    han: number;
+  }>;
+  ura_dora_markers?: string[];
+  cost?: {
+    main?: number;
+    main_bonus?: number;
+    additional?: number;
+    additional_bonus?: number;
+    kyoutaku_bonus?: number;
+    total?: number;
+    yaku_level?: string;
+  };
+  honba?: number;
+  kyotaku?: number;
 }
 
 export type ActionType =
@@ -38,6 +61,7 @@ export type ActionType =
   | "ankan"
   | "kakan"
   | "hora"
+  | "ryukyoku"
   | "none";
 
 export interface BattleState {
@@ -53,7 +77,7 @@ export interface BattleState {
   dora_markers: string[];
   actor_to_move: number | null;
   /** 后端不返回 pai_raw，忽略此字段 */
-  last_discard: { actor: number; pai: string } | null;
+  last_discard: { actor: number; pai: string; pai_raw?: string } | null;
   hand: string[];
   tsumo_pai: string | null;
   discards: DiscardEntry[][];
@@ -64,6 +88,8 @@ export interface BattleState {
   remaining_wall: number;
   human_player_id: number;
   player_info: PlayerInfo[];
+  /** 仅回放使用：当前处于摸牌前态的玩家，用于展示他家第 14 张手牌 */
+  replay_draw_actor?: number | null;
 }
 
 export interface StartBattleRequest {

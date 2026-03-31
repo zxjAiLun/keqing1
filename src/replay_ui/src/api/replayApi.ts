@@ -1,5 +1,5 @@
 // src/replay_ui/src/api/replayApi.ts
-import type { ReplayData, ReplayMeta } from '../types/replay';
+import type { ReplayData, ReplayMeta, SelfplayAnomalyReplayGroup } from '../types/replay';
 
 const API_BASE = '/api';
 
@@ -76,6 +76,10 @@ export const replayApi = {
   /** 删除回放 */
   delete: (replayId: string): Promise<void> =>
     api<void>(`/replay/${encodeURIComponent(replayId)}`, { method: 'DELETE' }),
+
+  /** 列出 selfplay 对局回放导出 */
+  listSelfplayReplayCollections: (): Promise<{ groups: SelfplayAnomalyReplayGroup[] }> =>
+    api<{ groups: SelfplayAnomalyReplayGroup[] }>('/selfplay/replay-collections'),
 
   /** 导出 HTML */
   exportHtml: (data: ReplayData): Promise<Blob> =>

@@ -21,6 +21,29 @@ export interface Action {
   target?: number;
   consumed?: string[];
   tsumogiri?: boolean;
+  is_tsumo?: boolean;
+  deltas?: number[];
+  scores?: number[];
+  han?: number;
+  fu?: number;
+  yaku?: string[];
+  yaku_details?: Array<{
+    key: string;
+    name: string;
+    han: number;
+  }>;
+  ura_dora_markers?: string[];
+  cost?: {
+    main?: number;
+    main_bonus?: number;
+    additional?: number;
+    additional_bonus?: number;
+    kyoutaku_bonus?: number;
+    total?: number;
+    yaku_level?: string;
+  };
+  honba?: number;
+  kyotaku?: number;
 }
 
 export type ActionType =
@@ -48,17 +71,18 @@ export interface DecisionLogEntry {
   bakaze: string;
   kyoku: number;
   honba: number;
+  oya: number;
   scores: number[];
   reached: boolean[];
   dora_markers: string[];
   hand: string[];
-  discards: Record<number, DiscardEntry[]>;
-  melds: Record<number, MeldEntry[]>;
+  discards: Record<number, DiscardEntry[]> | DiscardEntry[][];
+  melds?: Record<number, MeldEntry[]> | MeldEntry[][];
   actor_to_move: number;
   tsumo_pai: string | null;
-  last_discard: { actor: number; pai: string } | null;
+  last_discard: { actor: number; pai: string; pai_raw?: string } | null;
   /** 是否为其他家的观察步（无 bot 推理数据） */
-  is_obs?: boolean;
+  is_obs: boolean;
   /** 当前视角 Bot 的决策（obs 步为他家实际动作） */
   chosen: Action;
   /** 所有合法动作候选 + logit (+ beam_score if beam search enabled)，obs 步为空 */
@@ -67,6 +91,12 @@ export interface DecisionLogEntry {
   value?: number;
   /** ground truth：玩家实际动作 */
   gt_action: Action | null;
+  /** 观察步类型，仅 is_obs=true 时有意义 */
+  obs_kind?: 'discard' | 'meld' | 'reach' | 'terminal';
+  /** 当前棋盘快照语义，默认 after_action */
+  board_phase?: 'before_action' | 'after_action';
+  /** 对应 events.jsonl 的事件序号 */
+  source_event_index?: number;
   /** 供前端按小局过滤 */
   kyoku_key: KyokuInfo;
 }
@@ -79,6 +109,7 @@ export interface ReplayData {
   rating: number | null;
   player_id: number;
   player_names?: string[];
+  bot_type?: 'keqingv1' | 'keqingv2' | 'v5model';
 }
 
 export interface ReplayMeta {
@@ -111,6 +142,7 @@ export interface StepEntry {
   bakaze: string;
   kyoku: number;
   honba: number;
+  oya: number;
   scores: number[];
   reached: boolean[];
   dora_markers: string[];
@@ -119,7 +151,7 @@ export interface StepEntry {
   melds: Record<number, MeldEntry[]>;
   actor_to_move: number;
   tsumo_pai: string | null;
-  last_discard: { actor: number; pai: string } | null;
+  last_discard: { actor: number; pai: string; pai_raw?: string } | null;
   bot_decisions: Record<number, BotDecision>;
   gt_action: Action | null;
   kyoku_key: KyokuInfo;
@@ -130,6 +162,41 @@ export interface ReplaySubmitResponse {
   status: 'pending' | 'running' | 'done' | 'failed';
   progress: number;
   error?: string;
+}
+
+export interface SelfplayAnomalyReplayItem {
+  game_id: number;
+  anomaly_score: number;
+  score_components: Record<string, number>;
+  interest?: number;
+  scores?: number[];
+  ranks?: number[];
+  turns?: number;
+  rounds?: number;
+  mjson: string;
+  meta: string;
+  replay_id?: string;
+  replay_player_id?: number;
+  replay_bot_type?: string;
+  replay_view_url?: string;
+  game_board_url?: string;
+  replay_ui_error?: string | null;
+}
+
+export interface SelfplayAnomalyReplayGroup {
+  output_dir: string;
+  output_dir_path: string;
+  manifest_path: string;
+  collection_type?: string;
+  updated_at: number;
+  stats: {
+    games?: number;
+    completed_games?: number;
+    error_games?: number;
+    seconds_per_game?: number;
+    avg_turns?: number;
+  } | null;
+  items: SelfplayAnomalyReplayItem[];
 }
 
 export type PlayerMode =

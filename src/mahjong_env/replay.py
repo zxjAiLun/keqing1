@@ -3,64 +3,22 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set
+from typing import Dict, List, Optional, Protocol, Sequence, Set
 
+from keqingv3.progress_oracle import (
+    NormalProgressInfo,
+    analyze_normal_progress_from_counts as _oracle_calc_normal_progress_from_counts,
+    calc_shanten_waits_from_counts as _oracle_calc_shanten_waits_from_counts,
+)
 from mahjong_env.legal_actions import enumerate_legal_actions
 from mahjong_env.state import GameState, apply_event
-from mahjong_env.tiles import AKA_DORA_TILES, tile_to_136 as _to_136
+from mahjong_env.tiles import AKA_DORA_TILES, tile_to_34 as _to_34
 from mahjong_env.types import MjaiEvent
 from mahjong_env.types import Action
 
 # ---------------------------------------------------------------------------
-# riichienv-based shanten/waits helpers (replaces riichi.state.PlayerState)
+# generic 3n+1 / 3n+2 standard-hand shanten/waits helpers
 # ---------------------------------------------------------------------------
-
-
-def _snap_melds_to_riichienv(melds: List[dict]):
-    from riichienv import Meld as RiichiMeld, MeldType
-
-    _TYPE_MAP = {
-        "chi": MeldType.Chi,
-        "pon": MeldType.Pon,
-        "daiminkan": MeldType.Daiminkan,
-        "ankan": MeldType.Ankan,
-        "kakan": MeldType.Kakan,
-    }
-    result = []
-    for m in melds:
-        mt = _TYPE_MAP.get(m.get("type", ""))
-        if mt is None:
-            continue
-        tiles136 = [_to_136(t) for t in m.get("consumed", []) if _to_136(t) >= 0]
-        pai = m.get("pai")
-        if pai and _to_136(pai) >= 0:
-            tiles136.append(_to_136(pai))
-        result.append(RiichiMeld(mt, tiles136, m.get("type") != "ankan"))
-    return result
-
-
-def _calc_shanten_waits(hand: List[str], melds: List[dict]):
-    """返回 (shanten, waits_count, waits_tile34_bools, tehai_count)。"""
-    from riichienv import calculate_shanten, HandEvaluator
-
-    hand_ids = [_to_136(t) for t in hand if _to_136(t) >= 0]
-    if not hand_ids:
-        return 8, 0, [False] * 34, 0
-    try:
-        rmelds = _snap_melds_to_riichienv(melds) or None
-        he = HandEvaluator(hand_ids, rmelds)
-        shanten = int(calculate_shanten(hand_ids)) if not he.is_tenpai() else 0
-        # get_waits() 返回的是 tile34（0-33），不是 tile136
-        waits_raw = he.get_waits() if he.is_tenpai() else []
-        waits34 = [False] * 34
-        for w in waits_raw:
-            if 0 <= w < 34:
-                waits34[w] = True
-        waits_count = sum(waits34)
-        tehai_count = len(hand_ids)
-        return shanten, waits_count, waits34, tehai_count
-    except Exception:
-        return 8, 0, [False] * 34, len(hand_ids)
 
 
 def _normalize_or_keep_aka(tile: str) -> str:
@@ -71,6 +29,226 @@ def _normalize_or_keep_aka(tile: str) -> str:
     return tile
 
 
+_TILE34_TO_STR: List[str] = [
+    "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m",
+    "1p", "2p", "3p", "4p", "5p", "6p", "7p", "8p", "9p",
+    "1s", "2s", "3s", "4s", "5s", "6s", "7s", "8s", "9s",
+    "E", "S", "W", "N", "P", "F", "C",
+]
+
+
+def _counts34_from_hand(hand: List[str]) -> List[int]:
+    counts = [0] * 34
+    for tile in hand:
+        t34 = _to_34(tile)
+        if 0 <= t34 < 34:
+            counts[t34] += 1
+    return counts
+
+
+def _is_suited_sequence_start(tile34: int) -> bool:
+    return tile34 < 27 and (tile34 % 9) <= 6
+
+
+def _is_complete_regular_counts(
+    counts: tuple[int, ...],
+    cache: Dict[tuple[tuple[int, ...], int, bool], bool],
+    melds_needed: Optional[int] = None,
+    need_pair: bool = True,
+) -> bool:
+    if melds_needed is None:
+        tile_count = sum(counts)
+        if tile_count % 3 != 2:
+            return False
+        melds_needed = (tile_count - 2) // 3
+
+    key = (counts, melds_needed, need_pair)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    first = next((i for i, cnt in enumerate(counts) if cnt > 0), None)
+    if first is None:
+        result = melds_needed == 0 and not need_pair
+        cache[key] = result
+        return result
+
+    work = list(counts)
+    result = False
+
+    if need_pair and work[first] >= 2:
+        work[first] -= 2
+        if _is_complete_regular_counts(tuple(work), cache, melds_needed, False):
+            result = True
+        work[first] += 2
+
+    if not result and melds_needed > 0 and work[first] >= 3:
+        work[first] -= 3
+        if _is_complete_regular_counts(tuple(work), cache, melds_needed - 1, need_pair):
+            result = True
+        work[first] += 3
+
+    if (
+        not result
+        and melds_needed > 0
+        and _is_suited_sequence_start(first)
+        and work[first + 1] > 0
+        and work[first + 2] > 0
+    ):
+        work[first] -= 1
+        work[first + 1] -= 1
+        work[first + 2] -= 1
+        if _is_complete_regular_counts(tuple(work), cache, melds_needed - 1, need_pair):
+            result = True
+
+    cache[key] = result
+    return result
+
+
+def _find_regular_waits(counts: tuple[int, ...]) -> List[bool]:
+    waits = [False] * 34
+    if sum(counts) % 3 != 1:
+        return waits
+
+    complete_cache: Dict[tuple[tuple[int, ...], int, bool], bool] = {}
+    for tile34, cnt in enumerate(counts):
+        if cnt >= 4:
+            continue
+        work = list(counts)
+        work[tile34] += 1
+        if _is_complete_regular_counts(tuple(work), complete_cache):
+            waits[tile34] = True
+    return waits
+
+
+def _calc_shanten_waits(hand: List[str], melds: List[dict]):
+    """返回 (regular_shanten, waits_count, waits_tile34_bools, tehai_count)。"""
+    counts34 = _counts34_from_hand(hand)
+    try:
+        shanten, waits_count, waits34, tehai_count = _oracle_calc_shanten_waits_from_counts(tuple(counts34))
+        return shanten, waits_count, list(waits34), tehai_count
+    except Exception:
+        del melds
+        tehai_count = sum(counts34)
+        return 8, 0, [False] * 34, tehai_count
+
+
+def _meld_tile34_counts(melds: List[dict]) -> List[int]:
+    counts = [0] * 34
+    for meld in melds:
+        for p in meld.get("consumed", []) + ([meld.get("pai")] if meld.get("pai") else []):
+            t34 = _to_34(p)
+            if 0 <= t34 < 34:
+                counts[t34] += 1
+    return counts
+
+
+def _hand_tile34_counts(hand: List[str]) -> List[int]:
+    counts = [0] * 34
+    for tile in hand:
+        t34 = _to_34(tile)
+        if 0 <= t34 < 34:
+            counts[t34] += 1
+    return counts
+
+
+def _default_visible_counts(hand: List[str], melds: List[dict]) -> List[int]:
+    counts = _hand_tile34_counts(hand)
+    meld_counts = _meld_tile34_counts(melds)
+    for i in range(34):
+        counts[i] += meld_counts[i]
+    return counts
+
+
+def _counts_to_hand(counts: Sequence[int]) -> List[str]:
+    hand: List[str] = []
+    for t34, cnt in enumerate(counts):
+        if cnt > 0:
+            hand.extend([_TILE34_TO_STR[t34]] * cnt)
+    return hand
+
+
+def _tenpai_live_wait_count(
+    counts13: tuple[int, ...],
+    melds: List[dict],
+    visible_counts_local: tuple[int, ...],
+    shanten_cache: Dict[tuple[int, ...], tuple[int, int, List[bool], int]],
+) -> int:
+    cached = shanten_cache.get(counts13)
+    if cached is None:
+        cached = _calc_shanten_waits(_counts_to_hand(counts13), melds)
+        shanten_cache[counts13] = cached
+    shanten, _waits_count, waits_tiles, _tehai_count = cached
+    if shanten != 0:
+        return 0
+    return sum(
+        max(0, 4 - visible_counts_local[t34])
+        for t34, flag in enumerate(waits_tiles)
+        if flag
+    )
+
+
+def _best_tenpai_wait_live_after_draw(
+    counts14: tuple[int, ...],
+    melds: List[dict],
+    visible_counts_local: tuple[int, ...],
+    shanten_cache: Dict[tuple[int, ...], tuple[int, int, List[bool], int]],
+) -> int:
+    best_wait_live = 0
+    seen_discards: Set[int] = set()
+    for discard34, cnt in enumerate(counts14):
+        if cnt <= 0 or discard34 in seen_discards:
+            continue
+        seen_discards.add(discard34)
+        after_counts13 = list(counts14)
+        after_counts13[discard34] -= 1
+        after_counts13_t = tuple(after_counts13)
+        after_shanten, _w_cnt, _w_tiles, _tehai = shanten_cache.get(after_counts13_t, (None, None, None, None))
+        if after_shanten is None:
+            after_shanten, _w_cnt, _w_tiles, _tehai = _calc_shanten_waits(_counts_to_hand(after_counts13_t), melds)
+            shanten_cache[after_counts13_t] = (after_shanten, _w_cnt, _w_tiles, _tehai)
+        if after_shanten != 0:
+            continue
+        wait_live = _tenpai_live_wait_count(after_counts13_t, melds, visible_counts_local, shanten_cache)
+        if wait_live > best_wait_live:
+            best_wait_live = wait_live
+    return best_wait_live
+
+
+def _is_good_shape_draw_for_one_shanten(
+    counts13: tuple[int, ...],
+    draw_tile34: int,
+    melds: List[dict],
+    visible_counts_local: tuple[int, ...],
+    shanten_cache: Dict[tuple[int, ...], tuple[int, int, List[bool], int]],
+) -> bool:
+    """严格复刻一向听好型判定：
+
+    摸入有效牌后，枚举所有去重打牌分支；只要存在一个分支能形成一般形听牌，
+    且该听牌的 live waits > 4，就判该摸牌为好型进张。
+    """
+
+    counts14 = list(counts13)
+    counts14[draw_tile34] += 1
+    counts14_t = tuple(counts14)
+    return _best_tenpai_wait_live_after_draw(
+        counts14_t, melds, visible_counts_local, shanten_cache
+    ) > 4
+
+
+def _calc_normal_progress(
+    hand: List[str],
+    melds: List[dict],
+    visible_counts: Optional[List[int]] = None,
+) -> NormalProgressInfo:
+    if visible_counts is None:
+        visible_counts = _default_visible_counts(hand, melds)
+    return _oracle_calc_normal_progress_from_counts(
+        tuple(_hand_tile34_counts(hand)),
+        tuple(visible_counts),
+    )
+
+
 @dataclass
 class ReplaySample:
     state: Dict
@@ -79,6 +257,156 @@ class ReplaySample:
     label_action: Dict
     legal_actions: List[Dict]
     value_target: float
+    score_delta_target: float = 0.0
+    win_target: float = 0.0
+    dealin_target: float = 0.0
+
+
+@dataclass
+class ValueComputationContext:
+    event_index: int
+    event: MjaiEvent
+    actor: int
+    delta_shanten: float
+    delta_waits: float
+    delta_tehai: float
+    events: List[MjaiEvent]
+
+
+@dataclass
+class PendingValueSample:
+    sample: ReplaySample
+    round_step_index: int
+
+
+def _finalize_aux_targets(
+    pending_samples: List[PendingValueSample],
+    terminal_event: Optional[MjaiEvent],
+    *,
+    score_norm: float = 30000.0,
+) -> None:
+    if not pending_samples:
+        return
+
+    score_deltas = None
+    hora_actor = None
+    hora_target = None
+    if terminal_event is not None:
+        score_deltas = terminal_event.get("deltas") or terminal_event.get("score_delta")
+        if terminal_event.get("type") == "hora":
+            hora_actor = terminal_event.get("actor")
+            hora_target = terminal_event.get("target")
+
+    for pending in pending_samples:
+        actor = pending.sample.actor
+        if isinstance(score_deltas, list) and len(score_deltas) == 4:
+            pending.sample.score_delta_target = float(score_deltas[actor]) / score_norm
+        else:
+            pending.sample.score_delta_target = 0.0
+        pending.sample.win_target = 1.0 if hora_actor == actor else 0.0
+        pending.sample.dealin_target = 1.0 if (hora_target == actor and hora_actor != actor) else 0.0
+
+
+class ValueTargetStrategy(Protocol):
+    def initial_value(self, ctx: ValueComputationContext) -> float:
+        ...
+
+    def finalize_round(
+        self,
+        pending_samples: List[PendingValueSample],
+        terminal_event: Optional[MjaiEvent],
+    ) -> None:
+        ...
+
+
+class HeuristicValueStrategy:
+    def __init__(self):
+        self.w_shanten = 0.05
+        self.w_waits = 0.008
+        self.w_call_tehai = 0.003
+        self.value_norm = 30000.0
+        self.call_actions = {"chi", "pon", "daiminkan", "ankan", "kakan"}
+
+    def initial_value(self, ctx: ValueComputationContext) -> float:
+        et = ctx.event["type"]
+        actor = ctx.actor
+        delta_shanten = ctx.delta_shanten
+        delta_waits = ctx.delta_waits
+        delta_tehai = ctx.delta_tehai
+
+        if et == "hora":
+            sd = ctx.event.get("deltas") or ctx.event.get("score_delta")
+            if isinstance(sd, list) and len(sd) == 4:
+                return float(sd[actor]) / self.value_norm * 1.5
+            return float(self.w_shanten * delta_shanten + self.w_waits * delta_waits)
+
+        if et == "ryukyoku":
+            sd = ctx.event.get("deltas")
+            if isinstance(sd, list) and len(sd) == 4:
+                return float(sd[actor]) / self.value_norm
+            return 0.0
+
+        value = float(self.w_shanten * delta_shanten + self.w_waits * delta_waits)
+        if et in self.call_actions:
+            value += float(self.w_call_tehai * delta_tehai)
+            value = max(min(value, 10.0), -10.0)
+
+        if et == "dahai":
+            next_ev = _next_meaningful_event(ctx.events, ctx.event_index)
+            if (
+                next_ev is not None
+                and next_ev.get("type") == "hora"
+                and next_ev.get("actor") != actor
+            ):
+                sd = next_ev.get("deltas") or next_ev.get("score_delta")
+                if isinstance(sd, list) and len(sd) == 4:
+                    return float(sd[actor]) / self.value_norm
+        return value
+
+    def finalize_round(
+        self,
+        pending_samples: List[PendingValueSample],
+        terminal_event: Optional[MjaiEvent],
+    ) -> None:
+        del pending_samples, terminal_event
+
+
+class MCReturnValueStrategy:
+    def __init__(self, gamma: float = 0.99, value_norm: float = 30000.0):
+        self.gamma = gamma
+        self.value_norm = value_norm
+
+    def initial_value(self, ctx: ValueComputationContext) -> float:
+        del ctx
+        return 0.0
+
+    def finalize_round(
+        self,
+        pending_samples: List[PendingValueSample],
+        terminal_event: Optional[MjaiEvent],
+    ) -> None:
+        if not pending_samples or terminal_event is None:
+            return
+        sd = terminal_event.get("deltas") or terminal_event.get("score_delta")
+        if not (isinstance(sd, list) and len(sd) == 4):
+            return
+        last_step = pending_samples[-1].round_step_index
+        for pending in pending_samples:
+            actor = pending.sample.actor
+            steps_remaining = max(0, last_step - pending.round_step_index)
+            pending.sample.value_target = float(sd[actor]) / self.value_norm * (
+                self.gamma ** steps_remaining
+            )
+
+
+def _resolve_value_strategy(
+    value_strategy: str | ValueTargetStrategy | None,
+) -> ValueTargetStrategy:
+    if value_strategy is None or value_strategy == "heuristic":
+        return HeuristicValueStrategy()
+    if value_strategy == "mc_return":
+        return MCReturnValueStrategy()
+    return value_strategy
 
 
 ACTION_TYPES_FOR_LABEL = {
@@ -145,20 +473,23 @@ def build_supervised_samples(
     events: List[MjaiEvent],
     actor_filter: Optional[Set[int]] = None,
     actor_name_filter: Optional[Set[str]] = None,
+    value_strategy: str | ValueTargetStrategy | None = None,
 ) -> List[ReplaySample]:
     state = GameState()
     samples: List[ReplaySample] = []
+    strategy = _resolve_value_strategy(value_strategy)
     actor_names = extract_actor_names(events)
-
-    W_SHANTEN = 0.05
-    W_WAITS = 0.008
-    W_CALL_TEHAI = 0.003
-    CALL_ACTIONS = {"chi", "pon", "daiminkan", "ankan", "kakan"}
-    _VALUE_NORM = 30000.0
+    pending_round_samples: List[PendingValueSample] = []
+    round_step_index = 0
+    call_actions = {"chi", "pon", "daiminkan", "ankan", "kakan"}
 
     for i, event in enumerate(events):
         et = event["type"]
         actor = event.get("actor")
+
+        if et == "start_kyoku":
+            pending_round_samples.clear()
+            round_step_index = 0
 
         collect_sample = (
             actor is not None
@@ -174,8 +505,6 @@ def build_supervised_samples(
             )
             collect_sample = actor_name in actor_name_filter
 
-        # Compute local EV proxy for labeled actions (before->after riichi update).
-        value_target_local: Optional[float] = None
         shanten_before: Optional[int] = None
         waits_before_cnt: Optional[int] = None
         tehai_before_cnt: Optional[int] = None
@@ -202,7 +531,7 @@ def build_supervised_samples(
             shanten_after_vt = shanten_after
             waits_after_cnt_vt = waits_after_cnt
             tehai_after_cnt_vt = tehai_after_cnt
-            if et in CALL_ACTIONS and et not in ("ankan", "kakan"):
+            if et in call_actions and et not in ("ankan", "kakan"):
                 next_dahai = _next_actor_dahai(events, i, actor)
                 if next_dahai is not None:
                     discard_tile = _normalize_or_keep_aka(next_dahai["pai"])
@@ -226,40 +555,16 @@ def build_supervised_samples(
             delta_shanten = shanten_before - shanten_after_vt  # type: ignore[operator]
             delta_waits = waits_after_cnt_vt - waits_before_cnt  # type: ignore[operator]
             delta_tehai = tehai_after_cnt_vt - tehai_before_cnt  # type: ignore[operator]
-
-            # Terminal override: winning should reflect final score deltas.
-            if et == "hora":
-                sd = event.get("deltas") or event.get("score_delta")
-                if isinstance(sd, list) and len(sd) == 4:
-                    value_target_local = float(sd[actor]) / _VALUE_NORM * 1.5
-                else:
-                    value_target_local = float(
-                        W_SHANTEN * delta_shanten + W_WAITS * delta_waits
-                    )
-            elif et == "ryukyoku":
-                sd = event.get("deltas")
-                if isinstance(sd, list) and len(sd) == 4:
-                    value_target_local = float(sd[actor]) / _VALUE_NORM
-                else:
-                    value_target_local = 0.0
-            else:
-                value_target_local = float(
-                    W_SHANTEN * delta_shanten + W_WAITS * delta_waits
-                )
-                if et in CALL_ACTIONS:
-                    value_target_local += float(W_CALL_TEHAI * delta_tehai)
-                    value_target_local = max(min(value_target_local, 10.0), -10.0)
-                # 放铳检测：dahai 后下一个有意义事件是对手 hora，覆盖为放铳损失
-                if et == "dahai":
-                    next_ev = _next_meaningful_event(events, i)
-                    if (
-                        next_ev is not None
-                        and next_ev.get("type") == "hora"
-                        and next_ev.get("actor") != actor
-                    ):
-                        sd = next_ev.get("deltas") or next_ev.get("score_delta")
-                        if isinstance(sd, list) and len(sd) == 4:
-                            value_target_local = float(sd[actor]) / _VALUE_NORM
+            value_ctx = ValueComputationContext(
+                event_index=i,
+                event=event,
+                actor=actor,
+                delta_shanten=float(delta_shanten),
+                delta_waits=float(delta_waits),
+                delta_tehai=float(delta_tehai),
+                events=events,
+            )
+            value_target_local = strategy.initial_value(value_ctx)
 
             # Keep local value proxy computed above.
             actor_name = (
@@ -329,20 +634,25 @@ def build_supervised_samples(
                             action_kwargs["pai"] = label["pai"]
                         legal_dicts.append(Action(**action_kwargs).to_mjai())
 
-                samples.append(
-                    ReplaySample(
-                        state=snap,
-                        actor=actor,
-                        actor_name=actor_name,
-                        label_action=label,
-                        legal_actions=legal_dicts,
-                        value_target=float(
-                            value_target_local
-                            if value_target_local is not None
-                            else 0.0
-                        ),
+                sample = ReplaySample(
+                    state=snap,
+                    actor=actor,
+                    actor_name=actor_name,
+                    label_action=label,
+                    legal_actions=legal_dicts,
+                    value_target=float(value_target_local),
+                    score_delta_target=0.0,
+                    win_target=0.0,
+                    dealin_target=0.0,
+                )
+                samples.append(sample)
+                pending_round_samples.append(
+                    PendingValueSample(
+                        sample=sample,
+                        round_step_index=round_step_index,
                     )
                 )
+                round_step_index += 1
 
         if not collect_sample:
             apply_event(state, event)
@@ -385,18 +695,36 @@ def build_supervised_samples(
                     snap_p["shanten"] = shanten_p
                     snap_p["waits_count"] = waits_cnt_p
                     snap_p["waits_tiles"] = waits_tiles_p
-                    samples.append(
-                        ReplaySample(
-                            state=snap_p,
-                            actor=p,
-                            actor_name=actor_names[p]
-                            if 0 <= p < len(actor_names)
-                            else f"p{p}",
-                            label_action={"type": "none", "actor": p},
-                            legal_actions=[a.to_mjai() for a in legal_p],
-                            value_target=0.0,
+                    sample = ReplaySample(
+                        state=snap_p,
+                        actor=p,
+                        actor_name=actor_names[p]
+                        if 0 <= p < len(actor_names)
+                        else f"p{p}",
+                        label_action={"type": "none", "actor": p},
+                        legal_actions=[a.to_mjai() for a in legal_p],
+                        value_target=0.0,
+                        score_delta_target=0.0,
+                        win_target=0.0,
+                        dealin_target=0.0,
+                    )
+                    samples.append(sample)
+                    pending_round_samples.append(
+                        PendingValueSample(
+                            sample=sample,
+                            round_step_index=round_step_index,
                         )
                     )
+                    round_step_index += 1
+
+        if et in {"hora", "ryukyoku"}:
+            strategy.finalize_round(pending_round_samples, event)
+            _finalize_aux_targets(pending_round_samples, event)
+        if et == "end_kyoku":
+            strategy.finalize_round(pending_round_samples, None)
+            _finalize_aux_targets(pending_round_samples, None)
+            pending_round_samples.clear()
+            round_step_index = 0
 
     return samples
 

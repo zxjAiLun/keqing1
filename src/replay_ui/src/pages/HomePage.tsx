@@ -1,19 +1,18 @@
 import { useNavigate } from 'react-router-dom';
-import { BarChart2 } from 'lucide-react';
+import { BarChart2, Swords, Bot } from 'lucide-react';
+import { PageHeader, PageShell } from '../components/Layout/PageScaffold';
 
 export function HomePage() {
   const navigate = useNavigate();
 
   return (
-    <div style={{ minHeight: '100%', padding: '24px' }}>
-      <div style={{ maxWidth: 640, margin: '0 auto', textAlign: 'center' }}>
-
-        <h1 style={{ fontSize: 28, fontWeight: 800, color: 'var(--text-primary)', marginBottom: 8 }}>
-          Keqing
-        </h1>
-        <p style={{ fontSize: 16, color: 'var(--text-muted)', marginBottom: 36 }}>
-          立直麻将监督学习 Bot · 牌谱分析
-        </p>
+    <PageShell width={720}>
+      <div style={{ textAlign: 'center' }}>
+        <PageHeader
+          eyebrow="Legacy Home"
+          title="Keqing"
+          description="这是旧首页入口，保留给直接访问 `/home` 的场景。主流程建议从仪表盘进入。"
+        />
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14, alignItems: 'center' }}>
           <button
@@ -79,11 +78,34 @@ export function HomePage() {
               e.currentTarget.style.boxShadow = 'none';
             }}
           >
+            <Swords size={18} />
             开始对战
           </button>
-        </div>
 
+          <button
+            onClick={() => navigate('/bot-battle')}
+            style={{
+              width: '100%',
+              maxWidth: 400,
+              padding: '14px 24px',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--border)',
+              background: 'var(--card-bg)',
+              color: 'var(--text-primary)',
+              fontSize: 15,
+              fontWeight: 600,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 10,
+            }}
+          >
+            <Bot size={18} />
+            4 Bot 对战
+          </button>
+        </div>
       </div>
-    </div>
+    </PageShell>
   );
 }
