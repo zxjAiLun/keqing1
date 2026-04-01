@@ -1,4 +1,4 @@
-from mahjong_env.replay import _calc_normal_progress
+from mahjong_env.replay import _calc_normal_progress, _calc_shanten_waits
 
 
 def _parse_hand(s: str):
@@ -83,3 +83,21 @@ def test_two_shanten_reference_case_matches_16_live_ukeire():
 
     assert progress.shanten == 2
     assert progress.ukeire_live_count == 16
+
+
+def test_calc_shanten_waits_includes_chiitoi_waits_without_melds():
+    hand = _parse_hand("1122334455667m")
+    shanten, waits_count, waits_tiles, _ = _calc_shanten_waits(hand, [])
+
+    assert shanten == 0
+    assert waits_tiles[6] is True  # 7m
+    assert waits_count >= 1
+
+
+def test_calc_shanten_waits_includes_kokushi_waits_without_melds():
+    hand = _parse_hand("19m19p19s1234566z")
+    shanten, waits_count, waits_tiles, _ = _calc_shanten_waits(hand, [])
+
+    assert shanten == 0
+    assert waits_count == 1
+    assert waits_tiles[33] is True  # 7z / C

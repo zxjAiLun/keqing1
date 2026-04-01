@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import importlib
 import json
 import re
@@ -12,7 +13,11 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import yaml
 
-from mahjong_env.replay import build_supervised_samples, read_mjai_jsonl
+from mahjong_env.replay import (
+    IllegalLabelActionError,
+    build_supervised_samples,
+    read_mjai_jsonl,
+)
 from keqingv1.action_space import (
     ANKAN_IDX,
     CHI_HIGH_IDX,
@@ -48,6 +53,8 @@ _SUIT_PERMS = [
 ]
 _SUITS = ("m", "p", "s")
 _PAI_RE = re.compile(r'"([1-9])([mps])r?"')
+_V3_CACHE_CLEAR_EVERY = 8
+_WORKER_PROCESSED_FILES = 0
 
 
 def _permute_mjson_text(text: str, perm: tuple) -> str:
@@ -168,6 +175,68 @@ class V3PreprocessAdapter(BasePreprocessAdapter):
         }
 
 
+def create_preprocess_adapter(name: str) -> BasePreprocessAdapter:
+    normalized = name.strip().lower()
+    if normalized == "base":
+        return BasePreprocessAdapter()
+    if normalized == "meld_rank":
+        return MeldRankPreprocessAdapter()
+    if normalized == "v3_aux":
+        return V3PreprocessAdapter()
+    raise ValueError(f"unknown preprocess adapter: {name}")
+
+
+def events_to_cached_arrays(
+    events,
+    *,
+    actor_name_filter=None,
+    adapter: Optional[BasePreprocessAdapter] = None,
+    value_strategy: str = "heuristic",
+    encode_module: str = "keqingv1.features",
+) -> Optional[Dict[str, np.ndarray]]:
+    """Public helper for event-stream -> cache-array conversion.
+
+    This is the shared entrypoint that selfplay and offline preprocessing should
+    both use when exporting the base cache schema. Adapter-specific cache shapes
+    still belong to training.preprocess / training.cached_dataset rather than
+    ad hoc exporters in selfplay.
+    """
+    chosen_adapter = adapter or BasePreprocessAdapter()
+    encode_fn = importlib.import_module(encode_module).encode
+    return _parse_events_to_arrays(
+        events,
+        actor_name_filter=actor_name_filter,
+        adapter=chosen_adapter,
+        value_strategy=value_strategy,
+        encode_fn=encode_fn,
+    )
+
+
+def save_events_to_cache_file(
+    out_path: Path,
+    events,
+    *,
+    actor_name_filter=None,
+    adapter: Optional[BasePreprocessAdapter] = None,
+    adapter_name: str = "base",
+    value_strategy: str = "heuristic",
+    encode_module: str = "keqingv1.features",
+) -> bool:
+    chosen_adapter = adapter or create_preprocess_adapter(adapter_name)
+    result = events_to_cached_arrays(
+        events,
+        actor_name_filter=actor_name_filter,
+        adapter=chosen_adapter,
+        value_strategy=value_strategy,
+        encode_module=encode_module,
+    )
+    if result is None:
+        return False
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(out_path, **result)
+    return True
+
+
 def _parse_events_to_arrays(
     events,
     *,
@@ -191,6 +260,8 @@ def _parse_events_to_arrays(
             actor_name_filter=actor_name_filter,
             value_strategy=value_strategy,
         )
+    except IllegalLabelActionError:
+        raise
     except Exception:
         return None
 
@@ -236,7 +307,16 @@ def _concat_results(results: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarra
 
 
 def process_file(args: Tuple) -> Tuple[str, int]:
+    global _WORKER_PROCESSED_FILES
     src_path, out_path, augment, actor_name_filter, adapter, value_strategy, encode_module = args
+    clear_progress_caches = None
+    if encode_module == "keqingv3.features":
+        try:
+            clear_progress_caches = importlib.import_module(
+                "keqingv3.progress_oracle"
+            ).clear_progress_caches
+        except Exception:
+            clear_progress_caches = None
     if out_path.exists():
         return ("skip", 0)
     try:
@@ -246,14 +326,12 @@ def process_file(args: Tuple) -> Tuple[str, int]:
         return ("error", 0)
 
     all_results: List[Dict[str, np.ndarray]] = []
-    encode_fn = importlib.import_module(encode_module).encode
-
-    result = _parse_events_to_arrays(
+    result = events_to_cached_arrays(
         events,
         actor_name_filter=actor_name_filter,
         adapter=adapter,
         value_strategy=value_strategy,
-        encode_fn=encode_fn,
+        encode_module=encode_module,
     )
     if result is not None:
         all_results.append(result)
@@ -268,7 +346,7 @@ def process_file(args: Tuple) -> Tuple[str, int]:
                     actor_name_filter=actor_name_filter,
                     adapter=adapter,
                     value_strategy=value_strategy,
-                    encode_fn=encode_fn,
+                    encode_fn=importlib.import_module(encode_module).encode,
                 )
                 if result is not None:
                     result.update(adapter.permute_result_extras(result, perm))
@@ -277,12 +355,21 @@ def process_file(args: Tuple) -> Tuple[str, int]:
                 pass
 
     if not all_results:
-        return ("empty", 0)
+        status = ("empty", 0)
+    else:
+        merged = _concat_results(all_results)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(out_path, **merged)
+        status = ("ok", len(merged["tile_feat"]))
 
-    merged = _concat_results(all_results)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(out_path, **merged)
-    return ("ok", len(merged["tile_feat"]))
+    _WORKER_PROCESSED_FILES += 1
+    if (
+        clear_progress_caches is not None
+        and _WORKER_PROCESSED_FILES % _V3_CACHE_CLEAR_EVERY == 0
+    ):
+        clear_progress_caches()
+        gc.collect()
+    return status
 
 
 def run_preprocess(
@@ -300,6 +387,7 @@ def run_preprocess(
     parser.add_argument("--no_augment", dest="augment", action="store_false")
     parser.set_defaults(augment=None)
     parser.add_argument("--workers", type=int, default=None)
+    parser.add_argument("--maxtasksperchild", type=int, default=None)
     parser.add_argument("--actor_name_filter", nargs="+", type=str, default=None)
     parser.add_argument(
         "--value-strategy",
@@ -327,6 +415,11 @@ def run_preprocess(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     workers = args.workers if args.workers is not None else int(cfg.get("workers", max(1, cpu_count() - 2)))
+    maxtasksperchild = (
+        args.maxtasksperchild
+        if args.maxtasksperchild is not None
+        else cfg.get("maxtasksperchild", 64)
+    )
     augment = args.augment if args.augment is not None else bool(cfg.get("augment", False))
     actor_name_filter_raw = args.actor_name_filter if args.actor_name_filter is not None else cfg.get("actor_name_filter")
     actor_name_filter = set(actor_name_filter_raw) if actor_name_filter_raw else None
@@ -353,11 +446,11 @@ def run_preprocess(
     filter_info = f"，actor_filter={list(actor_name_filter)}" if actor_name_filter else ""
     print(
         f"共 {total} 个文件，使用 {workers} 个进程，augment={augment} "
-        f"value_strategy={value_strategy}{filter_info}"
+        f"value_strategy={value_strategy} maxtasksperchild={maxtasksperchild}{filter_info}"
     )
 
     done = skipped = errors = total_samples = 0
-    with Pool(processes=workers) as pool:
+    with Pool(processes=workers, maxtasksperchild=maxtasksperchild) as pool:
         for status, n_samples in pool.imap_unordered(process_file, tasks, chunksize=4):
             done += 1
             if status == "ok":
@@ -375,5 +468,9 @@ def run_preprocess(
 __all__ = [
     "BasePreprocessAdapter",
     "MeldRankPreprocessAdapter",
+    "create_preprocess_adapter",
+    "V3PreprocessAdapter",
+    "events_to_cached_arrays",
+    "save_events_to_cache_file",
     "run_preprocess",
 ]

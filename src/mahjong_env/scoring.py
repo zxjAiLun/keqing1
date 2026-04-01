@@ -57,6 +57,7 @@ def _state_from_snapshot(snapshot: dict) -> GameState:
     state.last_discard = snapshot.get("last_discard")
     state.last_tsumo = list(snapshot.get("last_tsumo", [None, None, None, None]))
     state.last_tsumo_raw = list(snapshot.get("last_tsumo_raw", [None, None, None, None]))
+    state.remaining_wall = snapshot.get("remaining_wall")
     state.players = [PlayerState() for _ in range(4)]
     for pid in range(4):
         player = state.players[pid]
@@ -129,14 +130,23 @@ def _take_tile_id(pool: Dict[str, List[int]], tile: str) -> int:
     raise ValueError(f"failed to allocate tile id for {tile} from pool")
 
 
+def _meld_tile_sort_key(tile: str) -> tuple[int, int, int]:
+    normalized = normalize_tile(tile)
+    suit = normalized[-1]
+    if suit in "mps":
+        return ("mps".index(suit), int(normalized[0]), 0 if tile.endswith("r") else 1)
+    honor_digit = _HONOR_TO_DIGIT.get(normalized, "9")
+    return (3, int(honor_digit), 0 if tile.endswith("r") else 1)
+
+
 def _meld_tiles(meld: dict) -> List[str]:
     consumed = list(meld.get("consumed", []))
     called_tile = meld.get("pai_raw") or meld.get("pai")
-    if meld.get("type") == "kakan":
-        return consumed
+    if meld.get("type") in {"ankan", "kakan"}:
+        return sorted(consumed, key=_meld_tile_sort_key)
     if called_tile:
-        return consumed + [called_tile]
-    return consumed
+        return sorted(consumed + [called_tile], key=_meld_tile_sort_key)
+    return sorted(consumed, key=_meld_tile_sort_key)
 
 
 def _to_mahjong_meld(meld: dict, pool: Dict[str, List[int]]) -> Meld:
@@ -242,14 +252,15 @@ def score_hora(
     all_tiles.extend(active_ura_markers)
     pool = _build_136_pool(all_tiles)
 
-    tiles136 = [_take_tile_id(pool, tile) for tile in hand_tiles]
-    win_tile = _find_win_tile_id(tiles136, hand_tiles, pai)
+    closed_tile_ids = [_take_tile_id(pool, tile) for tile in hand_tiles]
+    win_tile = _find_win_tile_id(closed_tile_ids, hand_tiles, pai)
     meld_objects = []
     meld_tile_ids: List[int] = []
     for meld in melds:
         meld_object = _to_mahjong_meld(meld, pool)
         meld_objects.append(meld_object)
         meld_tile_ids.extend(list(meld_object.tiles))
+    tiles136 = closed_tile_ids + meld_tile_ids
     dora_ids = [_take_tile_id(pool, marker) for marker in state.dora_markers]
     ura_ids = [_take_tile_id(pool, marker) for marker in active_ura_markers]
 
@@ -308,7 +319,7 @@ def score_hora(
         yaku=[str(y.name) for y in (response.yaku or [])],
         yaku_details=_build_yaku_details(
             response,
-            tile_ids=tiles136 + meld_tile_ids,
+            tile_ids=tiles136,
             dora_indicator_ids=dora_ids,
             ura_indicator_ids=ura_ids,
         ),
@@ -326,7 +337,12 @@ def can_hora(
     pai: str,
     is_tsumo: bool,
     is_chankan: bool = False,
+    is_rinshan: Optional[bool] = None,
+    is_haitei: Optional[bool] = None,
+    is_houtei: Optional[bool] = None,
 ) -> bool:
+    player = state.players[actor]
+    remaining_wall = state.remaining_wall
     try:
         score_hora(
             state,
@@ -334,7 +350,10 @@ def can_hora(
             target=target,
             pai=pai,
             is_tsumo=is_tsumo,
+            is_rinshan=bool(player.rinshan_tsumo) if is_rinshan is None else is_rinshan,
             is_chankan=is_chankan,
+            is_haitei=(bool(remaining_wall == 0) and is_tsumo) if is_haitei is None else is_haitei,
+            is_houtei=(bool(remaining_wall == 0) and not is_tsumo) if is_houtei is None else is_houtei,
         )
     except Exception:
         return False
@@ -349,6 +368,9 @@ def can_hora_from_snapshot(
     pai: str,
     is_tsumo: bool,
     is_chankan: bool = False,
+    is_rinshan: Optional[bool] = None,
+    is_haitei: Optional[bool] = None,
+    is_houtei: Optional[bool] = None,
 ) -> bool:
     state = _state_from_snapshot(snapshot)
     return can_hora(
@@ -358,4 +380,7 @@ def can_hora_from_snapshot(
         pai=pai,
         is_tsumo=is_tsumo,
         is_chankan=is_chankan,
+        is_rinshan=is_rinshan,
+        is_haitei=is_haitei,
+        is_houtei=is_houtei,
     )

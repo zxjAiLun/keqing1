@@ -68,6 +68,59 @@ def _legal_score(
     return score
 
 
+def _candidate_final_score(
+    policy_logits: np.ndarray,
+    action: dict,
+    beam_value_scores: dict,
+    value: float,
+    style_lambda: float,
+    aux_bonus: float,
+) -> float:
+    """统一导出候选动作的最终决策分数。
+
+    优先使用 beam/value 重排后的分数；若该动作未经过 beam 重排，
+    则回退到当前模型实际使用的综合打分（logit + style/value + aux）。
+    这样 replay 输出对 keqingv1/2/3 共用，并避免外层再猜 beam/logit 口径。
+    """
+    idx = action_to_idx(action)
+    if idx in beam_value_scores:
+        return float(beam_value_scores[idx])
+    return float(
+        _legal_score(
+            policy_logits,
+            action,
+            value=value,
+            style_lambda=style_lambda,
+            aux_bonus=aux_bonus,
+        )
+    )
+
+
+def _inject_shanten_waits(
+    snap: dict,
+    *,
+    hand_list: list,
+    melds_list: list,
+    model_version: str,
+) -> None:
+    from mahjong_env.replay import _calc_shanten_waits
+    from mahjong_env.tiles import tile_to_34 as _tile_to_34
+
+    shanten, waits_cnt, waits_tiles, _ = _calc_shanten_waits(hand_list, melds_list)
+    if model_version == "keqingv3":
+        from keqingv3.progress_oracle import calc_standard_shanten_from_counts
+
+        counts34 = [0] * 34
+        for tile in hand_list:
+            idx34 = _tile_to_34(tile)
+            if 0 <= idx34 < 34:
+                counts34[idx34] += 1
+        shanten = int(calc_standard_shanten_from_counts(tuple(counts34)))
+    snap["shanten"] = shanten
+    snap["waits_count"] = waits_cnt
+    snap["waits_tiles"] = waits_tiles
+
+
 def _get_aux_outputs(
     model: torch.nn.Module,
 ) -> dict[str, float]:
@@ -405,12 +458,20 @@ class KeqingBot:
             except Exception:
                 pass
 
-        # tsumo：决策时手里有 14 张（apply 后），waits 应基于 14 张计算 → apply 后算
-        # dahai 响应/副露/reach：决策时手牌尚未变化 → apply 前先记录手牌用于 waits 计算
+        # runtime_state 用于 legal action 枚举，必须保持 battle 当前时点的真实状态；
+        # model_snap 用于特征编码，必须与训练样本的 decision contract 对齐。
+        # 对 tsumo 而言，训练侧使用「13 张 hand + 单独 tsumo_pai」的 pre-apply 视图，
+        # 但 legal 动作仍来自 apply 后的 14 张状态，因此两者需要拆开。
+        _decision_base_snap: Optional[dict] = None
         _pre_apply_hand: Optional[list] = None
         _pre_apply_melds: Optional[list] = None
         if etype == "tsumo" and event.get("actor") == actor:
-            # 自家摸牌，需要弃牌/立直/自摸
+            _decision_base_snap = state.snapshot(actor)
+            _pre_apply_hand = _decision_base_snap.get("hand", [])
+            _pre_apply_melds = (
+                (_decision_base_snap.get("melds") or [[], [], [], []])[actor]
+            )
+            # 自家摸牌，需要弃牌/立直/自摸；runtime_state 必须先 apply
             apply_event(state, event)
             needs_response = True
         elif etype == "dahai" and event.get("actor") != actor:
@@ -444,38 +505,44 @@ class KeqingBot:
             apply_event(state, event)
             return None
 
-        # 先注入 shanten/waits，再枚举合法动作（shanten 影响 reach 是否合法）
-        snap = state.snapshot(actor)
+        # 先在 runtime_snap 上注入 shanten/waits，再枚举合法动作（shanten 影响 reach 是否合法）
+        runtime_snap = state.snapshot(actor)
         injected = False
-        if self._riichi_state is not None and _pre_apply_hand is None:
-            # tsumo 场景：_riichi_state 在 apply 后已更新到 14 张状态，直接用
+        if (
+            self._riichi_state is not None
+            and etype == "tsumo"
+            and event.get("actor") == actor
+            and _decision_base_snap is None
+            and self._model_version != "keqingv3"
+        ):
             try:
-                snap["shanten"] = int(self._riichi_state.shanten)
-                snap["waits_count"] = int(sum(self._riichi_state.waits))
-                snap["waits_tiles"] = list(self._riichi_state.waits)
+                runtime_snap["shanten"] = int(self._riichi_state.shanten)
+                runtime_snap["waits_count"] = int(sum(self._riichi_state.waits))
+                runtime_snap["waits_tiles"] = list(self._riichi_state.waits)
                 injected = True
             except Exception:
                 pass
         if not injected:
-            # fallback 或非 tsumo 场景：用决策时刻手牌计算 waits
-            from mahjong_env.replay import _calc_shanten_waits
-
             if _pre_apply_hand is not None:
-                # dahai响应/副露/reach：用 apply 前手牌
-                hand_list = _pre_apply_hand
-                melds_list = _pre_apply_melds or []
+                # tsumo runtime legal 仍然要看摸后 14 张；
+                # 其余响应/副露/reach 场景继续沿用原来的决策时刻手牌。
+                if etype == "tsumo" and event.get("actor") == actor:
+                    hand_list = runtime_snap.get("hand", [])
+                    melds_list = (runtime_snap.get("melds") or [[], [], [], []])[actor]
+                else:
+                    hand_list = _pre_apply_hand
+                    melds_list = _pre_apply_melds or []
             else:
-                # tsumo fallback：apply 后 14 张
-                hand_list = snap.get("hand", [])
-                melds_list = (snap.get("melds") or [[], [], [], []])[actor]
-            shanten, waits_cnt, waits_tiles, _ = _calc_shanten_waits(
-                hand_list, melds_list
+                hand_list = runtime_snap.get("hand", [])
+                melds_list = (runtime_snap.get("melds") or [[], [], [], []])[actor]
+            _inject_shanten_waits(
+                runtime_snap,
+                hand_list=hand_list,
+                melds_list=melds_list,
+                model_version=self._model_version,
             )
-            snap["shanten"] = shanten
-            snap["waits_count"] = waits_cnt
-            snap["waits_tiles"] = waits_tiles
         # 计算并注入振听状态
-        waits_tiles = snap.get("waits_tiles")
+        waits_tiles = runtime_snap.get("waits_tiles")
         p = state.players[actor]
         if waits_tiles is not None:
             from mahjong_env.tiles import tile_to_34 as _t34, normalize_tile as _norm
@@ -494,11 +561,24 @@ class KeqingBot:
                     # 打出了进张牌（摸切或手切）
                     p.riichi_furiten = True
             p.furiten = p.sutehai_furiten or p.riichi_furiten or p.doujun_furiten
-        snap["furiten"] = [pp.furiten for pp in state.players]
-        snap["sutehai_furiten"] = [pp.sutehai_furiten for pp in state.players]
-        snap["riichi_furiten"] = [pp.riichi_furiten for pp in state.players]
-        snap["doujun_furiten"] = [pp.doujun_furiten for pp in state.players]
-        legal_actions = enumerate_legal_actions(snap, actor)
+        runtime_snap["furiten"] = [pp.furiten for pp in state.players]
+        runtime_snap["sutehai_furiten"] = [pp.sutehai_furiten for pp in state.players]
+        runtime_snap["riichi_furiten"] = [pp.riichi_furiten for pp in state.players]
+        runtime_snap["doujun_furiten"] = [pp.doujun_furiten for pp in state.players]
+        legal_actions = enumerate_legal_actions(runtime_snap, actor)
+
+        model_snap = runtime_snap
+        if _decision_base_snap is not None:
+            model_snap = _decision_base_snap
+            _inject_shanten_waits(
+                model_snap,
+                hand_list=_pre_apply_hand or [],
+                melds_list=_pre_apply_melds or [],
+                model_version=self._model_version,
+            )
+            model_snap["tsumo_pai"] = event.get("pai")
+        else:
+            model_snap["tsumo_pai"] = event.get("pai") if etype == "tsumo" else None
 
         # 如果合法动作只有 none（无实质选择），直接返回 none 不做推理
         non_none = [a for a in legal_actions if a.type != "none"]
@@ -506,7 +586,7 @@ class KeqingBot:
             return None
         if not non_none:
             return {"type": "none", "actor": actor}
-        tile_feat, scalar = self._encode(snap, actor)
+        tile_feat, scalar = self._encode(model_snap, actor)
 
         tile_t = torch.from_numpy(tile_feat).unsqueeze(0).to(self.device)  # (1, C, 34)
         scalar_t = torch.from_numpy(scalar).unsqueeze(0).to(self.device)  # (1, S)
@@ -551,7 +631,7 @@ class KeqingBot:
                 self.model,
                 self._encode,
                 self.device,
-                snap,
+                runtime_snap,
                 actor,
                 logits_np,
                 legal_meld,
@@ -591,7 +671,7 @@ class KeqingBot:
                 self.model,
                 self._encode,
                 self.device,
-                snap,
+                runtime_snap,
                 actor,
                 logits_np,
                 legal_reach[0],
@@ -607,7 +687,7 @@ class KeqingBot:
                 self.model,
                 self._encode,
                 self.device,
-                snap,
+                runtime_snap,
                 actor,
                 logits_np,
                 legal_dahai,
@@ -639,6 +719,14 @@ class KeqingBot:
                 {
                     "action": a,
                     "logit": float(logits_np[action_to_idx(a)]),
+                    "final_score": _candidate_final_score(
+                        logits_np,
+                        a,
+                        beam_value_scores,
+                        value_scalar,
+                        self.style_vec[0],
+                        aux_bonus,
+                    ),
                     **(
                         {"beam_score": float(beam_value_scores[action_to_idx(a)])}
                         if action_to_idx(a) in beam_value_scores
@@ -650,24 +738,24 @@ class KeqingBot:
             key=lambda x: x["logit"],
             reverse=True,
         )
-        tsumo_pai = event.get("pai") if etype == "tsumo" else None
+        tsumo_pai = model_snap.get("tsumo_pai")
         self.decision_log.append(
             {
                 "step": len(self.decision_log),
-                "bakaze": snap.get("bakaze", ""),
-                "kyoku": snap.get("kyoku", 0),
-                "honba": snap.get("honba", 0),
-                "oya": snap.get("oya", 0),
-                "scores": snap.get("scores", []),
-                "hand": snap.get("hand", []),
-                "discards": snap.get("discards", []),
-                "melds": snap.get("melds", []),
-                "dora_markers": snap.get("dora_markers", []),
-                "reached": snap.get("reached", []),
-                "actor_to_move": snap.get(
+                "bakaze": model_snap.get("bakaze", ""),
+                "kyoku": model_snap.get("kyoku", 0),
+                "honba": model_snap.get("honba", 0),
+                "oya": model_snap.get("oya", 0),
+                "scores": model_snap.get("scores", []),
+                "hand": model_snap.get("hand", []),
+                "discards": model_snap.get("discards", []),
+                "melds": model_snap.get("melds", []),
+                "dora_markers": model_snap.get("dora_markers", []),
+                "reached": model_snap.get("reached", []),
+                "actor_to_move": model_snap.get(
                     "actor_to_move", event.get("actor", self.player_id)
                 ),
-                "last_discard": snap.get("last_discard"),
+                "last_discard": model_snap.get("last_discard"),
                 "tsumo_pai": tsumo_pai,
                 "candidates": scored,
                 "chosen": chosen,

@@ -1,11 +1,11 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`src/` contains runtime code. Key modules are `src/gateway/` for live battle APIs and bot turns, `src/mahjong_env/` for rules/state/legal actions, `src/replay/` for offline replay generation, and `src/replay_ui/` for the React/Vite frontend. Models and generated outputs live under `artifacts/`. Dataset inputs are under `dataset/`. Tests are in `tests/v5model/`. Historical code remains in `archive/`; prefer current `src/` implementations for new work.
+`src/` contains runtime code. Key modules are `src/gateway/` for live battle APIs and bot turns, `src/mahjong_env/` for rules/state/legal actions, `src/replay/` for offline replay generation, and `src/replay_ui/` for the React/Vite frontend. Models and generated outputs live under `artifacts/`. Dataset inputs are under `dataset/`. Current battle/replay regressions live primarily under `tests/`. Historical code remains in `archive/`; prefer current `src/` implementations for new work.
 
 ## Build, Test, and Development Commands
 - `uv run pytest` runs the Python test suite configured in `pyproject.toml`.
-- `uv run pytest tests/v5model/test_battle_meld_flow.py` runs a focused backend regression.
+- `uv run pytest tests/test_battle_rules_checklist.py tests/test_battle_edge_cases.py tests/test_replay_strict_legal.py` runs focused backend legality/regression checks.
 - `uv run python -m py_compile src/gateway/battle.py src/gateway/api/battle.py` performs quick syntax validation.
 - `cd src/replay_ui && npm install` installs frontend dependencies.
 - `cd src/replay_ui && npm run dev` starts the Vite dev server.
@@ -16,7 +16,7 @@
 Use 4-space indentation in Python and follow existing type-hinted, dataclass-heavy style. Keep Python modules `snake_case`, classes `PascalCase`, and React components/files `PascalCase` where appropriate. Prefer small, explicit state helpers over implicit UI logic. In frontend code, preserve the existing inline-style and utility-driven patterns unless a file already uses a different convention.
 
 ## Testing Guidelines
-Backend tests use `pytest`. Add regressions beside related files in `tests/v5model/`, named `test_<feature>.py` and `test_<behavior>()`. Frontend changes should at minimum pass `npm run build`; add lint validation for larger UI refactors. For battle/replay UI work, verify both live `battle` and `game-replay` flows when changing shared state fields.
+Backend tests use `pytest`. Add regressions beside related files in `tests/`, named `test_<feature>.py` and `test_<behavior>()`. Frontend changes should at minimum pass `npm run build`; add lint validation for larger UI refactors. For battle/replay UI work, verify both live `battle` and `game-replay` flows when changing shared state fields.
 
 ## Commit & Pull Request Guidelines
 Recent history favors short imperative subjects such as `add replay UI game board view & diff navigation buttons` and `refactor: archive deprecated code, reorganize project structure`. Use concise commits scoped to one change. PRs should include:
@@ -33,9 +33,10 @@ Operational runbook for the selfplay / battle / replay line lives at:
 
 ## Battle, Selfplay, and Replay Invariants
 - Treat `src/gateway/battle.py` + `src/mahjong_env/state.py` + `src/mahjong_env/legal_actions.py` as the only gameplay truth. `riichienv` may still be used for auxiliary shanten/waits analysis, but it must not become a second rules source for live battle or selfplay flow.
+- `src/mahjong_env/types.py::ActionSpec` is now the canonical action semantics layer. Battle, replay, bot-driver, and legal-action reconstruction should compare/canonicalize via `ActionSpec` rather than raw mjai dict equality.
 - Keep `scripts/selfplay.py` as a thin orchestrator. It must not manually mutate `room.state` to simulate draws, melds, scores, or progression. All gameplay mutations must go through `BattleManager`.
 - Every emitted event should be consumed by each bot at most once. Do not re-broadcast the same semantic event through multiple ad hoc paths. When refactoring selfplay, preserve the invariant that bot-local `GameState` and server `room.state` stay in sync.
-- When applying bot actions to the server, canonicalize against server-side legal actions first. This is especially important for red fives (`5mr/5pr/5sr`) and meld `consumed` tiles. The bot may choose a normalized action; the server must execute the exact legal representation from current state.
+- When applying bot or human actions to the server, canonicalize against server-side legal `ActionSpec`s first. This is especially important for red fives (`5mr/5pr/5sr`), meld `consumed` tiles, `hora` labels missing `pai`, and `ankan` labels inferred from `consumed`.
 - Discard response arbitration must preserve Mahjong priority:
   - `hora > pon/daiminkan > chi`
   - for equal priority, the player closer in turn order after the discarder wins
@@ -62,6 +63,11 @@ Operational runbook for the selfplay / battle / replay line lives at:
   - `chosen.type == "none"` with `gt_action == null` and non-`none` response candidates means the real action was an explicit `none`/pass
   - `chosen.type in {"chi","pon","daiminkan","ankan","kakan","hora"}` with `gt_action == null` and a `none` candidate means the real action was that chosen response
   Keep `POST /api/replay` and `GET /api/replay/{id}` on the same normalization path so freshly uploaded reviews and saved replays produce identical stats.
+- Replay strict legality is intentionally fail-fast. `build_supervised_samples(..., strict_legal_labels=True)` must raise if a replay label is not contained in the reconstructed legal set after `ActionSpec` canonicalization. Do not silently inject labels into the legal set to keep preprocessing moving.
+- Keep the `tsumo` feature contract aligned between replay training and bot inference:
+  - runtime legality/state uses the post-apply 14-tile state
+  - model features and `decision_log` use the pre-apply decision snapshot with 13-tile `hand` plus separate `tsumo_pai`
+  - do not collapse these into one snapshot just because the bot is already in its own-turn runtime state
 - Frontend review screens should render `实际: —` only for truly unknown ground truth. Do not use `null gt_action` as a silent synonym for “过” or “没有副露”; fix the backend replay normalization instead.
 - Hora display must not infer dora-family han from a flattened `yaku` name list alone. Backend scoring should expose structured `yaku_details` including exact `Dora`, `Ura Dora`, and `Aka Dora` han counts, and ReplayUI should prefer that structured data. Frontend fallback inference is only for legacy replay files.
 - Replay board semantics for opponent discards must preserve two phases:
@@ -72,7 +78,9 @@ Operational runbook for the selfplay / battle / replay line lives at:
   - tsumogiri: gap remains in the draw slot
   - tedashi: gap remains in the discarded tile position
 - Concealed opponent hands in replay mode should mirror the same timing semantics as revealed hands. If the discarded tile position is unknown, use a stable pseudo-random gap location rather than silently snapping back to a packed 13-tile block.
-- Before finishing selfplay/battle/replay changes, run focused regressions. At minimum prefer the current set of battle/selfplay tests in `tests/v5model/`, plus `cd src/replay_ui && npm run build` when changing replay UI or shared replay API shapes.
+- Before finishing selfplay/battle/replay changes, run focused regressions. At minimum prefer the current set:
+  - `uv run pytest tests/test_battle_rules_checklist.py tests/test_battle_edge_cases.py tests/test_replay_strict_legal.py tests/test_replay_aux_targets.py tests/test_aka_consistency.py`
+  - `cd src/replay_ui && npm run build` when changing replay UI or shared replay API shapes.
 
 ## Model Iteration Notes
 - Treat `src/keqingv1/` and `src/keqingv2/` as compatibility surfaces. Do not change their feature dimensions, model input shapes, or checkpoint expectations when working on new model ideas.

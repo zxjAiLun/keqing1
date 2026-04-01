@@ -323,7 +323,7 @@
             <span class="action-chip" :class="gtClass(entry)">
               实际: {{ entry.gt_action ? actionLabel(entry.gt_action) : '—' }}
             </span>
-            <span v-if="entry.chosen.type === entry.gt_action?.type && entry.chosen.type === 'dahai' && entry.chosen.pai === entry.gt_action?.pai"
+            <span v-if="sameAction(entry.chosen, entry.gt_action)"
               style="font-size:11px;color:#16a34a;font-weight:600">✓ Match</span>
           </div>
         </div>
@@ -352,7 +352,9 @@
               <thead><tr>
                 <th>动作</th>
                 <th>Logit</th>
-                <th v-if="entry.candidates.some(c => c.beam_score !== undefined)">Beam</th>
+                <th v-if="entry.candidates.some(c => c.final_score !== undefined)">Final</th>
+                <th v-else-if="entry.candidates.some(c => c.beam_score !== undefined)">Beam</th>
+                <th v-if="entry.candidates.some(c => c.danger_prior)">Danger</th>
                 <th></th>
               </tr></thead>
               <tbody>
@@ -360,7 +362,12 @@
                   :class="candRowClass(c, entry)">
                   <td>{{ actionLabel(c.action) }}</td>
                   <td class="mono">{{ c.logit.toFixed(3) }}</td>
-                  <td class="mono" v-if="entry.candidates.some(x => x.beam_score !== undefined)">{{ c.beam_score !== undefined ? c.beam_score.toFixed(3) : '—' }}</td>
+                  <td class="mono" v-if="entry.candidates.some(x => x.final_score !== undefined)">{{ c.final_score !== undefined ? c.final_score.toFixed(3) : '—' }}</td>
+                  <td class="mono" v-else-if="entry.candidates.some(x => x.beam_score !== undefined)">{{ c.beam_score !== undefined ? c.beam_score.toFixed(3) : '—' }}</td>
+                  <td class="mono" v-if="entry.candidates.some(x => x.danger_prior)">
+                    <span v-if="c.danger_prior" :title="[(c.danger_prior.reason || ''), (c.danger_prior.source_label || c.danger_prior_source || '')].filter(Boolean).join('\n')">{{ typeof c.danger_prior.value === 'number' ? c.danger_prior.value.toFixed(1) : c.danger_prior.value }}</span>
+                    <span v-else>—</span>
+                  </td>
                   <td class="cand-marks">{{ candMarks(c, entry) }}</td>
                 </tr>
               </tbody>
@@ -375,7 +382,9 @@
               <thead><tr>
                 <th>动作</th>
                 <th>Logit</th>
-                <th v-if="entry.candidates.some(c => c.beam_score !== undefined)">Beam</th>
+                <th v-if="entry.candidates.some(c => c.final_score !== undefined)">Final</th>
+                <th v-else-if="entry.candidates.some(c => c.beam_score !== undefined)">Beam</th>
+                <th v-if="entry.candidates.some(c => c.danger_prior)">Danger</th>
                 <th></th>
               </tr></thead>
               <tbody>
@@ -383,7 +392,12 @@
                   :class="candRowClass(c, entry)">
                   <td>{{ actionLabel(c.action) }}</td>
                   <td class="mono">{{ c.logit.toFixed(3) }}</td>
-                  <td class="mono" v-if="entry.candidates.some(x => x.beam_score !== undefined)">{{ c.beam_score !== undefined ? c.beam_score.toFixed(3) : '—' }}</td>
+                  <td class="mono" v-if="entry.candidates.some(x => x.final_score !== undefined)">{{ c.final_score !== undefined ? c.final_score.toFixed(3) : '—' }}</td>
+                  <td class="mono" v-else-if="entry.candidates.some(x => x.beam_score !== undefined)">{{ c.beam_score !== undefined ? c.beam_score.toFixed(3) : '—' }}</td>
+                  <td class="mono" v-if="entry.candidates.some(x => x.danger_prior)">
+                    <span v-if="c.danger_prior" :title="[(c.danger_prior.reason || ''), (c.danger_prior.source_label || c.danger_prior_source || '')].filter(Boolean).join('\n')">{{ typeof c.danger_prior.value === 'number' ? c.danger_prior.value.toFixed(1) : c.danger_prior.value }}</span>
+                    <span v-else>—</span>
+                  </td>
                   <td class="cand-marks">{{ candMarks(c, entry) }}</td>
                 </tr>
               </tbody>
@@ -473,7 +487,7 @@ createApp({
         const t = e.chosen?.type || '?';
         if (!types[t]) types[t] = { total: 0, match: 0 };
         types[t].total++;
-        if (e.gt_action && e.chosen?.type === e.gt_action.type && e.chosen?.pai === e.gt_action.pai) types[t].match++;
+        if (sameAction(e.chosen, e.gt_action)) types[t].match++;
       });
       const labels = { dahai:'打牌', none:'过', reach:'立直', chi:'吃', pon:'碰', daiminkan:'大明杠', ankan:'暗杠', kakan:'加杠', hora:'胡', ryukyoku:'流局' };
       return Object.entries(types).map(([t, v]) => ({
@@ -491,7 +505,7 @@ createApp({
         const t = e.chosen?.pai || '?';
         if (!tiles[t]) tiles[t] = { total: 0, match: 0 };
         tiles[t].total++;
-        if (e.gt_action?.type === 'dahai' && e.chosen?.pai === e.gt_action?.pai) tiles[t].match++;
+        if (e.gt_action?.type === 'dahai' && sameAction(e.chosen, e.gt_action)) tiles[t].match++;
       });
       return Object.entries(tiles).map(([t, v]) => ({
         tile: t,
@@ -522,18 +536,20 @@ createApp({
     function buildSortedTiles(entry) {
       const hand = entry.hand || [];
       const tsumo_pai = entry.tsumo_pai || null;
-      const tileLogit = {}, tileBeam = {};
+      const tileLogit = {}, tileBeam = {}, tileFinal = {};
       if (entry.candidates && entry.candidates.length) {
         entry.candidates.forEach(c => {
           if (c.action && c.action.type === 'dahai' && c.action.pai) {
             tileLogit[c.action.pai] = c.logit;
+            if (c.final_score !== undefined) tileFinal[c.action.pai] = c.final_score;
             if (c.beam_score !== undefined) tileBeam[c.action.pai] = c.beam_score;
           }
         });
       }
-      // 柱高依据：优先用 beam_score，否则用 logit
+      // 柱高依据：优先用 final_score，兼容 beam_score / logit
+      const hasFinal = Object.keys(tileFinal).length > 0;
       const hasBeam = Object.keys(tileBeam).length > 0;
-      const scoreMap = hasBeam ? tileBeam : tileLogit;
+      const scoreMap = hasFinal ? tileFinal : (hasBeam ? tileBeam : tileLogit);
       const vals = Object.values(scoreMap);
       let minScore = 0, maxScore = 1;
       if (vals.length > 1) { minScore = Math.min(...vals); maxScore = Math.max(...vals); }
@@ -545,6 +561,7 @@ createApp({
       return sorted.map(name => ({
         name,
         logit: tileLogit[name],
+        finalScore: tileFinal[name],
         beamScore: tileBeam[name],
         score: scoreMap[name],
         minScore, scoreRange,
@@ -593,31 +610,63 @@ createApp({
       return '';
     }
 
+    function normalizeTileForCompare(tile) {
+      if (!tile) return tile;
+      if (tile === '5mr' || tile === '5pr' || tile === '5sr') return tile;
+      return tile.endsWith('r') ? tile.slice(0, -1) : tile;
+    }
+    function normalizedConsumed(action) {
+      return (action?.consumed || []).map(normalizeTileForCompare).sort().join('|');
+    }
+    function sameAction(left, right) {
+      if (!left || !right) return false;
+      const lt = left.type === 'pass' ? 'none' : left.type;
+      const rt = right.type === 'pass' ? 'none' : right.type;
+      if (lt !== rt) return false;
+      if (lt === 'none' || lt === 'reach' || lt === 'ryukyoku') return true;
+      if (lt === 'dahai') return normalizeTileForCompare(left.pai) === normalizeTileForCompare(right.pai);
+      if (lt === 'hora') {
+        const lp = left.pai ? normalizeTileForCompare(left.pai) : null;
+        const rp = right.pai ? normalizeTileForCompare(right.pai) : null;
+        return left.target === right.target && (lp === null || rp === null || lp === rp);
+      }
+      if (['chi', 'pon', 'daiminkan', 'ankan', 'kakan'].includes(lt)) {
+        const lp = left.pai ? normalizeTileForCompare(left.pai).replace(/r$/, '') : null;
+        const rp = right.pai ? normalizeTileForCompare(right.pai).replace(/r$/, '') : null;
+        return (
+          left.target === right.target &&
+          (lp === null || rp === null || lp === rp) &&
+          normalizedConsumed(left) === normalizedConsumed(right)
+        );
+      }
+      return JSON.stringify(left) === JSON.stringify(right);
+    }
+
     function chosenClass(entry, chosen) {
       if (!chosen) return 'none';
       const g = entry.gt_action;
-      if (g && chosen.type === g.type && chosen.pai === g.pai) return 'both';
+      if (sameAction(chosen, g)) return 'both';
       if (chosen.type === 'dahai' || chosen.type === 'none') return 'bot';
       return 'gt';
     }
     function gtClass(entry) {
       const c = entry.chosen, g = entry.gt_action;
       if (!g) return 'none';
-      if (c && c.type === g.type && c.pai === g.pai) return 'both';
+      if (sameAction(c, g)) return 'both';
       return 'gt';
     }
 
     function candRowClass(c, entry) {
-      const isBot = JSON.stringify(c.action) === JSON.stringify(entry.chosen);
-      const isGt  = entry.gt_action && JSON.stringify(c.action) === JSON.stringify(entry.gt_action);
+      const isBot = sameAction(c.action, entry.chosen);
+      const isGt  = entry.gt_action && sameAction(c.action, entry.gt_action);
       if (isBot && isGt) return 'cand-both';
       if (isBot) return 'cand-bot';
       if (isGt)  return 'cand-gt';
       return '';
     }
     function candMarks(c, entry) {
-      const isBot = JSON.stringify(c.action) === JSON.stringify(entry.chosen);
-      const isGt  = entry.gt_action && JSON.stringify(c.action) === JSON.stringify(entry.gt_action);
+      const isBot = sameAction(c.action, entry.chosen);
+      const isGt  = entry.gt_action && sameAction(c.action, entry.gt_action);
       let m = '';
       if (isBot) m += '✓Bot ';
       if (isGt)  m += '★玩家';

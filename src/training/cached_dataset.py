@@ -325,11 +325,13 @@ class GenericCachedMjaiDataset(IterableDataset):
         for path in paths:
             try:
                 data = np.load(path, allow_pickle=True)
-                tile_feats = data[BASE_CACHE_FIELDS[0]].astype(np.float32)
-                scalars = data[BASE_CACHE_FIELDS[1]].astype(np.float32)
-                masks = data[BASE_CACHE_FIELDS[2]].astype(np.float32)
-                action_idxs = data[BASE_CACHE_FIELDS[3]].astype(np.int64)
-                values = data[BASE_CACHE_FIELDS[4]].astype(np.float32)
+                # Keep on-disk dtypes here to avoid whole-file host-side copies.
+                # Cast only where required later in collate / device transfer.
+                tile_feats = data[BASE_CACHE_FIELDS[0]]
+                scalars = data[BASE_CACHE_FIELDS[1]]
+                masks = data[BASE_CACHE_FIELDS[2]]
+                action_idxs = data[BASE_CACHE_FIELDS[3]]
+                values = data[BASE_CACHE_FIELDS[4]]
                 extra_arrays = self.adapter.load_optional_arrays(data, len(tile_feats))
             except Exception:
                 continue

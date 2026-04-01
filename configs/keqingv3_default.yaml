@@ -27,6 +27,12 @@ dealin_loss_weight: 0.3
 
 val_ratio: 0.05
 num_workers: 4
+buffer_size: 512
+prefetch_factor: 2
+pin_memory: true
+persistent_workers: true
 log_interval: 200
-aug_perms: 2
+aug_perms: 1
 files_per_epoch_ratio: 0.3
+win_pos_weight: 2.0
+dealin_pos_weight: 6.0

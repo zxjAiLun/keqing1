@@ -5,7 +5,7 @@ import { Loader2 } from 'lucide-react';
 import type { ReplayData } from '../types/replay';
 import type { DecisionLogEntry } from '../types/replay';
 import { replayApi } from '../api/replayApi';
-import { actionComparableKey, actionLabel, sameReplayAction } from '../utils/tileUtils';
+import { actionLabel, sameReplayAction } from '../utils/tileUtils';
 import { CN_BAKAZE, SEAT_NAMES_CN } from '../utils/constants';
 import { normalizeReplayPlayerNames, replayPlayerDisplayName } from '../utils/replayNames';
 
@@ -96,14 +96,12 @@ function CandidateTable({
   chosen,
   gtAction,
 }: {
-  candidates: Array<{ action: import('../types/replay').Action; logit: number; beam_score?: number }>;
+  candidates: Array<{ action: import('../types/replay').Action; logit: number; beam_score?: number; final_score?: number }>;
   chosen: import('../types/replay').Action | null;
   gtAction: import('../types/replay').Action | null;
 }) {
+  const hasFinal = candidates.some(c => c.final_score !== undefined);
   const hasBeam = candidates.some(c => c.beam_score !== undefined);
-  const actKey = (a: import('../types/replay').Action | null) => actionComparableKey(a);
-  const chosenKey = actKey(chosen);
-  const gtKey = actKey(gtAction);
   return (
     <div style={{ marginTop: 6, fontSize: 11, overflowX: 'auto' }}>
       <table style={{ borderCollapse: 'collapse', width: '100%' }}>
@@ -111,15 +109,15 @@ function CandidateTable({
           <tr style={{ background: '#f1f5f9' }}>
             <th style={{ padding: '2px 8px', textAlign: 'left', color: '#475569', borderBottom: '1px solid #e2e8f0' }}>动作</th>
             <th style={{ padding: '2px 8px', textAlign: 'right', color: '#475569', borderBottom: '1px solid #e2e8f0', fontFamily: 'monospace' }}>Logit</th>
+            {hasFinal && <th style={{ padding: '2px 8px', textAlign: 'right', color: '#475569', borderBottom: '1px solid #e2e8f0', fontFamily: 'monospace' }}>Final</th>}
             {hasBeam && <th style={{ padding: '2px 8px', textAlign: 'right', color: '#475569', borderBottom: '1px solid #e2e8f0', fontFamily: 'monospace' }}>Beam</th>}
             <th style={{ padding: '2px 8px', borderBottom: '1px solid #e2e8f0' }}></th>
           </tr>
         </thead>
         <tbody>
           {candidates.map((c, i) => {
-            const key = actKey(c.action);
-            const isBot = key === chosenKey;
-            const isGt  = key === gtKey && gtKey !== '';
+            const isBot = sameReplayAction(c.action, chosen);
+            const isGt  = sameReplayAction(c.action, gtAction);
             const isBoth = isBot && isGt;
             const bg = isBoth ? '#fdf4ff' : isBot ? '#fff0f0' : isGt ? '#f0fff4' : (i % 2 === 0 ? '#fff' : '#f9fafb');
             const color = isBoth ? '#6b21a8' : isBot ? '#c0392b' : isGt ? '#166534' : '#374151';
@@ -128,6 +126,7 @@ function CandidateTable({
               <tr key={i} style={{ background: bg, color, fontWeight: isBot || isBoth ? 600 : 400 }}>
                 <td style={{ padding: '2px 8px', borderBottom: '1px solid #f1f5f9' }}>{actionLabel(c.action)}</td>
                 <td style={{ padding: '2px 8px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #f1f5f9' }}>{c.logit >= 0 ? '+' : ''}{c.logit.toFixed(3)}</td>
+                {hasFinal && <td style={{ padding: '2px 8px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #f1f5f9' }}>{c.final_score !== undefined ? (c.final_score >= 0 ? '+' : '') + c.final_score.toFixed(3) : '—'}</td>}
                 {hasBeam && <td style={{ padding: '2px 8px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #f1f5f9' }}>{c.beam_score !== undefined ? (c.beam_score >= 0 ? '+' : '') + c.beam_score.toFixed(3) : '—'}</td>}
                 <td style={{ padding: '2px 8px', fontSize: 10, color: '#666', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>{marks}</td>
               </tr>
@@ -275,7 +274,7 @@ function StepCard({ entry, playerNames }: { entry: DecisionLogEntry; playerNames
     const c = entry.chosen;
     if (!c) return 'none';
     const g = entry.gt_action;
-    if (g && c.type === g.type && c.pai === g.pai) return 'both';
+    if (sameReplayAction(c, g)) return 'both';
     if (c.type === 'dahai' || c.type === 'none') return 'bot';
     return 'gt';
   })();
@@ -283,7 +282,7 @@ function StepCard({ entry, playerNames }: { entry: DecisionLogEntry; playerNames
   const gtClass = (() => {
     const c = entry.chosen, g = entry.gt_action;
     if (!g) return 'none';
-    if (c && c.type === g.type && c.pai === g.pai) return 'both';
+    if (sameReplayAction(c, g)) return 'both';
     return 'gt';
   })();
 
@@ -412,6 +411,10 @@ function StepCard({ entry, playerNames }: { entry: DecisionLogEntry; playerNames
 export function ReplayViewPage() {
   const location = useLocation();
   const navigate = useNavigate();
+  const params = new URLSearchParams(location.search);
+  const replayIdFromQuery = params.get('id');
+  const playerIdFromQuery = Number(params.get('player_id') ?? '0');
+  const requestedPlayerId = Number.isFinite(playerIdFromQuery) ? playerIdFromQuery : 0;
 
   const [data, setData] = useState<ReplayData | null>(null);
   const [curKyoku, setCurKyoku] = useState(0);
@@ -424,22 +427,21 @@ export function ReplayViewPage() {
 
   useEffect(() => {
     const state = location.state as { replayData?: ReplayData; replayId?: string } | null;
-    if (state?.replayData) {
+    if (state?.replayData && !replayIdFromQuery) {
       setData(state.replayData);
       setLoading(false);
     } else if (state?.replayId) {
-      replayApi.get(state.replayId).then(d => { setData(d); setLoading(false); }).catch(e => { setError(String(e)); setLoading(false); });
+      replayApi.get(state.replayId, requestedPlayerId).then(d => { setData(d); setLoading(false); }).catch(e => { setError(String(e)); setLoading(false); });
     } else {
-      const params = new URLSearchParams(location.search);
-      const replayId = params.get('id');
+      const replayId = replayIdFromQuery;
       if (replayId) {
-        replayApi.get(replayId).then(d => { setData(d); setLoading(false); }).catch(e => { setError(String(e)); setLoading(false); });
+        replayApi.get(replayId, requestedPlayerId).then(d => { setData(d); setLoading(false); }).catch(e => { setError(String(e)); setLoading(false); });
       } else {
         setError('未找到回放数据，请从首页上传牌谱');
         setLoading(false);
       }
     }
-  }, [location]);
+  }, [location, replayIdFromQuery, requestedPlayerId]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -557,6 +559,11 @@ export function ReplayViewPage() {
   const kyokuLabel = ko ? `第${CN_BAKAZE[ko.bakaze] || ko.bakaze}${ko.kyoku}局 ${ko.honba}本场 (${curKyoku + 1}/${numKyoku})` : '';
   const pid = data.player_id || 0;
   const playerNames = normalizeReplayPlayerNames(data);
+  const switchPerspective = (nextPid: number) => {
+    const replayId = replayIdFromQuery ?? (location.state as { replayId?: string } | null)?.replayId;
+    if (!replayId) return;
+    navigate(`/replay?id=${encodeURIComponent(replayId)}&player_id=${nextPid}`);
+  };
 
   return (
     <div style={{ background: 'var(--page-bg)', height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -587,7 +594,15 @@ export function ReplayViewPage() {
           <button className="btn" onClick={jumpToNextDiff} title="下一个与Bot不同的决策">差异⏭</button>
           <button className="btn" onClick={() => setShowStats(true)}>📊统计</button>
           <button className="btn" onClick={handleExportHtml}>💾导出</button>
-          <button className="btn" onClick={() => navigate('/game-replay', { state: { replayData: data } })} title="切换到牌桌视图">🀄牌桌</button>
+          <button
+            className="btn"
+            onClick={() => replayIdFromQuery
+              ? navigate(`/game-replay?id=${encodeURIComponent(replayIdFromQuery)}&player_id=${pid}`)
+              : navigate('/game-replay', { state: { replayData: data } })}
+            title="切换到牌桌视图"
+          >
+            🀄牌桌
+          </button>
         </span>
 
         <button className="btn" onClick={() => navigate('/')}>🏠</button>
@@ -598,18 +613,54 @@ export function ReplayViewPage() {
       {showStats && <StatsPanel data={data} onClose={() => setShowStats(false)} />}
 
       {/* 步列表 */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
-        <div style={{ maxWidth: 860, margin: '0 auto' }}>
-          {visibleSteps.map(entry => (
-            <div key={entry.step} ref={el => { if (el) stepRefs.current.set(entry.step, el); else stepRefs.current.delete(entry.step); }}>
-              <StepCard entry={entry} playerNames={playerNames} />
-            </div>
-          ))}
-          {visibleSteps.length === 0 && (
-            <p style={{ textAlign: 'center', color: '#9ca3af', fontSize: 14, padding: '48px 0' }}>
-              该局暂无数据
-            </p>
-          )}
+      <div style={{ flex: 1, overflow: 'hidden', display: 'flex' }}>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
+          <div style={{ maxWidth: 860, margin: '0 auto' }}>
+            {visibleSteps.map(entry => (
+              <div key={entry.step} ref={el => { if (el) stepRefs.current.set(entry.step, el); else stepRefs.current.delete(entry.step); }}>
+                <StepCard entry={entry} playerNames={playerNames} />
+              </div>
+            ))}
+            {visibleSteps.length === 0 && (
+              <p style={{ textAlign: 'center', color: '#9ca3af', fontSize: 14, padding: '48px 0' }}>
+                该局暂无数据
+              </p>
+            )}
+          </div>
+        </div>
+        <div
+          style={{
+            width: 220,
+            borderLeft: '1px solid var(--border)',
+            background: 'var(--sidebar-bg)',
+            padding: 12,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>切换主视角</div>
+          {playerNames.map((name, idx) => {
+            const active = idx === pid;
+            return (
+              <button
+                key={idx}
+                onClick={() => switchPerspective(idx)}
+                disabled={active}
+                className="btn"
+                style={{
+                  justifyContent: 'flex-start',
+                  opacity: active ? 1 : 0.92,
+                  fontWeight: active ? 700 : 500,
+                  outline: active ? '2px solid rgba(255,255,255,0.25)' : 'none',
+                }}
+                title={`切换到 ${name}`}
+              >
+                {SEAT_NAMES_CN[idx]} · {replayPlayerDisplayName(playerNames, idx)}
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>

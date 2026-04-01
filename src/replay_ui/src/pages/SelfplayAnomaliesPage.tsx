@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AlertTriangle, Loader2, MonitorPlay, ListTree } from 'lucide-react';
 import { replayApi } from '../api/replayApi';
@@ -12,13 +12,47 @@ function fmtTime(ts: number): string {
 export function SelfplayAnomaliesPage() {
   const navigate = useNavigate();
   const [groups, setGroups] = useState<SelfplayAnomalyReplayGroup[]>([]);
+  const [selectedRunPath, setSelectedRunPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const runs = useMemo(() => {
+    const byRun = new Map<string, {
+      output_dir: string;
+      output_dir_path: string;
+      updated_at: number;
+      stats: SelfplayAnomalyReplayGroup['stats'];
+      collections: SelfplayAnomalyReplayGroup[];
+    }>();
+
+    for (const group of groups) {
+      const existing = byRun.get(group.output_dir_path);
+      if (existing) {
+        existing.updated_at = Math.max(existing.updated_at, group.updated_at);
+        existing.collections.push(group);
+      } else {
+        byRun.set(group.output_dir_path, {
+          output_dir: group.output_dir,
+          output_dir_path: group.output_dir_path,
+          updated_at: group.updated_at,
+          stats: group.stats,
+          collections: [group],
+        });
+      }
+    }
+
+    return Array.from(byRun.values()).sort((a, b) => b.updated_at - a.updated_at);
+  }, [groups]);
+
+  const activeRun = runs.find((run) => run.output_dir_path === selectedRunPath) ?? runs[0] ?? null;
 
   useEffect(() => {
     replayApi.listSelfplayReplayCollections()
       .then((data) => {
         setGroups(data.groups);
+        if (data.groups.length > 0) {
+          setSelectedRunPath(data.groups[0].output_dir_path);
+        }
         setLoading(false);
       })
       .catch((e) => {
@@ -55,7 +89,7 @@ export function SelfplayAnomaliesPage() {
         description="自动聚合 selfplay 导出的 `replays/manifest.json` 与 `anomaly_replays/manifest.json`，统一跳转决策列表或牌桌回放。"
       />
 
-        {groups.length === 0 && (
+        {runs.length === 0 && (
           <div className="card">
             <SectionTitle title="暂无对局回放" description="先运行 selfplay，默认会保存 10 局；异常抽样回放也会一起出现在这里。" />
             <div style={{ color: 'var(--text-muted)', fontSize: 14 }}>
@@ -64,19 +98,46 @@ export function SelfplayAnomaliesPage() {
           </div>
         )}
 
-        {groups.map((group) => (
-          <div key={group.output_dir} className="card" style={{ marginBottom: 16 }}>
+        {runs.length > 0 && (
+          <div className="card" style={{ marginBottom: 16 }}>
+            <SectionTitle title="选择测试批次" description="按 benchmark 输出目录切换，不同时间戳的牌谱集不再混在同一个列表里。" />
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              {runs.map((run) => {
+                const active = activeRun?.output_dir_path === run.output_dir_path;
+                return (
+                  <button
+                    key={run.output_dir_path}
+                    onClick={() => setSelectedRunPath(run.output_dir_path)}
+                    style={{
+                      ...runButtonStyle,
+                      borderColor: active ? 'var(--accent)' : 'var(--border)',
+                      background: active ? 'rgba(52, 152, 219, 0.10)' : 'var(--card-bg)',
+                      color: active ? 'var(--accent)' : 'var(--text-primary)',
+                    }}
+                  >
+                    <div style={{ fontWeight: 700 }}>{run.output_dir}</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                      更新时间 {fmtTime(run.updated_at)}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {activeRun?.collections.map((group) => (
+          <div key={`${group.output_dir_path}-${group.collection_type}`} className="card" style={{ marginBottom: 16 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
               <div>
-                <div className="card-title" style={{ marginBottom: 4 }}>{group.output_dir}</div>
+                <div className="card-title" style={{ marginBottom: 4 }}>
+                  {group.collection_type === 'anomaly_replays' ? '异常抽样回放' : '普通对局回放'}
+                </div>
                 <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                   更新时间 {fmtTime(group.updated_at)}
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
                   manifest: {group.manifest_path}
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-                  类型: {group.collection_type === 'anomaly_replays' ? '异常抽样' : '普通对局'}
                 </div>
               </div>
               {group.stats && (
@@ -163,6 +224,16 @@ const pillStyle: CSSProperties = {
   color: 'var(--text-secondary)',
   fontSize: 12,
   background: 'var(--page-bg)',
+};
+
+const runButtonStyle: CSSProperties = {
+  minWidth: 240,
+  padding: '12px 14px',
+  borderRadius: 12,
+  border: '1px solid var(--border)',
+  textAlign: 'left',
+  cursor: 'pointer',
+  transition: 'all 120ms ease',
 };
 
 const btnStyle: CSSProperties = {

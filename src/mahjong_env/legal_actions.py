@@ -5,7 +5,7 @@ from typing import Dict, List
 
 from mahjong_env.scoring import can_hora_from_snapshot
 from mahjong_env.tiles import normalize_tile, AKA_DORA_TILES, tile_without_aka, tile_to_34 as _tile_to_34
-from mahjong_env.types import Action
+from mahjong_env.types import Action, ActionSpec
 
 
 def _chi_patterns(tile: str) -> List[List[str]]:
@@ -81,16 +81,31 @@ def _pick_consumed(hand: Counter, normalized: str, n: int) -> List[str]:
     return result
 
 
-def _ankan_candidates(hand: Counter) -> List[str]:
-    result = []
-    for t, n in hand.items():
-        if n >= 4 and t not in AKA_DORA_TILES:
-            result.append(t)
+def _ankan_candidates(hand: Counter) -> List[tuple[str, tuple[str, ...]]]:
+    result: List[tuple[str, tuple[str, ...]]] = []
+    seen: set[str] = set()
+    for tile in hand.keys():
+        normalized = normalize_tile(tile)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        consumed = tuple(_pick_consumed(hand, normalized, 4))
+        if len(consumed) == 4 and Counter(consumed) <= hand:
+            result.append((consumed[0], consumed))
     return result
 
 
-def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
-    legal: List[Action] = []
+def _can_declare_reach(hand: Counter, melds: List[Dict], shanten: int | None, reached: bool) -> bool:
+    if reached or shanten != 0:
+        return False
+    if any(meld.get("type") != "ankan" for meld in melds):
+        return False
+    concealed_kan_count = sum(1 for meld in melds if meld.get("type") == "ankan")
+    return sum(hand.values()) + 3 * concealed_kan_count == 14
+
+
+def enumerate_legal_action_specs(state_snapshot: Dict, actor: int) -> List[ActionSpec]:
+    legal: List[ActionSpec] = []
     hand = Counter(state_snapshot["hand"])
     last_discard = state_snapshot["last_discard"]
     last_kakan = state_snapshot.get("last_kakan")
@@ -98,6 +113,10 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
     last_tsumo = state_snapshot.get("last_tsumo", [None, None, None, None])[actor]
     last_tsumo_raw = state_snapshot.get("last_tsumo_raw", [None, None, None, None])[actor]
     reached = state_snapshot["reached"][actor]
+    hora_is_haitei = state_snapshot.get("_hora_is_haitei")
+    hora_is_houtei = state_snapshot.get("_hora_is_houtei")
+    hora_is_rinshan = state_snapshot.get("_hora_is_rinshan")
+    hora_is_chankan = state_snapshot.get("_hora_is_chankan")
 
     # If there is a pending `last_discard` from someone else, the player is in
     # a "call reaction" stage. Even if `actor_to_move` was advanced
@@ -107,26 +126,18 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
         tile_raw = last_kakan.get("pai_raw", last_kakan.get("pai"))
         furiten_list = state_snapshot.get("furiten", [False] * 4)
         actor_furiten = furiten_list[actor] if actor < len(furiten_list) else False
-        waits_tiles = state_snapshot.get("waits_tiles")
-        if waits_tiles is not None and not actor_furiten:
-            tile34_idx = _tile_to_34(normalize_tile(tile_raw))
-            if (
-                tile34_idx >= 0
-                and tile34_idx < len(waits_tiles)
-                and waits_tiles[tile34_idx]
-                and can_hora_from_snapshot(
-                    state_snapshot,
-                    actor=actor,
-                    target=kakan_actor,
-                    pai=tile_raw,
-                    is_tsumo=False,
-                    is_chankan=True,
-                )
-            ):
-                legal.append(
-                    Action(type="hora", actor=actor, target=kakan_actor, pai=tile_raw)
-                )
-        legal.append(Action(type="none", actor=actor))
+        if not actor_furiten and can_hora_from_snapshot(
+            state_snapshot,
+            actor=actor,
+            target=kakan_actor,
+            pai=tile_raw,
+            is_tsumo=False,
+            is_chankan=bool(hora_is_chankan) if hora_is_chankan is not None else True,
+        ):
+            legal.append(
+                ActionSpec(type="hora", actor=actor, target=kakan_actor, pai=tile_raw)
+            )
+        legal.append(ActionSpec(type="none"))
         return legal
 
     if last_discard and last_discard.get("actor") != actor:
@@ -136,38 +147,31 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
         # 荣和：检查 waits_tiles（由 bot.py/replay.py 注入），振听时不能荣和
         furiten_list = state_snapshot.get("furiten", [False] * 4)
         actor_furiten = furiten_list[actor] if actor < len(furiten_list) else False
-        waits_tiles = state_snapshot.get("waits_tiles")
-        if waits_tiles is not None and not actor_furiten:
-            tile34_idx = _tile_to_34(normalize_tile(tile_raw))
-            if (
-                tile34_idx >= 0
-                and tile34_idx < len(waits_tiles)
-                and waits_tiles[tile34_idx]
-                and can_hora_from_snapshot(
-                    state_snapshot,
-                    actor=actor,
-                    target=discarder,
-                    pai=tile_raw,
-                    is_tsumo=False,
-                )
-            ):
-                legal.append(Action(type="hora", actor=actor, target=discarder, pai=tile_raw))
+        if not actor_furiten and can_hora_from_snapshot(
+            state_snapshot,
+            actor=actor,
+            target=discarder,
+            pai=tile_raw,
+            is_tsumo=False,
+            is_houtei=hora_is_houtei,
+        ):
+            legal.append(ActionSpec(type="hora", actor=actor, target=discarder, pai=tile_raw))
         if not reached:
             if _can_pon(hand, tile_raw):
                 consumed_pon = _pick_consumed(hand, tile_norm, 2)
-                legal.append(Action(type="pon", actor=actor, target=discarder, pai=tile_raw, consumed=consumed_pon))
+                legal.append(ActionSpec(type="pon", actor=actor, target=discarder, pai=tile_raw, consumed=tuple(consumed_pon)))
             if _can_daiminkan(hand, tile_raw):
                 consumed_kan = _pick_consumed(hand, tile_norm, 3)
-                legal.append(Action(type="daiminkan", actor=actor, target=discarder, pai=tile_raw, consumed=consumed_kan))
+                legal.append(ActionSpec(type="daiminkan", actor=actor, target=discarder, pai=tile_raw, consumed=tuple(consumed_kan)))
 
             next_player = (discarder + 1) % 4
             if actor == next_player:
                 for c in _chi_patterns(tile_raw):
                     if _hand_has_tile(hand, c[0]) and _hand_has_tile(hand, c[1]):
                         actual_c = [_pick_chi_tile(hand, c[0]), _pick_chi_tile(hand, c[1])]
-                        legal.append(Action(type="chi", actor=actor, target=discarder, pai=tile_raw, consumed=actual_c))
+                        legal.append(ActionSpec(type="chi", actor=actor, target=discarder, pai=tile_raw, consumed=tuple(actual_c)))
 
-        legal.append(Action(type="none", actor=actor))
+        legal.append(ActionSpec(type="none"))
         return legal
 
     if actor_to_move == actor:
@@ -183,17 +187,19 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
                 target=actor,
                 pai=tsumo_pai_out,
                 is_tsumo=True,
+                is_rinshan=hora_is_rinshan,
+                is_haitei=hora_is_haitei,
             ):
-                legal.append(Action(type="hora", actor=actor, target=actor, pai=tsumo_pai_out))
+                legal.append(ActionSpec(type="hora", actor=actor, target=actor, pai=tsumo_pai_out))
 
         if reached:
             # 立直已被接受：只能摸切（tsumogiri），或暗杠。
             if last_tsumo_raw is not None:
-                legal.append(Action(type="dahai", actor=actor, pai=last_tsumo_raw, tsumogiri=True))
+                legal.append(ActionSpec(type="dahai", actor=actor, pai=last_tsumo_raw, tsumogiri=True))
             elif last_tsumo is not None:
-                legal.append(Action(type="dahai", actor=actor, pai=last_tsumo, tsumogiri=True))
-            for tile in _ankan_candidates(hand):
-                legal.append(Action(type="ankan", actor=actor, pai=tile, consumed=[tile] * 4))
+                legal.append(ActionSpec(type="dahai", actor=actor, pai=last_tsumo, tsumogiri=True))
+            for pai, consumed in _ankan_candidates(hand):
+                legal.append(ActionSpec(type="ankan", actor=actor, pai=pai, consumed=consumed))
             return legal
 
         if pending_reach:
@@ -220,14 +226,14 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
                     continue
                 tiles34 = TilesConverter.to_34_array(hand136)
                 if _shanten_calc.calculate_shanten(tiles34) == 0:
-                    legal.append(Action(type="dahai", actor=actor, pai=pai_out, tsumogiri=(last_tsumo == tile)))
+                    legal.append(ActionSpec(type="dahai", actor=actor, pai=pai_out, tsumogiri=(last_tsumo == tile)))
             if not legal:
                 # fallback：shanten 计算失败时退化为全打法
                 for tile in hand.keys():
                     pai_out = tile
                     if last_tsumo == tile and last_tsumo_raw is not None:
                         pai_out = last_tsumo_raw
-                    legal.append(Action(type="dahai", actor=actor, pai=pai_out, tsumogiri=(last_tsumo == tile)))
+                    legal.append(ActionSpec(type="dahai", actor=actor, pai=pai_out, tsumogiri=(last_tsumo == tile)))
             return legal
 
         # 普通打牌阶段
@@ -238,7 +244,7 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
             if last_tsumo == tile and last_tsumo_raw is not None:
                 pai_out = last_tsumo_raw
             legal.append(
-                Action(
+                ActionSpec(
                     type="dahai",
                     actor=actor,
                     pai=pai_out,
@@ -250,12 +256,14 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
         # shanten 信息由 libriichi 在 mjai_bot.py 的 react() 中计算并添加到 snapshot。
         # 只有 shanten == 0 (听牌) 时才允许立直，防止模型错误选择导致 mjai_simulator 报错。
         shanten = state_snapshot.get("shanten", None)
-        if not reached and sum(hand.values()) == 14 and shanten == 0:
-            legal.append(Action(type="reach", actor=actor))
-        for tile in _ankan_candidates(hand):
-            legal.append(Action(type="ankan", actor=actor, pai=tile, consumed=[tile] * 4))
+        actor_melds = state_snapshot.get("melds", [[]])[actor]
+        if _can_declare_reach(hand, actor_melds, shanten, reached):
+            legal.append(ActionSpec(type="reach", actor=actor))
+        for pai, consumed in _ankan_candidates(hand):
+            legal.append(ActionSpec(type="ankan", actor=actor, pai=pai, consumed=consumed))
         # kakan（对已碰/明杠再杠）在"打牌选择"阶段可能出现。
-        # 我们基于已有的 pon meld 来枚举升级可能性（不处理红牌aka精确选择）。
+        # 基于已有的 pon meld 枚举升级可能性；已正确处理 5m/5mr 等价，
+        # _hand_has_tile 和 _pick_chi_tile 会优先返回手里实际存在的赤宝牌版本。
         for meld in state_snapshot.get("melds", [[]])[actor]:
             if meld.get("type") != "pon":
                 continue
@@ -267,20 +275,20 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
             if _hand_has_tile(hand, meld_norm):
                 kakan_pai = _pick_chi_tile(hand, meld_norm)
                 legal.append(
-                    Action(
+                    ActionSpec(
                         type="kakan",
                         actor=actor,
                         pai=kakan_pai,
-                        consumed=[
+                        consumed=tuple([
                             *(meld.get("consumed") or []),
                             meld_pai,
-                        ],
+                        ]),
                     )
                 )
         return legal
 
     if not last_discard:
-        legal.append(Action(type="none", actor=actor))
+        legal.append(ActionSpec(type="none"))
         return legal
 
     discarder = last_discard["actor"]
@@ -288,27 +296,27 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
     tile_norm = normalize_tile(tile)
     tile_raw = last_discard.get("pai_raw", tile)
     if discarder == actor:
-        legal.append(Action(type="none", actor=actor))
+        legal.append(ActionSpec(type="none"))
         return legal
 
     if _can_pon(hand, tile_raw):
         legal.append(
-            Action(
+            ActionSpec(
                 type="pon",
                 actor=actor,
                 target=discarder,
                 pai=tile_raw,
-                consumed=_pick_consumed(hand, tile_norm, 2),
+                consumed=tuple(_pick_consumed(hand, tile_norm, 2)),
             )
         )
     if _can_daiminkan(hand, tile_raw):
         legal.append(
-            Action(
+            ActionSpec(
                 type="daiminkan",
                 actor=actor,
                 target=discarder,
                 pai=tile_raw,
-                consumed=_pick_consumed(hand, tile_norm, 3),
+                consumed=tuple(_pick_consumed(hand, tile_norm, 3)),
             )
         )
 
@@ -318,14 +326,18 @@ def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
             if _hand_has_tile(hand, c[0]) and _hand_has_tile(hand, c[1]):
                 actual_c = [_pick_chi_tile(hand, c[0]), _pick_chi_tile(hand, c[1])]
                 legal.append(
-                    Action(
+                    ActionSpec(
                         type="chi",
                         actor=actor,
                         target=discarder,
                         pai=tile_raw,
-                        consumed=actual_c,
+                        consumed=tuple(actual_c),
                     )
                 )
 
-    legal.append(Action(type="none", actor=actor))
+    legal.append(ActionSpec(type="none"))
     return legal
+
+
+def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:
+    return [spec.to_action() for spec in enumerate_legal_action_specs(state_snapshot, actor)]

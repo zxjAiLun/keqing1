@@ -13,6 +13,7 @@ from urllib.parse import urlparse, parse_qs
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from replay.bot import normalize_replay_decisions
 
 
 class _NumpyEncoder(json.JSONEncoder):
@@ -52,56 +53,122 @@ if _REACT_DIST.exists():
 from replay.storage import get_storage
 
 
-def _normalize_replay_decisions(decisions: dict, meta: dict | None = None) -> dict:
-    from replay.bot import _same_action
+def _normalize_replay_events(events: list[dict] | None) -> list[dict]:
+    if not events:
+        return events or []
 
-    if not isinstance(decisions, dict):
+    from copy import deepcopy
+
+    from mahjong_env.scoring import score_hora
+    from mahjong_env.state import GameState, apply_event
+
+    normalized = [deepcopy(ev) for ev in events]
+    state = GameState()
+
+    for idx, event in enumerate(normalized):
+        if not isinstance(event, dict):
+            continue
+
+        event_type = event.get("type")
+        if event_type == "hora":
+            has_score_details = bool(event.get("cost")) or event.get("han") not in (None, 0) or event.get("fu") not in (None, 0)
+            if not has_score_details:
+                actor = int(event.get("actor", 0))
+                target = int(event.get("target", actor))
+                is_tsumo = actor == target
+                pai = event.get("pai")
+                if not pai:
+                    if is_tsumo:
+                        pai = state.last_tsumo_raw[actor] or state.last_tsumo[actor]
+                    elif state.last_discard:
+                        pai = state.last_discard.get("pai_raw") or state.last_discard.get("pai")
+                ura_markers = [str(m) for m in (event.get("ura_dora_markers") or event.get("ura_markers") or [])]
+                if pai:
+                    try:
+                        result = score_hora(
+                            state,
+                            actor=actor,
+                            target=target,
+                            pai=str(pai),
+                            is_tsumo=is_tsumo,
+                            ura_dora_markers=ura_markers,
+                        )
+                        deltas = list(event.get("deltas") or result.deltas)
+                        scores = list(event.get("scores") or [int(state.scores[i] + deltas[i]) for i in range(4)])
+                        normalized[idx] = {
+                            **event,
+                            "pai": str(pai),
+                            "is_tsumo": is_tsumo,
+                            "han": result.han,
+                            "fu": result.fu,
+                            "yaku": result.yaku,
+                            "yaku_details": result.yaku_details,
+                            "cost": result.cost,
+                            "deltas": deltas,
+                            "scores": scores,
+                            "honba": int(event.get("honba", state.honba)),
+                            "kyotaku": int(event.get("kyotaku", state.kyotaku)),
+                            "ura_dora_markers": ura_markers,
+                        }
+                        event = normalized[idx]
+                    except Exception:
+                        pass
+
+        try:
+            apply_event(state, event)
+        except Exception:
+            continue
+
+    return normalized
+
+
+def _merge_terminal_event_details(decisions: dict, events: list[dict] | None) -> dict:
+    if not isinstance(decisions, dict) or not events:
         return decisions
 
-    log = decisions.get("log", [])
-    player_id = decisions.get("player_id")
-    response_action_types = {"chi", "pon", "daiminkan", "ankan", "kakan", "hora"}
-    pending_idx: int | None = None
-    for idx, entry in enumerate(log):
-        if not entry.get("is_obs") and entry.get("gt_action") is None:
-            pending_idx = idx
-        if pending_idx is None:
-            continue
-        if idx == pending_idx:
-            continue
-        pending = log[pending_idx]
-        if pending.get("gt_action") is not None:
-            pending_idx = None
-            continue
-        chosen = pending.get("chosen") or {}
-        candidates = pending.get("candidates", [])
-        has_none_candidate = any(
-            c.get("action", {}).get("type") == "none" for c in candidates
-        )
-        has_non_none_candidate = any(
-            c.get("action", {}).get("type") != "none" for c in candidates
-        )
-        if chosen.get("type") == "none" and has_non_none_candidate:
-            pending["gt_action"] = {"type": "none", "actor": player_id}
-            pending_idx = None
-        elif chosen.get("type") in response_action_types and has_none_candidate:
-            pending["gt_action"] = {
-                **chosen,
-                "actor": chosen.get("actor", player_id),
-            }
-            pending_idx = None
-
-    own_log = [e for e in log if not e.get("is_obs")]
-    total_ops = len(own_log)
-    match_count = sum(1 for e in own_log if _same_action(e.get("chosen"), e.get("gt_action")))
-    return {
-        **decisions,
-        "log": log,
-        "total_ops": total_ops,
-        "match_count": match_count,
-        "bot_type": (meta or {}).get("bot_type", decisions.get("bot_type")),
-        "player_names": decisions.get("player_names") or (meta or {}).get("player_names"),
+    event_lookup = {
+        idx: event
+        for idx, event in enumerate(events)
+        if isinstance(event, dict)
     }
+
+    for entry in decisions.get("log", []):
+        source_event_index = entry.get("source_event_index")
+        if source_event_index is None:
+            continue
+        event = event_lookup.get(int(source_event_index))
+        if not event:
+            continue
+        action = entry.get("gt_action") or entry.get("chosen") or {}
+        if action.get("type") not in {"hora", "ryukyoku"}:
+            continue
+        if entry.get("chosen"):
+            entry["chosen"] = {**entry["chosen"], **event}
+        if entry.get("gt_action"):
+            entry["gt_action"] = {**entry["gt_action"], **event}
+    return decisions
+
+def _infer_player_bot_type(player_name: str | None, fallback: str | None = None) -> str:
+    raw = (player_name or "").lower()
+    if "keqingv1" in raw:
+        return "keqingv1"
+    if "keqingv3" in raw:
+        return "keqingv3"
+    if "modelv5" in raw or "v5" in raw:
+        return "v5"
+    if "keqingv2" in raw:
+        return "keqingv2"
+    return fallback or "keqingv1"
+
+
+def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
+    mapping = {
+        "keqingv1": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv1" / "best.pth",
+        "keqingv2": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv2" / "best.pth",
+        "keqingv3": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv3" / "best.pth",
+        "v5": BASE_DIR.parent.parent / "artifacts" / "models" / "modelv5" / "best.pth",
+    }
+    return mapping[bot_type]
 
 
 # ========== 旧接口（兼容） ==========
@@ -118,8 +185,10 @@ async def replay(
     """Python 只返回 JSON，前端 Vue 渲染。（兼容旧接口）"""
     from replay.api import run_replay_single_raw
     from replay.bot import render_replay_json
+    storage = get_storage()
 
     has_files = files and any(f.filename for f in files if f.filename)
+    events: list[dict] | None = None
 
     try:
         if has_files:
@@ -161,6 +230,12 @@ async def replay(
         elif input_type == "tenhou6":
             data = json.loads(text)
             bot = run_replay_single_raw(data, player_id=player_id, checkpoint=checkpoint or None, input_type="tenhou6", bot_type=bot_type)
+            try:
+                from replay.bot import _parse_to_events
+
+                events = _parse_to_events(data, input_type="tenhou6")
+            except Exception:
+                events = None
 
         elif input_type == "mjai":
             lines = text.splitlines()
@@ -181,7 +256,20 @@ async def replay(
         else:
             return JSONResponse(status_code=400, content={"error": f"未知的 input_type：{input_type}"})
 
-        result = _normalize_replay_decisions(render_replay_json(bot))
+        normalized_events = _normalize_replay_events(events)
+        result = normalize_replay_decisions(render_replay_json(bot))
+        result = _merge_terminal_event_details(result, normalized_events)
+        if events:
+            replay_id = storage.save(
+                events=normalized_events,
+                decisions=result,
+                bot_type=bot_type,
+                player_names=result.get("player_names"),
+            )
+            result = {
+                **result,
+                "replay_id": replay_id,
+            }
         return Response(
             content=json.dumps(result, cls=_NumpyEncoder, ensure_ascii=False),
             media_type="application/json",
@@ -224,15 +312,41 @@ async def list_replays():
 
 
 @app.get("/api/replay/{replay_id}", response_class=JSONResponse)
-async def get_replay(replay_id: str):
+async def get_replay(replay_id: str, player_id: int | None = None):
     """获取回放完整数据（decisions）。"""
     storage = get_storage()
     decisions = storage.load_decisions(replay_id)
     if decisions is None:
         return JSONResponse(status_code=404, content={"error": f"回放 {replay_id} 不存在"})
     meta = storage.load_meta(replay_id) or {}
+    events = _normalize_replay_events(storage.load_events(replay_id))
+    if (
+        isinstance(decisions, dict)
+        and player_id is not None
+        and decisions.get("player_id") != player_id
+    ):
+        from replay.api import run_replay_single_raw
+        from replay.bot import render_replay_json
+
+        if not events:
+            return JSONResponse(status_code=404, content={"error": f"回放 {replay_id} 事件不存在"})
+        player_names = meta.get("player_names") or decisions.get("player_names") or []
+        fallback_bot_type = meta.get("bot_type") or decisions.get("bot_type") or "keqingv1"
+        player_name = player_names[player_id] if 0 <= player_id < len(player_names) else None
+        bot_type = _infer_player_bot_type(player_name, fallback=fallback_bot_type)
+        checkpoint = _default_checkpoint_for_bot_type(bot_type)
+        bot = run_replay_single_raw(
+            events,
+            player_id=player_id,
+            checkpoint=checkpoint,
+            input_type="url",
+            bot_type=bot_type,
+        )
+        decisions = render_replay_json(bot)
+        decisions["bot_type"] = bot_type
     if isinstance(decisions, dict):
-        decisions = _normalize_replay_decisions(decisions, meta=meta)
+        decisions = normalize_replay_decisions(decisions, meta=meta)
+        decisions = _merge_terminal_event_details(decisions, events)
     return JSONResponse(content=decisions)
 
 
@@ -250,7 +364,7 @@ async def get_replay_meta(replay_id: str):
 async def get_replay_events(replay_id: str, from_step: int = 0, limit: int = 50):
     """分页获取 mjai 事件流。"""
     storage = get_storage()
-    events = storage.load_events(replay_id)
+    events = _normalize_replay_events(storage.load_events(replay_id))
     if not events:
         return JSONResponse(status_code=404, content={"error": f"回放 {replay_id} 事件不存在"})
 

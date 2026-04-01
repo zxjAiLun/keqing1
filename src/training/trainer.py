@@ -94,6 +94,7 @@ def _run_epoch(
 
     model.train(is_train)
     total_ce = total_val_loss = total_acc = 0.0
+    total_extra_loss = 0.0
     total_grad_norm = 0.0
     grad_norm_steps = 0
     extra_totals = {k: 0.0 for k in task.log_metric_keys}
@@ -155,6 +156,7 @@ def _run_epoch(
 
             total_ce += ce.item()
             total_val_loss += val_loss.item()
+            total_extra_loss += float(extra_loss.item())
             for key in task.log_metric_keys:
                 extra_totals[key] += float(extra_metrics.get(key, 0.0))
             n_batches += 1
@@ -201,6 +203,8 @@ def _run_epoch(
     stats = {
         "ce": total_ce / n,
         "val_loss": total_val_loss / n,
+        "extra_loss": total_extra_loss / n,
+        "objective": (total_ce / n) + value_loss_weight * (total_val_loss / n) + (total_extra_loss / n),
         "acc": total_acc / n,
         "grad_norm": (total_grad_norm / grad_norm_steps if grad_norm_steps > 0 else None),
         "step": step,
@@ -256,6 +260,7 @@ def train_model(
     start_epoch = 0
     global_step = 0
     best_metric = -float("inf") if task.best_metric_mode == "max" else float("inf")
+    best_ce = float("inf")
 
     if resume_path is not None and resume_path.exists():
         if weights_only:
@@ -326,14 +331,29 @@ def train_model(
             )
             print(f"  [best checkpoint saved, val_{task.best_metric_name}={best_metric:.4f}]")
 
+        if val_stats["ce"] < best_ce:
+            best_ce = val_stats["ce"]
+            save_checkpoint(
+                output_dir / "best_ce.pth", model, optimizer, scheduler,
+                epoch + 1, global_step, best_ce,
+            )
+            print(f"  [best_ce checkpoint saved, val_ce={best_ce:.4f}]")
+
         log_row = {
             "epoch": epoch + 1,
             "step": global_step,
             "train_ce": train_stats["ce"],
+            "train_value_loss": train_stats["val_loss"],
+            "train_extra_loss": train_stats["extra_loss"],
+            "train_objective": train_stats["objective"],
             "train_acc": train_stats["acc"],
             "train_grad_norm": train_stats.get("grad_norm"),
             "val_ce": val_stats["ce"],
+            "val_value_loss": val_stats["val_loss"],
+            "val_extra_loss": val_stats["extra_loss"],
+            "val_objective": val_stats["objective"],
             "val_acc": val_stats["acc"],
+            "lr": optimizer.param_groups[0]["lr"],
             "val_acc_by_type": val_stats.get("acc_by_type", {}),
             "val_total_by_type": val_stats.get("total_by_type", {}),
         }

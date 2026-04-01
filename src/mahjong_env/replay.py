@@ -1,20 +1,29 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Sequence, Set
 
+from mahjong.shanten import Shanten
 from keqingv3.progress_oracle import (
     NormalProgressInfo,
     analyze_normal_progress_from_counts as _oracle_calc_normal_progress_from_counts,
     calc_shanten_waits_from_counts as _oracle_calc_shanten_waits_from_counts,
 )
-from mahjong_env.legal_actions import enumerate_legal_actions
+from mahjong_env.legal_actions import enumerate_legal_action_specs
+from mahjong_env.replay_normalizer import (
+    is_replay_meta_event,
+    normalize_replay_events,
+    normalize_replay_label_for_legal_compare,
+    replay_label_matches_legal,
+    replay_label_to_legal_mjai,
+)
 from mahjong_env.state import GameState, apply_event
 from mahjong_env.tiles import AKA_DORA_TILES, tile_to_34 as _to_34
 from mahjong_env.types import MjaiEvent
-from mahjong_env.types import Action
+from mahjong_env.types import ActionSpec
 
 # ---------------------------------------------------------------------------
 # generic 3n+1 / 3n+2 standard-hand shanten/waits helpers
@@ -121,12 +130,47 @@ def _find_regular_waits(counts: tuple[int, ...]) -> List[bool]:
     return waits
 
 
+def _find_special_waits(
+    counts34: tuple[int, ...],
+    *,
+    shanten_calc: Shanten,
+) -> tuple[int, List[bool]]:
+    chiitoi_shanten = int(shanten_calc.calculate_shanten_for_chiitoitsu_hand(list(counts34)))
+    kokushi_shanten = int(shanten_calc.calculate_shanten_for_kokushi_hand(list(counts34)))
+    special_shanten = min(chiitoi_shanten, kokushi_shanten)
+    waits = [False] * 34
+    if special_shanten != 0:
+        return special_shanten, waits
+
+    for tile34, cnt in enumerate(counts34):
+        if cnt >= 4:
+            continue
+        work = list(counts34)
+        work[tile34] += 1
+        if (
+            (chiitoi_shanten == 0 and int(shanten_calc.calculate_shanten_for_chiitoitsu_hand(work)) == -1)
+            or (kokushi_shanten == 0 and int(shanten_calc.calculate_shanten_for_kokushi_hand(work)) == -1)
+        ):
+            waits[tile34] = True
+    return special_shanten, waits
+
+
 def _calc_shanten_waits(hand: List[str], melds: List[dict]):
-    """返回 (regular_shanten, waits_count, waits_tile34_bools, tehai_count)。"""
+    """返回 (standard_shanten, waits_count, waits_tile34_bools, tehai_count)。"""
     counts34 = _counts34_from_hand(hand)
     try:
-        shanten, waits_count, waits34, tehai_count = _oracle_calc_shanten_waits_from_counts(tuple(counts34))
-        return shanten, waits_count, list(waits34), tehai_count
+        regular_shanten, waits_count, waits34, tehai_count = _oracle_calc_shanten_waits_from_counts(tuple(counts34))
+        waits = list(waits34)
+        shanten = regular_shanten
+        if not melds:
+            shanten_calc = Shanten()
+            special_shanten, special_waits = _find_special_waits(tuple(counts34), shanten_calc=shanten_calc)
+            if special_shanten < shanten:
+                shanten = special_shanten
+                waits = special_waits if special_shanten == 0 else [False] * 34
+            elif special_shanten == shanten == 0:
+                waits = [a or b for a, b in zip(waits, special_waits)]
+        return shanten, sum(waits), waits, tehai_count
     except Exception:
         del melds
         tehai_count = sum(counts34)
@@ -260,6 +304,11 @@ class ReplaySample:
     score_delta_target: float = 0.0
     win_target: float = 0.0
     dealin_target: float = 0.0
+    ryukyoku_tenpai_target: float = 0.0
+
+
+class IllegalLabelActionError(ValueError):
+    """Raised when a replay label action is not contained in the reconstructed legal set."""
 
 
 @dataclass
@@ -291,11 +340,16 @@ def _finalize_aux_targets(
     score_deltas = None
     hora_actor = None
     hora_target = None
+    ryukyoku_tenpai_players: set[int] = set()
     if terminal_event is not None:
         score_deltas = terminal_event.get("deltas") or terminal_event.get("score_delta")
         if terminal_event.get("type") == "hora":
             hora_actor = terminal_event.get("actor")
             hora_target = terminal_event.get("target")
+        elif terminal_event.get("type") == "ryukyoku":
+            ryukyoku_tenpai_players = {
+                int(pid) for pid in (terminal_event.get("tenpai_players") or []) if pid is not None
+            }
 
     for pending in pending_samples:
         actor = pending.sample.actor
@@ -305,6 +359,7 @@ def _finalize_aux_targets(
             pending.sample.score_delta_target = 0.0
         pending.sample.win_target = 1.0 if hora_actor == actor else 0.0
         pending.sample.dealin_target = 1.0 if (hora_target == actor and hora_actor != actor) else 0.0
+        pending.sample.ryukyoku_tenpai_target = 1.0 if actor in ryukyoku_tenpai_players else 0.0
 
 
 class ValueTargetStrategy(Protocol):
@@ -343,7 +398,12 @@ class HeuristicValueStrategy:
         if et == "ryukyoku":
             sd = ctx.event.get("deltas")
             if isinstance(sd, list) and len(sd) == 4:
-                return float(sd[actor]) / self.value_norm
+                base = float(sd[actor]) / self.value_norm
+                if base != 0.0:
+                    return base
+            tenpai_players = {int(pid) for pid in (ctx.event.get("tenpai_players") or []) if pid is not None}
+            if tenpai_players:
+                return 0.05 if actor in tenpai_players else -0.05
             return 0.0
 
         value = float(self.w_shanten * delta_shanten + self.w_waits * delta_waits)
@@ -446,9 +506,8 @@ def extract_actor_names(events: Sequence[MjaiEvent]) -> List[str]:
 
 def _next_meaningful_event(events: List[MjaiEvent], i: int) -> Optional[MjaiEvent]:
     """跳过 reach_accepted/dora 等元事件，返回 i 之后第一个有意义的事件。"""
-    _SKIP = {"reach_accepted", "dora", "new_dora"}
     for j in range(i + 1, len(events)):
-        if events[j].get("type") not in _SKIP:
+        if not is_replay_meta_event(events[j]):
             return events[j]
     return None
 
@@ -457,10 +516,9 @@ def _next_actor_dahai(
     events: List[MjaiEvent], i: int, actor: int
 ) -> Optional[MjaiEvent]:
     """在副露事件 i 后找到同 actor 的 dahai 事件（副露后必须打牌）。"""
-    _SKIP = {"reach_accepted", "dora", "new_dora"}
     for j in range(i + 1, len(events)):
         ev = events[j]
-        if ev.get("type") in _SKIP:
+        if is_replay_meta_event(ev):
             continue
         if ev.get("type") == "dahai" and ev.get("actor") == actor:
             return ev
@@ -474,7 +532,9 @@ def build_supervised_samples(
     actor_filter: Optional[Set[int]] = None,
     actor_name_filter: Optional[Set[str]] = None,
     value_strategy: str | ValueTargetStrategy | None = None,
+    strict_legal_labels: bool = True,
 ) -> List[ReplaySample]:
+    events = normalize_replay_events(events)
     state = GameState()
     samples: List[ReplaySample] = []
     strategy = _resolve_value_strategy(value_strategy)
@@ -482,14 +542,20 @@ def build_supervised_samples(
     pending_round_samples: List[PendingValueSample] = []
     round_step_index = 0
     call_actions = {"chi", "pon", "daiminkan", "ankan", "kakan"}
+    multi_ron_base_state: Optional[GameState] = None
 
     for i, event in enumerate(events):
         et = event["type"]
         actor = event.get("actor")
+        next_ev = _next_meaningful_event(events, i)
 
         if et == "start_kyoku":
             pending_round_samples.clear()
             round_step_index = 0
+            multi_ron_base_state = None
+
+        if et == "hora" and multi_ron_base_state is None and next_ev is not None and next_ev.get("type") == "hora":
+            multi_ron_base_state = copy.deepcopy(state)
 
         collect_sample = (
             actor is not None
@@ -509,7 +575,8 @@ def build_supervised_samples(
         waits_before_cnt: Optional[int] = None
         tehai_before_cnt: Optional[int] = None
         if collect_sample:
-            snap_before = state.snapshot(actor)
+            sample_state = multi_ron_base_state if (et == "hora" and multi_ron_base_state is not None) else state
+            snap_before = sample_state.snapshot(actor)
             hand_before = snap_before.get("hand", [])
             melds_before = (snap_before.get("melds") or [[], [], [], []])[actor]
             shanten_before, waits_before_cnt, _waits_before_bools, tehai_before_cnt = (
@@ -570,13 +637,22 @@ def build_supervised_samples(
             actor_name = (
                 actor_names[actor] if 0 <= actor < len(actor_names) else f"p{actor}"
             )
-            snap = snap_before
+            snap = dict(snap_before)
             # Only collect supervised samples when the actor hand is visible.
             if snap["hand"]:
                 # Attach shanten/waits features for the policy/value model.
                 snap["shanten"] = shanten_before if shanten_before is not None else 0
                 # tsumo_pai：摸牌事件时注入当前摸到的牌（raw，含赤宝牌），其余为 None
                 snap["tsumo_pai"] = event.get("pai") if et == "tsumo" else None
+                if et == "hora":
+                    if event.get("is_haitei") is True:
+                        snap["_hora_is_haitei"] = True
+                    if event.get("is_houtei") is True:
+                        snap["_hora_is_houtei"] = True
+                    if event.get("is_rinshan") is True:
+                        snap["_hora_is_rinshan"] = True
+                    if event.get("is_chankan") is True:
+                        snap["_hora_is_chankan"] = True
                 # waits_count/waits_tiles: 与 snap_before（决策时刻）对应，两者保持同一时间点
                 snap["waits_count"] = (
                     waits_before_cnt if waits_before_cnt is not None else 0
@@ -585,54 +661,18 @@ def build_supervised_samples(
                     _waits_before_bools  # length-34 bool list, before action
                 )
 
-                legal = enumerate_legal_actions(snap, actor)
-                label = dict(event)
-                if "pai" in label:
-                    label["pai"] = _normalize_or_keep_aka(label["pai"])
-                if "consumed" in label:
-                    label["consumed"] = [
-                        _normalize_or_keep_aka(t) for t in label["consumed"]
-                    ]
-                legal_dicts = [a.to_mjai() for a in legal]
-                # Our state reconstruction is intentionally lightweight.
-                # If the labeled action is not in enumerated legal set,
-                # inject it so supervised learning can proceed.
-                if label["type"] == "dahai":
-                    found = any(
-                        x.get("type") == "dahai" and x.get("pai") == label.get("pai")
-                        for x in legal_dicts
+                legal_specs = enumerate_legal_action_specs(snap, actor)
+                label = normalize_replay_label_for_legal_compare(event)
+                legal_dicts = [spec.to_mjai() for spec in legal_specs]
+                if strict_legal_labels and not replay_label_matches_legal(label, legal_dicts):
+                    raise IllegalLabelActionError(
+                        "replay label action not in reconstructed legal set: "
+                        f"event_index={i} actor={actor} actor_name={actor_name} "
+                        f"label={label} legal={legal_dicts} "
+                        f"snap={{'bakaze': {snap.get('bakaze')!r}, 'kyoku': {snap.get('kyoku')!r}, "
+                        f"'honba': {snap.get('honba')!r}, 'hand': {snap.get('hand')!r}, "
+                        f"'last_discard': {snap.get('last_discard')!r}, 'melds': {(snap.get('melds') or [[], [], [], []])[actor]!r}}}"
                     )
-                    if not found and "pai" in label:
-                        legal_dicts.append(
-                            Action(
-                                type="dahai",
-                                actor=actor,
-                                pai=label["pai"],
-                                tsumogiri=bool(label.get("tsumogiri", False)),
-                            ).to_mjai()
-                        )
-                elif label["type"] == "reach":
-                    found = any(x.get("type") == "reach" for x in legal_dicts)
-                    if not found:
-                        legal_dicts.append(Action(type="reach", actor=actor).to_mjai())
-                elif label["type"] in {"chi", "pon", "daiminkan", "ankan", "kakan"}:
-                    # 对于吃碰杠，如果不在 legal 中，注入它
-                    found = any(x.get("type") == label["type"] for x in legal_dicts)
-                    if not found:
-                        # 创建对应的 Action
-                        action_kwargs = {"type": label["type"], "actor": actor}
-                        if "consumed" in label:
-                            action_kwargs["consumed"] = label["consumed"]
-                        if "pai" in label:
-                            action_kwargs["pai"] = label["pai"]
-                        legal_dicts.append(Action(**action_kwargs).to_mjai())
-                elif label["type"] == "hora":
-                    found = any(x.get("type") == "hora" for x in legal_dicts)
-                    if not found:
-                        action_kwargs = {"type": "hora", "actor": actor}
-                        if "pai" in label:
-                            action_kwargs["pai"] = label["pai"]
-                        legal_dicts.append(Action(**action_kwargs).to_mjai())
 
                 sample = ReplaySample(
                     state=snap,
@@ -644,6 +684,7 @@ def build_supervised_samples(
                     score_delta_target=0.0,
                     win_target=0.0,
                     dealin_target=0.0,
+                    ryukyoku_tenpai_target=0.0,
                 )
                 samples.append(sample)
                 pending_round_samples.append(
@@ -660,7 +701,6 @@ def build_supervised_samples(
         # 生成 none/pass 样本：他家打牌后，有鸣牌机会但主动放弃的玩家
         if et == "dahai" and state.in_game:
             discarder = event.get("actor")
-            next_ev = _next_meaningful_event(events, i)
             if next_ev is not None:
                 next_type = next_ev.get("type")
                 next_actor = next_ev.get("actor")
@@ -680,8 +720,8 @@ def build_supervised_samples(
                     snap_p = state.snapshot(p)
                     if not snap_p["hand"]:
                         continue
-                    legal_p = enumerate_legal_actions(snap_p, p)
-                    non_none_p = [a for a in legal_p if a.type != "none"]
+                    legal_p_specs = enumerate_legal_action_specs(snap_p, p)
+                    non_none_p = [a for a in legal_p_specs if a.type != "none"]
                     if not non_none_p:
                         continue
                     if not is_next_tsumo:
@@ -702,11 +742,12 @@ def build_supervised_samples(
                         if 0 <= p < len(actor_names)
                         else f"p{p}",
                         label_action={"type": "none", "actor": p},
-                        legal_actions=[a.to_mjai() for a in legal_p],
+                        legal_actions=[spec.to_mjai() for spec in legal_p_specs],
                         value_target=0.0,
                         score_delta_target=0.0,
                         win_target=0.0,
                         dealin_target=0.0,
+                        ryukyoku_tenpai_target=0.0,
                     )
                     samples.append(sample)
                     pending_round_samples.append(
@@ -725,6 +766,10 @@ def build_supervised_samples(
             _finalize_aux_targets(pending_round_samples, None)
             pending_round_samples.clear()
             round_step_index = 0
+            multi_ron_base_state = None
+
+        if et == "hora" and not (next_ev is not None and next_ev.get("type") == "hora"):
+            multi_ron_base_state = None
 
     return samples
 
@@ -734,12 +779,15 @@ def replay_validate_label_legal(samples: List[ReplaySample]) -> List[str]:
     for idx, sample in enumerate(samples):
         label = sample.label_action
         legal = sample.legal_actions
-        if label["type"] == "dahai":
-            found = any(
-                a["type"] == "dahai" and a.get("pai") == label.get("pai") for a in legal
-            )
-        else:
-            found = any(a["type"] == label["type"] for a in legal)
+        found = replay_label_matches_legal(label, legal)
         if not found:
             errors.append(f"sample#{idx}: label {label} not in legal set")
     return errors
+
+
+def _label_matches_legal(label: Dict, legal_actions: List[Dict]) -> bool:
+    return replay_label_matches_legal(label, legal_actions)
+
+
+def _label_to_legal_mjai(label: Dict, actor: int) -> Dict:
+    return replay_label_to_legal_mjai(label, actor)

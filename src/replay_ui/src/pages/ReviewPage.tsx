@@ -61,14 +61,18 @@ export function ReviewPage() {
           <SectionTitle title="进入视图" description="牌桌视图适合看局面演进，决策列表适合快速定位差异步。" />
           <div className="flex gap-3" style={{ flexWrap: 'wrap' }}>
             <button
-              onClick={() => navigate('/game-replay', { state: { replayData: uploadedData } })}
+              onClick={() => uploadedData.replay_id
+                ? navigate(`/game-replay?id=${encodeURIComponent(uploadedData.replay_id)}&player_id=${uploadedData.player_id ?? 0}`)
+                : navigate('/game-replay', { state: { replayData: uploadedData } })}
               className="btn-primary"
               style={{ height: 40, padding: '0 24px', fontSize: 14 }}
             >
               ▶ 牌桌回放
             </button>
             <button
-              onClick={() => navigate('/replay', { state: { replayData: uploadedData } })}
+              onClick={() => uploadedData.replay_id
+                ? navigate(`/replay?id=${encodeURIComponent(uploadedData.replay_id)}&player_id=${uploadedData.player_id ?? 0}`)
+                : navigate('/replay', { state: { replayData: uploadedData } })}
               className="btn-primary"
               style={{
                 height: 40,

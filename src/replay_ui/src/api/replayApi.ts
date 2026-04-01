@@ -60,8 +60,10 @@ export const replayApi = {
     api<ReplayMeta[]>('/replay/list'),
 
   /** 获取回放完整数据 */
-  get: (replayId: string): Promise<ReplayData> =>
-    api<ReplayData>(`/replay/${encodeURIComponent(replayId)}`),
+  get: (replayId: string, playerId?: number): Promise<ReplayData> =>
+    api<ReplayData>(
+      `/replay/${encodeURIComponent(replayId)}${playerId !== undefined ? `?player_id=${playerId}` : ''}`
+    ),
 
   /** 获取回放元信息 */
   getMeta: (replayId: string): Promise<ReplayMeta> =>

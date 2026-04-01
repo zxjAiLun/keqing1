@@ -8,6 +8,12 @@ from mahjong.shanten import Shanten
 from riichienv import calculate_shanten as _calculate_standard_shanten
 
 
+_TILE136_CACHE_SIZE = 20000
+_REGULAR_WAITS_CACHE_SIZE = 10000
+_STANDARD_SHANTEN_CACHE_SIZE = 20000
+_SUMMARY_CACHE_SIZE = 10000
+
+
 _TILE34_TO_STR: List[str] = [
     "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m",
     "1p", "2p", "3p", "4p", "5p", "6p", "7p", "8p", "9p",
@@ -46,7 +52,7 @@ def counts_to_hand(counts: Sequence[int]) -> List[str]:
     return hand
 
 
-@lru_cache(maxsize=400000)
+@lru_cache(maxsize=_TILE136_CACHE_SIZE)
 def _counts34_to_tile136_ids(counts34: tuple[int, ...]) -> tuple[int, ...]:
     total = sum(counts34)
     if total == 0:
@@ -138,7 +144,7 @@ def find_regular_waits(counts: tuple[int, ...]) -> List[bool]:
     return waits
 
 
-@lru_cache(maxsize=400000)
+@lru_cache(maxsize=_REGULAR_WAITS_CACHE_SIZE)
 def calc_shanten_waits_from_counts(
     counts34: tuple[int, ...],
 ) -> tuple[int, int, tuple[bool, ...], int]:
@@ -150,7 +156,7 @@ def calc_shanten_waits_from_counts(
     return shanten, sum(waits34), waits34, tehai_count
 
 
-@lru_cache(maxsize=400000)
+@lru_cache(maxsize=_STANDARD_SHANTEN_CACHE_SIZE)
 def calc_standard_shanten_from_counts(counts34: tuple[int, ...]) -> int:
     return int(_calculate_standard_shanten(_counts34_to_tile136_ids(counts34)))
 
@@ -241,7 +247,7 @@ def _make_progress(
     )
 
 
-@lru_cache(maxsize=400000)
+@lru_cache(maxsize=_SUMMARY_CACHE_SIZE)
 def _summarize_3n1_cached(
     counts_3n1: tuple[int, ...],
     visible_counts_local: tuple[int, ...],
@@ -336,7 +342,7 @@ def _summarize_3n1_cached(
     )
 
 
-@lru_cache(maxsize=400000)
+@lru_cache(maxsize=_SUMMARY_CACHE_SIZE)
 def _summarize_3n2_cached(
     counts_3n2: tuple[int, ...],
     visible_counts_local: tuple[int, ...],
@@ -365,7 +371,6 @@ def _summarize_3n2_cached(
     return _summarize_3n1_cached(tuple(counts_3n2), visible_counts_local)
 
 
-@lru_cache(maxsize=400000)
 def analyze_normal_progress_from_counts(
     hand_counts34: tuple[int, ...],
     visible_counts34: tuple[int, ...],
@@ -377,3 +382,11 @@ def analyze_normal_progress_from_counts(
     if mod == 2:
         return _summarize_3n2_cached(hand_counts34, visible_counts34)
     return _make_progress(8, 0, tuple([False] * 34), tile_count, [False] * 34, [False] * 34, [False] * 34, visible_counts34)
+
+
+def clear_progress_caches() -> None:
+    _counts34_to_tile136_ids.cache_clear()
+    calc_shanten_waits_from_counts.cache_clear()
+    calc_standard_shanten_from_counts.cache_clear()
+    _summarize_3n1_cached.cache_clear()
+    _summarize_3n2_cached.cache_clear()

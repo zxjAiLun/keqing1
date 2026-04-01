@@ -11,13 +11,24 @@ import { sameReplayAction } from './tileUtils';
 // ---------------------------------------------------------------------------
 export interface LogitTileData {
   pai: string;
-  /** beam_score 优先，否则用 logit；undefined 表示该牌无候选权重 */
+  /** final_score 优先，兼容 beam_score/logit；undefined 表示该牌无候选权重 */
   score: number | undefined;
   /** 相对百分比 0-100，用于柱高 */
   pct: number;
   isChosen: boolean;
   isGt: boolean;
   isTsumo: boolean;
+}
+
+function normalizedPercentages(scores: number[]): number[] {
+  if (scores.length === 0) return [];
+  const maxScore = Math.max(...scores);
+  const exps = scores.map((score) => Math.exp(score - maxScore));
+  const total = exps.reduce((sum, value) => sum + value, 0);
+  if (!Number.isFinite(total) || total <= 0) {
+    return scores.map(() => 0);
+  }
+  return exps.map((value) => (value / total) * 100);
 }
 
 /** 从 DecisionLogEntry 提取手牌柱状图数据（dahai 类决策才有意义） */
@@ -27,18 +38,18 @@ export function buildLogitData(entry: DecisionLogEntry): LogitTileData[] {
   const chosenPai = entry.chosen?.type === 'dahai' ? (entry.chosen.pai ?? null) : null;
   const gtPai = entry.gt_action?.type === 'dahai' ? (entry.gt_action.pai ?? null) : null;
 
-  // 构建 pai → score 映射（beam_score 优先）
+  // 构建 pai → score 映射（final_score 优先，兼容 beam/logit）
   const scoreMap: Record<string, number> = {};
   for (const c of entry.candidates ?? []) {
     if (c.action?.type === 'dahai' && c.action.pai) {
-      scoreMap[c.action.pai] = c.beam_score ?? c.logit;
+      scoreMap[c.action.pai] = c.final_score ?? c.beam_score ?? c.logit;
     }
   }
 
-  const scores = Object.values(scoreMap);
-  const maxScore = scores.length ? Math.max(...scores) : 1;
-  const minScore = scores.length ? Math.min(...scores) : 0;
-  const range = Math.max(maxScore - minScore, 0.001);
+  const normalizedPcts = normalizedPercentages(Object.values(scoreMap));
+  const scorePctMap = Object.fromEntries(
+    Object.keys(scoreMap).map((pai, idx) => [pai, normalizedPcts[idx] ?? 0]),
+  );
 
   // 排序：摸切排最后，其余按 TILE_ORDER
   const others = hand.filter(t => t !== tsumo);
@@ -48,7 +59,7 @@ export function buildLogitData(entry: DecisionLogEntry): LogitTileData[] {
   return sorted.map(pai => {
     const score = scoreMap[pai];
     const pct = score !== undefined
-      ? Math.max(2, ((score - minScore) / range) * 100)
+      ? Math.max(6, scorePctMap[pai] ?? 0)
       : 0;
     return {
       pai,
@@ -61,7 +72,7 @@ export function buildLogitData(entry: DecisionLogEntry): LogitTileData[] {
   });
 }
 
-/** DecisionLogEntry 中非 dahai 候选的权重列表（beam_score 优先，降序） */
+/** DecisionLogEntry 中非 dahai 候选的权重列表（final_score 优先，降序） */
 export interface CandidateScore {
   action: DecisionLogEntry['candidates'][number]['action'];
   score: number;
@@ -76,7 +87,7 @@ export function buildCandidateScores(entry: DecisionLogEntry): CandidateScore[] 
 
   const list: CandidateScore[] = candidates.map(c => ({
     action: c.action,
-    score: c.beam_score ?? c.logit,
+    score: c.final_score ?? c.beam_score ?? c.logit,
     isChosen: sameReplayAction(chosen, c.action),
     isGt: sameReplayAction(gt, c.action),
   }));
@@ -149,7 +160,7 @@ function popLastMeld(
 
 function supportsPostActionPhase(entry: DecisionLogEntry): boolean {
   const action = entry.gt_action ?? entry.chosen;
-  return ['dahai', 'chi', 'pon', 'daiminkan', 'ankan', 'kakan'].includes(action?.type ?? '');
+  return ['dahai', 'chi', 'pon', 'daiminkan', 'ankan', 'kakan', 'hora', 'ryukyoku'].includes(action?.type ?? '');
 }
 
 function supportsReachPhase(entry: DecisionLogEntry): boolean {
@@ -188,15 +199,24 @@ export function entryToBattleState(
     ? mergedEntry.melds as MeldEntry[][]
     : toArray(mergedEntry.melds) as MeldEntry[][];
   const action = mergedEntry.gt_action ?? mergedEntry.chosen;
+  const isPreDiscardPhase = phase === 'pre' && action?.type === 'dahai';
   const pendingDiscardActorFromSnapshot =
     mergedEntry.actor_to_move !== null && mergedEntry.actor_to_move !== undefined && mergedEntry.last_discard === null
       ? mergedEntry.actor_to_move
       : null;
-  const showsReplayDraw =
-    phase === 'pre' &&
-    action?.type === 'dahai' &&
-    mergedEntry.actor_to_move === action.actor &&
-    mergedEntry.last_discard === null;
+  const showsReplayDraw = isPreDiscardPhase ? action.actor : pendingDiscardActorFromSnapshot;
+  const normalizedTsumoPai =
+    isPreDiscardPhase && action.actor === viewPlayerId
+      ? (mergedEntry.tsumo_pai ?? (action.tsumogiri ? action.pai ?? null : null))
+      : mergedEntry.tsumo_pai;
+  const normalizedActorToMove =
+    isPreDiscardPhase
+      ? action.actor
+      : mergedEntry.actor_to_move;
+  const normalizedLastDiscard =
+    isPreDiscardPhase && mergedEntry.last_discard?.actor === action.actor
+      ? null
+      : mergedEntry.last_discard;
 
   const baseState: BattleState = {
     game_id: 'replay',
@@ -209,10 +229,10 @@ export function entryToBattleState(
     oya: mergedEntry.oya,
     scores: mergedEntry.scores,
     dora_markers: mergedEntry.dora_markers ?? [],
-    actor_to_move: mergedEntry.actor_to_move,
-    last_discard: mergedEntry.last_discard,
+    actor_to_move: normalizedActorToMove,
+    last_discard: normalizedLastDiscard,
     hand: mergedEntry.hand ?? [],
-    tsumo_pai: mergedEntry.tsumo_pai,
+    tsumo_pai: normalizedTsumoPai,
     discards,
     melds,
     reached: mergedEntry.reached ?? [false, false, false, false],
@@ -221,7 +241,7 @@ export function entryToBattleState(
     remaining_wall: 0,
     human_player_id: viewPlayerId,
     player_info: playerNames.map((name, id) => ({ player_id: id, name, type: id === 0 ? 'human' : 'bot' })),
-    replay_draw_actor: showsReplayDraw ? action.actor : pendingDiscardActorFromSnapshot,
+    replay_draw_actor: showsReplayDraw,
   };
 
   if (mergedEntry.is_obs) {

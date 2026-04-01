@@ -9,15 +9,53 @@ interface ReplayDecisionPanelProps {
   totalSteps: number;
   compact?: boolean;
   playerNames?: string[];
+  currentPlayerId?: number;
+  onSwitchPlayer?: (playerId: number) => void;
 }
 
-/** 候选动作的显示值：beam_score 优先，没有则用 logit */
-function displayScore(c: { logit: number; beam_score?: number }): number {
-  return c.beam_score ?? c.logit;
+/** 候选动作的显示值：final_score（统一口径） */
+function displayScore(c: { logit: number; beam_score?: number; final_score?: number }): number {
+  return c.final_score ?? c.beam_score ?? c.logit;
 }
 
-function displayScoreLabel(c: { logit: number; beam_score?: number }): string {
+function displayScoreLabel(c: { logit: number; beam_score?: number; final_score?: number }): string {
   return displayScore(c).toFixed(2);
+}
+
+function ensureVisibleCandidates(
+  candidates: DecisionLogEntry['candidates'],
+  chosen: DecisionLogEntry['chosen'],
+  gtAction: DecisionLogEntry['gt_action'],
+  limit = 12,
+): DecisionLogEntry['candidates'] {
+  const sorted = [...candidates].sort((a, b) => displayScore(b) - displayScore(a));
+  const visible = sorted.slice(0, limit);
+
+  const ensureAction = (action: DecisionLogEntry['chosen'] | DecisionLogEntry['gt_action']) => {
+    if (!action) return;
+    const alreadyVisible = visible.some((candidate) => sameReplayAction(candidate.action, action));
+    if (alreadyVisible) return;
+    const matched = sorted.find((candidate) => sameReplayAction(candidate.action, action));
+    if (matched) {
+      visible.push(matched);
+    }
+  };
+
+  ensureAction(chosen);
+  ensureAction(gtAction);
+
+  return visible.sort((a, b) => displayScore(b) - displayScore(a));
+}
+
+function normalizedBarPercents(scores: number[]): number[] {
+  if (scores.length === 0) return [];
+  const maxScore = Math.max(...scores);
+  const exps = scores.map((score) => Math.exp(score - maxScore));
+  const total = exps.reduce((sum, value) => sum + value, 0);
+  if (!Number.isFinite(total) || total <= 0) {
+    return scores.map(() => 0);
+  }
+  return exps.map((value) => (value / total) * 100);
 }
 
 /** 动作的短名（用于表格第一列） */
@@ -37,7 +75,15 @@ function shortLabel(action: { type: string; pai?: string; consumed?: string[] })
   }
 }
 
-export function ReplayDecisionPanel({ entry, step, totalSteps, compact = false, playerNames = [] }: ReplayDecisionPanelProps) {
+export function ReplayDecisionPanel({
+  entry,
+  step,
+  totalSteps,
+  compact = false,
+  playerNames = [],
+  currentPlayerId,
+  onSwitchPlayer,
+}: ReplayDecisionPanelProps) {
   if (!entry) {
     return (
       <div style={panelStyle(compact)}>
@@ -72,19 +118,14 @@ export function ReplayDecisionPanel({ entry, step, totalSteps, compact = false, 
     );
   }
 
-  const { chosen, gt_action, candidates, value } = entry;
+  const { chosen, gt_action, candidates } = entry;
 
-  // 按显示分值降序排序，最多显示 12 条
-  const sorted = [...candidates]
-    .sort((a, b) => displayScore(b) - displayScore(a))
-    .slice(0, 12);
+  // 按显示分值降序排序；即使超出前 12，也强制展示 Bot 选择和实际动作。
+  const sorted = ensureVisibleCandidates(candidates, chosen, gt_action, 12);
 
-  const maxScore = sorted[0] ? displayScore(sorted[0]) : 1;
-  const minScore = sorted[sorted.length - 1] ? displayScore(sorted[sorted.length - 1]) : 0;
-  const scoreRange = Math.max(maxScore - minScore, 0.001);
+  const barPercents = normalizedBarPercents(sorted.map((candidate) => displayScore(candidate)));
 
-  const isUsingBeam = sorted.some(c => c.beam_score !== undefined);
-  const scoreTypeLabelShort = isUsingBeam ? 'Beam' : 'Logit';
+  const scoreTypeLabelShort = 'Final';
 
   const chosenIsGt = chosen && gt_action && sameReplayAction(chosen, gt_action);
 
@@ -140,8 +181,7 @@ export function ReplayDecisionPanel({ entry, step, totalSteps, compact = false, 
           {sorted.map((c, idx) => {
             const isChosen = sameReplayAction(c.action, chosen);
             const isGt = sameReplayAction(c.action, gt_action);
-            const score = displayScore(c);
-            const pct = Math.max(4, Math.round(((score - minScore) / scoreRange) * 100));
+            const pct = Math.max(8, Math.round(barPercents[idx] ?? 0));
 
             const barColor = isChosen && isGt ? '#8e44ad'
               : isChosen ? '#e74c3c'
@@ -201,17 +241,33 @@ export function ReplayDecisionPanel({ entry, step, totalSteps, compact = false, 
         </div>
       </div>
 
-      {/* Value 预测 */}
-      {value !== undefined && value !== null && (
+      {playerNames.length > 0 && onSwitchPlayer && currentPlayerId !== undefined && (
         <>
           <div style={dividerStyle} />
           <div style={{ ...sectionStyle, paddingTop: 8 }}>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>Value 预测</div>
-            <div style={{
-              fontSize: 14, fontFamily: 'Menlo, monospace', fontWeight: 700,
-              color: value >= 0 ? '#27ae60' : '#e74c3c',
-            }}>
-              {value >= 0 ? '+' : ''}{value.toFixed(3)}
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>切换主视角</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {playerNames.map((name, idx) => {
+                const active = idx === currentPlayerId;
+                return (
+                  <button
+                    key={idx}
+                    onClick={() => onSwitchPlayer(idx)}
+                    disabled={active}
+                    style={{
+                      ...switchBtnStyle,
+                      borderColor: active ? 'var(--accent)' : 'var(--border)',
+                      background: active ? 'rgba(52, 152, 219, 0.10)' : 'var(--card-bg)',
+                      color: active ? 'var(--accent)' : 'var(--text-primary)',
+                      cursor: active ? 'default' : 'pointer',
+                    }}
+                    title={`切换到 ${name}`}
+                  >
+                    <span style={{ fontWeight: 700 }}>P{idx}</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </>
@@ -226,7 +282,7 @@ export function ReplayDecisionPanel({ entry, step, totalSteps, compact = false, 
 const COL1_W = 52;
 
 const panelStyle = (compact: boolean): React.CSSProperties => ({
-  width: compact ? '100%' : 220,
+  width: '100%',
   minHeight: compact ? 240 : undefined,
   maxHeight: compact ? 300 : undefined,
   flexShrink: 0,
@@ -273,3 +329,15 @@ function badgeStyle(color: string): React.CSSProperties {
     flexShrink: 0,
   };
 }
+
+const switchBtnStyle: React.CSSProperties = {
+  width: '100%',
+  borderRadius: 8,
+  border: '1px solid var(--border)',
+  padding: '8px 10px',
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  fontSize: 12,
+  textAlign: 'left',
+};

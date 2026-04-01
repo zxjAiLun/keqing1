@@ -7,10 +7,11 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from mahjong_env.legal_actions import enumerate_legal_actions
+from mahjong_env.legal_actions import enumerate_legal_action_specs
 from mahjong_env.scoring import score_hora
 from mahjong_env.state import GameState, PlayerState, TileStateError, apply_event
 from mahjong_env.tiles import normalize_tile, AKA_DORA_TILES
+from mahjong_env.types import action_dict_to_spec, action_specs_match
 
 AKA5 = ("5mr", "5pr", "5sr")
 
@@ -245,6 +246,7 @@ class BattleManager:
         room.state.last_discard = None
         room.state.last_tsumo = [None, None, None, None]
         room.state.last_tsumo_raw = [None, None, None, None]
+        room.state.remaining_wall = room.remaining_wall()
         room.replay_draw_actor = None
 
         for pid in range(4):
@@ -286,6 +288,7 @@ class BattleManager:
             room.state.last_tsumo[actor] = tile
             room.state.last_tsumo_raw[actor] = tile
             room.state.players[actor].rinshan_tsumo = was_rinshan
+            room.state.remaining_wall = room.remaining_wall()
             room.events.append(
                 {"type": "tsumo", "actor": actor, "pai": tile, "rinshan": was_rinshan}
             )
@@ -623,6 +626,7 @@ class BattleManager:
                 "scores": room.state.scores[:],
                 "honba": room.state.honba,
                 "kyotaku": room.state.kyotaku,
+                "tenpai_players": tenpai[:],
             }
         )
         room.events.append({"type": "end_kyoku"})
@@ -817,8 +821,6 @@ class BattleManager:
         self, room: BattleRoom, actor: int, action: Dict
     ) -> Optional[str]:
         """处理人类玩家的动作。返回 None 表示成功，返回错误字符串表示失败。"""
-        from mahjong_env.legal_actions import enumerate_legal_actions
-
         is_response = bool(
             room.state.last_discard and room.state.last_discard.get("actor") != actor
         )
@@ -835,29 +837,20 @@ class BattleManager:
 
         # 枚举合法动作并验证
         snap = self.get_snap_with_shanten(room, actor)
-        legal = enumerate_legal_actions(snap, actor)
-        action_type = action.get("type")
-        legal_types = {
-            (a.type, a.pai, tuple(a.consumed) if a.consumed else None, a.target)
-            for a in legal
-        }
-        action_key = (
-            action_type,
-            action.get("pai"),
-            tuple(action.get("consumed", [])) if action.get("consumed") else None,
-            action.get("target"),
-        )
-        if action_type not in ("none", "reach") and action_key not in legal_types:
+        legal_specs = enumerate_legal_action_specs(snap, actor)
+        requested_spec = action_dict_to_spec(action, actor_hint=actor)
+        matched_spec = next((spec for spec in legal_specs if action_specs_match(spec, requested_spec)), None)
+        if matched_spec is None:
             return "Illegal action"
 
         # 应用动作
-        self.apply_action(room, actor, action)
+        self.apply_action(room, actor, matched_spec.to_mjai())
         return None
 
     def get_state_for_player(self, room: BattleRoom, player_id: int) -> Dict:
         snap = self.get_snap_with_shanten(room, player_id)
 
-        legal = enumerate_legal_actions(snap, player_id)
+        legal_specs = enumerate_legal_action_specs(snap, player_id)
         # 响应弃牌时（last_discard 来自他家），保留 none（skip）
         # 自己摸牌打牌回合，none 无意义，过滤掉
         is_response = (
@@ -867,21 +860,12 @@ class BattleManager:
             snap.get("last_kakan") and snap["last_kakan"].get("actor") != player_id
         )
         legal_actions = []
-        for a in legal:
-            if a.type == "none" and not is_response and not is_kakan_response:
+        for spec in legal_specs:
+            if spec.type == "none" and not is_response and not is_kakan_response:
                 continue
-            action_dict = {
-                "type": a.type,
-                "actor": a.actor,
-            }
-            if a.pai:
-                action_dict["pai"] = a.pai
-            if a.target is not None:
-                action_dict["target"] = a.target
-            if a.consumed:
-                action_dict["consumed"] = a.consumed
-            if a.tsumogiri:
-                action_dict["tsumogiri"] = a.tsumogiri
+            action_dict = spec.to_mjai()
+            if spec.type != "none" and "actor" not in action_dict:
+                action_dict["actor"] = player_id if spec.actor is None else spec.actor
             legal_actions.append(action_dict)
 
         return {

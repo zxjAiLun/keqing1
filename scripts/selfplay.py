@@ -996,53 +996,99 @@ def run_one_game(
 # ---------------------------------------------------------------------------
 
 
-def _events_to_npz(events: list) -> Optional[Tuple]:
-    """从 events 生成训练样本，返回 (tile_feat, scalar, mask, action_idx, value) 或 None。"""
+def _events_to_npz(
+    events: list,
+    *,
+    adapter_name: str = "base",
+    value_strategy: str = "heuristic",
+    encode_module: str = "keqingv1.features",
+) -> Optional[Dict[str, np.ndarray]]:
+    """从 events 生成 preprocess-owned cache arrays."""
     try:
-        from mahjong_env.replay import build_supervised_samples
-        from keqingv1.action_space import action_to_idx, build_legal_mask
-        from keqingv1.features import encode
+        from training.preprocess import create_preprocess_adapter, events_to_cached_arrays
 
-        samples = build_supervised_samples(events)
-    except Exception as e:
+        return events_to_cached_arrays(
+            events,
+            adapter=create_preprocess_adapter(adapter_name),
+            value_strategy=value_strategy,
+            encode_module=encode_module,
+        )
+    except Exception:
         return None
 
-    rows_tile, rows_scalar, rows_mask, rows_action, rows_value = [], [], [], [], []
-    for s in samples:
-        try:
-            tile_feat, scalar = encode(s.state, s.actor)
-            mask = np.array(build_legal_mask(s.legal_actions), dtype=np.float32)
-            action_idx = action_to_idx(s.label_action)
-            if mask[action_idx] == 0:
-                continue
-            value = float(np.clip(s.value_target, -1.0, 1.0))
-            rows_tile.append(tile_feat)
-            rows_scalar.append(scalar)
-            rows_mask.append(mask)
-            rows_action.append(action_idx)
-            rows_value.append(value)
-        except Exception:
-            continue
-    if not rows_tile:
-        return None
+
+def _save_npz(
+    path: Path,
+    events: list,
+    *,
+    adapter_name: str = "base",
+    value_strategy: str = "heuristic",
+    encode_module: str = "keqingv1.features",
+) -> bool:
+    try:
+        from training.preprocess import save_events_to_cache_file
+
+        return save_events_to_cache_file(
+            path,
+            events,
+            adapter_name=adapter_name,
+            value_strategy=value_strategy,
+            encode_module=encode_module,
+        )
+    except Exception:
+        return False
+
+
+def _build_cache_export_metadata(
+    *,
+    adapter_name: str,
+    value_strategy: str,
+    encode_module: str,
+    saved_games: int,
+    output_dir: Path,
+) -> dict:
+    recommended_output_dir = _recommended_preprocess_output_dir(output_dir.parent, adapter_name)
+    return {
+        "format": "preprocess_cache_wrapper",
+        "owner": "training.preprocess",
+        "status": "legacy_convenience_export",
+        "recommended_flow": [
+            "运行 selfplay 保存 .mjson",
+            "使用 src/training/preprocess.py 统一离线导出 cache",
+            "训练侧从 training.cached_dataset 读取 .npz",
+        ],
+        "recommended_replays_dir": str(output_dir.parent / "replays"),
+        "recommended_preprocess_output_dir": str(recommended_output_dir),
+        "recommended_preprocess_command": _build_recommended_preprocess_command(
+            output_dir.parent,
+            adapter_name,
+        ),
+        "adapter_name": adapter_name,
+        "value_strategy": value_strategy,
+        "encode_module": encode_module,
+        "saved_games": saved_games,
+        "output_dir": str(output_dir),
+    }
+
+
+def _write_cache_export_metadata(npz_dir: Path, metadata: dict) -> None:
+    with open(npz_dir / "metadata.json", "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+
+def _recommended_preprocess_output_dir(output_dir: Path, adapter_name: str) -> Path:
+    return output_dir / f"preprocessed_{adapter_name}"
+
+
+def _build_recommended_preprocess_command(output_dir: Path, adapter_name: str) -> str:
+    replays_dir = output_dir / "replays"
+    processed_dir = _recommended_preprocess_output_dir(output_dir, adapter_name)
     return (
-        np.stack(rows_tile).astype(np.float16),
-        np.stack(rows_scalar).astype(np.float16),
-        np.stack(rows_mask).astype(np.uint8),
-        np.array(rows_action, dtype=np.int16),
-        np.array(rows_value, dtype=np.float16),
-    )
-
-
-def _save_npz(path: Path, arrays: Tuple) -> None:
-    tile_feat, scalar, mask, action_idx, value = arrays
-    np.savez_compressed(
-        path,
-        tile_feat=tile_feat,
-        scalar=scalar,
-        mask=mask,
-        action_idx=action_idx,
-        value=value,
+        "uv run python -c "
+        "\"from training.preprocess import create_preprocess_adapter, run_preprocess; "
+        f"run_preprocess(default_output_dir='{processed_dir}', "
+        f"adapter=create_preprocess_adapter('{adapter_name}'))\" "
+        f"--data_dirs {replays_dir}"
     )
 
 
@@ -1350,6 +1396,7 @@ def _build_stats_snapshot(
     error_games: List[dict],
     elapsed: float,
     completed_games: int,
+    cache_export: Optional[dict],
 ) -> dict:
     total_decision_seconds = sum(aggregate_decision_seconds_by_actor.values())
     total_decision_count = sum(aggregate_decision_counts_by_actor.values())
@@ -1420,6 +1467,7 @@ def _build_stats_snapshot(
         },
         "replay_exports": replay_manifest,
         "anomaly_exports": anomaly_manifest,
+        "cache_export": cache_export,
         "elapsed_seconds": elapsed,
         "seconds_per_game": elapsed / max(1, completed_games),
     }
@@ -1479,7 +1527,26 @@ def parse_args():
         "--save-all-games", action="store_true", help="保存全部牌谱为 .mjson"
     )
     p.add_argument(
-        "--save-npz", action="store_true", help="将自对战数据保存为 .npz 训练样本"
+        "--save-npz",
+        action="store_true",
+        help="兼容导出：通过 src/training/preprocess.py 导出 cache .npz，并写 metadata.json；标准训练流程仍建议 .mjson -> 离线 preprocess",
+    )
+    p.add_argument(
+        "--cache-adapter",
+        choices=["base", "meld_rank", "v3_aux"],
+        default="base",
+        help="保存 .npz 时使用的 preprocess adapter",
+    )
+    p.add_argument(
+        "--cache-value-strategy",
+        choices=["heuristic", "mc_return"],
+        default="heuristic",
+        help="保存 .npz 时使用的 value strategy",
+    )
+    p.add_argument(
+        "--cache-encode-module",
+        default="keqingv1.features",
+        help="保存 .npz 时使用的 encode module",
     )
     p.add_argument(
         "--output-dir",
@@ -1957,19 +2024,48 @@ def main():
         if replay_ready:
             print(f"  ReplayUI 直连回放已生成 {replay_ready} 局", flush=True)
 
+    cache_export = None
+
     # 保存 npz
     if args.save_npz:
+        print(
+            "  警告: --save-npz 仅保留为 convenience wrapper；"
+            "训练 cache 的权威实现仍在 src/training/preprocess.py",
+            flush=True,
+        )
         npz_dir = output_dir / "npz"
         npz_dir.mkdir(exist_ok=True)
         saved = 0
         for r in game_results:
-            arrays = _events_to_npz(r["events"])
-            if arrays is None:
-                continue
             fname = npz_dir / f"game_{r['game_id']:05d}.npz"
-            _save_npz(fname, arrays)
-            saved += 1
-        print(f"  保存 {saved} 局 .npz 训练样本 -> {npz_dir}", flush=True)
+            ok = _save_npz(
+                fname,
+                r["events"],
+                adapter_name=args.cache_adapter,
+                value_strategy=args.cache_value_strategy,
+                encode_module=args.cache_encode_module,
+            )
+            if ok:
+                saved += 1
+        cache_export = _build_cache_export_metadata(
+            adapter_name=args.cache_adapter,
+            value_strategy=args.cache_value_strategy,
+            encode_module=args.cache_encode_module,
+            saved_games=saved,
+            output_dir=npz_dir,
+        )
+        _write_cache_export_metadata(npz_dir, cache_export)
+        print(
+            f"  保存 {saved} 局 .npz cache -> {npz_dir} "
+            f"(adapter={args.cache_adapter}, value_strategy={args.cache_value_strategy}, "
+            f"encode={args.cache_encode_module})",
+            flush=True,
+        )
+        print(
+            "  推荐标准训练导出流程：先保存 .mjson，再离线 preprocess。"
+            f" 推荐命令 -> {cache_export['recommended_preprocess_command']}",
+            flush=True,
+        )
 
     # 保存统计 json
     stats = _build_stats_snapshot(
@@ -1997,6 +2093,7 @@ def main():
         error_games=error_games,
         elapsed=elapsed,
         completed_games=completed_games,
+        cache_export=cache_export,
     )
     _write_stats_snapshot(output_dir, stats)
     print(f"  统计 -> {output_dir}/stats.json", flush=True)

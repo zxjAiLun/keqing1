@@ -50,6 +50,9 @@ class GameState:
     last_kakan: Optional[dict] = None
     last_tsumo: List[Optional[str]] = field(default_factory=lambda: [None, None, None, None])
     last_tsumo_raw: List[Optional[str]] = field(default_factory=lambda: [None, None, None, None])
+    remaining_wall: Optional[int] = None
+    pending_rinshan_actor: Optional[int] = None
+    ryukyoku_tenpai_players: List[int] = field(default_factory=list)
     in_game: bool = False
     feature_tracker: Optional[RoundFeatureTracker] = None
 
@@ -78,6 +81,9 @@ class GameState:
             "last_kakan": self.last_kakan.copy() if self.last_kakan else None,
             "last_tsumo": self.last_tsumo[:],
             "last_tsumo_raw": self.last_tsumo_raw[:],
+            "remaining_wall": self.remaining_wall,
+            "pending_rinshan_actor": self.pending_rinshan_actor,
+            "ryukyoku_tenpai_players": self.ryukyoku_tenpai_players[:],
             "furiten": [p.furiten for p in self.players],
             "sutehai_furiten": [p.sutehai_furiten for p in self.players],
             "riichi_furiten": [p.riichi_furiten for p in self.players],
@@ -109,10 +115,12 @@ def _remove_tile(counter: Counter, tile: str, n: int = 1, *, context: str = "") 
 
 def _upgrade_pon_meld_to_kakan(player: PlayerState, pai: str, added_tile: str) -> None:
     """将已有 pon 副露升级为 kakan；若未找到则退化为追加新 meld。"""
+    pai_family = normalize_tile(pai)
     for meld in player.melds:
         if meld.get("type") != "pon":
             continue
-        if _normalize_or_keep_aka(meld.get("pai", "")) != pai:
+        meld_pai = meld.get("pai", "")
+        if not meld_pai or normalize_tile(_normalize_or_keep_aka(meld_pai)) != pai_family:
             continue
         meld["type"] = "kakan"
         base_tiles = list(meld.get("consumed", []))
@@ -134,6 +142,16 @@ def _upgrade_pon_meld_to_kakan(player: PlayerState, pai: str, added_tile: str) -
     )
 
 
+def _consume_wall_for_kan(state: GameState) -> None:
+    """A successful kan reduces future live-wall draws by one.
+
+    The following rinshan draw then comes from the dead wall and must not
+    decrement `remaining_wall` again.
+    """
+    if state.remaining_wall is not None:
+        state.remaining_wall = max(0, state.remaining_wall - 1)
+
+
 def apply_event(state: GameState, event: MjaiEvent) -> None:
     et = event["type"]
     if et == "start_game":
@@ -153,6 +171,8 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
         state.actor_to_move = state.oya
         state.last_tsumo = [None, None, None, None]
         state.last_tsumo_raw = [None, None, None, None]
+        state.remaining_wall = 70
+        state.pending_rinshan_actor = None
         for pid in range(4):
             state.players[pid] = PlayerState()
             for tile in event["tehais"][pid]:
@@ -170,6 +190,7 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
     if et == "tsumo":
         actor = event["actor"]
         pai = event["pai"]
+        is_rinshan = bool(event.get("rinshan", False)) or state.pending_rinshan_actor == actor
         if pai != "?":
             tile_key = _normalize_or_keep_aka(pai)
             state.players[actor].hand[tile_key] += 1
@@ -177,15 +198,18 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
                 state.feature_tracker.on_tsumo(actor, tile_key)
             state.last_tsumo[actor] = tile_key
             state.last_tsumo_raw[actor] = pai
+            if not is_rinshan and state.remaining_wall is not None:
+                state.remaining_wall = max(0, state.remaining_wall - 1)
         else:
             state.last_tsumo[actor] = None
             state.last_tsumo_raw[actor] = None
         state.actor_to_move = actor
         state.last_discard = None
         state.last_kakan = None
+        state.pending_rinshan_actor = None
         # 摸牌时解除同巡振听
         state.players[actor].doujun_furiten = False
-        state.players[actor].rinshan_tsumo = bool(event.get("rinshan", False))
+        state.players[actor].rinshan_tsumo = is_rinshan
         return
 
     if et == "dahai":
@@ -247,6 +271,9 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
         state.last_tsumo[actor] = None
         state.last_tsumo_raw[actor] = None
         state.actor_to_move = actor
+        if et == "daiminkan":
+            _consume_wall_for_kan(state)
+            state.pending_rinshan_actor = actor
         return
 
     if et == "ankan":
@@ -278,6 +305,9 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
         state.last_kakan = None
         state.last_tsumo[actor] = None
         state.last_tsumo_raw[actor] = None
+        state.ryukyoku_tenpai_players = []
+        _consume_wall_for_kan(state)
+        state.pending_rinshan_actor = actor
         return
 
     if et == "kakan":
@@ -321,6 +351,8 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
         state.last_kakan = None
         state.last_tsumo[actor] = None
         state.last_tsumo_raw[actor] = None
+        _consume_wall_for_kan(state)
+        state.pending_rinshan_actor = actor
         return
 
     if et == "reach":
@@ -338,6 +370,7 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
         return
 
     if et in ("hora", "ryukyoku"):
+        state.pending_rinshan_actor = None
         if "scores" in event:
             state.scores = list(event["scores"])
         if "honba" in event:
@@ -348,6 +381,10 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
             state.ura_dora_markers = [
                 _normalize_or_keep_aka(tile) for tile in event["ura_dora_markers"]
             ]
+        if "tenpai_players" in event:
+            state.ryukyoku_tenpai_players = [int(pid) for pid in event["tenpai_players"]]
+        elif et == "hora":
+            state.ryukyoku_tenpai_players = []
         state.actor_to_move = None
         state.last_discard = None
         state.last_kakan = None
@@ -357,6 +394,8 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
         state.actor_to_move = None
         state.last_discard = None
         state.last_kakan = None
+        state.pending_rinshan_actor = None
+        state.ryukyoku_tenpai_players = []
         return
 
     if et == "dora":

@@ -100,6 +100,7 @@ export function actionLabel(action: { type: string; pai?: string; tsumogiri?: bo
 
 type ComparableAction = {
   type: string;
+  actor?: number;
   pai?: string;
   target?: number;
   consumed?: string[];
@@ -111,14 +112,55 @@ function normalizeReplayActionType(type: string | undefined): string {
   return type ?? "";
 }
 
+export function normalizeTileKeepAka(tile: string | null | undefined): string {
+  if (!tile) return '';
+  if (tile === '5mr' || tile === '5pr' || tile === '5sr') return tile;
+  return tile.endsWith('r') ? tile.slice(0, -1) : tile;
+}
+
+export function normalizeTileFamily(tile: string | null | undefined): string {
+  return normalizeTileKeepAka(tile).replace(/r$/, '');
+}
+
+function normalizedConsumedKey(consumed: string[] | undefined): string {
+  return [...(consumed ?? [])]
+    .map((tile) => normalizeTileFamily(tile))
+    .sort()
+    .join('|');
+}
+
 export function actionComparableKey(action: ComparableAction | null | undefined): string {
   if (!action) return '';
+  const type = normalizeReplayActionType(action.type);
+  if (type === 'none' || type === 'reach' || type === 'ryukyoku') {
+    return JSON.stringify({ type });
+  }
+  if (type === 'dahai') {
+    return JSON.stringify({
+      type,
+      pai: normalizeTileKeepAka(action.pai),
+    });
+  }
+  if (type === 'hora') {
+    return JSON.stringify({
+      type,
+      target: action.target ?? null,
+      pai: action.pai ? normalizeTileKeepAka(action.pai) : null,
+    });
+  }
+  if (type === 'chi' || type === 'pon' || type === 'daiminkan' || type === 'ankan' || type === 'kakan') {
+    return JSON.stringify({
+      type,
+      target: action.target ?? null,
+      pai: action.pai ? normalizeTileFamily(action.pai) : null,
+      consumed: normalizedConsumedKey(action.consumed),
+    });
+  }
   return JSON.stringify({
-    type: normalizeReplayActionType(action.type),
-    pai: action.pai ?? '',
+    type,
+    pai: normalizeTileKeepAka(action.pai),
     target: action.target ?? null,
-    consumed: [...(action.consumed ?? [])].sort(),
-    tsumogiri: Boolean(action.tsumogiri),
+    consumed: normalizedConsumedKey(action.consumed),
   });
 }
 
@@ -127,5 +169,34 @@ export function sameReplayAction(
   b: ComparableAction | null | undefined,
 ): boolean {
   if (!a || !b) return false;
+  const typeA = normalizeReplayActionType(a.type);
+  const typeB = normalizeReplayActionType(b.type);
+  if (typeA !== typeB) return false;
+
+  if (typeA === 'none' || typeA === 'reach' || typeA === 'ryukyoku') {
+    return true;
+  }
+
+  if (typeA === 'dahai') {
+    return normalizeTileKeepAka(a.pai) === normalizeTileKeepAka(b.pai);
+  }
+
+  if (typeA === 'hora') {
+    const paiA = a.pai ? normalizeTileKeepAka(a.pai) : null;
+    const paiB = b.pai ? normalizeTileKeepAka(b.pai) : null;
+    return (
+      (a.target ?? null) === (b.target ?? null) &&
+      (paiA === null || paiB === null || paiA === paiB)
+    );
+  }
+
+  if (typeA === 'chi' || typeA === 'pon' || typeA === 'daiminkan' || typeA === 'ankan' || typeA === 'kakan') {
+    return (
+      (a.target ?? null) === (b.target ?? null) &&
+      (!a.pai || !b.pai || normalizeTileFamily(a.pai) === normalizeTileFamily(b.pai)) &&
+      normalizedConsumedKey(a.consumed) === normalizedConsumedKey(b.consumed)
+    );
+  }
+
   return actionComparableKey(a) === actionComparableKey(b);
 }

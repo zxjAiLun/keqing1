@@ -8,7 +8,8 @@ import traceback
 from typing import Any, Callable, Dict, List, Optional
 
 from gateway.battle import BattleManager, BattleRoom
-from mahjong_env.legal_actions import enumerate_legal_actions
+from mahjong_env.legal_actions import enumerate_legal_action_specs, enumerate_legal_actions
+from mahjong_env.types import ActionSpec, action_dict_to_spec, action_specs_match
 
 logger = logging.getLogger(__name__)
 
@@ -196,17 +197,17 @@ class BotDriver:
 
     def _fallback_action(self, snap: Dict, actor: int) -> Dict:
         """枚举合法动作，优先返回非 none 动作。"""
-        legal = enumerate_legal_actions(snap, actor)
-        non_none = [a for a in legal if a.type != "none"]
-        target = non_none[0] if non_none else (legal[0] if legal else None)
+        legal_specs = enumerate_legal_action_specs(snap, actor)
+        non_none = [a for a in legal_specs if a.type != "none"]
+        target = non_none[0] if non_none else (legal_specs[0] if legal_specs else None)
         if target is None:
             return {"type": "none", "actor": actor}
         return {
             "type": target.type,
-            "actor": target.actor,
-            "pai": getattr(target, "pai", None),
-            "consumed": getattr(target, "consumed", None),
-            "target": getattr(target, "target", None),
+            "actor": actor if target.actor is None else target.actor,
+            "pai": target.pai,
+            "consumed": list(target.consumed) if target.consumed else None,
+            "target": target.target,
         }
 
     def _normalize_chosen(self, chosen: Any, actor: int) -> Dict:
@@ -234,16 +235,15 @@ class BotDriver:
     ) -> bool:
         """验证动作合法性并分发到对应的 BattleManager 方法。返回 True 表示成功。"""
         mgr = self.manager
-        action_type = action.get("type")
-        legal: List = enumerate_legal_actions(snap, actor)
-
-        # 按 type 分组，chi 可能有多条（low/mid/high）
-        legal_by_type: Dict[str, List] = {}
-        for a in legal:
-            legal_by_type.setdefault(a.type, []).append(a)
+        requested_spec = action_dict_to_spec(action, actor_hint=actor)
+        legal_specs: List[ActionSpec] = enumerate_legal_action_specs(snap, actor)
+        legal_by_type: Dict[str, List[ActionSpec]] = {}
+        for spec in legal_specs:
+            legal_by_type.setdefault(spec.type, []).append(spec)
+        action_type = requested_spec.type
 
         if action_type == "dahai":
-            pai = action.get("pai", "")
+            pai = requested_spec.pai or ""
             legal_dahai = legal_by_type.get("dahai", [])
             matched = next((a for a in legal_dahai if a.pai == pai), None) or (
                 legal_dahai[0] if legal_dahai else None
@@ -253,7 +253,7 @@ class BotDriver:
                 return True
 
         elif action_type == "reach":
-            pai = action.get("pai", "")
+            pai = requested_spec.pai or ""
             tsumo_pai = snap.get("tsumo_pai")
             shanten = snap.get("shanten", 8)
             if shanten == 0 and tsumo_pai and legal_by_type.get("reach"):
@@ -262,49 +262,76 @@ class BotDriver:
                 return True
 
         elif action_type == "chi":
-            consumed = action.get("consumed", [])
-            pai = action.get("pai", "")
-            target = action.get("target")
-            # 按 consumed 集合精确匹配，避免 chi_low/mid/high 混淆
+            target = requested_spec.target
             legal_chi = legal_by_type.get("chi", [])
             matched = next(
-                (a for a in legal_chi if set(a.consumed) == set(consumed)), None
+                (a for a in legal_chi if action_specs_match(a, requested_spec)), None
             ) or (legal_chi[0] if legal_chi else None)
             if matched:
                 mgr.handle_meld(
-                    room, "chi", actor, pai, matched.consumed, target=target
+                    room,
+                    "chi",
+                    actor,
+                    matched.pai or "",
+                    list(matched.consumed),
+                    target=target,
                 )
                 return True
 
         elif action_type in ("pon", "daiminkan"):
-            pai = action.get("pai", "")
-            consumed = action.get("consumed", [])
-            target = action.get("target")
-            if legal_by_type.get(action_type):
-                mgr.handle_meld(room, action_type, actor, pai, consumed, target=target)
+            legal_same = legal_by_type.get(action_type, [])
+            matched = next((a for a in legal_same if action_specs_match(a, requested_spec)), None)
+            if matched:
+                mgr.handle_meld(
+                    room,
+                    action_type,
+                    actor,
+                    matched.pai or "",
+                    list(matched.consumed),
+                    target=matched.target,
+                )
                 return True
 
         elif action_type == "ankan":
-            pai = action.get("pai", "")
-            consumed = action.get("consumed", [pai] * 4)
-            if legal_by_type.get("ankan"):
-                mgr.handle_meld(room, "ankan", actor, pai, consumed)
+            legal_ankan = legal_by_type.get("ankan", [])
+            matched = next((a for a in legal_ankan if action_specs_match(a, requested_spec)), None)
+            if matched:
+                mgr.handle_meld(
+                    room,
+                    "ankan",
+                    actor,
+                    matched.pai or "",
+                    list(matched.consumed) or [matched.pai] * 4,
+                )
                 return True
 
         elif action_type == "kakan":
-            pai = action.get("pai", "")
-            consumed = action.get("consumed", [])
-            if legal_by_type.get("kakan"):
-                mgr.handle_meld(room, "kakan", actor, pai, consumed)
+            legal_kakan = legal_by_type.get("kakan", [])
+            matched = next((a for a in legal_kakan if action_specs_match(a, requested_spec)), None)
+            if matched:
+                mgr.handle_meld(
+                    room,
+                    "kakan",
+                    actor,
+                    matched.pai or "",
+                    list(matched.consumed),
+                )
                 return True
 
         elif action_type == "hora":
-            pai = action.get("pai", "")
-            target = action.get("target", actor)
-            is_tsumo = target == actor
             legal_hora = legal_by_type.get("hora", [])
-            if legal_hora and pai == legal_hora[0].pai:
-                mgr.hora(room, actor, target, pai, is_tsumo=is_tsumo)
+            matched = next(
+                (
+                    a
+                    for a in legal_hora
+                    if a.target == requested_spec.target
+                    and (requested_spec.pai is None or a.pai == requested_spec.pai)
+                ),
+                None,
+            )
+            if matched:
+                target = actor if matched.target is None else matched.target
+                mgr.hora(room, actor, target, matched.pai or "", is_tsumo=(target == actor))
                 return True
 
         elif action_type == "none":

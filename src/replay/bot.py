@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Optional, Union
 
 from mahjong_env.replay import read_mjai_jsonl
+from mahjong_env.types import action_dict_to_spec, action_specs_match
+from static_tables.demo import annotate_replay_candidate_demo
 
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 _SRC_DIR = _PROJECT_ROOT / "src"
@@ -48,6 +50,7 @@ _DEFAULT_CHECKPOINTS = {
     "keqingv2": _PROJECT_ROOT / "artifacts/models/keqingv2/best.pth",
     "keqingv3": _PROJECT_ROOT / "artifacts/models/keqingv3/best.pth",
 }
+_RESPONSE_ACTION_TYPES = {"chi", "pon", "daiminkan", "ankan", "kakan", "hora"}
 
 
 def _is_mjai_dict(data: dict) -> bool:
@@ -245,7 +248,14 @@ def run_replay_from_source(
         # 记录其他家的操作观察步（棋盘快照，无 bot 推理数据）
         ev_actor = event.get("actor")
         ev_type = event.get("type", "")
-        if ev_actor is not None and ev_actor != player_id and ev_type in _OBS_TYPES:
+        should_record_obs = (
+            ev_type in _OBS_TYPES
+            and (
+                (ev_actor is not None and ev_actor != player_id)
+                or (ev_type == "ryukyoku")
+            )
+        )
+        if should_record_obs:
             snap = bot.game_state.snapshot(player_id)
             obs_entry = {
                 "step": len(bot.decision_log),
@@ -347,23 +357,87 @@ def _sort_hand(hand: list[str], tsumo_pai: str | None = None) -> list[str]:
     return sorted(hand, key=lambda t: _TILE_ORDER.get(t, 99))
 
 
-def _action_cmp_key(action: dict | None) -> tuple | None:
+def _action_cmp_key(action: dict | None):
     if not action:
         return None
-    action_type = action.get("type")
-    if action_type == "pass":
-        action_type = "none"
-    return (
-        action_type,
-        action.get("pai", ""),
-        action.get("target"),
-        tuple(sorted(action.get("consumed", []))),
-        bool(action.get("tsumogiri", False)),
-    )
+    normalized = dict(action)
+    if normalized.get("type") == "pass":
+        normalized["type"] = "none"
+    try:
+        return action_dict_to_spec(normalized)
+    except Exception:
+        return None
+
+
+def _candidate_score_for_replay(candidate: dict) -> float | None:
+    """统一读取 replay 候选动作分数。
+
+    新版本优先使用 final_score；旧版本兼容 beam_score/logit。
+    """
+    if candidate.get("final_score") is not None:
+        return float(candidate["final_score"])
+    if candidate.get("beam_score") is not None:
+        return float(candidate["beam_score"])
+    if candidate.get("logit") is not None:
+        return float(candidate["logit"])
+    return None
 
 
 def _same_action(a: dict | None, b: dict | None) -> bool:
-    return _action_cmp_key(a) == _action_cmp_key(b) and _action_cmp_key(a) is not None
+    spec_a = _action_cmp_key(a)
+    spec_b = _action_cmp_key(b)
+    if spec_a is None or spec_b is None:
+        return False
+    return action_specs_match(spec_a, spec_b)
+
+
+def normalize_replay_decisions(decisions: dict, meta: dict | None = None) -> dict:
+    if not isinstance(decisions, dict):
+        return decisions
+
+    log = decisions.get("log", [])
+    player_id = decisions.get("player_id")
+    pending_idx: int | None = None
+    for idx, entry in enumerate(log):
+        if not entry.get("is_obs") and entry.get("gt_action") is None:
+            pending_idx = idx
+        if pending_idx is None or idx == pending_idx:
+            continue
+        pending = log[pending_idx]
+        if pending.get("gt_action") is not None:
+            pending_idx = None
+            continue
+        chosen = pending.get("chosen") or {}
+        candidates = pending.get("candidates", [])
+        has_none_candidate = any(
+            c.get("action", {}).get("type") == "none" for c in candidates
+        )
+        has_non_none_candidate = any(
+            c.get("action", {}).get("type") != "none" for c in candidates
+        )
+        if chosen.get("type") == "none" and has_non_none_candidate:
+            pending["gt_action"] = {"type": "none", "actor": player_id}
+            pending_idx = None
+        elif chosen.get("type") in _RESPONSE_ACTION_TYPES and has_none_candidate:
+            pending["gt_action"] = {
+                **chosen,
+                "actor": chosen.get("actor", player_id),
+            }
+            pending_idx = None
+
+    own_log = [e for e in log if not e.get("is_obs")]
+    total_ops = len(own_log)
+    match_count = sum(
+        1 for e in own_log if _same_action(e.get("chosen"), e.get("gt_action"))
+    )
+    return {
+        **decisions,
+        "log": log,
+        "total_ops": total_ops,
+        "match_count": match_count,
+        "bot_type": (meta or {}).get("bot_type", decisions.get("bot_type")),
+        "player_names": decisions.get("player_names") or (meta or {}).get("player_names"),
+    }
 
 
 def _tile_img(tile: str, width: int = 40, style: str = "") -> str:
@@ -446,8 +520,8 @@ def _render_candidates_logit(
         a = c["action"]
         logit = c["logit"]
         label = action_label(a)
-        is_chosen = a == chosen
-        is_gt = gt_action is not None and a == gt_action
+        is_chosen = _same_action(a, chosen)
+        is_gt = gt_action is not None and _same_action(a, gt_action)
         pct = max(0, (logit - min_logit) / logit_range * 100)
         bar_color = "#e74c3c" if is_chosen else "#3498db"
         marks = ""
@@ -612,6 +686,11 @@ def render_replay_json(bot: KeqingBot) -> dict:
     # 重新按顺序编排 step（obs 步插入后编号可能乱）
     for i, entry in enumerate(log):
         entry["step"] = i
+        if entry.get("candidates"):
+            entry["candidates"] = [
+                annotate_replay_candidate_demo(candidate, entry)
+                for candidate in entry["candidates"]
+            ]
 
     # 补 kyoku_key 方便前端过滤
     for entry in log:
@@ -626,8 +705,8 @@ def render_replay_json(bot: KeqingBot) -> dict:
     total_ops = len(own_log)
     matches = sum(1 for e in own_log if _same_action(e.get("chosen"), e.get("gt_action")))
 
-    # Rating: 方案3 — exp(-alpha * delta_score)，alpha=0.5
-    # delta = bot_best_score - gt_score，使用 beam_score 优先，fallback 到 logit
+    # Rating: exp(-alpha * delta_score)，alpha=0.5
+    # delta 基于模型最终用于决策的综合分数（final_score）；旧版本回放回退到 beam/logit。
     import math
 
     _ALPHA = 0.5
@@ -639,21 +718,17 @@ def render_replay_json(bot: KeqingBot) -> dict:
         candidates = e.get("candidates", [])
         if not candidates:
             continue
-        has_beam = any("beam_score" in c for c in candidates)
-        score_key = "beam_score" if has_beam else "logit"
-        # bot 最优 score（chosen 对应的 score）
         chosen = e.get("chosen", {})
 
-        chosen_key = _action_cmp_key(chosen)
-        gt_key = _action_cmp_key(gt)
         bot_score = None
         gt_score = None
         for c in candidates:
-            ck = _action_cmp_key(c["action"])
-            s = c.get(score_key, c.get("logit"))
-            if ck == chosen_key and bot_score is None:
+            s = _candidate_score_for_replay(c)
+            if s is None:
+                continue
+            if _same_action(c["action"], chosen) and bot_score is None:
                 bot_score = s
-            if ck == gt_key and gt_score is None:
+            if _same_action(c["action"], gt) and gt_score is None:
                 gt_score = s
         if bot_score is None or gt_score is None:
             continue
@@ -666,7 +741,7 @@ def render_replay_json(bot: KeqingBot) -> dict:
         else None
     )
 
-    return {
+    return normalize_replay_decisions({
         "log": log,
         "kyoku_order": kyoku_order,
         "total_ops": total_ops,
@@ -674,7 +749,7 @@ def render_replay_json(bot: KeqingBot) -> dict:
         "rating": rating,
         "player_id": bot.player_id,
         "player_names": getattr(bot, "player_names", []),
-    }
+    })
 
 
 def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
@@ -724,7 +799,7 @@ def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
         )
 
         gt_label = action_label(gt_action) if gt_action else "—"
-        gt_color = "#27ae60" if (gt_action and gt_action == chosen) else "#c0392b"
+        gt_color = "#27ae60" if _same_action(gt_action, chosen) else "#c0392b"
 
         # 立直步骤：从下一条 log 取出宣言牌信息（跳过 obs 步）
         reach_dahai_str = ""

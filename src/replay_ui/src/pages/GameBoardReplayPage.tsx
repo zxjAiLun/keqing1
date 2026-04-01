@@ -1,7 +1,7 @@
 // src/replay_ui/src/pages/GameBoardReplayPage.tsx
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Loader2, ChevronLeft, ChevronRight, SkipBack, SkipForward } from 'lucide-react';
+import { Loader2, ChevronLeft, ChevronRight, SkipBack, SkipForward, PanelLeftClose, PanelLeftOpen, ChevronsUp, ChevronsDown } from 'lucide-react';
 import { MahjongTable } from '../components/BattleBoard/MahjongTable';
 import { Tile } from '../components/BattleBoard/Tile';
 import { ReplayDecisionPanel } from '../components/DecisionPanel/ReplayDecisionPanel';
@@ -14,18 +14,14 @@ import { sameReplayAction, TILE_ORDER } from '../utils/tileUtils';
 import { normalizeReplayPlayerNames, replayPlayerDisplayName } from '../utils/replayNames';
 import type { Action, ReplayData } from '../types/replay';
 
-const SPEED_OPTIONS = [
-  { value: 0.5 as const, label: '0.5x' },
-  { value: 1 as const, label: '1x' },
-  { value: 2 as const, label: '2x' },
-  { value: 4 as const, label: '4x' },
-];
-
 export function GameBoardReplayPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const routeState = location.state as { replayData?: ReplayData; replayId?: string } | null;
-  const replayIdFromRoute = routeState?.replayId ?? new URLSearchParams(location.search).get('id');
+  const params = new URLSearchParams(location.search);
+  const replayIdFromRoute = routeState?.replayId ?? params.get('id');
+  const playerIdFromQuery = Number(params.get('player_id') ?? '0');
+  const requestedPlayerId = Number.isFinite(playerIdFromQuery) ? playerIdFromQuery : 0;
 
   const [data, setData] = useState<ReplayData | null>(null);
   const [events, setEvents] = useState<Record<string, unknown>[] | null>(null);
@@ -38,20 +34,22 @@ export function GameBoardReplayPage() {
   const [narrowLayout, setNarrowLayout] = useState(false);
   const [boardPhase, setBoardPhase] = useState<ReplayBoardPhase>('pre');
   const [showOpponentHands, setShowOpponentHands] = useState(false);
+  const [showPerspectiveDrawer, setShowPerspectiveDrawer] = useState(false);
+  const [showTopToolbar, setShowTopToolbar] = useState(true);
 
   // 加载数据
   useEffect(() => {
-    if (routeState?.replayData) {
+    if (routeState?.replayData && !replayIdFromRoute) {
       setData(routeState.replayData);
       setLoading(false);
     } else if (routeState?.replayId) {
-      replayApi.get(routeState.replayId)
+      replayApi.get(routeState.replayId, requestedPlayerId)
         .then(d => { setData(d); setLoading(false); })
         .catch(e => { setError(String(e)); setLoading(false); });
     } else {
       const replayId = replayIdFromRoute;
       if (replayId) {
-        replayApi.get(replayId)
+        replayApi.get(replayId, requestedPlayerId)
           .then(d => { setData(d); setLoading(false); })
           .catch(e => { setError(String(e)); setLoading(false); });
       } else {
@@ -59,7 +57,7 @@ export function GameBoardReplayPage() {
         setLoading(false);
       }
     }
-  }, [location, replayIdFromRoute, routeState]);
+  }, [location, replayIdFromRoute, requestedPlayerId, routeState]);
 
   useEffect(() => {
     if (!replayIdFromRoute) return;
@@ -73,10 +71,10 @@ export function GameBoardReplayPage() {
   }, [replayIdFromRoute]);
 
   const {
-    currentStep, isPlaying, speed, totalSteps,
+    currentStep, totalSteps,
     currentEntry, currentKyoku, totalKyoku,
-    togglePlay, stepForward, stepBackward,
-    goToStart, goToEnd, goToStep, goToKyoku, changeSpeed,
+    stepForward, stepBackward,
+    goToStart, goToEnd, goToStep, goToKyoku,
   } = useReplayPlayer(data);
 
   const currentHasPostPhase = hasReplayPostAction(currentEntry);
@@ -215,13 +213,12 @@ export function GameBoardReplayPage() {
         case 'ArrowRight': case 'l': handleStepForward(); break;
         case 'ArrowDown':  case 'j': moveBoardStep(1); break;
         case 'ArrowUp':    case 'k': moveBoardStep(-1); break;
-        case ' ': togglePlay(); break;
       }
     };
     // useCapture=true 确保在其他元素之前捕获
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
-  }, [handleStepBackward, handleStepForward, moveBoardStep, togglePlay]);
+  }, [handleStepBackward, handleStepForward, moveBoardStep]);
 
   // 滚轮事件
   useEffect(() => {
@@ -235,7 +232,7 @@ export function GameBoardReplayPage() {
   }, [moveBoardStep]);
 
   useEffect(() => {
-    const updateLayout = () => setNarrowLayout(window.innerWidth < 1320);
+    const updateLayout = () => setNarrowLayout(window.innerWidth < 1120);
     updateLayout();
     window.addEventListener('resize', updateLayout);
     return () => window.removeEventListener('resize', updateLayout);
@@ -245,6 +242,10 @@ export function GameBoardReplayPage() {
   const playerNames = normalizeReplayPlayerNames(data);
 
   const viewPlayerId = data?.player_id ?? 0;
+  const switchPerspective = (nextPid: number) => {
+    if (!replayIdFromRoute) return;
+    navigate(`/game-replay?id=${encodeURIComponent(replayIdFromRoute)}&player_id=${nextPid}`);
+  };
 
   // 适配数据
   const battleState = useMemo(
@@ -260,13 +261,20 @@ export function GameBoardReplayPage() {
 
   const entry = currentEntry;
   const k = entry?.kyoku_key;
-  const kyokuLabel = k ? `第${CN_BAKAZE[k.bakaze] ?? k.bakaze}${k.kyoku}局 ${k.honba}本场` : '';
+  const kyokuLabel = k ? `${CN_BAKAZE[k.bakaze] ?? k.bakaze}${k.kyoku}局 ${k.honba}本场` : '';
 
   // 当前步 bot 选择和实际打出
   const chosenPai = entry?.chosen?.type === 'dahai' ? entry.chosen.pai ?? null : null;
+  const currentResultAction = (currentEntry?.gt_action ?? currentEntry?.chosen) as Action | undefined;
   const resultSummary = useMemo(
-    () => buildReplayResultSummary(events, currentEntry ?? undefined, playerNames),
-    [events, currentEntry, playerNames],
+    () => {
+      if (!currentEntry) return null;
+      if ((currentResultAction?.type === 'hora' || currentResultAction?.type === 'ryukyoku') && boardPhase !== 'post') {
+        return null;
+      }
+      return buildReplayResultSummary(events, currentEntry, playerNames);
+    },
+    [events, currentEntry, currentResultAction, playerNames, boardPhase],
   );
   const replayHands = useMemo(
     () => buildReplayHandsForBoard(events as ReplayEvent[] | null, data, currentStep, currentEntry ?? null, boardPhase),
@@ -294,155 +302,156 @@ export function GameBoardReplayPage() {
   }
 
   return (
-    <div className="h-full flex flex-col" style={{ background: 'var(--page-bg)' }}>
-      {/* ── 顶栏 ── */}
-      <div style={{
-        minHeight: 40, flexShrink: 0,
-        background: 'var(--sidebar-bg)',
-        borderBottom: '1px solid var(--border)',
-        display: 'flex', alignItems: 'center',
-        padding: '6px 12px', gap: 10, flexWrap: 'wrap',
-      }}>
-        {/* 返回 */}
-        <button onClick={() => navigate('/')} style={iconBtnStyle} title="返回">
-          ←
-        </button>
-
-        <span style={{ color: 'var(--border)' }}>|</span>
-
-        {/* 局号 */}
-        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: narrowLayout ? '100%' : 260 }}>
-          {kyokuLabel}
-        </span>
-
-        {/* 小局跳转 */}
-        {totalKyoku > 1 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <button onClick={() => handleGoToKyoku(Math.max(0, currentKyoku - 1))} disabled={currentKyoku === 0} style={smallBtnStyle}>
-              ◀
-            </button>
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{currentKyoku + 1}/{totalKyoku}</span>
-            <button onClick={() => handleGoToKyoku(Math.min(totalKyoku - 1, currentKyoku + 1))} disabled={currentKyoku === totalKyoku - 1} style={smallBtnStyle}>
-              ▶
-            </button>
-          </div>
-        )}
-
-        {/* 步骤进度 */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3, minWidth: narrowLayout ? 140 : 100 }}>
-          <input
-            type="range" min={0} max={totalSteps - 1} value={currentStep}
-            onChange={e => handleGoToStep(parseInt(e.target.value))}
-            style={{ width: '100%', accentColor: 'var(--accent)' }}
-          />
-        </div>
-
-        {/* 步进 */}
-        <button onClick={handleGoToStart} disabled={currentStep === 0 && boardPhase === 'pre'} style={smallBtnStyle} title="第一步">
-          <SkipBack size={13} />
-        </button>
-        <button onClick={handleStepBackward} disabled={currentStep === 0 && boardPhase === 'pre'} style={smallBtnStyle} title="上一步 (←)">
-          <ChevronLeft size={13} />
-        </button>
-        <button onClick={togglePlay} style={{ ...smallBtnStyle, fontWeight: 700 }}>
-          {isPlaying ? '⏸' : '▶'}
-        </button>
-        <button onClick={handleStepForward} disabled={currentStep === totalSteps - 1 && !currentHasPostPhase && !currentHasReachPhase} style={smallBtnStyle} title="下一步 (→)">
-          <ChevronRight size={13} />
-        </button>
-        <button onClick={handleGoToEnd} disabled={currentStep === totalSteps - 1 && boardPhase === 'pre'} style={smallBtnStyle} title="最后一步">
-          <SkipForward size={13} />
-        </button>
-
-        {/* 速度 */}
-        <div style={{ display: 'flex', gap: 2 }}>
-          {SPEED_OPTIONS.map(s => (
-            <button key={s.label}
-              onClick={() => changeSpeed(s.value)}
-              style={{
-                ...smallBtnStyle,
-                fontWeight: speed === s.value ? 700 : 400,
-                color: speed === s.value ? 'var(--accent)' : 'var(--text-muted)',
-                fontSize: 10,
-              }}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
-
-        {/* step 数 */}
-        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'Menlo, monospace', flexShrink: 0 }}>
-          {currentStep + 1}/{totalSteps}{boardPhase === 'post' ? ' · 后' : boardPhase === 'reach' ? ' · 立直' : ' · 前'}
-        </span>
-
-        <span style={{ color: 'var(--border)' }}>|</span>
-
-        {/* 统计 */}
-        <button onClick={() => setShowStats(true)} style={iconBtnStyle} title="统计">
-          📊
-        </button>
-
-        {/* 跳转到上/下一不同 */}
-        <button onClick={jumpToPrevDiff} style={iconBtnStyle} title="上一个与Bot不同的决策">
-          ⏮差异
-        </button>
-        <button onClick={jumpToNextDiff} style={iconBtnStyle} title="下一个与Bot不同的决策">
-          差异⏭
-        </button>
-
-        {/* 切换到决策列表 */}
-        <button
-          onClick={() => navigate('/replay', { state: { replayData: data } })}
-          style={iconBtnStyle}
-          title="切换到决策列表"
-        >
-          📋列表
-        </button>
-      </div>
-
-      {/* 统计面板 */}
+    <div
+      style={{
+        height: 'calc(100vh - var(--mobile-shell-offset, 0px))',
+        background: 'var(--page-bg)',
+        overflow: 'hidden',
+      }}
+    >
       {showStats && data && <StatsPanel data={data} onClose={() => setShowStats(false)} />}
 
-      {/* ── 主内容：牌桌 + 右侧面板 ── */}
-      <div style={{ flex: 1, display: 'flex', minHeight: 0, flexDirection: narrowLayout ? 'column' : 'row' }}>
-        {/* 牌桌 */}
-        <div style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
-          {battleState ? (
-            <div style={{ position: 'relative', height: '100%' }}>
-              <MahjongTable
-                state={battleState}
-                onAction={() => {}}
-                isMyTurn={false}
-                selectedTile={chosenPai}
-                selectedTileIdx={null}
-                onTileSelect={() => {}}
-                autoHora={autoHora} setAutoHora={setAutoHora}
-                noMeld={noMeld} setNoMeld={setNoMeld}
-                autoTsumogiri={autoTsumogiri} setAutoTsumogiri={setAutoTsumogiri}
-                mode="replay"
-                logitData={logitData}
-                revealedOpponentHands={showOpponentHands ? replayHands : null}
-                onToggleOpponentHands={() => setShowOpponentHands((v) => !v)}
-              />
-              {resultSummary && <ReplayResultOverlay summary={resultSummary} playerNames={playerNames} />}
+      {battleState ? (
+        <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0, position: 'relative' }}>
+            <MahjongTable
+              state={battleState}
+              onAction={() => {}}
+              isMyTurn={false}
+              selectedTile={chosenPai}
+              selectedTileIdx={null}
+              onTileSelect={() => {}}
+              autoHora={autoHora} setAutoHora={setAutoHora}
+              noMeld={noMeld} setNoMeld={setNoMeld}
+              autoTsumogiri={autoTsumogiri} setAutoTsumogiri={setAutoTsumogiri}
+              mode="replay"
+              logitData={logitData}
+              revealedOpponentHands={showOpponentHands ? replayHands : null}
+              onToggleOpponentHands={() => setShowOpponentHands((v) => !v)}
+            />
+            {resultSummary && <ReplayResultOverlay summary={resultSummary} playerNames={playerNames} />}
+
+            <div style={floatingTopBarWrapStyle}>
+              <button
+                onClick={() => setShowTopToolbar((v) => !v)}
+                style={toolbarToggleStyle}
+                title={showTopToolbar ? '收起顶部工具栏' : '展开顶部工具栏'}
+              >
+                {showTopToolbar ? <ChevronsUp size={14} /> : <ChevronsDown size={14} />}
+                <span>{showTopToolbar ? '收起' : '展开'}</span>
+              </button>
+              {showTopToolbar && (
+                <div style={floatingTopBarStyle}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <button onClick={() => navigate('/')} style={iconBtnStyle} title="返回">←</button>
+                    {totalKyoku > 1 ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <button onClick={() => handleGoToKyoku(Math.max(0, currentKyoku - 1))} disabled={currentKyoku === 0} style={smallBtnStyle}>◀</button>
+                        <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.78)' }}>{kyokuLabel} · {currentKyoku + 1}/{totalKyoku}</span>
+                        <button onClick={() => handleGoToKyoku(Math.min(totalKyoku - 1, currentKyoku + 1))} disabled={currentKyoku === totalKyoku - 1} style={smallBtnStyle}>▶</button>
+                      </div>
+                    ) : (
+                      <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.78)' }}>{kyokuLabel}</span>
+                    )}
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 180 }}>
+                    <input
+                      type="range"
+                      min={0}
+                      max={totalSteps - 1}
+                      value={currentStep}
+                      onChange={e => handleGoToStep(parseInt(e.target.value))}
+                      style={{ width: '100%', accentColor: 'var(--accent)' }}
+                    />
+                    <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.72)', fontFamily: 'Menlo, monospace', whiteSpace: 'nowrap' }}>
+                      {currentStep + 1}/{totalSteps}{boardPhase === 'post' ? ' · 后' : boardPhase === 'reach' ? ' · 立直' : ' · 前'}
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <button onClick={handleGoToStart} disabled={currentStep === 0 && boardPhase === 'pre'} style={smallBtnStyle} title="第一步"><SkipBack size={13} /></button>
+                    <button onClick={handleStepBackward} disabled={currentStep === 0 && boardPhase === 'pre'} style={smallBtnStyle} title="上一步 (←)"><ChevronLeft size={13} /></button>
+                    <button onClick={handleStepForward} disabled={currentStep === totalSteps - 1 && !currentHasPostPhase && !currentHasReachPhase} style={smallBtnStyle} title="下一步 (→)"><ChevronRight size={13} /></button>
+                    <button onClick={handleGoToEnd} disabled={currentStep === totalSteps - 1 && boardPhase === 'pre'} style={smallBtnStyle} title="最后一步"><SkipForward size={13} /></button>
+
+                    <button onClick={() => setShowStats(true)} style={iconBtnStyle} title="统计">📊</button>
+                    <button onClick={jumpToPrevDiff} style={iconBtnStyle} title="上一个与Bot不同的决策">⏮差异</button>
+                    <button onClick={jumpToNextDiff} style={iconBtnStyle} title="下一个与Bot不同的决策">差异⏭</button>
+                    <button
+                      onClick={() => replayIdFromRoute
+                        ? navigate(`/replay?id=${encodeURIComponent(replayIdFromRoute)}&player_id=${viewPlayerId}`)
+                        : navigate('/replay', { state: { replayData: data } })}
+                      style={iconBtnStyle}
+                      title="切换到决策列表"
+                    >
+                      📋列表
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-              <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>选择一个步骤</p>
+
+            <div style={floatingPerspectiveStyle}>
+              <button
+                onClick={() => setShowPerspectiveDrawer((v) => !v)}
+                style={perspectiveToggleStyle}
+                title="切换主视角"
+              >
+                {showPerspectiveDrawer ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
+                <span>主视角</span>
+              </button>
+              {showPerspectiveDrawer && (
+                <div style={perspectiveDrawerStyle}>
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.72)' }}>切换主视角</div>
+                  {playerNames.map((name, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => switchPerspective(idx)}
+                      disabled={!replayIdFromRoute || idx === viewPlayerId}
+                      style={{
+                        ...floatingSwitchBtnStyle,
+                        borderColor: idx === viewPlayerId ? 'var(--accent)' : 'rgba(255,255,255,0.12)',
+                        background: idx === viewPlayerId ? 'rgba(52, 152, 219, 0.16)' : 'rgba(255,255,255,0.04)',
+                        color: idx === viewPlayerId ? '#d6ebff' : '#f3f4f6',
+                        cursor: idx === viewPlayerId ? 'default' : 'pointer',
+                      }}
+                      title={`切换到 ${name}`}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {!narrowLayout && (
+            <div
+              style={{
+                width: 198,
+                minWidth: 198,
+                height: '100%',
+                borderLeft: '1px solid var(--border)',
+                background: 'var(--page-bg)',
+              }}
+            >
+              <ReplayDecisionPanel
+                entry={currentEntry}
+                step={currentStep}
+                totalSteps={totalSteps}
+                compact={false}
+                playerNames={playerNames}
+              />
             </div>
           )}
-        </div>
 
-        {/* 右侧面板 */}
-        <ReplayDecisionPanel
-          entry={currentEntry}
-          step={currentStep}
-          totalSteps={totalSteps}
-          compact={narrowLayout}
-          playerNames={playerNames}
-        />
-      </div>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+          <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>选择一个步骤</p>
+        </div>
+      )}
     </div>
   );
 }
@@ -460,6 +469,105 @@ const smallBtnStyle: React.CSSProperties = {
   padding: 3, borderRadius: 4, border: '1px solid var(--border)',
   background: 'var(--sidebar-hover-bg)', color: 'var(--text-secondary)',
   cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+};
+
+const floatingSwitchBtnStyle: React.CSSProperties = {
+  width: '100%',
+  borderRadius: 8,
+  border: '1px solid rgba(255,255,255,0.12)',
+  padding: '7px 9px',
+  textAlign: 'left',
+  fontSize: 12,
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+};
+
+const perspectiveToggleStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  borderRadius: 10,
+  border: '1px solid rgba(255,255,255,0.12)',
+  background: 'rgba(17, 24, 39, 0.86)',
+  color: '#f3f4f6',
+  padding: '8px 10px',
+  fontSize: 12,
+  cursor: 'pointer',
+  boxShadow: '0 8px 24px rgba(0,0,0,0.28)',
+  backdropFilter: 'blur(10px)',
+};
+
+const perspectiveDrawerStyle: React.CSSProperties = {
+  position: 'absolute',
+  left: 0,
+  bottom: 'calc(100% + 8px)',
+  zIndex: 30,
+  background: 'rgba(17, 24, 39, 0.92)',
+  border: '1px solid rgba(255,255,255,0.12)',
+  borderRadius: 12,
+  padding: '10px 10px 8px',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  minWidth: 170,
+  boxShadow: '0 8px 24px rgba(0,0,0,0.28)',
+  backdropFilter: 'blur(10px)',
+};
+
+const floatingTopBarWrapStyle: React.CSSProperties = {
+  position: 'absolute',
+  top: 12,
+  left: 168,
+  right: 12,
+  zIndex: 34,
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'flex-start',
+  gap: 8,
+  pointerEvents: 'none',
+};
+
+const toolbarToggleStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  padding: '7px 10px',
+  borderRadius: 999,
+  border: '1px solid rgba(255,255,255,0.12)',
+  background: 'rgba(12, 16, 20, 0.52)',
+  color: '#f3f4f6',
+  fontSize: 12,
+  cursor: 'pointer',
+  boxShadow: '0 12px 24px rgba(0,0,0,0.18)',
+  backdropFilter: 'blur(10px)',
+  pointerEvents: 'auto',
+};
+
+const floatingTopBarStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 10,
+  flexWrap: 'wrap',
+  padding: '10px 12px',
+  borderRadius: 16,
+  width: 'min(980px, calc(100% - 32px))',
+  background: 'linear-gradient(90deg, rgba(12, 16, 20, 0.78) 0%, rgba(12, 16, 20, 0.72) 58%, rgba(12, 16, 20, 0.24) 78%, rgba(12, 16, 20, 0.04) 100%)',
+  border: '1px solid rgba(255,255,255,0.08)',
+  boxShadow: '0 16px 32px rgba(0,0,0,0.18)',
+  backdropFilter: 'blur(14px)',
+  pointerEvents: 'auto',
+};
+
+const floatingPerspectiveStyle: React.CSSProperties = {
+  position: 'absolute',
+  left: 12,
+  bottom: 12,
+  zIndex: 30,
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'flex-start',
+  gap: 6,
 };
 
 type ReplayEvent = Record<string, unknown>;
@@ -692,7 +800,7 @@ function applyEntryEventsToHands(
   action: Action | null | undefined,
   phase: ReplayBoardPhase,
 ): number {
-  if (!action || ['none', 'reach', 'hora', 'ryukyoku'].includes(action.type)) {
+  if (!action || ['none', 'hora', 'ryukyoku'].includes(action.type)) {
     return startCursor;
   }
 
@@ -708,9 +816,13 @@ function applyEntryEventsToHands(
 
     if (type === 'tsumo') {
       const tsumoActor = Number(ev.actor ?? -1);
-      if (action.type === 'dahai' && tsumoActor === action.actor) {
+      if ((action.type === 'dahai' || action.type === 'reach') && tsumoActor === action.actor) {
         applyReplayEventToHands(hands, ev);
         cursor += 1;
+        if (action.type === 'reach') {
+          if (phase !== 'post') return cursor;
+          continue;
+        }
         if (phase !== 'post') return cursor;
         continue;
       }

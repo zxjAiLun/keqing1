@@ -13,7 +13,8 @@ data_dirs:
 output_dir: processed_v3
 
 # 预处理并行度
-workers: 16
+workers: 12
+maxtasksperchild: 24
 
 # 是否在预处理阶段直接做花色增强
 augment: false

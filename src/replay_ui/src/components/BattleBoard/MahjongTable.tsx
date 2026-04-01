@@ -37,6 +37,7 @@ const BASE_TABLE_HEIGHT = 900;
 const SELF_HAND_GAP = 2;
 const SELF_HAND_DRAW_GAP = 6;
 const SELF_HAND_RESERVED_WIDTH = TILE_SIZES.large.w * 14 + SELF_HAND_GAP * 12 + SELF_HAND_DRAW_GAP;
+const SELF_HAND_BAR_MAX_HEIGHT = 60;
 // 6张一列宽度（用于中心正方形边长）
 export const CENTER_SIZE = DISC_COLS * DISC_W + (DISC_COLS - 1) * DISC_GAP; // 142px
 
@@ -59,6 +60,7 @@ function OrientedTile({
   dimmed,
   outlined,
   outlineColor,
+  outlineWidth,
 }: {
   tile: string;
   size: "small" | "normal" | "large";
@@ -66,6 +68,7 @@ function OrientedTile({
   dimmed?: boolean;
   outlined?: boolean;
   outlineColor?: string;
+  outlineWidth?: number;
 }) {
   const { width, height } = getTileBox(size, orientation);
   return (
@@ -77,7 +80,7 @@ function OrientedTile({
           left: "50%",
           transform: `translate(-50%, -50%) rotate(${orientation}deg)`,
           filter: dimmed ? "brightness(0.6)" : undefined,
-          outline: outlined ? `2px solid ${outlineColor ?? "var(--gold)"}` : undefined,
+          outline: outlined ? `${outlineWidth ?? 2}px solid ${outlineColor ?? "var(--gold)"}` : undefined,
           outlineOffset: "1px",
           borderRadius: outlined ? 3 : undefined,
         }}
@@ -88,7 +91,35 @@ function OrientedTile({
   );
 }
 
-function DiscardTile({ d, position, zIndex }: { d: DiscardEntry; position: SeatPosition; zIndex?: number }) {
+function normalizeClaimKey(pai: string): string {
+  return pai.endsWith("r") ? pai.slice(0, -1) : pai;
+}
+
+function buildClaimedDiscardFlags(
+  discards: DiscardEntry[][],
+  melds: MeldEntry[][],
+): boolean[][] {
+  const flags = discards.map((row) => row.map(() => false));
+  for (let actor = 0; actor < melds.length; actor += 1) {
+    for (const meld of melds[actor] ?? []) {
+      if (meld.type === "ankan") continue;
+      const target = meld.target;
+      if (target == null || target === actor) continue;
+      const targetDiscards = discards[target] ?? [];
+      const targetFlags = flags[target] ?? [];
+      const want = normalizeClaimKey(meld.pai);
+      for (let i = targetDiscards.length - 1; i >= 0; i -= 1) {
+        if (targetFlags[i]) continue;
+        if (normalizeClaimKey(targetDiscards[i].pai) !== want) continue;
+        targetFlags[i] = true;
+        break;
+      }
+    }
+  }
+  return flags;
+}
+
+function DiscardTile({ d, position, zIndex, claimed }: { d: DiscardEntry; position: SeatPosition; zIndex?: number; claimed?: boolean }) {
   const modelOrientation = getSeatModel(position).tileOrientation;
   const baseOrientation =
     position === "east" ? 90
@@ -102,14 +133,15 @@ function DiscardTile({ d, position, zIndex }: { d: DiscardEntry; position: SeatP
         size="normal"
         orientation={orientation}
         dimmed={d.tsumogiri}
-        outlined={d.reach_declared}
+        outlined={Boolean(claimed || d.reach_declared)}
+        outlineColor={claimed ? "#ef4444" : undefined}
       />
     </div>
   );
 }
 
 // 自家（底部）：左下角起，行左→右，新行向下
-function DiscardPondSouth({ discards }: { discards: DiscardEntry[] }) {
+function DiscardPondSouth({ discards, claimedFlags = [] }: { discards: DiscardEntry[]; claimedFlags?: boolean[] }) {
   const rows = chunkDiscards(discards, DISC_COLS);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: DISC_GAP, alignItems: "flex-start" }}>
@@ -122,6 +154,7 @@ function DiscardPondSouth({ discards }: { discards: DiscardEntry[] }) {
                 key={`${globalIndex}-${d.pai}-${d.tsumogiri ? "t" : "d"}-${d.reach_declared ? "r" : "n"}`}
                 d={d}
                 position="south"
+                claimed={claimedFlags[globalIndex]}
               />
             );
           })}
@@ -132,7 +165,7 @@ function DiscardPondSouth({ discards }: { discards: DiscardEntry[] }) {
 }
 
 // 对家（顶部）：右上角起，行右→左，新行向上（column-reverse）
-function DiscardPondNorth({ discards }: { discards: DiscardEntry[] }) {
+function DiscardPondNorth({ discards, claimedFlags = [] }: { discards: DiscardEntry[]; claimedFlags?: boolean[] }) {
   const rows = chunkDiscards(discards, DISC_COLS);
   return (
     <div style={{ display: "flex", flexDirection: "column-reverse", gap: DISC_GAP, alignItems: "flex-end" }}>
@@ -145,6 +178,7 @@ function DiscardPondNorth({ discards }: { discards: DiscardEntry[] }) {
                 key={`${globalIndex}-${d.pai}-${d.tsumogiri ? "t" : "d"}-${d.reach_declared ? "r" : "n"}`}
                 d={d}
                 position="north"
+                claimed={claimedFlags[globalIndex]}
               />
             );
           })}
@@ -155,7 +189,7 @@ function DiscardPondNorth({ discards }: { discards: DiscardEntry[] }) {
 }
 
 // 左家（上家）：牌旋转90°，列从上→下，新列向左
-function DiscardPondLeft({ discards }: { discards: DiscardEntry[] }) {
+function DiscardPondLeft({ discards, claimedFlags = [] }: { discards: DiscardEntry[]; claimedFlags?: boolean[] }) {
   const cols = chunkDiscards(discards, DISC_COLS);
   return (
     <div style={{ display: "flex", flexDirection: "row-reverse", gap: DISC_GAP, alignItems: "flex-start" }}>
@@ -169,6 +203,7 @@ function DiscardPondLeft({ discards }: { discards: DiscardEntry[] }) {
                 d={d}
                 position="east"
                 zIndex={di + 1}
+                claimed={claimedFlags[globalIndex]}
               />
             );
           })}
@@ -179,7 +214,7 @@ function DiscardPondLeft({ discards }: { discards: DiscardEntry[] }) {
 }
 
 // 右家（下家）：牌旋转90°+180°=270°，列从下→上，新列向右
-function DiscardPondRight({ discards }: { discards: DiscardEntry[] }) {
+function DiscardPondRight({ discards, claimedFlags = [] }: { discards: DiscardEntry[]; claimedFlags?: boolean[] }) {
   const cols = chunkDiscards(discards, DISC_COLS);
   return (
     <div style={{ display: "flex", flexDirection: "row", gap: DISC_GAP, alignItems: "flex-end" }}>
@@ -193,6 +228,7 @@ function DiscardPondRight({ discards }: { discards: DiscardEntry[] }) {
                 d={d}
                 position="west"
                 zIndex={di + 1}
+                claimed={claimedFlags[globalIndex]}
               />
             );
           })}
@@ -281,7 +317,11 @@ function MeldBlock({ pid, meld, position }: { pid: number; meld: MeldEntry; posi
             {entry.hidden ? (
               <TileBack size="normal" orientation={meldOrientation} />
             ) : (
-              <OrientedTile tile={entry.tile} size="normal" orientation={orientation} />
+              <OrientedTile
+                tile={entry.tile}
+                size="normal"
+                orientation={orientation}
+              />
             )}
             {stackedTile && (
               <div style={{ position: "absolute", inset: 0, transform: stackOffset, pointerEvents: "none" }}>
@@ -553,30 +593,34 @@ function PlayerZone({
               pointerEvents: "none", alignItems: "flex-end",
               width: SELF_HAND_RESERVED_WIDTH,
             }}>
-              {[...sortedHand, ...(tsumoPai ? [tsumoPai] : [])].map((tile, i) => {
-                const d = logitData.find(x => x.pai === tile && x.isTsumo === (tsumoPai ? i === sortedHand.length : false))
-                  ?? logitData.find(x => x.pai === tile);
-                const h = d ? Math.max(3, Math.round(d.pct / 100 * 48)) : 2;
-                const barColor = d?.isChosen && d?.isGt ? "#8e44ad"
-                  : d?.isChosen ? "#e74c3c"
-                  : d?.isGt ? "#27ae60"
-                  : d?.score !== undefined ? "var(--accent)"
-                  : "rgba(150,150,150,0.25)";
-                return (
-                  <div key={`bar-${tile}-${i}`} style={{
-                    width: TILE_SIZES.large.w,
-                    marginLeft: i === sortedHand.length && tsumoPai ? SELF_HAND_DRAW_GAP : 0,
-                    display: "flex", alignItems: "flex-end", justifyContent: "center", flexShrink: 0,
-                  }}>
-                    <div style={{
-                      width: 24, height: h,
-                      background: barColor,
-                      borderRadius: "2px 2px 0 0",
-                      transition: "height 0.15s ease",
-                    }} />
-                  </div>
-                );
-              })}
+              {(() => {
+                const maxPct = Math.max(...logitData.map((item) => item.pct), 1);
+                return [...sortedHand, ...(tsumoPai ? [tsumoPai] : [])].map((tile, i) => {
+                  const d = logitData.find(x => x.pai === tile && x.isTsumo === (tsumoPai ? i === sortedHand.length : false))
+                    ?? logitData.find(x => x.pai === tile);
+                  const normalizedPct = d ? d.pct / maxPct : 0;
+                  const h = d ? Math.max(4, Math.round(normalizedPct * SELF_HAND_BAR_MAX_HEIGHT)) : 2;
+                  const barColor = d?.isChosen && d?.isGt ? "#8e44ad"
+                    : d?.isChosen ? "#e74c3c"
+                    : d?.isGt ? "#27ae60"
+                    : d?.score !== undefined ? "var(--accent)"
+                    : "rgba(150,150,150,0.25)";
+                  return (
+                    <div key={`bar-${tile}-${i}`} style={{
+                      width: TILE_SIZES.large.w,
+                      marginLeft: i === sortedHand.length && tsumoPai ? SELF_HAND_DRAW_GAP : 0,
+                      display: "flex", alignItems: "flex-end", justifyContent: "center", flexShrink: 0,
+                    }}>
+                      <div style={{
+                        width: 24, height: h,
+                        background: barColor,
+                        borderRadius: "2px 2px 0 0",
+                        transition: "height 0.15s ease",
+                      }} />
+                    </div>
+                  );
+                });
+              })()}
             </div>
           )}
           {/* 手牌 */}
@@ -857,6 +901,8 @@ function BoardInfoCorner({
 
 function CenterPanel({
   bakaze,
+  kyoku,
+  honba,
   scores,
   oya,
   humanId,
@@ -867,6 +913,8 @@ function CenterPanel({
   onToggleScoreMode,
 }: {
   bakaze: string;
+  kyoku: number;
+  honba: number;
   scores: number[];
   oya: number;
   humanId: number;
@@ -937,7 +985,19 @@ function CenterPanel({
           fontWeight: 700,
           fontFamily: "Menlo, monospace",
         }}>
-          {BAKAZE_CN[bakaze] ?? bakaze}
+          {BAKAZE_CN[bakaze] ?? bakaze}{kyoku}局
+        </div>
+        <div style={{
+          padding: "2px 8px",
+          background: "var(--gold-bg)",
+          color: "var(--gold)",
+          borderRadius: 4,
+          fontSize: 11,
+          fontWeight: 700,
+          border: "1px solid var(--gold-border)",
+          fontFamily: "Menlo, monospace",
+        }}>
+          {honba}本场
         </div>
       </div>
       <span style={{ fontSize: 9, color: "var(--text-muted)", marginTop: 2 }}>
@@ -999,7 +1059,6 @@ export function MahjongTable({
   const oppLeft  = (humanId + 3) % 4;
 
   const [tablecloth, setTablecloth]             = useState<"default" | "green" | "blue" | "beige">("default");
-  const [showTableclothPicker, setShowTableclothPicker] = useState(false);
   const compactTable = tableScale < 0.9;
   const showActionBar = mode === "battle" && isMyTurn && !reachPending && !state.pending_reach[humanId];
   const showReachBanner = mode === "battle" && isMyTurn && (reachPending || state.pending_reach[humanId]);
@@ -1015,6 +1074,10 @@ export function MahjongTable({
   const topDiscardHole = getOpponentDiscardHole("north", revealedOpponentHands?.[oppTop] ?? [], discards[oppTop] || [], state.last_discard, oppTop, topConcealedCount);
   const leftDiscardHole = getOpponentDiscardHole("east", revealedOpponentHands?.[oppLeft] ?? [], discards[oppLeft] || [], state.last_discard, oppLeft, leftConcealedCount);
   const rightDiscardHole = getOpponentDiscardHole("west", revealedOpponentHands?.[oppRight] ?? [], discards[oppRight] || [], state.last_discard, oppRight, rightConcealedCount);
+  const claimedDiscardFlags = useMemo(
+    () => buildClaimedDiscardFlags(discards, melds),
+    [discards, melds],
+  );
   const canToggleOpponentHands = mode === "replay" && Boolean(onToggleOpponentHands);
 
   // 赤宝牌归一化：5mr->5m, 5pr->5p, 5sr->5s
@@ -1095,6 +1158,23 @@ export function MahjongTable({
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    const applyPreference = () => {
+      const stored = window.localStorage.getItem("keqing.tablecloth");
+      if (stored && TABLECLOTH_OPTIONS.some((opt) => opt.id === stored)) {
+        setTablecloth(stored as typeof tablecloth);
+      } else {
+        setTablecloth("default");
+      }
+    };
+    applyPreference();
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === "keqing.tablecloth") applyPreference();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
   const tableBg = tablecloth === "default"
     ? "var(--table-bg)"
     : TABLECLOTH_OPTIONS.find(t => t.id === tablecloth)?.color ?? "var(--table-bg)";
@@ -1104,112 +1184,10 @@ export function MahjongTable({
   return (
     <div className="flex flex-col h-full overflow-hidden" style={{ background: "var(--page-bg)" }}>
 
-      {/* 顶部工具栏 */}
-      <div style={{
-        minHeight: 44,
-        background: "var(--sidebar-bg)",
-        borderBottom: "1px solid var(--sidebar-border)",
-        display: "flex",
-        alignItems: "center",
-        padding: compactTable ? "6px 12px" : "6px 16px",
-        gap: compactTable ? 10 : 16,
-        flexWrap: "wrap",
-        flexShrink: 0,
-        backdropFilter: "blur(12px)",
-        transition: "background var(--transition), border-color var(--transition)",
-      }}>
-        <span style={{ fontWeight: 700, fontSize: 14, color: "var(--text-primary)" }}>
-          {BAKAZE_CN[bakaze] ?? bakaze}局
-        </span>
-        <span style={{ color: "var(--text-muted)", fontSize: 13 }}>{kyoku}圈</span>
-        <span style={{
-          fontSize: 11, padding: "1px 6px", borderRadius: 4,
-          background: "var(--gold-bg)", color: "var(--gold)",
-          border: "1px solid var(--gold-border)",
-          fontWeight: 600,
-          transition: "background var(--transition), color var(--transition)",
-        }}>
-          {honba}本场
-        </span>
-        {kyotaku > 0 && (
-          <span style={{
-            fontSize: 11, padding: "1px 6px", borderRadius: 4,
-            background: "var(--error)", color: "#fff",
-            fontWeight: 700,
-            transition: "background var(--transition)",
-          }}>
-            立直棒 {kyotaku}
-          </span>
-        )}
-
-        {/* 桌布切换 */}
-        <div style={{ position: "relative", marginLeft: "auto" }}>
-          <button
-            onClick={() => setShowTableclothPicker(!showTableclothPicker)}
-            style={{
-              fontSize: 12, color: "var(--text-muted)",
-              background: "none", border: "none", cursor: "pointer",
-              padding: "4px 8px", borderRadius: 4,
-              transition: "color var(--transition)",
-            }}
-          >
-            桌布 ▾
-          </button>
-          {showTableclothPicker && (
-            <div style={{
-              position: "absolute", top: "100%", right: 0, marginTop: 4,
-              background: "var(--card-bg)",
-              border: "1px solid var(--card-border)",
-              borderRadius: 8,
-              padding: 8, display: "flex", gap: 8,
-              boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
-              zIndex: 50,
-              backdropFilter: "blur(12px)",
-            }}>
-              {TABLECLOTH_OPTIONS.map(opt => (
-                <button
-                  key={opt.id}
-                  onClick={() => { setTablecloth(opt.id); setShowTableclothPicker(false); }}
-                  style={{
-                    display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
-                    padding: 8, borderRadius: 8, cursor: "pointer",
-                    background: tablecloth === opt.id ? "var(--accent-bg)" : "transparent",
-                    border: `2px solid ${tablecloth === opt.id ? "var(--accent)" : "transparent"}`,
-                    transition: "background var(--transition), border-color var(--transition)",
-                  }}
-                >
-                  <div style={{
-                    width: 28, height: 28, borderRadius: "50%",
-                    background: opt.color,
-                    boxShadow: "inset 0 1px 3px rgba(0,0,0,0.1)",
-                  }} />
-                  <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{opt.label}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* 得分 */}
-        <div style={{ display: "flex", gap: compactTable ? 10 : 16, marginLeft: compactTable ? 0 : 8, flexWrap: "wrap", minWidth: 0 }}>
-          {scores.map((score, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
-              <div style={{ width: 8, height: 8, borderRadius: "50%", background: SEAT_COLORS[i] }} />
-              <span style={{ fontSize: 12, fontWeight: 600, color: SEAT_COLORS[i], maxWidth: compactTable ? 84 : 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {player_info[i]?.name || `P${i}`}
-              </span>
-              <span style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "Menlo, monospace" }}>
-                {score.toLocaleString()}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-
       {/* 牌桌主体 */}
       <div ref={boardViewportRef} style={{
         flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center",
-        padding: 12, position: "relative",
+        padding: 0, position: "relative",
         background: "var(--page-bg)",
         transition: "background var(--transition)",
       }}>
@@ -1231,6 +1209,8 @@ export function MahjongTable({
           {/* 中心面板 */}
           <CenterPanel
             bakaze={bakaze}
+            kyoku={kyoku}
+            honba={honba}
             scores={scores}
             oya={oya}
             humanId={humanId}
@@ -1244,19 +1224,19 @@ export function MahjongTable({
           {/* 中央弃牌堆 — 以自家为主视角，紧贴 CenterPanel 四角，全部用 top/left */}
           {/* 自家（底部）：正方形左下角，行左→右，向下扩展 */}
           <div style={{ position: "absolute", left: `calc(50% - ${CENTER_SIZE/2}px)`, top: `calc(50% + ${CENTER_SIZE/2}px)` }}>
-            <DiscardPondSouth discards={discards[humanId] || []} />
+            <DiscardPondSouth discards={discards[humanId] || []} claimedFlags={claimedDiscardFlags[humanId] || []} />
           </div>
           {/* 对家（顶部）：第一张牌右下角对齐正方形右上角，行右→左，新行向上 */}
           <div style={{ position: "absolute", left: `calc(50% + ${CENTER_SIZE/2}px)`, top: `calc(50% - ${CENTER_SIZE/2}px)`, transform: "translate(-100%, -100%)" }}>
-            <DiscardPondNorth discards={discards[oppTop] || []} />
+            <DiscardPondNorth discards={discards[oppTop] || []} claimedFlags={claimedDiscardFlags[oppTop] || []} />
           </div>
           {/* 左家（上家）：第一张牌左上角对齐正方形左上角，列上→下，新列向左 */}
           <div style={{ position: "absolute", left: `calc(50% - ${CENTER_SIZE/2}px)`, top: `calc(50% - ${CENTER_SIZE/2}px)`, transform: "translateX(-100%)" }}>
-            <DiscardPondLeft discards={discards[oppLeft] || []} />
+            <DiscardPondLeft discards={discards[oppLeft] || []} claimedFlags={claimedDiscardFlags[oppLeft] || []} />
           </div>
           {/* 右家（下家）：第一张牌左上角对齐正方形右下角，横向，向上扩展 */}
           <div style={{ position: "absolute", left: `calc(50% + ${CENTER_SIZE/2}px)`, top: `calc(50% + ${CENTER_SIZE/2}px)`, transform: "translateY(-100%)" }}>
-            <DiscardPondRight discards={discards[oppRight] || []} />
+            <DiscardPondRight discards={discards[oppRight] || []} claimedFlags={claimedDiscardFlags[oppRight] || []} />
           </div>
 
 
