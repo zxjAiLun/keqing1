@@ -83,7 +83,7 @@ Tenhou / mjlog / 外部牌谱
 
 默认配置文件：
 
-- [configs/keqingv3_preprocess.yaml](/media/bailan/DISK1/AUbuntuProject/project/keqing1/configs/keqingv3_preprocess.yaml)
+- [configs/keqingv3_preprocess.yaml](configs/keqingv3_preprocess.yaml)
 
 默认命令：
 
@@ -122,7 +122,7 @@ uv run python scripts/preprocess_v3.py --actor_name_filter "玩家名"
 
 默认配置文件：
 
-- [configs/keqingv3_default.yaml](/media/bailan/DISK1/AUbuntuProject/project/keqing1/configs/keqingv3_default.yaml)
+- [configs/keqingv3_default.yaml](configs/keqingv3_default.yaml)
 
 默认命令：
 
@@ -212,35 +212,35 @@ uv run python src/main.py local --port 8000
 
 ### 核心代码
 
-- [src/mahjong_env](/media/bailan/DISK1/AUbuntuProject/project/keqing1/src/mahjong_env)
+- [src/mahjong_env](src/mahjong_env)
   - 游戏状态、合法动作、计分、回放样本语义
-- [src/inference](/media/bailan/DISK1/AUbuntuProject/project/keqing1/src/inference)
+- [src/inference](src/inference)
   - 统一运行时推理、beam/value/aux rerank、review 导出
-- [src/gateway](/media/bailan/DISK1/AUbuntuProject/project/keqing1/src/gateway)
+- [src/gateway](src/gateway)
   - live battle 与 bot 驱动
-- [src/replay](/media/bailan/DISK1/AUbuntuProject/project/keqing1/src/replay)
+- [src/replay](src/replay)
   - replay API、存储、归一化、展示辅助
-- [src/keqingv3](/media/bailan/DISK1/AUbuntuProject/project/keqing1/src/keqingv3)
+- [src/keqingv3](src/keqingv3)
   - 当前主训练线模型、特征、progress oracle、trainer
-- [src/training](/media/bailan/DISK1/AUbuntuProject/project/keqing1/src/training)
+- [src/training](src/training)
   - 通用 preprocess、cached dataset、训练循环基础设施
 
 ### 常用脚本
 
-- [scripts/preprocess_v3.py](/media/bailan/DISK1/AUbuntuProject/project/keqing1/scripts/preprocess_v3.py)
-- [scripts/train_keqingv3.py](/media/bailan/DISK1/AUbuntuProject/project/keqing1/scripts/train_keqingv3.py)
-- [scripts/selfplay.py](/media/bailan/DISK1/AUbuntuProject/project/keqing1/scripts/selfplay.py)
-- [scripts/reconvert_failed_ds1.py](/media/bailan/DISK1/AUbuntuProject/project/keqing1/scripts/reconvert_failed_ds1.py)
+- [scripts/preprocess_v3.py](scripts/preprocess_v3.py)
+- [scripts/train_keqingv3.py](scripts/train_keqingv3.py)
+- [scripts/selfplay.py](scripts/selfplay.py)
+- [scripts/reconvert_failed_ds1.py](scripts/reconvert_failed_ds1.py)
 
 ### 产物目录
 
-- [artifacts/converted_mjai](/media/bailan/DISK1/AUbuntuProject/project/keqing1/artifacts/converted_mjai)
+- [artifacts/converted_mjai](artifacts/converted_mjai)
   - 训练输入 `.mjson`
-- [processed_v3_fixaux](/media/bailan/DISK1/AUbuntuProject/project/keqing1/processed_v3_fixaux)
+- [processed_v3_fixaux](processed_v3_fixaux)
   - 当前 v3 cache 输出
-- [artifacts/models](/media/bailan/DISK1/AUbuntuProject/project/keqing1/artifacts/models)
+- [artifacts/models](artifacts/models)
   - 训练产物
-- [artifacts/replays](/media/bailan/DISK1/AUbuntuProject/project/keqing1/artifacts/replays)
+- [artifacts/replays](artifacts/replays)
   - review / replay 导出
 
 ## 测试
@@ -291,8 +291,8 @@ npm run build
 
 ## 更多设计说明
 
-- [docs/keqingv3_design.md](/media/bailan/DISK1/AUbuntuProject/project/keqing1/docs/keqingv3_design.md)
-- [docs/old/data_pipeline_overview.md](/media/bailan/DISK1/AUbuntuProject/project/keqing1/docs/old/data_pipeline_overview.md)
+- [docs/keqingv3_design.md](docs/keqingv3_design.md)
+- [docs/old/data_pipeline_overview.md](docs/old/data_pipeline_overview.md)
 
 ## 致谢
 
