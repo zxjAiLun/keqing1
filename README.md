@@ -1,228 +1,301 @@
-# Keqing1 — 立直麻将 AI
+# Keqing1
 
-基于监督学习的立直麻将策略机器人，使用 Conv1d ResNet 架构，支持 Mjai 协议推理。
+立直麻将 AI 项目。当前仓库已经收口到一条统一运行时主线：
 
-## 项目状态
+- 规则与状态真源：`src/mahjong_env`
+- 在线推理入口：`src/inference/runtime_bot.py::RuntimeBot`
+- 本地对战 / 回放服务：`src/replay/server.py`
+- 当前训练迭代线：`keqingv3`
 
-当前稳定运行线仍是 **keqingv2**，当前主迭代训练线为 **keqingv3**。
+当前状态可以简单理解为：
 
-当前运行时推理入口为**统一 runtime bot 壳**：
-- `src/inference/runtime_bot.py::RuntimeBot`
-- `keqingv1 / keqingv2 / keqingv3` 通过不同 checkpoint 与 adapter 复用同一套 battle/replay 推理壳
+- `keqingv2` 仍是可运行、可对比的稳定基线
+- `keqingv3` 是当前主训练线
+- battle / replay / selfplay 已不再各自维护一套 bot 壳，而是共用 `RuntimeBot`
 
-主要特性：
-- 完整的 45 动作监督学习框架（dahai×34 + reach/chi/pon/kan/hora/none）
-- Meld Value Ranking Loss：value head 学习区分值得副露 vs 不值得副露
-- 立直状态三段式 legal_actions（`reached` / `pending_reach` / 普通）
-- none/pass 样本自动生成（约占总样本 16%）
-- 振听系统、荣和精确判断
-- 立直后摸切样本过滤（约 5.5%）
-- RuntimeBot 支持 Mjai 协议推理 + beam search value 重排
+## 当前推荐用法
 
-## 快速开始
-
-### 安装
+### 1. 安装环境
 
 ```bash
 uv sync
 ```
 
-### 本地模式 / 天凤模式启动
-
-本项目现在把“本地单机回放/对战”和“天凤平台 Gateway”明确分开：
+前端回放页面需要单独安装依赖：
 
 ```bash
-# 本地模式：启动 ReplayUI + 本地 Battle API
+cd src/replay_ui
+npm install
+```
+
+## 本地运行
+
+### 2. 启动本地回放 + Battle API
+
+```bash
 uv run python src/main.py local --port 8000
+```
 
-# 兼容旧命令，效果等同于 local
+兼容别名：
+
+```bash
 uv run python src/main.py replay --port 8000
+```
 
-# 仅启动天凤 Gateway
+启动后可用：
+
+- Replay / Review 页面
+- 本地 bot battle API
+- `game-replay` 棋盘回放
+
+### 3. 仅启动天凤 Gateway
+
+```bash
 uv run python src/main.py tenhou --gateway-port 11600
+```
 
-# 兼容旧命令，效果等同于 tenhou
+兼容别名：
+
+```bash
 uv run python src/main.py gateway --gateway-port 11600
+```
 
-# 两者同时启动
+### 4. 同时启动本地服务和 Gateway
+
+```bash
 uv run python src/main.py serve --port 8000 --gateway-port 11600
 ```
 
-说明：
-- `local/replay` 只提供本地网页回放和本地 battle bot 对战，不启动天凤 Gateway
-- `tenhou/gateway` 只提供平台接入，不启动本地网页服务
-- 如果只是本地 1v3、4bot、自对战回放，不需要启动天凤 Gateway 端口
+## 训练数据流程
 
-### 预处理数据
+当前 `keqingv3` 的标准数据流程是：
+
+```text
+Tenhou / mjlog / 外部牌谱
+-> mjai .mjson
+-> scripts/preprocess_v3.py
+-> processed_v3_fixaux/*.npz
+-> scripts/train_keqingv3.py
+-> artifacts/models/keqingv3
+```
+
+### 5. 预处理
+
+默认配置文件：
+
+- [configs/keqingv3_preprocess.yaml](/media/bailan/DISK1/AUbuntuProject/project/keqing1/configs/keqingv3_preprocess.yaml)
+
+默认命令：
 
 ```bash
-# keqingv3 预处理入口（默认读取 configs/keqingv3_preprocess.yaml）
 uv run python scripts/preprocess_v3.py
 ```
 
-当前 keqingv3 预处理默认配置要点：
-- 输出目录：`processed_v3_fixaux`
-- 默认关闭压缩：`compress_output: false`
-- 预处理已内建 recent-window ETA
-- 近期 hot path 已集中优化到 `keqingv3.progress_oracle`
+当前默认行为：
 
-如果只想临时覆盖并发或 ETA 窗口：
+- 输入目录：`artifacts/converted_mjai/ds1`
+- 输出目录：`processed_v3_fixaux`
+- `value_strategy = mc_return`
+- `compress_output = false`
+- 预处理进度会显示：
+  - 已运行秒数
+  - 预计剩余秒数
+  - `skip / empty / error`
+
+常用覆盖参数：
 
 ```bash
 uv run python scripts/preprocess_v3.py --workers 18 --eta-window 200
+uv run python scripts/preprocess_v3.py --output_dir processed_v3_debug
+uv run python scripts/preprocess_v3.py --actor_name_filter "玩家名"
 ```
 
-注意：
-- `processed_v3` 的旧 cache 可能带有修复前的 aux target 覆盖问题
-- `keqingv3` 训练应优先使用 `processed_v3_fixaux`
+说明：
 
-### 训练 keqingv3
+- `processed_v3_fixaux` 是当前 `keqingv3` 正式训练应使用的 cache
+- 旧 `processed_v3` 可能含有修复前的 aux target 缓存，不建议继续直接训练
+- 预处理失败的牌谱会记录到输出目录下的失败日志，便于后续重转
+
+## 训练
+
+### 6. 训练 keqingv3
+
+默认配置文件：
+
+- [configs/keqingv3_default.yaml](/media/bailan/DISK1/AUbuntuProject/project/keqing1/configs/keqingv3_default.yaml)
+
+默认命令：
 
 ```bash
-# 默认读取 configs/keqingv3_default.yaml
 uv run python scripts/train_keqingv3.py
 ```
 
-如果要临时改设备或输出目录：
+默认配置要点：
+
+- 数据目录：`processed_v3_fixaux/ds1`
+- 设备：`cuda`
+- 输出目录：`artifacts/models/keqingv3`
+
+常用覆盖：
 
 ```bash
-uv run python scripts/train_keqingv3.py \
-  --device cpu \
-  --output-dir artifacts/models/keqingv3_debug
+uv run python scripts/train_keqingv3.py --smoke
+uv run python scripts/train_keqingv3.py --resume artifacts/models/keqingv3/last.pth
+uv run python scripts/train_keqingv3.py --output-dir artifacts/models/keqingv3_exp1
+uv run python scripts/train_keqingv3.py --device cpu
 ```
 
-### 运行测试
+当前 checkpoint 语义：
+
+- `last.pth`：续训入口
+- `best.pth`：按总 `val_objective` 选优
+- `best_meld.pth`：按 response-window / meld 指标选优
+
+## 自对战与评测
+
+### 7. 运行 selfplay
+
+```bash
+uv run python scripts/selfplay.py --model keqingv3 --games 100
+```
+
+也可以直接指定权重路径：
+
+```bash
+uv run python scripts/selfplay.py \
+  --model artifacts/models/keqingv3/best.pth \
+  --games 100 \
+  --game-format hanchan
+```
+
+常用参数：
+
+- `--seat-bots keqingv3 keqingv2 keqingv2 keqingv2`
+- `--fixed-seats`
+- `--save-games 20`
+- `--save-all-games`
+- `--export-anomaly-games 20`
+
+默认输出目录：
+
+- `artifacts/selfplay_benchmarks/<model>_<timestamp>`
+
+典型输出：
+
+- `stats.json`
+- `progress.jsonl`
+- `replays/manifest.json`
+- 可选 `anomaly_replays/manifest.json`
+
+## 回放与 Review
+
+### 8. 本地查看 replay / review
+
+启动服务：
+
+```bash
+uv run python src/main.py local --port 8000
+```
+
+然后访问：
+
+- `http://127.0.0.1:8000/`
+- `http://127.0.0.1:8000/game-replay?...`
+
+当前回放链路特点：
+
+- `replay` 与 `battle` 共用统一 runtime 语义
+- `hora` 展示优先使用后端重算结果
+- replay decision 统计由后端统一归一化，不依赖前端临时猜测
+
+## 目录说明
+
+### 核心代码
+
+- [src/mahjong_env](/media/bailan/DISK1/AUbuntuProject/project/keqing1/src/mahjong_env)
+  - 游戏状态、合法动作、计分、回放样本语义
+- [src/inference](/media/bailan/DISK1/AUbuntuProject/project/keqing1/src/inference)
+  - 统一运行时推理、beam/value/aux rerank、review 导出
+- [src/gateway](/media/bailan/DISK1/AUbuntuProject/project/keqing1/src/gateway)
+  - live battle 与 bot 驱动
+- [src/replay](/media/bailan/DISK1/AUbuntuProject/project/keqing1/src/replay)
+  - replay API、存储、归一化、展示辅助
+- [src/keqingv3](/media/bailan/DISK1/AUbuntuProject/project/keqing1/src/keqingv3)
+  - 当前主训练线模型、特征、progress oracle、trainer
+- [src/training](/media/bailan/DISK1/AUbuntuProject/project/keqing1/src/training)
+  - 通用 preprocess、cached dataset、训练循环基础设施
+
+### 常用脚本
+
+- [scripts/preprocess_v3.py](/media/bailan/DISK1/AUbuntuProject/project/keqing1/scripts/preprocess_v3.py)
+- [scripts/train_keqingv3.py](/media/bailan/DISK1/AUbuntuProject/project/keqing1/scripts/train_keqingv3.py)
+- [scripts/selfplay.py](/media/bailan/DISK1/AUbuntuProject/project/keqing1/scripts/selfplay.py)
+- [scripts/reconvert_failed_ds1.py](/media/bailan/DISK1/AUbuntuProject/project/keqing1/scripts/reconvert_failed_ds1.py)
+
+### 产物目录
+
+- [artifacts/converted_mjai](/media/bailan/DISK1/AUbuntuProject/project/keqing1/artifacts/converted_mjai)
+  - 训练输入 `.mjson`
+- [processed_v3_fixaux](/media/bailan/DISK1/AUbuntuProject/project/keqing1/processed_v3_fixaux)
+  - 当前 v3 cache 输出
+- [artifacts/models](/media/bailan/DISK1/AUbuntuProject/project/keqing1/artifacts/models)
+  - 训练产物
+- [artifacts/replays](/media/bailan/DISK1/AUbuntuProject/project/keqing1/artifacts/replays)
+  - review / replay 导出
+
+## 测试
+
+### 9. 运行测试
+
+全量：
 
 ```bash
 uv run pytest
 ```
 
-## 项目架构
+常用 focused tests：
 
-```text
-keqing1/
-├── src/
-│   ├── keqingv1/                 # v1 基础模型（兼容 action space / 特征定义）
-│   │   ├── action_space.py       # 45 个动作的索引映射
-│   │   ├── features.py           # 特征编码 (54,34) tile_feat + (48,) scalar
-│   │   ├── model.py              # MahjongModel (~1.7M 参数)
-│   │   ├── cached_dataset.py     # IterableDataset 流式加载（npz）
-│   │   ├── trainer.py            # 训练循环（AMP + 梯度累积）
-│   │
-│   ├── keqingv2/                 # v2 扩展（Meld Value Ranking Loss）
-│   │   ├── cached_dataset.py     # 预编码 rank pair，batch 返回 10-tuple
-│   │   └── trainer.py            # rank loss 训练循环
-│   │
-│   ├── keqingv3/                 # v3 迭代（aux heads + progress oracle）
-│   │   ├── features.py
-│   │   ├── feature_tracker.py
-│   │   ├── progress_oracle.py
-│   │   ├── model.py
-│   │   ├── cached_dataset.py
-│   │   └── trainer.py
-│   │
-│   ├── mahjong_env/              # 麻将环境（游戏状态、合法动作）
-│   │   ├── state.py
-│   │   ├── legal_actions.py
-│   │   ├── replay.py
-│   │   ├── tiles.py
-│   │   └── types.py
-│   │
-│   ├── inference/                # 统一运行时推理壳（battle/replay 共用）
-│   │   ├── runtime_bot.py
-│   │   ├── keqing_adapter.py
-│   │   ├── scoring.py
-│   │   ├── default_context.py
-│   │   └── review.py
-│   │
-│   └── gateway/                  # Bot 对战网关
-│
-├── configs/
-│   ├── keqingv2_default.yaml
-│   ├── keqingv3_default.yaml
-│   └── keqingv3_preprocess.yaml
-│
-├── artifacts/
-│   ├── converted_mjai/           # 转换后的训练数据（ds1-ds13）
-│   └── models/
-│       ├── keqingv1/
-│       ├── keqingv2/
-│       └── keqingv3/
-│
-├── tests/
-└── docs/
+```bash
+uv run pytest tests/test_battle_rules_checklist.py tests/test_battle_edge_cases.py tests/test_replay_strict_legal.py
 ```
 
-## scripts 分区标签
-
-为降低脚本检索成本，`scripts/` 统一按以下标签理解：
-
-### [data] 数据转换与预处理
-
-- `batch_convert_ds.py`
-- `batch_convert_mjai_converter.py`
-- `batch_convert_tenhou6.py`
-- `download_and_convert.py`
-- `extract_tenhou_links.py`
-- `mjlog2mjai_parse.py`
-- `preprocess_cached.py`
-- `preprocess_ds4.py`
-- `preprocess_task.py`
-- `preprocess_v2.py`
-- `preprocess_v3.py`
-- `reorganize_ds.py`
-- `tenhou_xml_to_json.py`
-
-### [replay] 回放转换与校验
-
-- `verify_roundtrip.py`
-- `verify_tenhou6_mjai.py`
-- `visualize_replay.py`
-- `test_gameviewer.py`
-
-### [selfplay] 自对战与导出流程
-
-- `selfplay.py`
-- `run_game_script.py`
-- `run_game_and_export.ipynb`
-
-### [devtools] 开发辅助与环境检查
-
-- `build_static_tables.py`
-- `download_wait_categories.py`
-- `test_riichienv_import.py`
-
-## 训练与数据流（当前）
-
-```text
-天凤/雀魂对局记录
-      ↓
-Mjai JSONL (.mjson)
-      ↓ (scripts/preprocess_v3.py + training.preprocess)
-缓存样本 (.npz, 当前主线为 processed_v3_fixaux)
-      ↓ (scripts/train_keqingv3.py + keqingv3.trainer)
-模型 checkpoint (artifacts/models/keqingv3*)
+```bash
+uv run pytest tests/test_normal_progress.py tests/test_features_v3.py tests/test_training_updates.py
 ```
 
-当前主线支持 `keqingv1 / keqingv2 / keqingv3` 三条模型分支。
+语法检查：
 
-运行时语义：
-- battle / replay 统一依赖 `RuntimeBot`
-- 模型版本差异主要体现在：
-  - checkpoint 参数形状
-  - 对应 features / model / adapter
-- 不再保留独立的 `keqingv1.bot` 运行时壳
+```bash
+uv run python -m py_compile src/keqingv3/progress_oracle.py src/training/trainer.py
+```
 
-## 注意事项
+前端构建：
 
-- `src/` 为包根路径（`pyproject.toml` 配置）
-- 训练 checkpoint 保存在 `artifacts/models/keqingv1|keqingv2|keqingv3/`
-- GPU 不可用时自动回退到 CPU
-- 数据集使用 IterableDataset 流式加载，不会全量加载进内存
-- Python 执行用 `uv run python3`，系统 `python3` 无 `riichienv`/`torch`
+```bash
+cd src/replay_ui
+npm run build
+```
+
+## 当前约束与注意事项
+
+- `mahjong_env` 是规则真源，不要把 `riichienv` 引进 live battle 规则主链
+- `RuntimeBot` 是 battle / replay / selfplay 的统一在线 bot 入口
+- `tsumo` 的训练特征契约是：
+  - `hand` = 决策前 13 张
+  - `tsumo_pai` = 当前摸到的牌
+- replay strict legality 默认 fail-fast，不会静默把非法 label 塞进 legal set
+- `keqingv3` 预处理热路径集中在：
+  - `src/keqingv3/progress_oracle.py`
+  - `src/keqingv3/feature_tracker.py`
+- 如果 push 触发全局 hook 环境问题，优先确认测试命令是否通过 `uv run pytest`
+
+## 更多设计说明
+
+- [docs/keqingv3_design.md](/media/bailan/DISK1/AUbuntuProject/project/keqing1/docs/keqingv3_design.md)
+- [docs/old/data_pipeline_overview.md](/media/bailan/DISK1/AUbuntuProject/project/keqing1/docs/old/data_pipeline_overview.md)
 
 ## 致谢
 
-- [Mortal](https://github.com/Equim-chan/Mortal) — 架构参考
-- [Mjai](https://github.com/mjai-jp/mjai) — 麻将 AI 协议
-- 天凤/雀魂社区 — 数据集来源
+- [Mortal](https://github.com/Equim-chan/Mortal)
+- [mjai](https://github.com/mjai-jp/mjai)
+- 天凤 / 雀魂相关社区数据与工具链
