@@ -102,18 +102,3 @@ def test_calc_shanten_waits_includes_kokushi_waits_without_melds():
     assert waits_count == 1
     assert waits_tiles[33] is True  # 7z / C
 
-
-def test_two_shanten_shape_tiebreak_prefers_isolated_tile_discard():
-    hand14 = _parse_hand("235667m2355889p2s")
-
-    hand_after_discard_2s = list(hand14)
-    hand_after_discard_2s.remove("2s")
-    progress_2s = _calc_normal_progress(hand_after_discard_2s, [])
-
-    hand_after_discard_3m = list(hand14)
-    hand_after_discard_3m.remove("3m")
-    progress_3m = _calc_normal_progress(hand_after_discard_3m, [])
-
-    assert progress_2s.shanten == 2
-    assert progress_3m.shanten >= progress_2s.shanten
-    assert progress_2s.improvement_live_count > 0

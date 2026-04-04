@@ -317,8 +317,6 @@ def _summarize_3n1_cached(
         if not use_regular_detail:
             waits_count = 0
             waits_tiles = tuple([False] * 34)
-    base_shape_score = _shape_score(counts_3n1) if shanten == 2 else 0
-
     loop_t0 = time.perf_counter()
     for tile34 in range(34):
         live = max(0, 4 - visible_counts_local[tile34])
@@ -341,7 +339,6 @@ def _summarize_3n1_cached(
 
         if shanten == 2:
             improves = False
-            best_same_shanten_shape = base_shape_score
             for discard34 in _candidate_discards_no_meld_break(counts_3n2):
                 after_counts_3n1 = list(counts_3n2)
                 after_counts_3n1[discard34] -= 1
@@ -353,14 +350,8 @@ def _summarize_3n1_cached(
                 if after_shanten < shanten:
                     improves = True
                     break
-                if after_shanten == shanten:
-                    same_shape = _shape_score(after_counts_3n1_t)
-                    if same_shape > best_same_shanten_shape:
-                        best_same_shanten_shape = same_shape
             if improves:
                 ukeire_tiles[tile34] = True
-            elif best_same_shanten_shape > base_shape_score:
-                improvement_tiles[tile34] = True
             continue
 
         is_good_shape_draw = use_regular_detail and shanten == 1 and _is_good_shape_draw_for_one_shanten(
@@ -431,7 +422,6 @@ def _summarize_3n2_cached(
             progress_3n1.ukeire_live_count,
             progress_3n1.good_shape_ukeire_live_count,
             progress_3n1.improvement_live_count,
-            shape_score,
             progress_3n1.ukeire_type_count,
             progress_3n1.improvement_type_count,
         )
