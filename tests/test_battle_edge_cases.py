@@ -131,6 +131,30 @@ def test_houtei_haitei_flags_doc():
     assert sig.parameters["is_houtei"].default == False
 
 
+def test_reach_acceptance_sets_ippatsu_eligible_until_interruption():
+    manager, room = _make_room()
+    manager.start_kyoku(room, seed=7)
+
+    room.state.players[0].hand = Counter({
+        "1m": 1, "2m": 1, "3m": 1,
+        "4m": 1, "5m": 1, "6m": 1,
+        "7m": 1, "8m": 1, "9m": 1,
+        "2p": 2, "5p": 2,
+        "9p": 1,
+    })
+    room.state.actor_to_move = 0
+    room.state.last_tsumo[0] = "9p"
+    room.state.last_tsumo_raw[0] = "9p"
+
+    manager.reach(room, 0)
+    manager.discard(room, 0, "9p", tsumogiri=True)
+
+    assert room.state.players[0].reached is True
+    assert room.state.players[0].pending_reach is False
+    assert room.state.players[0].ippatsu_eligible is True
+    assert room.events[-1]["type"] == "reach_accepted"
+
+
 # =============================================================================
 # 3. 连杠：多个大明杠连续揭示 dora
 # =============================================================================
@@ -259,6 +283,57 @@ def test_chankan_flag_doc():
     # 验证 kakan 响应时 chankan 路径存在
     legal_src = inspect.getsource(enumerate_legal_action_specs)
     assert "is_chankan" in legal_src
+
+
+def test_chankan_hora_passes_is_chankan_to_scoring(monkeypatch):
+    manager, room = _make_room()
+    manager.start_kyoku(room, seed=7)
+
+    room.state.players[0].hand = Counter({"5m": 1, "5mr": 1, "2m": 1, "3m": 1})
+    room.state.players[0].melds = [{
+        "type": "pon",
+        "pai": "5m",
+        "pai_raw": "5m",
+        "consumed": ["5m", "5mr"],
+        "target": 1,
+    }]
+    room.state.actor_to_move = 0
+    manager.handle_meld(room, "kakan", actor=0, pai="5m", consumed=["5m", "5mr", "5m"])
+
+    captured = {}
+
+    def fake_score_hora(*args, **kwargs):
+        captured["is_chankan"] = kwargs.get("is_chankan")
+        return HoraResult(
+            han=2,
+            fu=30,
+            yaku=["Chankan", "Riichi"],
+            yaku_details=[
+                {"key": "Chankan", "name": "Chankan", "han": 1},
+                {"key": "Riichi", "name": "Riichi", "han": 1},
+            ],
+            is_open_hand=False,
+            cost={
+                "main": 2000,
+                "main_bonus": 0,
+                "additional": 0,
+                "additional_bonus": 0,
+                "kyoutaku_bonus": 0,
+                "total": 2000,
+                "yaku_level": "",
+            },
+            deltas=[-2000, 2000, 0, 0],
+        )
+
+    monkeypatch.setattr("gateway.battle.score_hora", fake_score_hora)
+
+    manager.apply_action(
+        room,
+        actor=1,
+        action={"type": "hora", "actor": 1, "target": 0, "pai": "5m"},
+    )
+
+    assert captured["is_chankan"] is True
 
 
 # =============================================================================

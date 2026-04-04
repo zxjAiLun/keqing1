@@ -113,6 +113,26 @@ def test_reach_allowed_with_only_ankan():
     assert any(a.type == "reach" for a in legal)
 
 
+def test_reach_allowed_on_complete_hand_if_some_discard_keeps_tenpai():
+    player = PlayerState()
+    player.hand.update(["4m", "4s", "5mr", "5sr", "6m", "6p", "6p", "6p", "6s", "7m", "8m", "9m", "C", "C"])
+
+    gs = GameState()
+    gs.bakaze = "S"
+    gs.kyoku = 4
+    gs.honba = 0
+    gs.players = [PlayerState(), player, PlayerState(), PlayerState()]
+    gs.actor_to_move = 1
+    gs.last_tsumo = [None, "5mr", None, None]
+    gs.last_tsumo_raw = [None, "5mr", None, None]
+    snap = gs.snapshot(actor=1)
+
+    legal = enumerate_legal_actions(snap, actor=1)
+
+    assert any(a.type == "hora" and a.target == 1 and a.pai == "5mr" for a in legal)
+    assert any(a.type == "reach" and a.actor == 1 for a in legal)
+
+
 def test_reach_blocked_when_already_reached():
     player = PlayerState()
     player.hand.update(["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5sr", "5sr"])

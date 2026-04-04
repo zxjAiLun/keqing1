@@ -3,10 +3,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-import keqingv1.bot as bot_mod
-from keqingv1.bot import KeqingBot
+import inference.runtime_bot as bot_mod
 from keqingv1.features import C_TILE, N_SCALAR
 from keqingv1.model import MahjongModel as MahjongModelV1
+from inference.runtime_bot import RuntimeBot
 from mahjong_env.state import GameState, apply_event
 from mahjong_env.types import Action
 
@@ -46,7 +46,7 @@ def test_keqing_bot_tsumo_uses_pre_apply_decision_snapshot_for_model_and_log(
 ):
     ckpt = tmp_path / "v1.pth"
     _save_ckpt(ckpt)
-    bot = KeqingBot(player_id=0, model_path=ckpt, device="cpu", beam_k=0)
+    bot = RuntimeBot(player_id=0, model_path=ckpt, device="cpu", beam_k=0)
     bot.game_state = _setup_actor0_state()
 
     captured: dict[str, dict] = {}
@@ -97,7 +97,7 @@ def test_keqing_bot_tsumo_decision_snapshot_matches_training_contract(
 ):
     ckpt = tmp_path / "v1.pth"
     _save_ckpt(ckpt)
-    bot = KeqingBot(player_id=0, model_path=ckpt, device="cpu", beam_k=0)
+    bot = RuntimeBot(player_id=0, model_path=ckpt, device="cpu", beam_k=0)
     bot.game_state = _setup_actor0_state()
 
     model_snaps: list[dict] = []

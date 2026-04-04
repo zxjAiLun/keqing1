@@ -28,8 +28,8 @@ Recent history favors short imperative subjects such as `add replay UI game boar
 ## Architecture Notes
 Treat `mahjong_env` and `gateway` as state truth. Frontend rendering should consume serialized state rather than re-deriving game rules locally. When adding UI animation states, prefer backend-provided fields if timing must match real game transitions.
 
-Operational runbook for the selfplay / battle / replay line lives at:
-- `docs/selfplay_battle_replay_runbook.md`
+Operational runbook for the runtime / replay / training line lives at:
+- `docs/old/data_pipeline_overview.md`
 
 ## Battle, Selfplay, and Replay Invariants
 - Treat `src/gateway/battle.py` + `src/mahjong_env/state.py` + `src/mahjong_env/legal_actions.py` as the only gameplay truth. `riichienv` may still be used for auxiliary shanten/waits analysis, but it must not become a second rules source for live battle or selfplay flow.
@@ -84,8 +84,10 @@ Operational runbook for the selfplay / battle / replay line lives at:
 
 ## Model Iteration Notes
 - Treat `src/keqingv1/` and `src/keqingv2/` as compatibility surfaces. Do not change their feature dimensions, model input shapes, or checkpoint expectations when working on new model ideas.
+- Runtime inference entrypoint for battle/replay now lives in `src/inference/runtime_bot.py::SharedKeqingBot`. `src/keqingv1/bot.py` is a compatibility export layer; do not treat it as the conceptual owner of v2/v3 runtime behavior.
 - Build new model iterations under their own module namespace, e.g. `src/keqingv3/`, even if they temporarily reuse code from `keqingv1`. New feature layouts, heads, or input dimensions must not be introduced directly into `keqingv1`.
 - Shared training infrastructure belongs in `src/training/` and shared sample/state analysis belongs in `src/mahjong_env/`. Version-specific feature encoders and model definitions belong in the corresponding versioned package.
+- If runtime behavior differs by model version, the split should happen in `src/inference/` adapter/context/scoring layers or in a versioned adapter, not by hard-coding battle/replay back to `keqingv1.bot`.
 - When changing shanten, waits, ukeire, or other progress-analysis logic, prefer extending the shared analyzer in `src/mahjong_env/replay.py` and then consuming it from versioned feature modules. Do not maintain separate partially duplicated analyzers in multiple model packages.
 - For `keqingv3`, the hot path now lives in `src/keqingv3/progress_oracle.py` plus `src/keqingv3/feature_tracker.py`. Optimize there first before touching training or I/O code.
 - `keqingv3` progress-analysis default policy is now:

@@ -1,4 +1,5 @@
-from replay.bot import _render_candidates_logit, _same_action
+from inference.review import same_action as _same_action
+from replay.legacy_render import render_candidates_logit
 
 
 def test_replay_same_action_ignores_dahai_tsumogiri_difference():
@@ -49,7 +50,7 @@ def test_render_candidates_logit_marks_equivalent_gt_action():
         "pai": "4p",
         "consumed": ["5p", "6p"],
     }
-    html = _render_candidates_logit(
+    html = render_candidates_logit(
         [{"action": candidate_action, "logit": 1.25}],
         chosen,
         gt,

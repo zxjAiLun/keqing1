@@ -38,9 +38,20 @@ export const TILE_DISPLAY_NAMES: Record<string, string> = {
 };
 
 export function sortHand(hand: string[], tsumoPai?: string | null): string[] {
-  const others = hand.filter(t => t !== tsumoPai || !tsumoPai);
+  if (!tsumoPai) {
+    return [...hand].sort((a, b) => (TILE_ORDER[a] ?? 99) - (TILE_ORDER[b] ?? 99));
+  }
+
+  let removedTsumo = false;
+  const others = hand.filter((tile) => {
+    if (!removedTsumo && tile === tsumoPai) {
+      removedTsumo = true;
+      return false;
+    }
+    return true;
+  });
   const sorted = [...others].sort((a, b) => (TILE_ORDER[a] ?? 99) - (TILE_ORDER[b] ?? 99));
-  if (tsumoPai && hand.includes(tsumoPai)) {
+  if (removedTsumo) {
     sorted.push(tsumoPai);
   }
   return sorted;

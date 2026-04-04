@@ -412,36 +412,47 @@ export function ReplayViewPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const params = new URLSearchParams(location.search);
+  const routeState = location.state as { replayData?: ReplayData; replayId?: string } | null;
   const replayIdFromQuery = params.get('id');
+  const replayIdFromRoute = routeState?.replayId ?? null;
+  const replayId = replayIdFromRoute ?? replayIdFromQuery;
   const playerIdFromQuery = Number(params.get('player_id') ?? '0');
   const requestedPlayerId = Number.isFinite(playerIdFromQuery) ? playerIdFromQuery : 0;
+  const initialData = routeState?.replayData && !replayIdFromQuery ? routeState.replayData : null;
+  const initialError = initialData || replayId ? null : '未找到回放数据，请从首页上传牌谱';
 
-  const [data, setData] = useState<ReplayData | null>(null);
+  const [data, setData] = useState<ReplayData | null>(initialData);
   const [curKyoku, setCurKyoku] = useState(0);
   const [showStats, setShowStats] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(initialData === null && initialError === null);
+  const [error, setError] = useState<string | null>(initialError);
   const stepRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const [scrollToStep, setScrollToStep] = useState<number | null>(null);
   const focusedStep = useRef<number>(-1);
 
   useEffect(() => {
-    const state = location.state as { replayData?: ReplayData; replayId?: string } | null;
-    if (state?.replayData && !replayIdFromQuery) {
-      setData(state.replayData);
-      setLoading(false);
-    } else if (state?.replayId) {
-      replayApi.get(state.replayId, requestedPlayerId).then(d => { setData(d); setLoading(false); }).catch(e => { setError(String(e)); setLoading(false); });
-    } else {
-      const replayId = replayIdFromQuery;
-      if (replayId) {
-        replayApi.get(replayId, requestedPlayerId).then(d => { setData(d); setLoading(false); }).catch(e => { setError(String(e)); setLoading(false); });
-      } else {
-        setError('未找到回放数据，请从首页上传牌谱');
-        setLoading(false);
+    if (data || !replayId) return;
+    let cancelled = false;
+    const loadReplay = async () => {
+      try {
+        const loaded = await replayApi.get(replayId, requestedPlayerId);
+        if (!cancelled) {
+          setData(loaded);
+          setError(null);
+          setLoading(false);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(String(e));
+          setLoading(false);
+        }
       }
-    }
-  }, [location, replayIdFromQuery, requestedPlayerId]);
+    };
+    loadReplay();
+    return () => {
+      cancelled = true;
+    };
+  }, [data, replayId, requestedPlayerId]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {

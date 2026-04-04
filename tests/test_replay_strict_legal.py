@@ -99,6 +99,57 @@ def test_can_hora_from_snapshot_handles_open_ron_with_unsorted_chi_meld():
     assert can_hora_from_snapshot(snap, actor=2, target=0, pai="7s", is_tsumo=False) is True
 
 
+def test_can_hora_from_snapshot_uses_explicit_actor_when_snapshot_has_no_actor():
+    player2 = PlayerState()
+    player2.hand.update(["3p", "5m", "5m", "5mr", "5s", "5s", "5s"])
+    player2.melds = [
+        {"type": "pon", "pai": "2p", "pai_raw": "2p", "consumed": ["2p", "2p"], "target": 3},
+        {"type": "chi", "pai": "3s", "pai_raw": "3s", "consumed": ["2s", "4s"], "target": 1},
+    ]
+
+    gs = GameState()
+    gs.bakaze = "S"
+    gs.kyoku = 1
+    gs.honba = 0
+    gs.oya = 0
+    gs.dora_markers = ["1m"]
+    gs.scores = [25000, 25000, 25000, 25000]
+    gs.players = [PlayerState(), PlayerState(), player2, PlayerState()]
+    gs.last_discard = {"actor": 1, "pai": "3p", "pai_raw": "3p"}
+    snap = gs.snapshot(actor=2)
+    snap.pop("actor", None)
+
+    assert can_hora_from_snapshot(snap, actor=2, target=1, pai="3p", is_tsumo=False) is True
+
+    legal = enumerate_legal_actions(snap, actor=2)
+    assert any(a.type == "hora" and a.target == 1 and a.pai == "3p" for a in legal)
+
+
+def test_can_hora_from_snapshot_handles_unsorted_tile_pool_with_four_fives():
+    player2 = PlayerState()
+    player2.hand.update(["3p", "5m", "5m", "5mr", "5s", "5s", "5s"])
+    player2.melds = [
+        {"type": "pon", "pai": "2p", "pai_raw": "2p", "consumed": ["2p", "2p"], "target": 3},
+        {"type": "chi", "pai": "3s", "pai_raw": "3s", "consumed": ["2s", "4s"], "target": 1},
+    ]
+
+    gs = GameState()
+    gs.bakaze = "S"
+    gs.kyoku = 1
+    gs.honba = 0
+    gs.oya = 0
+    gs.dora_markers = ["1s", "5s"]
+    gs.scores = [29500, 21600, 22500, 26400]
+    gs.players = [PlayerState(), PlayerState(), player2, PlayerState()]
+    gs.last_discard = {"actor": 1, "pai": "3p", "pai_raw": "3p"}
+    snap = gs.snapshot(actor=2)
+
+    assert can_hora_from_snapshot(snap, actor=2, target=1, pai="3p", is_tsumo=False) is True
+
+    legal = enumerate_legal_actions(snap, actor=2)
+    assert any(a.type == "hora" and a.target == 1 and a.pai == "3p" for a in legal)
+
+
 def test_enumerate_legal_actions_allows_reach_with_only_concealed_kan_melds():
     player3 = PlayerState()
     player3.hand.update(["3m", "3m", "3m", "3p", "3p", "6p", "6p", "6s", "7s", "8p", "8s"])
@@ -194,6 +245,36 @@ def test_enumerate_legal_actions_chankan_blocks_none_when_hora_legal(monkeypatch
 
     hora_actions = [a for a in legal if a.type == "hora"]
     assert len(hora_actions) >= 1
+
+
+def test_enumerate_legal_actions_allows_rinshan_plus_haitei_tsumo():
+    """项目语义里最后一张开杠后自摸可以同时带 rinshan 和 haitei。"""
+    player = PlayerState()
+    player.hand.update(["2p", "2p", "2p", "3p", "4m", "4p", "5m", "6m", "7p", "8p", "9p"])
+    player.melds = [
+        {"type": "kakan", "pai": "C", "pai_raw": "C", "consumed": ["C", "C", "C", "C"], "target": 0},
+    ]
+    player.rinshan_tsumo = True
+
+    gs = GameState()
+    gs.bakaze = "E"
+    gs.kyoku = 1
+    gs.honba = 1
+    gs.oya = 0
+    gs.scores = [25000, 25000, 25000, 25000]
+    gs.remaining_wall = 0
+    gs.players = [PlayerState(), player, PlayerState(), PlayerState()]
+    gs.actor_to_move = 1
+    gs.last_tsumo = [None, "9p", None, None]
+    gs.last_tsumo_raw = [None, "9p", None, None]
+
+    snap = gs.snapshot(actor=1)
+    snap["_hora_is_rinshan"] = True
+    snap["_hora_is_haitei"] = True
+
+    legal = enumerate_legal_actions(snap, actor=1)
+
+    assert any(a.type == "hora" and a.target == 1 and a.pai == "9p" for a in legal)
 
 
 # =============================================================================

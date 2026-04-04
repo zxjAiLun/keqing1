@@ -2,9 +2,6 @@
 # 预处理：
 #   uv run python scripts/preprocess_cached.py --data_dirs artifacts/converted_mjai/ds1 ds2 ds3 ds4 ds5 ds6 ds8 ds9 ds10 ds11 ds12 ds13 --output_dir processed --workers 16
 #   uv run python scripts/preprocess_cached.py --data_dirs artifacts/converted_mjai/ds7 --output_dir processed_naga --workers 16 --actor_name_filter 'ⓝNAGA25'
-# 训练：
-#   uv run python src/train/train_keqing.py --config configs/keqing_cached_naga.yaml
-
 data_dirs:
   - processed/ds1
   - processed/ds2

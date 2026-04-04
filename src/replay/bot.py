@@ -1,9 +1,8 @@
-"""跑谱 Review 系统：将 tenhou6 JSON / mjai JSONL 牌谱发给 KeqingBot 进行逐步决策分析，输出 HTML 报告。"""
+"""跑谱 Review 系统：将 tenhou6 JSON / mjai JSONL 牌谱发给 RuntimeBot 逐步决策分析，输出 HTML 报告。"""
 
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import sys as _sys
 import tempfile
@@ -11,7 +10,15 @@ from pathlib import Path
 from typing import Optional, Union
 
 from mahjong_env.replay import read_mjai_jsonl
-from mahjong_env.types import action_dict_to_spec, action_specs_match
+from inference.review import (
+    DefaultRuntimeReviewExporter,
+    action_label,
+    same_action as _same_action,
+    summarize_decision_matches,
+    summarize_reach_followup,
+)
+from replay.legacy_render import render_candidates_bar, set_svg_dir, tile_img
+from replay.normalize import normalize_replay_decisions
 from static_tables.demo import annotate_replay_candidate_demo
 
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -21,36 +28,24 @@ for _dir in (str(_SRC_DIR), str(_SCRIPTS_DIR), str(_PROJECT_ROOT)):
     if _dir not in _sys.path:
         _sys.path.insert(0, _dir)
 
-# 支持 keqingv1 / keqingv2，v5model 缺失时允许按可选依赖处理
-try:
-    from v5model.bot import V5Bot as _V5Bot
-    from v5model.action_space import action_to_idx as _action_to_idx_v5
-except ModuleNotFoundError:
-    _V5Bot = None
-    _action_to_idx_v5 = None
-
-from keqingv1.bot import KeqingBot as _KeqingBot
-from keqingv1.action_space import action_to_idx as _action_to_idx_k1
+from inference.runtime_bot import RuntimeBot
 
 # bot 类型 → run_replay_from_source 内部创建 Bot 时用
 _BOT_CLASSES = {
-    "keqingv1": _KeqingBot,
-    "keqingv2": _KeqingBot,
-    "keqingv3": _KeqingBot,
+    "keqingv1": RuntimeBot,
+    "keqingv2": RuntimeBot,
+    "keqingv3": RuntimeBot,
 }
-if _V5Bot is not None:
-    _BOT_CLASSES["v5"] = _V5Bot
 
 PLAYER_NAMES = ["East", "South", "West", "North"]
 
 # 默认 checkpoint 路径（按 bot 类型，相对于 PROJECT_ROOT）
 _DEFAULT_CHECKPOINTS = {
-    "v5": _PROJECT_ROOT / "artifacts/models/modelv5/latest.pth",
     "keqingv1": _PROJECT_ROOT / "artifacts/models/keqingv1/latest.pth",
     "keqingv2": _PROJECT_ROOT / "artifacts/models/keqingv2/best.pth",
     "keqingv3": _PROJECT_ROOT / "artifacts/models/keqingv3/best.pth",
 }
-_RESPONSE_ACTION_TYPES = {"chi", "pon", "daiminkan", "ankan", "kakan", "hora"}
+_REVIEW_EXPORTER = DefaultRuntimeReviewExporter()
 
 
 def _is_mjai_dict(data: dict) -> bool:
@@ -180,7 +175,7 @@ def run_replay_from_source(
         输入内容类型："auto"（自动检测）、"tenhou6"（tenhou6 JSON）、"mjai"（mjai JSONL）。
         "url" 模式下 source 已是 mjai 事件列表。
     bot_type : str
-        Bot 类型："v5"（V5Bot）或 "keqingv1"（KeqingBot）。
+        Bot 类型："keqingv1" / "keqingv2" / "keqingv3"。
         checkpoint 为 None 时使用对应的默认路径。
 
     Returns
@@ -203,7 +198,7 @@ def run_replay_from_source(
     events = _load_events_from_source(source, input_type=input_type)
     bot_cls = _BOT_CLASSES[bot_type]
     bot = bot_cls(player_id=player_id, model_path=checkpoint)
-    bot.player_names: list[str] = []  # 从 start_game 提取
+    setattr(bot, "player_names", [])
 
     _MELD_TYPES = {"chi", "pon", "daiminkan", "ankan", "kakan"}
     # 其他家操作类型（需要记录观察步）
@@ -229,7 +224,7 @@ def run_replay_from_source(
 
     for event_index, event in enumerate(events):
         if event.get("type") == "start_game" and isinstance(event.get("names"), list):
-            bot.player_names = [str(n) for n in event["names"]]
+            setattr(bot, "player_names", [str(n) for n in event["names"]])
         pending = _find_pending_decision()
         if pending is not None:
             if _is_player_action(event, player_id):
@@ -244,6 +239,7 @@ def run_replay_from_source(
                 # 不能留成 null，否则前端会把它当成“没有实际选择”。
                 if chosen.get("type") == "none" and has_non_none_candidate:
                     pending["gt_action"] = {"type": "none", "actor": player_id}
+        pre_react_len = len(bot.decision_log)
         bot.react(event)
         # 记录其他家的操作观察步（棋盘快照，无 bot 推理数据）
         ev_actor = event.get("actor")
@@ -258,7 +254,7 @@ def run_replay_from_source(
         if should_record_obs:
             snap = bot.game_state.snapshot(player_id)
             obs_entry = {
-                "step": len(bot.decision_log),
+                "step": pre_react_len,
                 "bakaze": snap.get("bakaze", ""),
                 "kyoku": snap.get("kyoku", 0),
                 "honba": snap.get("honba", 0),
@@ -289,388 +285,15 @@ def run_replay_from_source(
                 "board_phase": "after_action",
                 "source_event_index": event_index,
             }
-            bot.decision_log.append(obs_entry)
+            bot.decision_log.insert(pre_react_len, obs_entry)
+            for idx in range(pre_react_len, len(bot.decision_log)):
+                bot.decision_log[idx]["step"] = idx
 
     html = render_html(bot)
     return bot, html
 
 
-# 牌字符串 -> SVG 文件名映射
-_TILE_SVG = {
-    **{f"{n}m": f"Man{n}" for n in range(1, 10)},
-    **{f"{n}p": f"Pin{n}" for n in range(1, 10)},
-    **{f"{n}s": f"Sou{n}" for n in range(1, 10)},
-    "5mr": "Man5-Dora",
-    "5pr": "Pin5-Dora",
-    "5sr": "Sou5-Dora",
-    "E": "Ton",
-    "S": "Nan",
-    "W": "Shaa",
-    "N": "Pei",
-    "P": "Haku",
-    "F": "Hatsu",
-    "C": "Chun",
-}
-
-# 排序权重：m(0-8) p(9-17) s(18-26) 字(27-33)
-_TILE_ORDER = {
-    **{f"{n}m": n - 1 for n in range(1, 10)},
-    "5mr": 4,
-    **{f"{n}p": 9 + n - 1 for n in range(1, 10)},
-    "5pr": 13,
-    **{f"{n}s": 18 + n - 1 for n in range(1, 10)},
-    "5sr": 22,
-    "E": 27,
-    "S": 28,
-    "W": 29,
-    "N": 30,
-    "P": 31,
-    "F": 32,
-    "C": 33,
-}
-
-_SVG_DIR = (
-    Path(__file__).parent.parent.parent / "tiles" / "riichi-mahjong-tiles" / "Regular"
-)
-
-
-def _svg_b64(tile: str) -> str:
-    name = _TILE_SVG.get(tile, "Blank")
-    path = _SVG_DIR / f"{name}.svg"
-    if not path.exists():
-        path = _SVG_DIR / "Blank.svg"
-    if path.exists():
-        data = path.read_bytes()
-    else:
-        data = b'<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"/>'
-    return "data:image/svg+xml;base64," + base64.b64encode(data).decode()
-
-
-def _sort_hand(hand: list[str], tsumo_pai: str | None = None) -> list[str]:
-    """排序手牌，tsumo_pai 放在最右边。"""
-    others = [t for t in hand if t != tsumo_pai or tsumo_pai is None]
-    if tsumo_pai and tsumo_pai in hand:
-        others = sorted(
-            [t for t in hand if t != tsumo_pai], key=lambda t: _TILE_ORDER.get(t, 99)
-        )
-        return others + [tsumo_pai]
-    return sorted(hand, key=lambda t: _TILE_ORDER.get(t, 99))
-
-
-def _action_cmp_key(action: dict | None):
-    if not action:
-        return None
-    normalized = dict(action)
-    if normalized.get("type") == "pass":
-        normalized["type"] = "none"
-    try:
-        return action_dict_to_spec(normalized)
-    except Exception:
-        return None
-
-
-def _candidate_score_for_replay(candidate: dict) -> float | None:
-    """统一读取 replay 候选动作分数。
-
-    新版本优先使用 final_score；旧版本兼容 beam_score/logit。
-    """
-    if candidate.get("final_score") is not None:
-        return float(candidate["final_score"])
-    if candidate.get("beam_score") is not None:
-        return float(candidate["beam_score"])
-    if candidate.get("logit") is not None:
-        return float(candidate["logit"])
-    return None
-
-
-def _same_action(a: dict | None, b: dict | None) -> bool:
-    spec_a = _action_cmp_key(a)
-    spec_b = _action_cmp_key(b)
-    if spec_a is None or spec_b is None:
-        return False
-    return action_specs_match(spec_a, spec_b)
-
-
-def normalize_replay_decisions(decisions: dict, meta: dict | None = None) -> dict:
-    if not isinstance(decisions, dict):
-        return decisions
-
-    log = decisions.get("log", [])
-    player_id = decisions.get("player_id")
-    pending_idx: int | None = None
-    for idx, entry in enumerate(log):
-        if not entry.get("is_obs") and entry.get("gt_action") is None:
-            pending_idx = idx
-        if pending_idx is None or idx == pending_idx:
-            continue
-        pending = log[pending_idx]
-        if pending.get("gt_action") is not None:
-            pending_idx = None
-            continue
-        chosen = pending.get("chosen") or {}
-        candidates = pending.get("candidates", [])
-        has_none_candidate = any(
-            c.get("action", {}).get("type") == "none" for c in candidates
-        )
-        has_non_none_candidate = any(
-            c.get("action", {}).get("type") != "none" for c in candidates
-        )
-        if chosen.get("type") == "none" and has_non_none_candidate:
-            pending["gt_action"] = {"type": "none", "actor": player_id}
-            pending_idx = None
-        elif chosen.get("type") in _RESPONSE_ACTION_TYPES and has_none_candidate:
-            pending["gt_action"] = {
-                **chosen,
-                "actor": chosen.get("actor", player_id),
-            }
-            pending_idx = None
-
-    own_log = [e for e in log if not e.get("is_obs")]
-    total_ops = len(own_log)
-    match_count = sum(
-        1 for e in own_log if _same_action(e.get("chosen"), e.get("gt_action"))
-    )
-    return {
-        **decisions,
-        "log": log,
-        "total_ops": total_ops,
-        "match_count": match_count,
-        "bot_type": (meta or {}).get("bot_type", decisions.get("bot_type")),
-        "player_names": decisions.get("player_names") or (meta or {}).get("player_names"),
-    }
-
-
-def _tile_img(tile: str, width: int = 40, style: str = "") -> str:
-    src = _svg_b64(tile)
-    base_border = "border:1px solid #bbb;border-radius:3px;box-sizing:border-box;"
-    return f'<img src="{src}" width="{width}" title="{tile}" style="margin:1px;{base_border}{style}">'
-
-
-def action_label(a: dict) -> str:
-    t = a.get("type", "?")
-    if t == "dahai":
-        tsumogiri = " (摸切)" if a.get("tsumogiri") else ""
-        return f"打 {a.get('pai', '?')}{tsumogiri}"
-    if t == "reach":
-        return "立直"
-    if t == "chi":
-        return f"吃 {a.get('pai', '?')} ({','.join(a.get('consumed', []))})"
-    if t == "pon":
-        return f"碰 {a.get('pai', '?')}"
-    if t == "daiminkan":
-        return f"大明杠 {a.get('pai', '?')}"
-    if t == "ankan":
-        return f"暗杠 {a.get('pai', '?')}"
-    if t == "kakan":
-        return f"加杠 {a.get('pai', '?')}"
-    if t == "hora":
-        return "胡牌"
-    if t == "ryukyoku":
-        return "流局"
-    if t == "none":
-        return "过"
-    return t
-
-
-def _action_pai(a: dict) -> str | None:
-    """从动作中提取主要牌（用于在手牌上标注）。"""
-    t = a.get("type", "")
-    if t == "dahai":
-        return a.get("pai")
-    if t == "reach":
-        return None  # 立直本身不标注单张
-    if t == "chi":
-        return a.get("pai")
-    if t == "pon":
-        return a.get("pai")
-    if t == "daiminkan":
-        return a.get("pai")
-    return None
-
-
-def _render_hand_tiles(
-    hand: list[str],
-    highlight_pai: str | None,
-    tsumo_pai: str | None = None,
-    highlight_color: str = "#e74c3c",
-) -> str:
-    """渲染手牌图片行，highlight_pai 对应的牌加红框标注，tsumo_pai 放最右。"""
-    sorted_hand = _sort_hand(hand, tsumo_pai)
-    imgs = []
-    for tile in sorted_hand:
-        if tile == highlight_pai:
-            style = f"border:2px solid {highlight_color};border-radius:3px;box-sizing:border-box;"
-        else:
-            style = ""
-        imgs.append(_tile_img(tile, width=38, style=style))
-    return "".join(imgs)
-
-
-def _render_candidates_logit(
-    candidates: list[dict], chosen: dict, gt_action: dict | None
-) -> str:
-    """模式1：传统 logit 条形图表格。"""
-    if not candidates:
-        return ""
-    max_logit = candidates[0]["logit"]
-    min_logit = candidates[-1]["logit"]
-    logit_range = max(max_logit - min_logit, 1e-3)
-    rows = []
-    for c in candidates:
-        a = c["action"]
-        logit = c["logit"]
-        label = action_label(a)
-        is_chosen = _same_action(a, chosen)
-        is_gt = gt_action is not None and _same_action(a, gt_action)
-        pct = max(0, (logit - min_logit) / logit_range * 100)
-        bar_color = "#e74c3c" if is_chosen else "#3498db"
-        marks = ""
-        if is_chosen:
-            marks += " ✓Bot"
-        if is_gt:
-            marks += " ★玩家"
-        row_style = (
-            "background:#fff3cd;"
-            if is_chosen
-            else ("background:#d4edda;" if is_gt else "")
-        )
-        rows.append(f"""
-          <tr style="{row_style}">
-            <td style="padding:2px 8px;font-weight:{"bold" if is_chosen else "normal"}">{label}{marks}</td>
-            <td style="padding:2px 8px;text-align:right;font-family:monospace">{logit:+.3f}</td>
-            <td style="padding:2px 8px;width:180px">
-              <div style="background:#eee;border-radius:3px;height:14px;width:180px">
-                <div style="background:{bar_color};height:14px;width:{pct:.1f}%;border-radius:3px"></div>
-              </div>
-            </td>
-          </tr>""")
-    return f"""
-    <table style="border-collapse:collapse">
-      <tr style="background:#f0f0f0">
-        <th style="padding:2px 8px;text-align:left">动作</th>
-        <th style="padding:2px 8px">Logit</th>
-        <th style="padding:2px 8px">相对强度</th>
-      </tr>
-      {"".join(rows)}
-    </table>"""
-
-
-def _render_candidates_tile(
-    candidates: list[dict],
-    chosen: dict,
-    gt_action: dict | None,
-    hand: list[str],
-    tsumo_pai: str | None = None,
-) -> str:
-    """模式2：在手牌图上方标注 bot 选择（dahai 类动作）。非 dahai 退回文字显示。"""
-    bot_pai = _action_pai(chosen)
-    gt_pai = _action_pai(gt_action) if gt_action else None
-    sorted_hand = _sort_hand(hand, tsumo_pai)
-    imgs = []
-    for tile in sorted_hand:
-        is_bot = tile == bot_pai
-        is_gt = tile == gt_pai
-        if is_bot and is_gt:
-            label_html = '<div style="text-align:center;font-size:10px;color:#8e44ad;font-weight:bold">✓★</div>'
-        elif is_bot:
-            label_html = '<div style="text-align:center;font-size:10px;color:#e74c3c;font-weight:bold">✓Bot</div>'
-        elif is_gt:
-            label_html = '<div style="text-align:center;font-size:10px;color:#27ae60;font-weight:bold">★玩家</div>'
-        else:
-            label_html = '<div style="height:14px"></div>'
-        border = ""
-        if is_bot:
-            border = "border:2px solid #e74c3c;"
-        elif is_gt:
-            border = "border:2px solid #27ae60;"
-        imgs.append(
-            f'<div style="display:inline-block;text-align:center;margin:1px">{label_html}{_tile_img(tile, width=38, style=border + "border-radius:3px;")}</div>'
-        )
-    # 非 dahai 动作补充文字
-    extra = ""
-    if chosen.get("type") not in ("dahai", "none"):
-        extra = f'<div style="margin-top:4px;font-size:12px">Bot: <b>{action_label(chosen)}</b></div>'
-    if gt_action and gt_action.get("type") not in ("dahai", "none"):
-        extra += f'<div style="font-size:12px;color:#27ae60">玩家: <b>{action_label(gt_action)}</b></div>'
-    return f'<div style="margin:4px 0">{"".join(imgs)}</div>{extra}'
-
-
-def _render_candidates_bar(
-    candidates: list[dict],
-    chosen: dict,
-    gt_action: dict | None,
-    hand: list[str],
-    tsumo_pai: str | None = None,
-) -> str:
-    """柱状模式：每张候选牌上方显示 logit 强度柱（仅 dahai，其他退回 tile 模式）。"""
-    if chosen.get("type") not in ("dahai", "none"):
-        return _render_candidates_tile(candidates, chosen, gt_action, hand, tsumo_pai)
-
-    if not candidates:
-        return ""
-
-    max_logit = candidates[0]["logit"]
-    min_logit = candidates[-1]["logit"]
-    logit_range = max(max_logit - min_logit, 1e-3)
-
-    tile_logit: dict[str, float] = {}
-    for c in candidates:
-        a = c["action"]
-        if a.get("type") == "dahai":
-            tile_logit[a.get("pai", "")] = c["logit"]
-
-    bot_pai = _action_pai(chosen)
-    gt_pai = _action_pai(gt_action) if gt_action else None
-    sorted_hand = _sort_hand(hand, tsumo_pai)
-
-    imgs = []
-    for tile in sorted_hand:
-        logit = tile_logit.get(tile, min_logit)
-        pct = max(1, (logit - min_logit) / logit_range * 100)
-        is_bot = tile == bot_pai
-        is_gt = tile == gt_pai
-
-        if is_bot and is_gt:
-            bar_color = "#8e44ad"
-            marks = "✓★"
-        elif is_bot:
-            bar_color = "#e74c3c"
-            marks = "✓"
-        elif is_gt:
-            bar_color = "#27ae60"
-            marks = "★"
-        else:
-            bar_color = "#3498db"
-            marks = ""
-
-        MAX_BAR_H = 60  # 柱最高 60px
-        bar_height = max(4, int(pct / 100 * MAX_BAR_H))
-        border = ""
-        if is_bot:
-            border = "border:2px solid #e74c3c;"
-        elif is_gt:
-            border = "border:2px solid #27ae60;"
-        # tile 渲染为 38px 宽，SVG 原始 300x400，等比高度 ≈ 38*400/300 ≈ 51px
-        TILE_H = 51
-        # 每列：tile 固定在底部，bar 叠在 tile 上方，bar 底部紧贴 tile 顶部往上长
-        imgs.append(
-            f'<div style="display:inline-block;width:38px;text-align:center;margin:0 1px;vertical-align:bottom;position:relative">'
-            f'<div style="position:absolute;bottom:{TILE_H}px;left:0;width:38px;height:{bar_height}px;background:{bar_color};border-radius:{bar_height}px {bar_height}px 0 0;display:flex;align-items:center;justify-content:center;overflow:hidden">'
-            f'<span style="font-size:9px;color:#fff;font-weight:bold;white-space:nowrap">{marks}</span>'
-            f"</div>"
-            f"{_tile_img(tile, width=38, style=border + 'border-radius:3px;')}"
-            f"</div>"
-        )
-
-    extra = ""
-    if chosen.get("type") not in ("dahai", "none"):
-        extra = f'<div style="margin-top:4px;font-size:12px">Bot: <b>{action_label(chosen)}</b></div>'
-    if gt_action and gt_action.get("type") not in ("dahai", "none"):
-        extra += f'<div style="font-size:12px;color:#27ae60">玩家: <b>{action_label(gt_action)}</b></div>'
-    return f'<div style="margin:4px 0;display:flex;flex-wrap:wrap">{"".join(imgs)}</div>{extra}'
-
-
-def render_replay_json(bot: KeqingBot) -> dict:
+def render_replay_json(bot: RuntimeBot) -> dict:
     """将 bot.decision_log 转换为前端 Vue 可用的 JSON 数据结构。"""
     log = bot.decision_log
 
@@ -701,45 +324,8 @@ def render_replay_json(bot: KeqingBot) -> dict:
         }
 
     # total_ops/matches 只统计自家决策步（排除 obs 步）
-    own_log = [e for e in log if not e.get("is_obs")]
-    total_ops = len(own_log)
-    matches = sum(1 for e in own_log if _same_action(e.get("chosen"), e.get("gt_action")))
-
-    # Rating: exp(-alpha * delta_score)，alpha=0.5
-    # delta 基于模型最终用于决策的综合分数（final_score）；旧版本回放回退到 beam/logit。
-    import math
-
-    _ALPHA = 0.5
-    rating_scores = []
-    for e in log:
-        gt = e.get("gt_action")
-        if not gt:
-            continue
-        candidates = e.get("candidates", [])
-        if not candidates:
-            continue
-        chosen = e.get("chosen", {})
-
-        bot_score = None
-        gt_score = None
-        for c in candidates:
-            s = _candidate_score_for_replay(c)
-            if s is None:
-                continue
-            if _same_action(c["action"], chosen) and bot_score is None:
-                bot_score = s
-            if _same_action(c["action"], gt) and gt_score is None:
-                gt_score = s
-        if bot_score is None or gt_score is None:
-            continue
-        delta = bot_score - gt_score  # >= 0 when bot != gt
-        rating_scores.append(math.exp(-_ALPHA * max(delta, 0.0)))
-
-    rating = (
-        round(100.0 * sum(rating_scores) / len(rating_scores), 1)
-        if rating_scores
-        else None
-    )
+    total_ops, matches = summarize_decision_matches(log)
+    rating = _REVIEW_EXPORTER.compute_rating(log)
 
     return normalize_replay_decisions({
         "log": log,
@@ -752,10 +338,8 @@ def render_replay_json(bot: KeqingBot) -> dict:
     })
 
 
-def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
-    global _SVG_DIR
-    if tiles_dir is not None:
-        _SVG_DIR = tiles_dir
+def render_html(bot: RuntimeBot, tiles_dir: Path | None = None) -> str:
+    set_svg_dir(tiles_dir)
     pid = bot.player_id
     log = bot.decision_log
 
@@ -770,9 +354,7 @@ def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
         kyoku_steps[key].append(entry["step"])
 
     # 统计 matches（排除 obs 步）
-    own_log = [e for e in log if not e.get("is_obs")]
-    total_ops = len(own_log)
-    matches = sum(1 for e in own_log if _same_action(e.get("chosen"), e.get("gt_action")))
+    total_ops, matches = summarize_decision_matches(log)
 
     step_divs = []
     for i, entry in enumerate(log):
@@ -793,32 +375,21 @@ def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
         score_str = "  ".join(
             f"P{i2}({'R' if reached[i2] else ''}):{scores[i2]}" for i2 in range(4)
         )
-        dora_imgs = "".join(_tile_img(t, 32) for t in dora)
-        bar_mode_content = _render_candidates_bar(
+        dora_imgs = "".join(tile_img(t, 32) for t in dora)
+        bar_mode_content = render_candidates_bar(
             candidates, chosen, gt_action, hand, tsumo_pai
         )
 
         gt_label = action_label(gt_action) if gt_action else "—"
         gt_color = "#27ae60" if _same_action(gt_action, chosen) else "#c0392b"
 
-        # 立直步骤：从下一条 log 取出宣言牌信息（跳过 obs 步）
         reach_dahai_str = ""
-        if chosen.get("type") == "reach":
-            for j in range(i + 1, len(log)):
-                next_entry = log[j]
-                if next_entry.get("is_obs"):
-                    continue
-                next_chosen = next_entry["chosen"]
-                next_gt = next_entry.get("gt_action")
-                if next_chosen.get("type") == "dahai":
-                    bot_pai = next_chosen.get("pai", "?")
-                    gt_pai = (
-                        next_gt.get("pai", "?")
-                        if next_gt and next_gt.get("type") == "dahai"
-                        else "—"
-                    )
-                    reach_dahai_str = f' <span style="font-size:12px;color:#888">（宣言牌 Bot: <b>{bot_pai}</b> 玩家: <b>{gt_pai}</b>）</span>'
-                break
+        reach_followup = summarize_reach_followup(log, i)
+        if reach_followup is not None:
+            bot_pai = reach_followup["bot_action"].get("pai", "?")
+            gt_action = reach_followup.get("gt_action")
+            gt_pai = gt_action.get("pai", "?") if gt_action else "—"
+            reach_dahai_str = f' <span style="font-size:12px;color:#888">（宣言牌 Bot: <b>{bot_pai}</b> 玩家: <b>{gt_pai}</b>）</span>'
 
         step_id = f"step{entry['step']}"
         step_divs.append(f"""
@@ -938,7 +509,7 @@ def render_html(bot: KeqingBot, tiles_dir: Path | None = None) -> str:
     """
 
 
-def render_replay_html(bot: KeqingBot) -> str:
+def render_replay_html(bot: RuntimeBot) -> str:
     """返回嵌入到 result-view 的 HTML 内容片段（无外层 html/body）。"""
     html = render_html(bot)
     start = html.find("<body")
@@ -984,8 +555,8 @@ def main():
     parser.add_argument(
         "--bot-type",
         default="keqingv1",
-        choices=["v5", "keqingv1"],
-        help="Bot 类型：v5（V5Bot）或 keqingv1（KeqingBot）",
+        choices=["keqingv1", "keqingv2", "keqingv3"],
+        help="Bot 类型：keqingv1 / keqingv2 / keqingv3",
     )
     parser.add_argument("--output", default=None, help="HTML 输出路径")
     parser.add_argument(

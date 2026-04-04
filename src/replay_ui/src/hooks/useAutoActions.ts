@@ -15,16 +15,8 @@ export function useAutoActions({
   noMeld,
   autoTsumogiri,
 }: UseAutoActionsOptions) {
-  const humanId = state?.human_player_id ?? 0;
-  const isOwnDrawTurn =
-    state?.phase === "playing" && state?.actor_to_move === humanId;
-  const isResponseTurn =
-    state?.phase === "playing" &&
-    !!state?.last_discard &&
-    state.last_discard.actor !== humanId &&
-    (state.legal_actions?.some(a => a.actor === humanId) ?? false);
-  const isMyTurn = Boolean(isOwnDrawTurn || isResponseTurn);
-  const legalActions = state?.legal_actions ?? [];
+  const isMyTurn = Boolean(state?.needs_input);
+  const legalActions = isMyTurn ? (state?.legal_actions ?? []) : [];
 
   const hasHora    = isMyTurn && legalActions.some(a => a.type === "hora");
   const hasMeld    = isMyTurn && legalActions.some(
@@ -37,9 +29,11 @@ export function useAutoActions({
       || a.type === "hora" || a.type === "reach"
       || a.type === "ankan" || a.type === "kakan"
   );
+  const onlyNoneResponse = isMyTurn && legalActions.length === 1 && legalActions[0]?.type === "none";
 
-  // 需要玩家手动决策：有实质选择，且自动化规则无法覆盖
-  const needsDecision = hasRealChoice && !(
+  // 需要玩家手动决策：只要当前存在合法动作且未命中显式自动化，就暂停轮询等待用户点击。
+  const needsDecision = isMyTurn && legalActions.length > 0 && !(
+    onlyNoneResponse ||
     (autoHora && hasHora) ||
     (noMeld && hasMeld && !hasHora) ||
     (autoTsumogiri && hasDahai && !hasHora)
@@ -53,6 +47,7 @@ export function useAutoActions({
     hasDahai,
     hasNone,
     hasRealChoice,
+    onlyNoneResponse,
     needsDecision,
   };
 }

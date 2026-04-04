@@ -1,14 +1,11 @@
 # keqingv3 默认训练配置
 # 预处理建议：
-#   uv run python scripts/preprocess_v3.py --config configs/keqing_default.yaml --output_dir processed_v3
-# 训练：
-#   uv run python src/train/train_v3.py --config configs/keqingv3_default.yaml
-
+#   uv run python scripts/preprocess_v3.py --config configs/keqingv3_preprocess.yaml
 data_dirs:
-  - processed_v3/ds1
-  - processed_v3/ds2
+  - processed_v3_fixaux/ds1
 
 output_dir: artifacts/models/keqingv3
+device: cuda
 
 hidden_dim: 256
 num_res_blocks: 4
@@ -31,7 +28,7 @@ buffer_size: 512
 prefetch_factor: 2
 pin_memory: true
 persistent_workers: true
-log_interval: 200
+log_interval: 500
 aug_perms: 1
 files_per_epoch_ratio: 0.3
 win_pos_weight: 2.0

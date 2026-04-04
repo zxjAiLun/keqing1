@@ -1,8 +1,12 @@
+from pathlib import Path
+
 from mahjong_env.replay import (
     PendingValueSample,
     ReplaySample,
     _finalize_aux_targets,
     _label_matches_legal,
+    build_supervised_samples,
+    read_mjai_jsonl,
 )
 from mahjong_env.replay_normalizer import (
     normalize_replay_events,
@@ -62,6 +66,17 @@ def test_finalize_aux_targets_ryukyoku_tracks_tenpai_players():
     assert pending[1].sample.ryukyoku_tenpai_target == 1.0
     assert pending[2].sample.ryukyoku_tenpai_target == 0.0
     assert pending[3].sample.ryukyoku_tenpai_target == 1.0
+
+
+def test_build_supervised_samples_preserves_aux_targets_after_end_kyoku():
+    path = Path("artifacts/converted_mjai/closehand&atk/2017122802gm-00a9-0000-90c30e7e.mjson")
+    events = list(read_mjai_jsonl(path))
+
+    samples = build_supervised_samples(events, strict_legal_labels=True)
+
+    assert any(sample.win_target > 0.0 for sample in samples)
+    assert any(sample.dealin_target > 0.0 for sample in samples)
+    assert any(abs(sample.score_delta_target) > 0.0 for sample in samples)
 
 
 # =============================================================================

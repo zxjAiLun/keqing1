@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import time
 from typing import Dict, List
 
 import numpy as np
@@ -21,7 +22,10 @@ from mahjong.shanten import Shanten
 
 from mahjong_env.tiles import tile_to_34 as _to_34, tile_is_aka as _is_aka
 from keqingv3.feature_tracker import SnapshotFeatureTracker
-from keqingv3.progress_oracle import analyze_normal_progress_from_counts
+from keqingv3.progress_oracle import (
+    analyze_normal_progress_from_counts,
+    analyze_normal_progress_with_timings,
+)
 
 
 _DORA_NEXT = {
@@ -40,42 +44,6 @@ N_SCALAR = 56
 
 _WIND_ORDER = ["E", "S", "W", "N"]
 _BAKAZE_IDX = {"E": 0, "S": 1, "W": 2, "N": 3}
-
-def _build_visible_counts(state: Dict, actor: int) -> List[int]:
-    counts = [0] * 34
-
-    for tile in state.get("hand", []):
-        idx = _to_34(tile)
-        if idx >= 0:
-            counts[idx] += 1
-
-    for meld_group in state.get("melds", [[], [], [], []]):
-        for meld in meld_group:
-            for p in meld.get("consumed", []) + ([meld.get("pai")] if meld.get("pai") else []):
-                idx = _to_34(p)
-                if idx >= 0:
-                    counts[idx] += 1
-
-    for disc_group in state.get("discards", [[], [], [], []]):
-        for disc in disc_group:
-            pai = disc["pai"] if isinstance(disc, dict) else disc
-            idx = _to_34(pai)
-            if idx >= 0:
-                counts[idx] += 1
-
-    for dm in state.get("dora_markers", []):
-        idx = _to_34(dm)
-        if idx >= 0:
-            counts[idx] += 1
-
-    tsumo_pai = state.get("tsumo_pai")
-    if tsumo_pai:
-        idx = _to_34(tsumo_pai)
-        if idx >= 0:
-            counts[idx] += 1
-
-    del actor
-    return counts
 
 
 def _shape_proxy_from_hand_count(hand_count: Counter) -> tuple[int, int, int]:
@@ -105,12 +73,30 @@ def _regular_shanten_counts(all34_list: List[int]) -> tuple[int, int]:
 
 def encode(state: Dict, actor: int):
     """返回 (tile_features, scalar_features)。"""
+    tile_feat, scalar, _timings = _encode_impl(state, actor, collect_timings=False)
+    return tile_feat, scalar
+
+
+def encode_with_timings(state: Dict, actor: int):
+    """返回 (tile_features, scalar_features, timings)。"""
+    return _encode_impl(state, actor, collect_timings=True)
+
+
+def _encode_impl(state: Dict, actor: int, *, collect_timings: bool):
+    timings = {
+        "tracker_s": 0.0,
+        "progress_s": 0.0,
+        "fill_s": 0.0,
+    }
+    t_fill0 = time.perf_counter() if collect_timings else 0.0
     tile_feat = np.zeros((C_TILE, N_TILES), dtype=np.float32)
     scalar = np.zeros(N_SCALAR, dtype=np.float32)
 
-    discards: List[List] = state.get("discards", [[], [], [], []])
     tracker = SnapshotFeatureTracker.from_state(state, actor)
-    hand: List[str] = tracker.hand_tiles
+    if collect_timings:
+        timings["tracker_s"] = time.perf_counter() - t_fill0
+        t_fill0 = time.perf_counter()
+    discards: List[List] = state.get("discards", [[], [], [], []])
 
     def _disc_pai(d) -> str:
         return d["pai"] if isinstance(d, dict) else d
@@ -129,12 +115,39 @@ def encode(state: Dict, actor: int):
     honba: int = state.get("honba", 0)
     kyotaku: int = state.get("kyotaku", 0)
     oya: int = state.get("oya", 0)
+    hand_counts34 = tracker.hand_counts34
+    meld_counts34 = tracker.meld_counts34
+    visible_counts = tracker.visible_counts34
 
     # ---- ch 0-3: 自家手牌计数 planes ----
-    hand_count: Counter = Counter({i: c for i, c in enumerate(tracker.hand_counts34) if c > 0})
+    hand_count: Counter = Counter({i: c for i, c in enumerate(hand_counts34) if c > 0})
     for tile34, cnt in hand_count.items():
         for k in range(min(cnt, 4)):
             tile_feat[k, tile34] = 1.0
+
+    discard_infos: list[list[tuple[int, bool, bool]]] = []
+    total_discards = 0
+    latest_riichi_pid = None
+    latest_riichi_turn = -1
+    for pid in range(4):
+        pid_disc_infos: list[tuple[int, bool, bool]] = []
+        pid_discards = discards[pid] if pid < len(discards) else []
+        total_discards += len(pid_discards)
+        for turn, d in enumerate(pid_discards):
+            idx = _to_34(_disc_pai(d))
+            if idx < 0:
+                continue
+            tsumogiri = _disc_tsumogiri(d)
+            reach_declared = _disc_reach_declared(d)
+            pid_disc_infos.append((idx, tsumogiri, reach_declared))
+            if pid != actor and reach_declared and turn > latest_riichi_turn:
+                latest_riichi_turn = turn
+                latest_riichi_pid = pid
+        discard_infos.append(pid_disc_infos)
+
+    chi_pon_calls = 0
+    kan_calls = 0
+    opponent_meld_counts = [0.0, 0.0, 0.0]
 
     # ---- ch 4-7: 自家副露 presence ----
     actor_melds = melds[actor] if actor < len(melds) else []
@@ -150,30 +163,30 @@ def encode(state: Dict, actor: int):
     other_pids = [pid for pid in range(4) if pid != actor]
     for slot, pid in enumerate(other_pids):  # slot 0,1,2
         ch_base = 8 + slot * 2
-        pid_discs = discards[pid] if pid < len(discards) else []
-        for d in pid_discs:
-            idx = _to_34(_disc_pai(d))
-            if idx < 0:
-                continue
-            if _disc_reach_declared(d):
+        for idx, tsumogiri, reach_declared in discard_infos[pid]:
+            if reach_declared:
                 tile_feat[ch_base,     idx] = 1.0  # 立直宣言牌
-            if not _disc_tsumogiri(d):
+            if not tsumogiri:
                 tile_feat[ch_base + 1, idx] = 1.0  # 手切
 
     # ---- ch 14-16: 他家副露 presence（3家 × 1通道）----
     for slot, pid in enumerate(other_pids):  # slot 0,1,2
         pid_melds_list = melds[pid] if pid < len(melds) else []
+        opponent_meld_counts[slot] = len(pid_melds_list) / 4.0
         for meld in pid_melds_list:
             pais = meld.get('consumed', []) + ([meld.get('pai')] if meld.get('pai') else [])
+            mtype = meld.get("type")
+            if mtype in ("chi", "pon"):
+                chi_pon_calls += 1
+            if mtype in ("daiminkan", "ankan", "kakan"):
+                kan_calls += 1
             for p in pais:
                 idx = _to_34(p)
                 if idx >= 0:
                     tile_feat[14 + slot, idx] = 1.0
     # ---- ch 17: 自家舍牌 presence ----
-    for disc in discards[actor] if actor < len(discards) else []:
-        idx = _to_34(_disc_pai(disc))
-        if idx >= 0:
-            tile_feat[17, idx] = 1.0
+    for idx, _tsumogiri, _reach_declared in discard_infos[actor]:
+        tile_feat[17, idx] = 1.0
 
     # ---- ch 18: dora 实际牌（指示牌下一张，累加）----
     for dm in dora_markers:
@@ -183,8 +196,14 @@ def encode(state: Dict, actor: int):
             if idx >= 0:
                 tile_feat[18, idx] += 1.0
 
-    visible_counts = list(tracker.visible_counts34)
-    progress = analyze_normal_progress_from_counts(tracker.hand_counts34, tracker.visible_counts34)
+    if collect_timings:
+        t_progress0 = time.perf_counter()
+        progress, progress_timings = analyze_normal_progress_with_timings(hand_counts34, visible_counts)
+        timings["progress_s"] = time.perf_counter() - t_progress0
+        timings.update(progress_timings)
+        t_fill0 = time.perf_counter()
+    else:
+        progress = analyze_normal_progress_from_counts(hand_counts34, visible_counts)
 
     # ---- ch 19: 听牌 waits tiles ----
     waits_tiles = state.get("waits_tiles")
@@ -200,12 +219,8 @@ def encode(state: Dict, actor: int):
     slot_for_pid = {pid: slot for slot, pid in enumerate(other_pids)}
     slot_for_pid[actor] = 3
     for pid in range(4):
-        pid_discards = discards[pid] if pid < len(discards) else []
         slot = slot_for_pid[pid]
-        for turn, d in enumerate(pid_discards):
-            idx = _to_34(_disc_pai(d))
-            if idx < 0:
-                continue
+        for turn, (idx, _tsumogiri, _reach_declared) in enumerate(discard_infos[pid]):
             seg = min(turn // 3, 7)
             ch = 20 + slot * 8 + seg
             tile_feat[ch, idx] = 1.0
@@ -219,26 +234,14 @@ def encode(state: Dict, actor: int):
 
     # ch 53: 最新立直家立直后其他家打过的牌（对该立直家的真安全牌）
     # 找最后一个立直的他家 pid，取其立直宣言牌之后其他家的舍牌
-    latest_riichi_pid = None
-    latest_riichi_turn = -1
-    for pid in other_pids:
-        if pid < len(reached) and reached[pid]:
-            pid_discs = discards[pid] if pid < len(discards) else []
-            for turn, d in enumerate(pid_discs):
-                if _disc_reach_declared(d) and turn > latest_riichi_turn:
-                    latest_riichi_turn = turn
-                    latest_riichi_pid = pid
     if latest_riichi_pid is not None:
         # 收集立直后所有其他家（含 actor）的舍牌
         after_riichi_tiles: set = set()
         for pid in range(4):
             if pid == latest_riichi_pid:
                 continue
-            pid_discs = discards[pid] if pid < len(discards) else []
-            for d in pid_discs:
-                idx = _to_34(_disc_pai(d))
-                if idx >= 0:
-                    after_riichi_tiles.add(idx)
+            for idx, _tsumogiri, _reach_declared in discard_infos[pid]:
+                after_riichi_tiles.add(idx)
         for idx in after_riichi_tiles:
             tile_feat[53, idx] = 1.0
 
@@ -268,7 +271,7 @@ def encode(state: Dict, actor: int):
         if dt:
             dora_set[_to_34(dt)] += 1
     # 手牌+副露的所有牌（tile34 list），仅构建一次，供 dora 计数和役种判断共用
-    all34_list: List[int] = list(hand_count.elements()) + [i for i, c in enumerate(tracker.meld_counts34) for _ in range(c)]
+    all34_list: List[int] = list(hand_count.elements()) + [i for i, c in enumerate(meld_counts34) for _ in range(c)]
     dora_count = sum(dora_set[t] for t in all34_list)
 
     _YAOCHUU_34 = {0, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33}
@@ -297,16 +300,6 @@ def encode(state: Dict, actor: int):
     else:
         chiitoi_shanten, kokushi_shanten = _regular_shanten_counts(list(hand_count.elements()))
 
-    total_discards = sum(len(pid_discards) for pid_discards in discards)
-    chi_pon_calls = 0
-    kan_calls = 0
-    for pid_melds in melds:
-        for meld in pid_melds:
-            mtype = meld.get("type")
-            if mtype in ("chi", "pon"):
-                chi_pon_calls += 1
-            if mtype in ("daiminkan", "ankan", "kakan"):
-                kan_calls += 1
     estimated_wall_draws = total_discards - chi_pon_calls + kan_calls
     if tsumo_pai:
         estimated_wall_draws += 1
@@ -364,9 +357,9 @@ def encode(state: Dict, actor: int):
     scalar[18] = 1.0 if aka_m > 0 else 0.0
     scalar[19] = 1.0 if aka_p > 0 else 0.0
     scalar[20] = 1.0 if aka_s > 0 else 0.0
-    scalar[21] = len(melds[other_pids[0]]) / 4.0 if len(other_pids) > 0 else 0.0
-    scalar[22] = len(melds[other_pids[1]]) / 4.0 if len(other_pids) > 1 else 0.0
-    scalar[23] = len(melds[other_pids[2]]) / 4.0 if len(other_pids) > 2 else 0.0
+    scalar[21] = opponent_meld_counts[0] if len(other_pids) > 0 else 0.0
+    scalar[22] = opponent_meld_counts[1] if len(other_pids) > 1 else 0.0
+    scalar[23] = opponent_meld_counts[2] if len(other_pids) > 2 else 0.0
     scalar[24] = ((scores[other_pids[0]] if len(other_pids) > 0 else actor_score) - actor_score) / 30000.0
     scalar[25] = ((scores[other_pids[1]] if len(other_pids) > 1 else actor_score) - actor_score) / 30000.0
     scalar[26] = ((scores[other_pids[2]] if len(other_pids) > 2 else actor_score) - actor_score) / 30000.0
@@ -436,4 +429,7 @@ def encode(state: Dict, actor: int):
     scalar[54] = float(np.clip(improvement_minus_5x_wait / 34.0, -1.0, 1.0))
     scalar[55] = float(np.clip(wait_hiddenness_ratio, 0.0, 1.0))
 
-    return tile_feat, scalar
+    if collect_timings:
+        timings["fill_s"] = time.perf_counter() - t_fill0
+        return tile_feat, scalar, timings
+    return tile_feat, scalar, timings

@@ -543,6 +543,7 @@ def build_supervised_samples(
     round_step_index = 0
     call_actions = {"chi", "pon", "daiminkan", "ankan", "kakan"}
     multi_ron_base_state: Optional[GameState] = None
+    round_terminal_finalized = False
 
     for i, event in enumerate(events):
         et = event["type"]
@@ -553,6 +554,7 @@ def build_supervised_samples(
             pending_round_samples.clear()
             round_step_index = 0
             multi_ron_base_state = None
+            round_terminal_finalized = False
 
         if et == "hora" and multi_ron_base_state is None and next_ev is not None and next_ev.get("type") == "hora":
             multi_ron_base_state = copy.deepcopy(state)
@@ -761,12 +763,15 @@ def build_supervised_samples(
         if et in {"hora", "ryukyoku"}:
             strategy.finalize_round(pending_round_samples, event)
             _finalize_aux_targets(pending_round_samples, event)
+            round_terminal_finalized = True
         if et == "end_kyoku":
-            strategy.finalize_round(pending_round_samples, None)
-            _finalize_aux_targets(pending_round_samples, None)
+            if not round_terminal_finalized:
+                strategy.finalize_round(pending_round_samples, None)
+                _finalize_aux_targets(pending_round_samples, None)
             pending_round_samples.clear()
             round_step_index = 0
             multi_ron_base_state = None
+            round_terminal_finalized = False
 
         if et == "hora" and not (next_ev is not None and next_ev.get("type") == "hora"):
             multi_ron_base_state = None

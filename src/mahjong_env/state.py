@@ -152,6 +152,21 @@ def _consume_wall_for_kan(state: GameState) -> None:
         state.remaining_wall = max(0, state.remaining_wall - 1)
 
 
+def _resolve_dahai_tile_key(state: GameState, actor: int, pai_raw: str, tsumogiri: bool) -> tuple[str, str]:
+    if pai_raw != "?":
+        return _normalize_or_keep_aka(pai_raw), pai_raw
+    if tsumogiri:
+        last_raw = state.last_tsumo_raw[actor]
+        last_key = state.last_tsumo[actor]
+        if last_raw is not None and last_key is not None:
+            return last_key, last_raw
+    raise TileStateError(
+        f"apply_event dahai actor={actor}: unresolved unknown discard pai='?' "
+        f"(tsumogiri={tsumogiri}, last_tsumo={state.last_tsumo[actor]!r}, "
+        f"last_tsumo_raw={state.last_tsumo_raw[actor]!r})"
+    )
+
+
 def apply_event(state: GameState, event: MjaiEvent) -> None:
     et = event["type"]
     if et == "start_game":
@@ -215,7 +230,8 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
     if et == "dahai":
         actor = event["actor"]
         pai_raw = event["pai"]
-        tile_key = _normalize_or_keep_aka(pai_raw)
+        tsumogiri = bool(event.get("tsumogiri", False))
+        tile_key, resolved_pai_raw = _resolve_dahai_tile_key(state, actor, pai_raw, tsumogiri)
         _remove_tile(
             state.players[actor].hand,
             tile_key,
@@ -224,10 +240,9 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
         )
         if state.feature_tracker is not None:
             state.feature_tracker.on_dahai(actor, tile_key)
-        tsumogiri = bool(event.get("tsumogiri", False))
         reach_declared = state.players[actor].pending_reach
         state.players[actor].discards.append({"pai": tile_key, "tsumogiri": tsumogiri, "reach_declared": reach_declared})
-        state.last_discard = {"actor": actor, "pai": tile_key, "pai_raw": pai_raw}
+        state.last_discard = {"actor": actor, "pai": tile_key, "pai_raw": resolved_pai_raw}
         state.last_kakan = None
         state.last_tsumo[actor] = None
         state.last_tsumo_raw[actor] = None

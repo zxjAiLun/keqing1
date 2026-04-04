@@ -360,7 +360,7 @@
               <tbody>
                 <tr v-for="c in entry.candidates" :key="c.action.type+(c.action.pai||'')"
                   :class="candRowClass(c, entry)">
-                  <td>{{ actionLabel(c.action) }}</td>
+                  <td :title="candidateActionTitle(c)">{{ candidateActionLabel(c) }}</td>
                   <td class="mono">{{ c.logit.toFixed(3) }}</td>
                   <td class="mono" v-if="entry.candidates.some(x => x.final_score !== undefined)">{{ c.final_score !== undefined ? c.final_score.toFixed(3) : '—' }}</td>
                   <td class="mono" v-else-if="entry.candidates.some(x => x.beam_score !== undefined)">{{ c.beam_score !== undefined ? c.beam_score.toFixed(3) : '—' }}</td>
@@ -390,7 +390,7 @@
               <tbody>
                 <tr v-for="c in entry.candidates" :key="c.action.type+(c.action.pai||'')"
                   :class="candRowClass(c, entry)">
-                  <td>{{ actionLabel(c.action) }}</td>
+                  <td :title="candidateActionTitle(c)">{{ candidateActionLabel(c) }}</td>
                   <td class="mono">{{ c.logit.toFixed(3) }}</td>
                   <td class="mono" v-if="entry.candidates.some(x => x.final_score !== undefined)">{{ c.final_score !== undefined ? c.final_score.toFixed(3) : '—' }}</td>
                   <td class="mono" v-else-if="entry.candidates.some(x => x.beam_score !== undefined)">{{ c.beam_score !== undefined ? c.beam_score.toFixed(3) : '—' }}</td>
@@ -455,6 +455,23 @@ function actionLabel(a) {
     case 'none':     return '跳过';
     default:        return a.type;
   }
+}
+
+function candidateActionLabel(c) {
+  const action = c?.action || null;
+  if (!action) return '—';
+  if (action.type !== 'reach') return actionLabel(action);
+  const reachDiscard = c?.reach_discard;
+  if (!reachDiscard || !reachDiscard.pai) return actionLabel(action);
+  return '立直 → ' + actionLabel(reachDiscard);
+}
+
+function candidateActionTitle(c) {
+  const action = c?.action || null;
+  if (!action || action.type !== 'reach') return '';
+  const reachDiscard = c?.reach_discard;
+  if (!reachDiscard || !reachDiscard.pai) return '';
+  return '联合评估宣言牌: ' + actionLabel(reachDiscard);
 }
 
 createApp({
@@ -724,7 +741,7 @@ createApp({
       statsTotal, statsMatch, statsPct, statsKyoku, statsDahaiRate, statsByType, statsByTile,
       tileUrl, sortedHand, barHeight, barRoundClass, barColor, barWrapClass, barLabel, tileCssClass,
       prevKyoku, nextKyoku, prevStep, nextStep, showStats,
-      actionLabel, chosenClass, gtClass,
+      actionLabel, candidateActionLabel, candidateActionTitle, chosenClass, gtClass,
     };
   },
 }).mount('#app');

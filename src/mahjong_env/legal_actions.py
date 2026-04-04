@@ -95,13 +95,116 @@ def _ankan_candidates(hand: Counter) -> List[tuple[str, tuple[str, ...]]]:
     return result
 
 
-def _can_declare_reach(hand: Counter, melds: List[Dict], shanten: int | None, reached: bool) -> bool:
-    if reached or shanten != 0:
+def _remove_tile_once(hand: List[str], tile: str) -> bool:
+    try:
+        hand.remove(tile)
+        return True
+    except ValueError:
+        normalized = normalize_tile(tile)
+        if normalized != tile:
+            try:
+                hand.remove(normalized)
+                return True
+            except ValueError:
+                return False
+        return False
+
+
+def _ankan_allowed_after_reach(
+    hand: Counter,
+    melds: List[Dict],
+    consumed: tuple[str, ...],
+    last_tsumo: str | None,
+    last_tsumo_raw: str | None,
+) -> bool:
+    from mahjong_env.replay import _calc_shanten_waits
+
+    full_hand = list(hand.elements())
+    if last_tsumo is not None and len(full_hand) % 3 == 1:
+        full_hand.append(last_tsumo_raw or last_tsumo)
+
+    before_hand = list(full_hand)
+    draw_tile = last_tsumo_raw or last_tsumo
+    if draw_tile is not None:
+        _remove_tile_once(before_hand, draw_tile)
+
+    before_shanten, _before_wait_count, before_waits, _ = _calc_shanten_waits(before_hand, melds)
+    if before_shanten != 0:
+        return False
+
+    after_hand = list(full_hand)
+    for tile in consumed:
+        if not _remove_tile_once(after_hand, tile):
+            return False
+
+    ankan_tile = consumed[0] if consumed else None
+    after_melds = [
+        *melds,
+        {
+            "type": "ankan",
+            "pai": ankan_tile,
+            "pai_raw": ankan_tile,
+            "consumed": list(consumed),
+            "target": 0,
+        },
+    ]
+    after_shanten, _after_wait_count, after_waits, _ = _calc_shanten_waits(after_hand, after_melds)
+    return after_shanten == 0 and list(before_waits) == list(after_waits)
+
+
+def _reach_discard_candidates(
+    hand: Counter,
+    last_tsumo: str | None,
+    last_tsumo_raw: str | None,
+) -> List[tuple[str, bool]]:
+    from mahjong.shanten import Shanten
+    from mahjong.tile import TilesConverter
+    from mahjong_env.tiles import tile_to_136 as _to_136
+
+    candidates: List[tuple[str, bool]] = []
+    seen: set[tuple[str, bool]] = set()
+    shanten_calc = Shanten()
+
+    for tile in list(hand.keys()):
+        pai_out = tile
+        tsumogiri = last_tsumo == tile
+        if tsumogiri and last_tsumo_raw is not None:
+            pai_out = last_tsumo_raw
+        test_hand = dict(hand)
+        test_hand[tile] -= 1
+        if test_hand[tile] == 0:
+            del test_hand[tile]
+        hand136: List[int] = []
+        for t, cnt in test_hand.items():
+            idx136 = _to_136(t)
+            if idx136 >= 0:
+                hand136.extend([idx136] * cnt)
+        if not hand136:
+            continue
+        tiles34 = TilesConverter.to_34_array(hand136)
+        if shanten_calc.calculate_shanten(tiles34) == 0:
+            key = (pai_out, tsumogiri)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(key)
+    return candidates
+
+
+def _can_declare_reach(
+    hand: Counter,
+    melds: List[Dict],
+    reached: bool,
+    last_tsumo: str | None,
+    last_tsumo_raw: str | None,
+) -> bool:
+    if reached:
         return False
     if any(meld.get("type") != "ankan" for meld in melds):
         return False
     concealed_kan_count = sum(1 for meld in melds if meld.get("type") == "ankan")
-    return sum(hand.values()) + 3 * concealed_kan_count == 14
+    if sum(hand.values()) + 3 * concealed_kan_count != 14:
+        return False
+    return bool(_reach_discard_candidates(hand, last_tsumo, last_tsumo_raw))
 
 
 def enumerate_legal_action_specs(state_snapshot: Dict, actor: int) -> List[ActionSpec]:
@@ -198,35 +301,17 @@ def enumerate_legal_action_specs(state_snapshot: Dict, actor: int) -> List[Actio
                 legal.append(ActionSpec(type="dahai", actor=actor, pai=last_tsumo_raw, tsumogiri=True))
             elif last_tsumo is not None:
                 legal.append(ActionSpec(type="dahai", actor=actor, pai=last_tsumo, tsumogiri=True))
+            actor_melds = state_snapshot.get("melds", [[]])[actor]
             for pai, consumed in _ankan_candidates(hand):
-                legal.append(ActionSpec(type="ankan", actor=actor, pai=pai, consumed=consumed))
+                if _ankan_allowed_after_reach(hand, actor_melds, consumed, last_tsumo, last_tsumo_raw):
+                    legal.append(ActionSpec(type="ankan", actor=actor, pai=pai, consumed=consumed))
             return legal
 
         if pending_reach:
             # 已宣告立直、等待打出立直宣言牌：只能打出让手牌保持听牌的牌。
             # 对每张候选牌，临时移除后检验 shanten==0（听牌）。
-            from mahjong_env.tiles import tile_to_136 as _to_136
-            from mahjong.shanten import Shanten
-            from mahjong.tile import TilesConverter
-            _shanten_calc = Shanten()
-            for tile in list(hand.keys()):
-                pai_out = tile
-                if last_tsumo == tile and last_tsumo_raw is not None:
-                    pai_out = last_tsumo_raw
-                test_hand = dict(hand)
-                test_hand[tile] -= 1
-                if test_hand[tile] == 0:
-                    del test_hand[tile]
-                hand136 = []
-                for t, cnt in test_hand.items():
-                    idx136 = _to_136(t)
-                    if idx136 >= 0:
-                        hand136.extend([idx136] * cnt)
-                if not hand136:
-                    continue
-                tiles34 = TilesConverter.to_34_array(hand136)
-                if _shanten_calc.calculate_shanten(tiles34) == 0:
-                    legal.append(ActionSpec(type="dahai", actor=actor, pai=pai_out, tsumogiri=(last_tsumo == tile)))
+            for pai_out, tsumogiri in _reach_discard_candidates(hand, last_tsumo, last_tsumo_raw):
+                legal.append(ActionSpec(type="dahai", actor=actor, pai=pai_out, tsumogiri=tsumogiri))
             if not legal:
                 # fallback：shanten 计算失败时退化为全打法
                 for tile in hand.keys():
@@ -255,9 +340,8 @@ def enumerate_legal_action_specs(state_snapshot: Dict, actor: int) -> List[Actio
         # 这里用更严格的条件，减少reach动作在不合时机时被加入legal set。
         # shanten 信息由 libriichi 在 mjai_bot.py 的 react() 中计算并添加到 snapshot。
         # 只有 shanten == 0 (听牌) 时才允许立直，防止模型错误选择导致 mjai_simulator 报错。
-        shanten = state_snapshot.get("shanten", None)
         actor_melds = state_snapshot.get("melds", [[]])[actor]
-        if _can_declare_reach(hand, actor_melds, shanten, reached):
+        if _can_declare_reach(hand, actor_melds, reached, last_tsumo, last_tsumo_raw):
             legal.append(ActionSpec(type="reach", actor=actor))
         for pai, consumed in _ankan_candidates(hand):
             legal.append(ActionSpec(type="ankan", actor=actor, pai=pai, consumed=consumed))

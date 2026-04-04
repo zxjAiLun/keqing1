@@ -1,4 +1,4 @@
-from replay.bot import normalize_replay_decisions
+from replay.normalize import normalize_replay_decisions
 
 
 def test_normalize_replay_decisions_fills_explicit_none_gt_action():

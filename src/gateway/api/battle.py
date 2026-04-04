@@ -16,13 +16,14 @@ sys.path.insert(
 
 from gateway.battle import BattleConfig, BattleManager, BattleRoom, get_manager
 from gateway.bot_driver import BotDriver
+from inference.bot_registry import SUPPORTED_BOT_NAMES, create_runtime_bot
 from mahjong_env.legal_actions import enumerate_legal_actions
 
 app = FastAPI()
 manager = get_manager()
 
 project_root = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 tiles_path = os.path.join(project_root, "tiles", "riichi-mahjong-tiles", "Regular")
 if os.path.exists(tiles_path):
@@ -33,7 +34,8 @@ router = APIRouter(prefix="/api/battle")
 # NOTE: router 在文件末尾 include 到 app（需在所有路由定义之后）
 
 bots: Dict[int, Any] = {}
-BOT_TYPE = os.environ.get("BOT_TYPE", "v5")
+BOT_TYPE = os.environ.get("BOT_TYPE", "keqingv1")
+SUPPORTED_BOT_MODELS = set(SUPPORTED_BOT_NAMES)
 
 
 def _cleanup_bot(bot: Any) -> None:
@@ -54,42 +56,47 @@ def _cleanup_all_bots() -> None:
 
 
 # 当前选用的 bot 模型名称（由 start_battle 设置）
-current_bot_model: str = "modelv5"
+current_bot_model: str = "keqingv1"
+
+
+def _build_bot_names(bot_model: str, count: int) -> List[str]:
+    return [f"{bot_model}-{i + 1}号机" for i in range(count)]
 
 
 def get_or_create_bot(bot_id: int) -> Any:
     if bot_id not in bots:
-        import v5model
-
-        project_root = os.path.dirname(
-            os.path.dirname(os.path.dirname(v5model.__file__))
+        bot_name = current_bot_model
+        if bot_name not in SUPPORTED_BOT_MODELS:
+            raise ValueError(f"Unsupported bot model: {bot_name}")
+        print(f"[Bot] Creating {bot_name} bot for seat {bot_id}")
+        bots[bot_id] = create_runtime_bot(
+            bot_name=bot_name,
+            player_id=bot_id,
+            project_root=project_root,
+            device="cuda",
+            verbose=False,
         )
-        model_name = current_bot_model
-        if model_name in ("keqingv1", "keqingv2", "keqingv3"):
-            from keqingv1.bot import KeqingBot
-
-            model_path = os.path.join(
-                project_root, "artifacts", "models", model_name, "best.pth"
-            )
-            print(f"[Bot] Loading {model_name} model from: {model_path}")
-            bots[bot_id] = KeqingBot(
-                player_id=bot_id, model_path=model_path, device="cuda", verbose=False
-            )
-        else:
-            from v5model.bot import V5Bot
-
-            model_path = os.path.join(
-                project_root, "artifacts", "models", model_name, "best.pth"
-            )
-            print(f"[Bot] Loading {model_name} model from: {model_path}")
-            bots[bot_id] = V5Bot(
-                player_id=bot_id, model_path=model_path, device="cuda", verbose=False
-            )
     return bots[bot_id]
 
 
 bot_driver = BotDriver(manager, get_or_create_bot)
 _advance_lock = asyncio.Lock()
+
+
+def _has_pending_post_call_discard(room: BattleRoom, actor: int) -> bool:
+    """chi/pon 后尚未打牌的阶段：没有 last_tsumo，但手牌张数已处于“待打牌”状态。"""
+    if room.phase != "playing":
+        return False
+    if room.state.actor_to_move != actor:
+        return False
+    if room.state.last_tsumo[actor] is not None:
+        return False
+    if room.state.last_discard or room.state.last_kakan:
+        return False
+    if room.pending_rinshan:
+        return False
+    hand_size = sum(room.state.players[actor].hand.values())
+    return hand_size % 3 == 2
 
 
 def _prepare_player_state(room: BattleRoom, player_id: int) -> Dict[str, Any]:
@@ -101,9 +108,9 @@ def _prepare_player_state(room: BattleRoom, player_id: int) -> Dict[str, Any]:
         and room.human_player_id == player_id
         and room.remaining_wall() >= 1
         and not room.state.last_discard
+        and not room.state.last_kakan
     ):
-        hand_size = sum(room.state.players[player_id].hand.values())
-        if hand_size not in (11, 12):
+        if not _has_pending_post_call_discard(room, player_id):
             manager.draw(room, player_id)
     return manager.get_state_for_player(room, player_id=player_id)
 
@@ -118,7 +125,12 @@ class StartBattleRequest(BaseModel):
     player_name: str = "Player"
     bot_count: int = 3
     seed: Optional[int] = None
-    bot_model: str = "modelv5"  # modelv5 / keqingv1 / keqingv2 / keqingv3
+    bot_model: str = "keqingv1"
+
+
+class Start4BotRequest(BaseModel):
+    seed: Optional[int] = None
+    bot_model: str = "keqingv1"
 
 
 class StartBattleResponse(BaseModel):
@@ -144,18 +156,20 @@ class ActionResponse(BaseModel):
 @router.post("/start", response_model=StartBattleResponse)
 async def start_battle(req: StartBattleRequest) -> StartBattleResponse:
     global current_bot_model
+    if req.bot_model not in SUPPORTED_BOT_MODELS:
+        raise HTTPException(status_code=400, detail=f"Unsupported bot_model: {req.bot_model}")
     current_bot_model = req.bot_model
     _cleanup_all_bots()
 
     players: List[PlayerInfo] = [
         PlayerInfo(id="human", name=req.player_name, type="human"),
     ]
-    bot_names = ["Alpha", "Beta", "Gamma"]
+    bot_names = _build_bot_names(req.bot_model, req.bot_count)
     for i in range(req.bot_count):
         players.append(
             PlayerInfo(
                 id=f"bot_{i}",
-                name=bot_names[i] if i < len(bot_names) else f"Bot{i + 1}",
+                name=bot_names[i],
                 type="bot",
             )
         )
@@ -166,9 +180,11 @@ async def start_battle(req: StartBattleRequest) -> StartBattleResponse:
     room.human_player_id = 0
 
     manager.start_kyoku(room, seed=req.seed)
+    room.bot_event_cursor = {}
 
     for bot_id in range(1, 4):
         get_or_create_bot(bot_id).reset()
+    bot_driver.sync_all_bots(room)
 
     state = _prepare_player_state(room, player_id=0)
     return StartBattleResponse(game_id=room.game_id, state=state)
@@ -182,27 +198,33 @@ async def close_battle(game_id: str) -> Dict[str, bool]:
 
 
 @router.post("/start_4bot")
-async def start_4bot(seed: Optional[int] = None) -> Dict[str, Any]:
+async def start_4bot(req: Start4BotRequest) -> Dict[str, Any]:
     """4 Bot对战模式，自动运行直到游戏结束"""
+    global current_bot_model
+    if req.bot_model not in SUPPORTED_BOT_MODELS:
+        raise HTTPException(
+            status_code=400, detail=f"Unsupported bot_model: {req.bot_model}"
+        )
+    current_bot_model = req.bot_model
     _cleanup_all_bots()
 
+    bot_names = _build_bot_names(req.bot_model, 4)
     players: List[PlayerInfo] = [
-        PlayerInfo(
-            id=f"bot_{i}", name=["Alpha", "Beta", "Gamma", "Delta"][i], type="bot"
-        )
+        PlayerInfo(id=f"bot_{i}", name=bot_names[i], type="bot")
         for i in range(4)
     ]
 
     config = BattleConfig(player_count=4, players=[p.model_dump() for p in players])
-    room = manager.create_room(config, seed=seed)
+    room = manager.create_room(config, seed=req.seed)
     room.human_player_id = -1  # 表示无人类玩家
+    room.bot_event_cursor = {}
 
     for bot_id in range(4):
         get_or_create_bot(bot_id).reset()
 
     import asyncio
 
-    asyncio.create_task(bot_driver.run_4bot_game(room.game_id, seed))
+    asyncio.create_task(bot_driver.run_4bot_game(room.game_id, req.seed))
 
     state = manager.get_state_for_player(room, player_id=0)
     return {"game_id": room.game_id, "state": state}
@@ -339,9 +361,13 @@ async def advance_bot(game_id: str) -> ActionResponse:
                     room.state.last_kakan
                     and room.state.last_kakan.get("actor") != next_actor
                 )
+                has_pending_post_call_discard = _has_pending_post_call_discard(
+                    room, next_actor
+                )
                 needs_draw_stage = (
                     not is_discard_response
                     and not is_kakan_response
+                    and not has_pending_post_call_discard
                     and room.replay_draw_actor != next_actor
                     and room.state.last_tsumo[next_actor] is None
                 )
@@ -350,7 +376,12 @@ async def advance_bot(game_id: str) -> ActionResponse:
                     draw_tile = manager.prepare_turn(room, next_actor)
                     if room.phase != "ended" and draw_tile is None and room.replay_draw_actor != next_actor:
                         last_bot_action = await bot_driver.take_turn(room, next_actor)
-                elif room.replay_draw_actor == next_actor or is_discard_response or is_kakan_response:
+                elif (
+                    room.replay_draw_actor == next_actor
+                    or has_pending_post_call_discard
+                    or is_discard_response
+                    or is_kakan_response
+                ):
                     last_bot_action = await bot_driver.take_turn(room, next_actor)
 
     state = _prepare_player_state(room, player_id=human_player_id if human_player_id >= 0 else 0)

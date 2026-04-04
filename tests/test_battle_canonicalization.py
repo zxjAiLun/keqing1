@@ -279,6 +279,8 @@ class TestStateExposure:
         # response window 时 none 应保留
         none_actions = [a for a in legal_actions if a["type"] == "none"]
         assert len(none_actions) >= 1, "response window should include none"
+        assert state["needs_input"] is True
+        assert state["input_context"] == "discard_response"
 
     def test_none_absent_in_self_discard_window(self):
         """自己摸牌打牌窗口时 none 不应出现。"""
@@ -295,6 +297,28 @@ class TestStateExposure:
         # 自己打牌窗口 none 无意义，应被过滤
         none_actions = [a for a in legal_actions if a["type"] == "none"]
         assert len(none_actions) == 0, "self discard window should not have none"
+        assert state["needs_input"] is True
+        assert state["input_context"] == "self_turn"
+
+    def test_no_input_and_empty_legal_actions_when_player_has_no_priority(self):
+        """他家附露/响应阶段与当前玩家无关时，前端不应再收到可点击动作。"""
+        manager, room = _make_room()
+        manager.start_kyoku(room, seed=7)
+
+        room.state.players[0].hand = Counter({
+            "1m": 1, "4m": 1, "7m": 1,
+            "2p": 1, "5p": 1, "8p": 1,
+            "3s": 1, "6s": 1, "9s": 1,
+            "E": 1, "S": 1, "W": 1, "N": 1,
+        })
+        room.state.last_discard = {"actor": 1, "pai": "3m", "pai_raw": "3m"}
+        room.state.actor_to_move = 2
+
+        state = manager.get_state_for_player(room, 0)
+
+        assert state["needs_input"] is False
+        assert state["input_context"] is None
+        assert state["legal_actions"] == []
 
     def test_actor_field_filled_in_legal_actions(self):
         """legal_actions 中非 none 动作的 actor 字段应被补齐。"""

@@ -33,12 +33,18 @@ class BotDriver:
         if room.phase == "ended":
             return None
 
-        snap, event = self._build_snap_and_event(room, actor)
+        snap, event, trigger_event_index = self._build_snap_and_event(room, actor)
+        if trigger_event_index is not None:
+            self._sync_bot_events(room, actor, upto=trigger_event_index)
 
         logger.debug("Bot %d calling react with event: %s", actor, event)
         await asyncio.sleep(0.5)
 
         chosen_dict = await self._call_bot(room, actor, snap, event)
+        if trigger_event_index is not None:
+            room.bot_event_cursor[actor] = max(
+                room.bot_event_cursor.get(actor, 0), trigger_event_index + 1
+            )
         logger.debug(
             "Bot %d chosen: type=%s pai=%s",
             actor,
@@ -64,6 +70,8 @@ class BotDriver:
             return
 
         self.manager.start_kyoku(room, seed=seed)
+        room.bot_event_cursor = {}
+        self.sync_all_bots(room)
 
         while True:
             while room.phase == "playing":
@@ -75,9 +83,15 @@ class BotDriver:
                     self.manager.ryukyoku(room)
                     break
 
-                snap, event = self._build_snap_and_event(room, actor, do_draw=True)
+                snap, event, trigger_event_index = self._build_snap_and_event(room, actor, do_draw=True)
+                if trigger_event_index is not None:
+                    self._sync_bot_events(room, actor, upto=trigger_event_index)
 
                 chosen_dict = await self._call_bot(room, actor, snap, event)
+                if trigger_event_index is not None:
+                    room.bot_event_cursor[actor] = max(
+                        room.bot_event_cursor.get(actor, 0), trigger_event_index + 1
+                    )
                 applied = self.validate_and_apply(room, actor, chosen_dict, snap)
                 if not applied:
                     logger.warning(
@@ -101,6 +115,8 @@ class BotDriver:
                 break
 
             self.manager.start_kyoku(room, seed=None)
+            room.bot_event_cursor = {}
+            self.sync_all_bots(room)
             await asyncio.sleep(0.1)
 
     async def run_4bot_game_from_current(self, room: BattleRoom) -> None:
@@ -115,9 +131,15 @@ class BotDriver:
                     self.manager.ryukyoku(room)
                     break
 
-                snap, event = self._build_snap_and_event(room, actor, do_draw=True)
+                snap, event, trigger_event_index = self._build_snap_and_event(room, actor, do_draw=True)
+                if trigger_event_index is not None:
+                    self._sync_bot_events(room, actor, upto=trigger_event_index)
 
                 chosen_dict = await self._call_bot(room, actor, snap, event)
+                if trigger_event_index is not None:
+                    room.bot_event_cursor[actor] = max(
+                        room.bot_event_cursor.get(actor, 0), trigger_event_index + 1
+                    )
                 applied = self.validate_and_apply(room, actor, chosen_dict, snap)
                 if not applied:
                     self.validate_and_apply(
@@ -136,11 +158,42 @@ class BotDriver:
                 break
 
             self.manager.start_kyoku(room, seed=None)
+            room.bot_event_cursor = {}
+            self.sync_all_bots(room)
             await asyncio.sleep(0.1)
 
     # ------------------------------------------------------------------
     # 内部辅助
     # ------------------------------------------------------------------
+
+    def _sync_bot_events(
+        self,
+        room: BattleRoom,
+        bot_id: int,
+        *,
+        upto: Optional[int] = None,
+    ) -> None:
+        limit = len(room.events) if upto is None else upto
+        cursor = room.bot_event_cursor.get(bot_id, 0)
+        if cursor >= limit:
+            return
+        bot = self.get_or_create_bot(bot_id)
+        for event in room.events[cursor:limit]:
+            bot.react(event)
+        room.bot_event_cursor[bot_id] = limit
+
+    def sync_all_bots(
+        self,
+        room: BattleRoom,
+        *,
+        upto: Optional[int] = None,
+        include_human: bool = False,
+    ) -> None:
+        limit = len(room.events) if upto is None else upto
+        for pid, player in enumerate(room.config.players):
+            if not include_human and player.get("type") != "bot":
+                continue
+            self._sync_bot_events(room, pid, upto=limit)
 
     def _build_snap_and_event(
         self, room: BattleRoom, actor: int, do_draw: bool = False
@@ -155,6 +208,7 @@ class BotDriver:
         is_opponent_discard = bool(last_discard and last_discard.get("actor") != actor)
 
         tsumo_pai = None
+        trigger_event_index: Optional[int] = None
         if not is_opponent_discard:
             if do_draw:
                 self.manager.draw(room, actor)
@@ -164,15 +218,37 @@ class BotDriver:
         snap["tsumo_pai"] = tsumo_pai
 
         if is_opponent_discard:
-            event = {
-                "type": "dahai",
-                "actor": last_discard["actor"],
-                "pai": last_discard["pai"],
-            }
+            if room.events:
+                trigger_event_index = len(room.events) - 1
+                event = room.events[trigger_event_index]
+            else:
+                event = {
+                    "type": "dahai",
+                    "actor": last_discard["actor"],
+                    "pai": last_discard["pai"],
+                }
+        elif room.state.last_kakan and room.state.last_kakan.get("actor") != actor:
+            if room.events:
+                trigger_event_index = len(room.events) - 1
+                event = room.events[trigger_event_index]
+            else:
+                event = dict(room.state.last_kakan)
+        elif room.events and room.state.last_tsumo[actor] is None:
+            last_event = room.events[-1]
+            if (
+                last_event.get("actor") == actor
+                and last_event.get("type") in ("chi", "pon", "daiminkan", "reach")
+            ):
+                trigger_event_index = len(room.events) - 1
+                event = last_event
+            else:
+                event = {"type": "none", "actor": actor}
         else:
             event = {"type": "tsumo", "actor": actor, "pai": tsumo_pai}
+            if room.events and room.events[-1].get("type") == "tsumo" and room.events[-1].get("actor") == actor:
+                trigger_event_index = len(room.events) - 1
 
-        return snap, event
+        return snap, event, trigger_event_index
 
     async def _call_bot(
         self, room: BattleRoom, actor: int, snap: Dict, event: Dict
@@ -331,7 +407,14 @@ class BotDriver:
             )
             if matched:
                 target = actor if matched.target is None else matched.target
-                mgr.hora(room, actor, target, matched.pai or "", is_tsumo=(target == actor))
+                mgr.hora(
+                    room,
+                    actor,
+                    target,
+                    matched.pai or "",
+                    is_tsumo=(target == actor),
+                    is_chankan=bool(room.state.last_kakan and room.state.last_kakan.get("actor") != actor and target != actor),
+                )
                 return True
 
         elif action_type == "none":

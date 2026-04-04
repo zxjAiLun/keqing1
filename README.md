@@ -4,7 +4,11 @@
 
 ## 项目状态
 
-当前主力模型为 **keqingv2**（Conv1d ResNet ~1.7M 参数，keqingv1 + Meld Value Ranking Loss）。
+当前稳定运行线仍是 **keqingv2**，当前主迭代训练线为 **keqingv3**。
+
+当前运行时推理入口为**统一 runtime bot 壳**：
+- `src/inference/runtime_bot.py::RuntimeBot`
+- `keqingv1 / keqingv2 / keqingv3` 通过不同 checkpoint 与 adapter 复用同一套 battle/replay 推理壳
 
 主要特性：
 - 完整的 45 动作监督学习框架（dahai×34 + reach/chi/pon/kan/hora/none）
@@ -13,7 +17,7 @@
 - none/pass 样本自动生成（约占总样本 16%）
 - 振听系统、荣和精确判断
 - 立直后摸切样本过滤（约 5.5%）
-- KeqingBot 支持 Mjai 协议推理 + beam search value 重排
+- RuntimeBot 支持 Mjai 协议推理 + beam search value 重排
 
 ## 快速开始
 
@@ -23,33 +27,68 @@
 uv sync
 ```
 
+### 本地模式 / 天凤模式启动
+
+本项目现在把“本地单机回放/对战”和“天凤平台 Gateway”明确分开：
+
+```bash
+# 本地模式：启动 ReplayUI + 本地 Battle API
+uv run python src/main.py local --port 8000
+
+# 兼容旧命令，效果等同于 local
+uv run python src/main.py replay --port 8000
+
+# 仅启动天凤 Gateway
+uv run python src/main.py tenhou --gateway-port 11600
+
+# 兼容旧命令，效果等同于 tenhou
+uv run python src/main.py gateway --gateway-port 11600
+
+# 两者同时启动
+uv run python src/main.py serve --port 8000 --gateway-port 11600
+```
+
+说明：
+- `local/replay` 只提供本地网页回放和本地 battle bot 对战，不启动天凤 Gateway
+- `tenhou/gateway` 只提供平台接入，不启动本地网页服务
+- 如果只是本地 1v3、4bot、自对战回放，不需要启动天凤 Gateway 端口
+
 ### 预处理数据
 
 ```bash
-# 普通数据（ds1-ds6, ds8-ds13 合并到 processed_v2_new/ds1）
-uv run python scripts/preprocess_v2.py \
-  --data_dirs artifacts/converted_mjai/ds1 artifacts/converted_mjai/ds2 ... \
-  --output_dir processed_v2_new/ds1 --workers 16
-
-# NAGA 视角数据（ds7 → processed_v2_new/ds2）
-uv run python scripts/preprocess_v2.py \
-  --data_dirs artifacts/converted_mjai/ds7 \
-  --output_dir processed_v2_new/ds2 --workers 16 \
-  --actor_name_filter 'ⓝNAGA25'
+# keqingv3 预处理入口（默认读取 configs/keqingv3_preprocess.yaml）
+uv run python scripts/preprocess_v3.py
 ```
 
-### 启动训练（keqingv2）
+当前 keqingv3 预处理默认配置要点：
+- 输出目录：`processed_v3_fixaux`
+- 默认关闭压缩：`compress_output: false`
+- 预处理已内建 recent-window ETA
+- 近期 hot path 已集中优化到 `keqingv3.progress_oracle`
+
+如果只想临时覆盖并发或 ETA 窗口：
 
 ```bash
-# 从 keqingv1 权重迁移（推荐）
-uv run python src/train/train_v2.py \
-  --config configs/keqingv2_default.yaml \
-  --resume artifacts/models/keqingv1/best.pth --weights-only
+uv run python scripts/preprocess_v3.py --workers 18 --eta-window 200
+```
 
-# 断点续训
-uv run python src/train/train_v2.py \
-  --config configs/keqingv2_default.yaml \
-  --resume artifacts/models/keqingv2/latest.pth
+注意：
+- `processed_v3` 的旧 cache 可能带有修复前的 aux target 覆盖问题
+- `keqingv3` 训练应优先使用 `processed_v3_fixaux`
+
+### 训练 keqingv3
+
+```bash
+# 默认读取 configs/keqingv3_default.yaml
+uv run python scripts/train_keqingv3.py
+```
+
+如果要临时改设备或输出目录：
+
+```bash
+uv run python scripts/train_keqingv3.py \
+  --device cpu \
+  --output-dir artifacts/models/keqingv3_debug
 ```
 
 ### 运行测试
@@ -63,17 +102,24 @@ uv run pytest
 ```text
 keqing1/
 ├── src/
-│   ├── keqingv1/                 # v1 基础模型（复用）
+│   ├── keqingv1/                 # v1 基础模型（兼容 action space / 特征定义）
 │   │   ├── action_space.py       # 45 个动作的索引映射
 │   │   ├── features.py           # 特征编码 (54,34) tile_feat + (48,) scalar
 │   │   ├── model.py              # MahjongModel (~1.7M 参数)
 │   │   ├── cached_dataset.py     # IterableDataset 流式加载（npz）
 │   │   ├── trainer.py            # 训练循环（AMP + 梯度累积）
-│   │   └── bot.py                # KeqingBot（Mjai 协议推理 + beam search）
 │   │
 │   ├── keqingv2/                 # v2 扩展（Meld Value Ranking Loss）
 │   │   ├── cached_dataset.py     # 预编码 rank pair，batch 返回 10-tuple
 │   │   └── trainer.py            # rank loss 训练循环
+│   │
+│   ├── keqingv3/                 # v3 迭代（aux heads + progress oracle）
+│   │   ├── features.py
+│   │   ├── feature_tracker.py
+│   │   ├── progress_oracle.py
+│   │   ├── model.py
+│   │   ├── cached_dataset.py
+│   │   └── trainer.py
 │   │
 │   ├── mahjong_env/              # 麻将环境（游戏状态、合法动作）
 │   │   ├── state.py
@@ -82,139 +128,95 @@ keqing1/
 │   │   ├── tiles.py
 │   │   └── types.py
 │   │
-│   ├── train/
-│   │   └── train_v2.py           # keqingv2 训练入口
+│   ├── inference/                # 统一运行时推理壳（battle/replay 共用）
+│   │   ├── runtime_bot.py
+│   │   ├── keqing_adapter.py
+│   │   ├── scoring.py
+│   │   ├── default_context.py
+│   │   └── review.py
 │   │
 │   └── gateway/                  # Bot 对战网关
 │
 ├── configs/
-│   └── keqingv2_default.yaml     # keqingv2 训练超参
+│   ├── keqingv2_default.yaml
+│   ├── keqingv3_default.yaml
+│   └── keqingv3_preprocess.yaml
 │
 ├── artifacts/
 │   ├── converted_mjai/           # 转换后的训练数据（ds1-ds13）
-│   └── models/modelv5/           # 训练输出
-│       ├── best.pth              # 最佳 checkpoint
-│       ├── latest.pth            # 最新 checkpoint
-│       └── train_log.jsonl       # 训练日志
+│   └── models/
+│       ├── keqingv1/
+│       ├── keqingv2/
+│       └── keqingv3/
 │
 ├── tests/
 └── docs/
-    └── v5model.md                # v5model 详细设计文档
 ```
 
-## v5model 架构
+## scripts 分区标签
 
-### 网络结构
+为降低脚本检索成本，`scripts/` 统一按以下标签理解：
 
-```text
-输入：
-  tile_feat  (B, 128, 34)  — 128 通道 × 34 张牌
-  scalar     (B, 16)       — 16 维标量特征
+### [data] 数据转换与预处理
 
-MahjongModel：
-  input_proj  Conv1d(128→256, k=1) + BN + ReLU
-  ResBlock×4  Conv1d(256, k=3, pad=1) + BN + ReLU  ×2（残差连接）
-  global_avg_pool  →  (B, 256)
-  scalar_proj  Linear(16→32) + ReLU
-  concat  →  (B, 288)
-  fc_shared  Linear(288→256) + ReLU + Dropout(0.1)
+- `batch_convert_ds.py`
+- `batch_convert_mjai_converter.py`
+- `batch_convert_tenhou6.py`
+- `download_and_convert.py`
+- `extract_tenhou_links.py`
+- `mjlog2mjai_parse.py`
+- `preprocess_cached.py`
+- `preprocess_ds4.py`
+- `preprocess_task.py`
+- `preprocess_v2.py`
+- `preprocess_v3.py`
+- `reorganize_ds.py`
+- `tenhou_xml_to_json.py`
 
-输出头：
-  policy_head  Linear(256→45)     — 未 softmax 的动作 logits
-  value_head   Linear(256→64→1)   — Tanh 输出，预测最终得分
+### [replay] 回放转换与校验
 
-参数量：~1.7M
-```
+- `verify_roundtrip.py`
+- `verify_tenhou6_mjai.py`
+- `visualize_replay.py`
+- `test_gameviewer.py`
 
-### 动作空间（45 个）
+### [selfplay] 自对战与导出流程
 
-| 索引 | 动作 |
-|------|------|
-| 0–33 | 弃牌（dahai），按牌种索引 |
-| 34 | 立直（reach） |
-| 35 | 吃（chi_low） |
-| 36 | 吃（chi_mid） |
-| 37 | 吃（chi_high） |
-| 38 | 碰（pon） |
-| 39 | 大明杠（daiminkan） |
-| 40 | 暗杠（ankan） |
-| 41 | 加杠（kakan） |
-| 42 | 和牌（hora） |
-| 43 | 流局（ryukyoku） |
-| 44 | 跳过（none/pass） |
+- `selfplay.py`
+- `run_game_script.py`
+- `run_game_and_export.ipynb`
 
-### 特征编码
+### [devtools] 开发辅助与环境检查
 
-**tile_feat `(128, 34)`：**
+- `build_static_tables.py`
+- `download_wait_categories.py`
+- `test_riichienv_import.py`
 
-- 自家手牌（多热，每种牌 0-4 张）
-- 各家已见牌、副露、立直状态
-- 宝牌、场风/自风、向听数等
-
-**scalar `(16,)`：**
-
-- 各家分数、本场数、供托数、剩余牌数、巡目等
-
-### 训练配置
-
-| 参数 | 值 |
-|------|----|
-| batch_size | 64（梯度累积×4，等效 256）|
-| learning_rate | 3e-4 |
-| warmup_steps | 500 |
-| LR decay | Cosine |
-| AMP | 是（GradScaler） |
-| value loss weight | 0.5 |
-| num_epochs | 20 |
-
-### Value Target
-
-每局游戏中累加所有 `hora` / `ryukyoku` 事件的 `deltas`，得到该玩家的最终得分变化，除以 30000 归一化到 `[-1, 1]`。
-
-## 数据流
+## 训练与数据流（当前）
 
 ```text
 天凤/雀魂对局记录
-      ↓ (src/convert/ + libriichi)
+      ↓
 Mjai JSONL (.mjson)
-      ↓ (mahjong_env.replay.build_supervised_samples)
-监督学习样本 (state, legal_actions, label_action)
-      ↓ (v5model.dataset.MjaiIterableDataset)
-流式训练 batch
+      ↓ (scripts/preprocess_v3.py + training.preprocess)
+缓存样本 (.npz, 当前主线为 processed_v3_fixaux)
+      ↓ (scripts/train_keqingv3.py + keqingv3.trainer)
+模型 checkpoint (artifacts/models/keqingv3*)
 ```
 
-数据目录：`artifacts/converted_mjai/ds1` ~ `ds13`，共 12870 个 `.mjson` 文件。
+当前主线支持 `keqingv1 / keqingv2 / keqingv3` 三条模型分支。
 
-## v5model 关键实现细节
-
-### 立直状态处理（legal_actions.py）
-
-`enumerate_legal_actions` 对立直状态实现三段式处理：
-
-| 状态 | `reached=True` | `pending_reach=True` | 普通 |
-|------|---------------|---------------------|------|
-| 含义 | 立直已被接受 | 已宣告、待打宣言牌 | 正常打牌 |
-| 合法动作 | tsumogiri + ankan | 打出后 shanten==0 的打法 | 全打法 + reach + ankan + kakan |
-| reach 可选 | 否 | 否 | 是（shanten==0 时）|
-
-`pending_reach` 字段由 `state.snapshot()` 自动提供，无需外部注入。立直宣言牌候选用 `mahjong.Shanten` 逐张判断（移除后 shanten==0）。
-
-### 训练样本过滤
-
-`build_supervised_samples` 过滤 `reached=True` 时的 dahai 事件（立直后摸切，无决策价值，约占 dahai 样本 5.5%）。训练数据实时从 `.mjson` 解析，无需重新生成数据。
-
-### waits_tiles 语义
-
-`snap["waits_tiles"]`（length-34 bool list）表示**等待牌**（摸到哪张能和），不是「可打牌」。`pending_reach` 分支中判断「打出后听牌」需重新用 Shanten 计算，不能直接用 waits_tiles 过滤。
-
-### none/pass 样本
-
-每个 dahai 事件后，对有鸣牌机会但主动放弃（下一事件为 tsumo）的玩家生成 none 样本，约占总样本 16%。缺少此类样本会导致模型鸣牌过激进。
+运行时语义：
+- battle / replay 统一依赖 `RuntimeBot`
+- 模型版本差异主要体现在：
+  - checkpoint 参数形状
+  - 对应 features / model / adapter
+- 不再保留独立的 `keqingv1.bot` 运行时壳
 
 ## 注意事项
 
-- `src/` 为包根路径（`pyproject.toml` 配置），导入用 `from v5model.xxx import ...`
-- 训练 checkpoint 保存在 `artifacts/models/modelv5/`，`best.pth` 为最佳，`latest.pth` 支持断点续训
+- `src/` 为包根路径（`pyproject.toml` 配置）
+- 训练 checkpoint 保存在 `artifacts/models/keqingv1|keqingv2|keqingv3/`
 - GPU 不可用时自动回退到 CPU
 - 数据集使用 IterableDataset 流式加载，不会全量加载进内存
 - Python 执行用 `uv run python3`，系统 `python3` 无 `riichienv`/`torch`

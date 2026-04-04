@@ -30,11 +30,20 @@ export function useConnectionManager({
   const statusRef = useRef<ConnStatus>('connected');
   const attemptsRef = useRef(0);
   const gameIdRef = useRef(gameId);
-  gameIdRef.current = gameId;
   const onStateUpdateRef = useRef(onStateUpdate);
-  onStateUpdateRef.current = onStateUpdate;
   const onGiveUpRef = useRef(onGiveUp);
-  onGiveUpRef.current = onGiveUp;
+
+  useEffect(() => {
+    gameIdRef.current = gameId;
+  }, [gameId]);
+
+  useEffect(() => {
+    onStateUpdateRef.current = onStateUpdate;
+  }, [onStateUpdate]);
+
+  useEffect(() => {
+    onGiveUpRef.current = onGiveUp;
+  }, [onGiveUp]);
 
   const setStatusBoth = (s: ConnStatus) => {
     statusRef.current = s;
@@ -44,10 +53,12 @@ export function useConnectionManager({
   // 心跳循环
   useEffect(() => {
     if (!gameId) {
-      setStatusBoth('connected');
-      attemptsRef.current = 0;
-      setReconnectAttempts(0);
-      return;
+      const resetTimer = window.setTimeout(() => {
+        setStatusBoth('connected');
+        attemptsRef.current = 0;
+        setReconnectAttempts(0);
+      }, 0);
+      return () => clearTimeout(resetTimer);
     }
 
     let cancelled = false;

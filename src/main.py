@@ -1,10 +1,12 @@
-"""IceLatte 统一入口：牌谱 Review + Bot 对战服务。
+"""IceLatte 统一入口：本地回放/对战 与 天凤 Gateway 分离。
 
 用法:
-    python -m main serve      # 启动 FastAPI + Gateway (默认)
-    python -m main serve --replay-only  # 仅启动牌谱 Review (不启动 Gateway)
-    python -m main replay    # 仅启动牌谱 Review 服务
-    python -m main gateway   # 仅启动 Gateway (天凤接入)
+    python -m main           # 默认 local：启动 ReplayUI + 本地 Battle API
+    python -m main local     # 本地模式：启动 ReplayUI + 本地 Battle API（不启动天凤 Gateway）
+    python -m main replay    # local 的兼容别名
+    python -m main tenhou    # 仅启动天凤 Gateway
+    python -m main gateway   # tenhou 的兼容别名
+    python -m main serve     # 同时启动本地模式 + 天凤 Gateway
 """
 from __future__ import annotations
 
@@ -109,18 +111,22 @@ def run_merged(port: int, debug: bool, replay_only: bool, logger: logging.Logger
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="IceLatte 统一入口")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=False)
 
-    sub.add_parser("serve", help="启动 FastAPI + Gateway")
-    sub.add_parser("replay", help="仅启动牌谱 Review 服务")
-    sub.add_parser("gateway", help="仅启动 Gateway (天凤接入)")
+    sub.add_parser("serve", help="同时启动本地模式 + 天凤 Gateway")
+    sub.add_parser("local", help="仅启动本地 ReplayUI + Battle API（不启动天凤 Gateway）")
+    sub.add_parser("replay", help="local 的兼容别名")
+    sub.add_parser("tenhou", help="仅启动天凤 Gateway")
+    sub.add_parser("gateway", help="tenhou 的兼容别名")
 
-    parser.add_argument("--port", "-p", type=int, default=8000, help="FastAPI 端口 (默认 8000)")
-    parser.add_argument("--gateway-port", type=int, default=11600, help="Gateway 端口 (默认 11600)")
+    parser.add_argument("--port", "-p", type=int, default=8000, help="本地 ReplayUI / Battle API 的 HTTP 端口 (默认 8000)")
+    parser.add_argument("--gateway-port", type=int, default=11600, help="天凤 Gateway TCP 端口 (默认 11600)")
     parser.add_argument("--debug", "-d", action="store_true", help="Gateway 调试模式")
     parser.add_argument("--replay-only", action="store_true", help="serve 命令下仅启动牌谱服务")
 
     args = parser.parse_args()
+    if args.command is None:
+        args.command = "local"
 
     # 主日志器
     main_logger = setup_logging("main")
@@ -130,10 +136,10 @@ def main() -> None:
 
     if args.command == "serve":
         run_merged(args.port, args.debug, args.replay_only, main_logger)
-    elif args.command == "replay":
+    elif args.command in {"local", "replay"}:
         replay_logger = setup_logging("replay")
         run_replay_server(args.port, replay_logger)
-    elif args.command == "gateway":
+    elif args.command in {"tenhou", "gateway"}:
         gateway_logger = setup_logging("gateway")
         gateway_settings.DEBUG = args.debug
         run_gateway_server(gateway_logger)

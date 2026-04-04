@@ -1,9 +1,29 @@
 import { useEffect, useState } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Users, BarChart2, AlertTriangle, Menu, X, Bot, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { NavLink } from 'react-router-dom';
+import {
+  LayoutDashboard,
+  Users,
+  BarChart2,
+  AlertTriangle,
+  Menu,
+  X,
+  Bot,
+  PanelLeftClose,
+  PanelLeftOpen,
+} from 'lucide-react';
 import { ThemeToggle } from './ThemeToggle';
+import { Button } from '../ui/Button';
+import { t } from '../ui/tokens';
+import { useTheme } from '../../context/themeStore';
+import { TABLECLOTH_OPTIONS } from '../BattleBoard/tableclothOptions';
+import type { TableclothId } from '../BattleBoard/tableclothOptions';
 
-const NAV_ITEMS = [
+const NAV_ITEMS: Array<{
+  path: string;
+  icon: typeof LayoutDashboard;
+  label: string;
+  exact?: boolean;
+}> = [
   { path: '/', icon: LayoutDashboard, label: '仪表盘', exact: true },
   { path: '/battle', icon: Users, label: '人机对战' },
   { path: '/bot-battle', icon: Bot, label: '4 Bot 对战' },
@@ -11,28 +31,19 @@ const NAV_ITEMS = [
   { path: '/selfplay-anomalies', icon: AlertTriangle, label: '对局回放' },
 ];
 
-const TABLECLOTH_OPTIONS = [
-  { id: 'default', label: '默认' },
-  { id: 'green', label: '浅绿' },
-  { id: 'blue', label: '浅蓝' },
-  { id: 'beige', label: '米黄' },
-] as const;
-
 export function Sidebar() {
-  const location = useLocation();
   const [isMobile, setIsMobile] = useState(false);
   const [open, setOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
-  const [tablecloth, setTablecloth] = useState<(typeof TABLECLOTH_OPTIONS)[number]['id']>('default');
-
-  useEffect(() => {
-    const saved = window.localStorage.getItem('keqing.sidebar.collapsed');
-    setCollapsed(saved === 'true');
-    const storedTablecloth = window.localStorage.getItem('keqing.tablecloth');
-    if (storedTablecloth && TABLECLOTH_OPTIONS.some((opt) => opt.id === storedTablecloth)) {
-      setTablecloth(storedTablecloth as (typeof TABLECLOTH_OPTIONS)[number]['id']);
+  const [collapsed, setCollapsed] = useState(
+    () => window.localStorage.getItem('keqing.sidebar.collapsed') === 'true',
+  );
+  const [tablecloth, setTablecloth] = useState<TableclothId>(() => {
+    const stored = window.localStorage.getItem('keqing.tablecloth');
+    if (stored && TABLECLOTH_OPTIONS.some((o) => o.id === stored)) {
+      return stored as TableclothId;
     }
-  }, []);
+    return 'default';
+  });
 
   useEffect(() => {
     window.localStorage.setItem('keqing.sidebar.collapsed', String(collapsed));
@@ -50,32 +61,90 @@ export function Sidebar() {
     return () => document.documentElement.style.setProperty('--mobile-shell-offset', '0px');
   }, [isMobile]);
 
-  useEffect(() => {
-    setOpen(false);
-  }, [location.pathname]);
-
-  const updateTablecloth = (next: (typeof TABLECLOTH_OPTIONS)[number]['id']) => {
+  const updateTablecloth = (next: TableclothId) => {
     setTablecloth(next);
     window.localStorage.setItem('keqing.tablecloth', next);
     window.dispatchEvent(new StorageEvent('storage', { key: 'keqing.tablecloth', newValue: next }));
   };
 
-  const tableclothControls = (
+  // ── Table Cloth RGB Editor ─────────────────────────────────────────────────
+  const { tableCloth, setTableCloth } = useTheme();
+
+  const rgbPreview = `rgb(${tableCloth.r},${tableCloth.g},${tableCloth.b})`;
+
+  const handleRgbChange = (channel: 'r' | 'g' | 'b', raw: string) => {
+    const val = parseInt(raw, 10);
+    if (isNaN(val)) return;
+    setTableCloth({ ...tableCloth, [channel]: Math.max(0, Math.min(255, val)) });
+  };
+
+  const tableClothEditor = (
+    <div style={{ display: 'grid', gap: 6, width: '100%' }}>
+      <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>桌布颜色</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {/* 颜色预览 */}
+        <div
+          style={{
+            width: 28,
+            height: 20,
+            borderRadius: 4,
+            background: rgbPreview,
+            border: '1px solid rgba(255,255,255,0.15)',
+            flexShrink: 0,
+            boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
+            transition: 'background 0.15s',
+          }}
+        />
+        {/* RGB 数值输入 */}
+        {(['r', 'g', 'b'] as const).map((ch) => (
+          <div key={ch} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+            <span style={{ fontSize: 9, fontWeight: 700, color: ch === 'r' ? '#f87171' : ch === 'g' ? '#4ade80' : '#60a5fa', textTransform: 'uppercase' }}>
+              {ch}
+            </span>
+            <input
+              type="number"
+              min={0}
+              max={255}
+              value={tableCloth[ch]}
+              onChange={(e) => handleRgbChange(ch, e.target.value)}
+              style={{
+                width: 38,
+                padding: '2px 4px',
+                borderRadius: 4,
+                border: '1px solid var(--border)',
+                background: 'var(--card-bg)',
+                color: 'var(--text-primary)',
+                fontSize: 11,
+                fontFamily: 'Menlo, monospace',
+                textAlign: 'center',
+              }}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  // ── Tablecloth selector (shared between mobile/desktop) ──────────────────
+  const tableclothSelector = (
     <div style={{ display: 'grid', gap: 8, width: '100%' }}>
       <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>桌布</div>
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
         {TABLECLOTH_OPTIONS.map((opt) => (
           <button
             key={opt.id}
             onClick={() => updateTablecloth(opt.id)}
+            title={opt.color}
             style={{
-              padding: '4px 8px',
-              borderRadius: 8,
-              border: `1px solid ${tablecloth === opt.id ? 'var(--accent)' : 'var(--border)'}`,
-              background: tablecloth === opt.id ? 'var(--accent-bg)' : 'var(--card-bg)',
-              color: tablecloth === opt.id ? 'var(--accent)' : 'var(--text-secondary)',
+              padding: '3px 8px',
+              borderRadius: 5,
+              border: `1px solid ${tablecloth === opt.id ? 'rgba(212,168,83,0.5)' : 'rgba(255,255,255,0.08)'}`,
+              background: tablecloth === opt.id ? 'rgba(212,168,83,0.12)' : 'rgba(255,255,255,0.04)',
+              color: tablecloth === opt.id ? 'rgba(212,168,83,0.95)' : 'var(--sidebar-text-muted)',
               fontSize: 11,
               cursor: 'pointer',
+              transition: 'all var(--transition)',
+              fontWeight: tablecloth === opt.id ? 600 : 400,
             }}
           >
             {opt.label}
@@ -85,9 +154,48 @@ export function Sidebar() {
     </div>
   );
 
+  // ── Nav Link ─────────────────────────────────────────────────────────────
+  const navLink = ({ path, icon: Icon, label, exact }: (typeof NAV_ITEMS)[number]) => (
+    <NavLink
+      key={path}
+      to={path}
+      end={exact}
+      onClick={() => setOpen(false)}
+      className={({ isActive }) =>
+        `nav-link-item${isActive ? ' nav-link-active' : ''}`
+      }
+      style={{ transition: 'background var(--transition), color var(--transition)' }}
+      title={label}
+    >
+      <Icon size={18} />
+      {!collapsed && <span>{label}</span>}
+    </NavLink>
+  );
+
+  // ── Logo ────────────────────────────────────────────────────────────────
+  const logo = (
+    <div
+      style={{
+        width: 36,
+        height: 36,
+        borderRadius: 'var(--radius-md)',
+        background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%)',
+        boxShadow: '0 4px 12px var(--accent-shadow)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+      }}
+    >
+      <span style={{ color: 'var(--btn-primary-text)', fontWeight: 700, fontSize: 14 }}>麻</span>
+    </div>
+  );
+
+  // ─────────────────────────────────────────────────────────────────────
   if (isMobile) {
     return (
       <>
+        {/* Mobile header bar */}
         <div
           style={{
             position: 'fixed',
@@ -106,24 +214,15 @@ export function Sidebar() {
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <button
-              onClick={() => setOpen(v => !v)}
-              style={{
-                width: 36,
-                height: 36,
-                borderRadius: 8,
-                border: '1px solid var(--border)',
-                background: 'var(--card-bg)',
-                color: 'var(--text-primary)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-              }}
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setOpen((v) => !v)}
               title="菜单"
+              style={{ width: 36, height: 36, padding: 0 }}
             >
               {open ? <X size={18} /> : <Menu size={18} />}
-            </button>
+            </Button>
             <div>
               <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--text-primary)' }}>Keqing</div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>立直麻将工作台</div>
@@ -132,6 +231,7 @@ export function Sidebar() {
           <ThemeToggle />
         </div>
 
+        {/* Backdrop */}
         {open && (
           <div
             onClick={() => setOpen(false)}
@@ -144,8 +244,8 @@ export function Sidebar() {
           />
         )}
 
+        {/* Drawer panel */}
         <aside
-          className="flex flex-col"
           style={{
             position: 'fixed',
             top: 56,
@@ -159,188 +259,164 @@ export function Sidebar() {
             transform: open ? 'translateX(0)' : 'translateX(-100%)',
             transition: 'transform 0.22s ease',
             zIndex: 119,
+            display: 'flex',
+            flexDirection: 'column',
           }}
         >
-          <div className="p-4" style={{ borderBottom: '1px solid var(--sidebar-border)' }}>
-            <div className="flex items-center gap-3">
-              <div
-                className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
-                style={{
-                  background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%)',
-                  boxShadow: '0 4px 12px var(--accent-shadow)',
-                  transition: 'background var(--transition), box-shadow var(--transition)',
-                }}
-              >
-                <span
-                  className="text-white font-bold text-sm"
-                  style={{ color: 'var(--btn-primary-text)' }}
-                >
-                  麻
-                </span>
-              </div>
-              <div>
-                <h1 className="text-base font-bold" style={{ color: 'var(--sidebar-text)', transition: 'color var(--transition)' }}>
-                  Keqing
-                </h1>
-                <p className="text-xs" style={{ color: 'var(--sidebar-text-muted)', transition: 'color var(--transition)' }}>
-                  立直麻将工作台
-                </p>
-              </div>
+          {/* Header */}
+          <div
+            style={{
+              padding: 16,
+              borderBottom: '1px solid var(--sidebar-border)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+            }}
+          >
+            {logo}
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--sidebar-text)' }}>Keqing</div>
+              <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>立直麻将工作台</div>
             </div>
           </div>
 
-          <nav className="flex-1 p-3">
-            {NAV_ITEMS.map(({ path, icon: Icon, label, exact }) => (
-              <NavLink
-                key={path}
-                to={path}
-                end={exact}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium mb-1 nav-link-item ${
-                    isActive ? 'nav-link-active' : ''
-                  }`
-                }
-                style={{ transition: 'background var(--transition), color var(--transition)' }}
-              >
-                <Icon size={18} />
-                <span>{label}</span>
-              </NavLink>
-            ))}
+          {/* Nav */}
+          <nav style={{ flex: 1, padding: 12, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {NAV_ITEMS.map(navLink)}
           </nav>
 
+          {/* Footer */}
           <div
-            className="p-4 flex items-center justify-between"
-            style={{ borderTop: '1px solid var(--sidebar-border)' }}
+            style={{
+              padding: 16,
+              borderTop: '1px solid var(--sidebar-border)',
+              display: 'grid',
+              gap: 12,
+            }}
           >
-            <div style={{ display: 'grid', gap: 10, width: '100%' }}>
-              {tableclothControls}
-              <div className="text-xs" style={{ color: 'var(--sidebar-text-muted)', transition: 'color var(--transition)' }}>
-                v2.0
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                <ThemeToggle />
-              </div>
+            {tableclothSelector}
+            {tableClothEditor}
+            <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>v2.0</div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <ThemeToggle />
             </div>
           </div>
         </aside>
-
-        <style>{`
-          .nav-link-item {
-            color: var(--sidebar-text);
-          }
-          .nav-link-item:hover {
-            background: var(--sidebar-hover-bg);
-          }
-          .nav-link-active {
-            background: var(--sidebar-active-bg) !important;
-            color: var(--sidebar-active-text) !important;
-          }
-        `}</style>
       </>
     );
   }
 
+  // ── Desktop ────────────────────────────────────────────────────────────
   return (
     <aside
-      className="flex flex-col h-full"
       style={{
-        width: collapsed ? 72 : 224,
+        width: collapsed ? t.sidebar.widthCollapsed : t.sidebar.width,
         background: 'var(--sidebar-bg)',
         borderRight: '1px solid var(--sidebar-border)',
         backdropFilter: 'blur(12px)',
-        transition: 'background var(--transition), border-color var(--transition), width 0.18s ease',
+        transition: `width 0.18s ease, background var(--transition), border-color var(--transition)`,
+        display: 'flex',
+        flexDirection: 'column',
+        flexShrink: 0,
+        overflow: 'hidden',
       }}
     >
-      <div className="p-4" style={{ borderBottom: '1px solid var(--sidebar-border)', display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'space-between' }}>
+      {/* Header */}
+      <div
+        style={{
+          padding: collapsed ? '16px 8px' : '16px',
+          borderBottom: '1px solid var(--sidebar-border)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: collapsed ? 'center' : 'space-between',
+          gap: 8,
+        }}
+      >
         {!collapsed && (
-          <div className="flex items-center gap-3" style={{ minWidth: 0 }}>
-            <div
-              className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
-              style={{
-                background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%)',
-                boxShadow: '0 4px 12px var(--accent-shadow)',
-              }}
-            >
-              <span className="text-white font-bold text-sm" style={{ color: 'var(--btn-primary-text)' }}>麻</span>
-            </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+            {logo}
             <div>
-              <h1 className="text-base font-bold" style={{ color: 'var(--sidebar-text)' }}>Keqing</h1>
-              <p className="text-xs" style={{ color: 'var(--sidebar-text-muted)' }}>立直麻将工作台</p>
+              <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--sidebar-text)' }}>Keqing</div>
+              <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>立直麻将工作台</div>
             </div>
           </div>
         )}
-        <button
-          onClick={() => setCollapsed(v => !v)}
-          style={{
-            width: 34,
-            height: 34,
-            borderRadius: 8,
-            border: '1px solid var(--border)',
-            background: 'var(--card-bg)',
-            color: 'var(--text-primary)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'pointer',
-            flexShrink: 0,
-          }}
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => setCollapsed((v) => !v)}
           title={collapsed ? '展开侧栏' : '收起侧栏'}
+          style={{ width: 34, height: 34, padding: 0, flexShrink: 0 }}
         >
           {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
-        </button>
+        </Button>
       </div>
 
-      <nav className="flex-1 p-3">
-        {NAV_ITEMS.map(({ path, icon: Icon, label, exact }) => (
+      {/* Nav */}
+      <nav
+        style={{
+          flex: 1,
+          padding: 12,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 2,
+          overflowY: 'auto',
+        }}
+      >
+        {NAV_ITEMS.map((item) => (
           <NavLink
-            key={path}
-            to={path}
-            end={exact}
+            key={item.path}
+            to={item.path}
+            end={item.exact}
             className={({ isActive }) =>
-              `flex items-center ${collapsed ? 'justify-center' : 'gap-3'} px-3 py-2.5 rounded-lg text-sm font-medium mb-1 nav-link-item ${
-                isActive ? 'nav-link-active' : ''
-              }`
+              `nav-link-item${collapsed ? ' justify-center' : ''}${isActive ? ' nav-link-active' : ''}`
             }
-            style={{ transition: 'background var(--transition), color var(--transition)' }}
-            title={label}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              padding: '10px 12px',
+              borderRadius: 'var(--radius-sm)',
+              color: 'var(--sidebar-text)',
+              textDecoration: 'none',
+              fontSize: 14,
+              fontWeight: 500,
+              transition: 'background var(--transition), color var(--transition)',
+              justifyContent: collapsed ? 'center' : 'flex-start',
+            }}
+            title={item.label}
           >
-            <Icon size={18} />
-            {!collapsed && <span>{label}</span>}
+            <item.icon size={18} />
+            {!collapsed && <span>{item.label}</span>}
           </NavLink>
         ))}
       </nav>
 
+      {/* Footer */}
       <div
-        className="p-4 flex items-center justify-between"
-        style={{ borderTop: '1px solid var(--sidebar-border)', justifyContent: collapsed ? 'center' : 'space-between' }}
+        style={{
+          padding: collapsed ? '10px 6px' : '12px 10px',
+          borderTop: '1px solid var(--sidebar-border)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: collapsed ? 6 : 10,
+        }}
       >
-        {collapsed ? (
+        {!collapsed && tableclothSelector}
+        {!collapsed && tableClothEditor}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: collapsed ? 'center' : 'space-between',
+          }}
+        >
+          {!collapsed && (
+            <span style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>v2.0</span>
+          )}
           <ThemeToggle />
-        ) : (
-          <div style={{ display: 'grid', gap: 10, width: '100%' }}>
-            {tableclothControls}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div className="text-xs" style={{ color: 'var(--sidebar-text-muted)', transition: 'color var(--transition)' }}>
-                v2.0
-              </div>
-              <ThemeToggle />
-            </div>
-          </div>
-        )}
+        </div>
       </div>
-
-      <style>{`
-        .nav-link-item {
-          color: var(--sidebar-text);
-        }
-        .nav-link-item:hover {
-          background: var(--sidebar-hover-bg);
-        }
-        .nav-link-active {
-          background: var(--sidebar-active-bg) !important;
-          color: var(--sidebar-active-text) !important;
-        }
-      `}</style>
     </aside>
   );
 }

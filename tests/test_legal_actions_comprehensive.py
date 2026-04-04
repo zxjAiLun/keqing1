@@ -504,11 +504,22 @@ class TestOwnTurnBranch:
         assert dahai_actions[0].tsumogiri is True
         assert not any(a.type == "reach" for a in legal)
 
-    def test_reached_ankan_still_present(self):
+    def test_reached_ankan_still_present_when_wait_shape_guard_passes(self, monkeypatch):
+        monkeypatch.setattr("mahjong_env.legal_actions._ankan_allowed_after_reach", lambda *args, **kwargs: True)
         snap = self._make_own_turn_state(reached=True, last_tsumo="5mr", last_tsumo_raw="5mr",
                                           hand_tiles=["1m", "1m", "1m", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "5mr"])
         legal = enumerate_legal_actions(snap, actor=0)
         assert any(a.type == "ankan" for a in legal)
+
+    def test_reached_ankan_blocked_when_wait_shape_changes(self):
+        snap = self._make_own_turn_state(
+            reached=True,
+            last_tsumo="4m",
+            last_tsumo_raw="4m",
+            hand_tiles=["1s", "2s", "3s", "3s", "3s", "3s", "1m", "1m", "1m", "2m", "2m", "2m", "4m"],
+        )
+        legal = enumerate_legal_actions(snap, actor=0)
+        assert not any(a.type == "ankan" and a.pai == "3s" for a in legal)
 
     def test_reached_no_chi_pon(self):
         snap = self._make_own_turn_state(reached=True, last_tsumo="5mr", last_tsumo_raw="5mr")

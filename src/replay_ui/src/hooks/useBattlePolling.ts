@@ -24,12 +24,21 @@ export function useBattlePolling({
 
   // 用 ref 缓存最新值，避免 interval 依赖频繁重建
   const stateRef = useRef(state);
-  stateRef.current = state;
   const needsDecisionRef = useRef(needsDecision);
-  needsDecisionRef.current = needsDecision;
   // onStateUpdate 应为稳定引用，但也用 ref 做防御
   const onStateUpdateRef = useRef(onStateUpdate);
-  onStateUpdateRef.current = onStateUpdate;
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
+    needsDecisionRef.current = needsDecision;
+  }, [needsDecision]);
+
+  useEffect(() => {
+    onStateUpdateRef.current = onStateUpdate;
+  }, [onStateUpdate]);
 
   useEffect(() => {
     mountedRef.current = true;

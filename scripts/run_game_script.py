@@ -4,7 +4,7 @@ sys.path.insert(0, 'src')
 
 import torch
 from riichienv import RiichiEnv
-from keqingv1.bot import KeqingBot
+from inference.runtime_bot import RuntimeBot
 
 # 加载模型
 MODEL_PATH = "artifacts/models/keqingv1/best.pth"
@@ -15,7 +15,7 @@ print(f"Using device: {DEVICE}")
 print("创建4个Agent...")
 bots = {}
 for pid in range(4):
-    bots[pid] = KeqingBot(
+    bots[pid] = RuntimeBot(
         player_id=pid,
         model_path=MODEL_PATH,
         device=DEVICE

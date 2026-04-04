@@ -15,7 +15,7 @@ export function BattlePage() {
   const [selectedTile, setSelectedTile] = useState<string | null>(null);
   const [selectedTileIdx, setSelectedTileIdx] = useState<number | null>(null);
   const [playerName, setPlayerName] = useState("玩家");
-  const [botModel, setBotModel] = useState("modelv5");
+  const [botModel, setBotModel] = useState("keqingv1");
   const [autoHora, setAutoHora] = useState(true);       // 自动胡牌，默认开
   const [noMeld, setNoMeld] = useState(false);           // 不响应附露，默认关
   const [autoTsumogiri, setAutoTsumogiri] = useState(false); // 自动摸切，默认关
@@ -73,7 +73,7 @@ export function BattlePage() {
     }
   }, [gameId]);
 
-  const { isMyTurn, legalActions, hasHora, hasMeld, hasDahai, hasNone, hasRealChoice, needsDecision } = useAutoActions({
+  const { isMyTurn, legalActions, hasHora, hasMeld, hasDahai, onlyNoneResponse, needsDecision } = useAutoActions({
     state,
     autoHora,
     noMeld,
@@ -86,9 +86,13 @@ export function BattlePage() {
     setSelectedTileIdx(null);
   }, [isMyTurn, state?.game_id, state?.actor_to_move, state?.last_discard]);
 
-  // 自动化：自动胡牌 / 不响应附露 / 自动摸切 / 仅none自动跳过
+  // 自动化：自动胡牌 / 不响应附露 / 自动摸切
   useEffect(() => {
     if (!isMyTurn || !gameId || pendingActionRef.current) return;
+    if (onlyNoneResponse) {
+      const noneAction = legalActions.find(a => a.type === "none");
+      if (noneAction) { handleAction(noneAction); return; }
+    }
     if (autoHora && hasHora) {
       const horaAction = legalActions.find(a => a.type === "hora");
       if (horaAction) { handleAction(horaAction); return; }
@@ -101,11 +105,7 @@ export function BattlePage() {
       const tsumogiriAction = legalActions.find(a => a.type === "dahai" && a.tsumogiri);
       if (tsumogiriAction) { handleAction(tsumogiriAction); return; }
     }
-    if (hasNone && !hasRealChoice) {
-      const noneAction = legalActions.find(a => a.type === "none");
-      if (noneAction) { handleAction(noneAction); return; }
-    }
-  }, [isMyTurn, gameId, state?.legal_actions, autoHora, noMeld, autoTsumogiri, hasHora, hasMeld, hasDahai, hasNone, hasRealChoice, legalActions, handleAction]);
+  }, [isMyTurn, gameId, state?.legal_actions, autoHora, noMeld, autoTsumogiri, hasHora, hasMeld, hasDahai, onlyNoneResponse, legalActions, handleAction]);
 
   useBattlePolling({
     gameId,
@@ -200,7 +200,7 @@ export function BattlePage() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <label style={{ fontSize: 12, color: '#6b7280', fontWeight: 500 }}>对手模型</label>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {['modelv5', 'modelv5_naga', 'keqingv1', 'keqingv2'].map(m => (
+                {['keqingv1', 'keqingv2', 'keqingv3', 'rulebase'].map(m => (
                   <button
                     key={m}
                     onClick={() => setBotModel(m)}
@@ -266,131 +266,143 @@ export function BattlePage() {
   if (state.phase === "ended") {
     const winner = state.winner;
     const isWinner = winner === state.human_player_id;
-    const seatColors = ["#e74c3c", "#3498db", "#8e44ad", "#27ae60"];
 
     return (
       <div
         style={{
-          background: '#f0f2f5',
+          background: 'var(--page-bg)',
           minHeight: '100%',
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'center',
           justifyContent: 'center',
-          gap: 32,
+          gap: 24,
         }}
       >
-        {/* 胜利/失败图标 */}
-        <div style={{
-          width: 72, height: 72, borderRadius: '50%',
-          background: isWinner
-            ? 'linear-gradient(135deg, #d4a853 0%, #b8922e 100%)'
-            : 'linear-gradient(135deg, #9ca3af 0%, #6b7280 100%)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          boxShadow: isWinner
-            ? '0 8px 32px rgba(212,168,83,0.4)'
-            : '0 8px 24px rgba(0,0,0,0.15)',
-          animation: isWinner ? "floatIcon 2.5s ease-in-out infinite" : "none",
-        }}>
-          <span style={{ color: '#fff', fontWeight: 700, fontSize: 28 }}>
-            {isWinner ? '勝' : '負'}
-          </span>
-        </div>
-
-        <h1 style={{ fontSize: 36, fontWeight: 700, color: isWinner ? '#d4a853' : '#6b7280' }}>
-          {isWinner ? '你赢了！' : `${state.player_info[winner ?? 0]?.name} 获胜`}
-        </h1>
-
+        {/* 天凤风格终局面板 */}
         <div
           style={{
-            background: '#fff',
-            border: '1px solid #e5e7eb',
-            borderRadius: 16,
-            padding: 28,
-            boxShadow: '0 4px 20px rgba(0,0,0,0.07)',
+            background: 'var(--result-panel-bg)',
+            border: '1px solid var(--result-panel-border)',
+            borderRadius: 8,
+            boxShadow: 'var(--result-panel-shadow)',
+            padding: '24px 28px 20px',
+            width: 480,
+            maxWidth: '92%',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 16,
           }}
         >
-          <div style={{ display: 'flex', gap: 32 }}>
-            {state.scores.map((score, i) => (
-              <div key={i} style={{ textAlign: 'center', minWidth: 80 }}>
-                <div style={{
-                  width: 14, height: 14, borderRadius: '50%',
-                  background: seatColors[i], margin: '0 auto 8px',
-                  boxShadow: `0 0 6px ${seatColors[i]}60`,
-                }} />
-                <div style={{ fontWeight: 700, marginBottom: 4, color: seatColors[i] }}>
-                  {state.player_info[i]?.name}
-                </div>
-                <div style={{
-                  fontSize: 20, fontWeight: 700,
-                  fontFamily: 'Menlo, monospace',
-                  color: score === Math.max(...state.scores) ? '#d4a853' : '#6b7280',
+          {/* 标题行 */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--result-title)' }}>
+              {isWinner ? '和了' : `和了 · ${state.player_info[winner ?? 0]?.name}`}
+            </div>
+            <div style={{
+              width: 36, height: 36, borderRadius: '50%',
+              background: isWinner
+                ? 'linear-gradient(135deg, #d4a853 0%, #b8922e 100%)'
+                : 'rgba(255,255,255,0.1)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0,
+            }}>
+              <span style={{ color: '#fff', fontWeight: 700, fontSize: 16 }}>
+                {isWinner ? '勝' : '負'}
+              </span>
+            </div>
+          </div>
+
+          {/* 排名列表 */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {[...state.scores.entries()].sort(([, a], [, b]) => b - a).map(([pid, score], rank) => {
+              const isHuman = pid === state.human_player_id;
+              const delta = score - (state.scores[state.human_player_id] ?? 0);
+              const rankLabel = ['1位', '2位', '3位', '4位'][rank];
+              return (
+                <div key={pid} style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: '7px 10px',
+                  borderRadius: 5,
+                  background: isHuman ? 'rgba(255,255,255,0.06)' : 'transparent',
+                  border: isHuman ? '1px solid rgba(255,255,255,0.1)' : '1px solid transparent',
                 }}>
-                  {score.toLocaleString()}
+                  <span style={{ fontSize: 11, color: 'var(--result-muted)', width: 24, flexShrink: 0 }}>{rankLabel}</span>
+                  <span style={{ fontSize: 13, color: isHuman ? 'var(--result-title)' : 'var(--result-muted)', flex: 1 }}>
+                    {state.player_info[pid]?.name ?? `Player ${pid}`}
+                  </span>
+                  <span style={{
+                    fontFamily: 'Menlo, monospace',
+                    fontSize: 13,
+                    color: pid === state.human_player_id
+                      ? (delta >= 0 ? 'var(--result-positive)' : 'var(--result-negative)')
+                      : 'var(--result-muted)',
+                  }}>
+                    {pid === state.human_player_id
+                      ? `${delta >= 0 ? '+' : ''}${delta.toLocaleString()} → `
+                      : ''}{score.toLocaleString()}
+                  </span>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
 
-        <button
-          onClick={async () => {
-            if (gameId) await closeBattle(gameId);
-            setState(null);
-            setGameId(null);
-            setSelectedTile(null);
-          }}
-          style={{
-            padding: '10px 28px',
-            borderRadius: 8,
-            border: 'none',
-            background: 'linear-gradient(135deg, #1e4a7a 0%, #0f2d4a 100%)',
-            color: '#fff',
-            fontSize: 15,
-            fontWeight: 600,
-            cursor: 'pointer',
-            boxShadow: '0 4px 12px rgba(30,74,122,0.25)',
-          }}
-        >
-          再来一局
-        </button>
-
-        <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
+        {/* 操作按钮 */}
+        <div style={{ display: 'flex', gap: 8 }}>
           <button
-            onClick={() => downloadExport("mjai")}
+            onClick={async () => {
+              if (gameId) await closeBattle(gameId);
+              setState(null);
+              setGameId(null);
+              setSelectedTile(null);
+            }}
             style={{
-              padding: '8px 16px',
+              padding: '8px 20px',
               borderRadius: 6,
-              border: '1px solid #3498db',
-              background: '#fff',
-              color: '#3498db',
+              border: '1px solid var(--result-panel-border)',
+              background: 'var(--result-panel-bg)',
+              color: 'var(--result-muted)',
               fontSize: 13,
               fontWeight: 600,
               cursor: 'pointer',
             }}
           >
-            导出 Mjai Log
+            再来一局
+          </button>
+          <button
+            onClick={() => downloadExport("mjai")}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 6,
+              border: '1px solid rgba(52,152,219,0.4)',
+              background: 'transparent',
+              color: 'rgba(52,152,219,0.8)',
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            Mjai Log
           </button>
           <button
             onClick={() => downloadExport("tenhou6")}
             style={{
               padding: '8px 16px',
               borderRadius: 6,
-              border: '1px solid #27ae60',
-              background: '#fff',
-              color: '#27ae60',
+              border: '1px solid rgba(39,174,96,0.4)',
+              background: 'transparent',
+              color: 'rgba(39,174,96,0.8)',
               fontSize: 13,
               fontWeight: 600,
               cursor: 'pointer',
             }}
           >
-            导出 Tenhou6
+            Tenhou6
           </button>
         </div>
-
-        <style>{`
-          @keyframes floatIcon { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
-        `}</style>
       </div>
     );
   }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -74,6 +75,32 @@ def masked_ce_loss(logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tenso
     return nn.functional.cross_entropy(logits, labels)
 
 
+def _is_finite_scalar(value: float) -> bool:
+    return math.isfinite(float(value))
+
+
+def _format_nonfinite_debug(
+    *,
+    tag: str,
+    batch_idx: int,
+    reason: str,
+    loss_value: float,
+    ce_value: float,
+    val_loss_value: float,
+    extra_loss_value: float,
+    extra_metrics: Dict,
+    lr: float,
+    grad_norm: float | None = None,
+) -> str:
+    extra_str = " ".join(f"{key}={float(extra_metrics.get(key, 0.0)):.4f}" for key in sorted(extra_metrics))
+    grad_str = f" grad_norm={grad_norm:.4f}" if grad_norm is not None else ""
+    return (
+        f"  [{tag}] nonfinite reason={reason} batch={batch_idx:5d} "
+        f"loss={loss_value:.4f} ce={ce_value:.4f} val={val_loss_value:.4f} "
+        f"extra={extra_loss_value:.4f} {extra_str}{grad_str} lr={lr:.2e}"
+    )
+
+
 def _run_epoch(
     model: MahjongModel,
     loader: DataLoader,
@@ -90,13 +117,12 @@ def _run_epoch(
 ) -> Dict:
     import sys
 
-    del log_interval
-
     model.train(is_train)
     total_ce = total_val_loss = total_acc = 0.0
     total_extra_loss = 0.0
     total_grad_norm = 0.0
     grad_norm_steps = 0
+    nonfinite_steps = 0
     extra_totals = {k: 0.0 for k in task.log_metric_keys}
     n_batches = 0
     tag = "train" if is_train else "val"
@@ -127,12 +153,53 @@ def _run_epoch(
                 loss = ce + value_loss_weight * val_loss + extra_loss
 
             if is_train:
+                loss_value = float(loss.detach().item())
+                ce_value = float(ce.detach().item())
+                val_loss_value = float(val_loss.detach().item())
+                extra_loss_value = float(extra_loss.detach().item())
+                current_lr = float(optimizer.param_groups[0]["lr"])
+                if not _is_finite_scalar(loss_value):
+                    nonfinite_steps += 1
+                    print(
+                        _format_nonfinite_debug(
+                            tag=tag,
+                            batch_idx=n_batches + 1,
+                            reason="loss",
+                            loss_value=loss_value,
+                            ce_value=ce_value,
+                            val_loss_value=val_loss_value,
+                            extra_loss_value=extra_loss_value,
+                            extra_metrics=extra_metrics,
+                            lr=current_lr,
+                        )
+                    )
+                    optimizer.zero_grad()
+                    continue
                 loss_scaled = loss / accumulation_steps
                 scaler.scale(loss_scaled).backward()
 
                 if (i + 1) % accumulation_steps == 0:
                     scaler.unscale_(optimizer)
                     grad_norm = float(nn.utils.clip_grad_norm_(model.parameters(), 1.0))
+                    if not _is_finite_scalar(grad_norm):
+                        nonfinite_steps += 1
+                        print(
+                            _format_nonfinite_debug(
+                                tag=tag,
+                                batch_idx=n_batches + 1,
+                                reason="grad_norm",
+                                loss_value=loss_value,
+                                ce_value=ce_value,
+                                val_loss_value=val_loss_value,
+                                extra_loss_value=extra_loss_value,
+                                extra_metrics=extra_metrics,
+                                lr=current_lr,
+                                grad_norm=grad_norm,
+                            )
+                        )
+                        optimizer.zero_grad()
+                        scaler.update()
+                        continue
                     total_grad_norm += grad_norm
                     grad_norm_steps += 1
                     scaler.step(optimizer)
@@ -165,23 +232,17 @@ def _run_epoch(
             grad_norm_str = ""
             if is_train and grad_norm_steps > 0:
                 grad_norm_str = f" gnorm={total_grad_norm/grad_norm_steps:.3f}"
-            extra_str = "".join(
-                f" {key}={extra_totals[key]/n_batches:.4f}"
-                for key in task.log_metric_keys
-            )
-            sys.stdout.write(
-                f"\r  [{tag}] batch={n_batches:5d} | "
-                f"ce={total_ce/n_batches:.4f} "
-                f"val={total_val_loss/n_batches:.4f}"
-                f"{extra_str} "
-                f"acc={total_acc/n_batches:.3f}"
-                f"{grad_norm_str}"
-                f"{lr_str}   "
-            )
-            sys.stdout.flush()
-
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+            nonfinite_str = f" skipped={nonfinite_steps}" if is_train and nonfinite_steps > 0 else ""
+            if n_batches == 1 or (log_interval > 0 and n_batches % log_interval == 0):
+                print(
+                    f"  [{tag}] batch={n_batches:5d} | "
+                    f"ce={total_ce/n_batches:.4f} "
+                    f"val={total_val_loss/n_batches:.4f}"
+                    f" acc={total_acc/n_batches:.3f}"
+                    f"{grad_norm_str}"
+                    f"{nonfinite_str}"
+                    f"{lr_str}   "
+                )
 
     merged_cor: Dict[str, int] = defaultdict(int)
     merged_tot: Dict[str, int] = defaultdict(int)
@@ -207,6 +268,7 @@ def _run_epoch(
         "objective": (total_ce / n) + value_loss_weight * (total_val_loss / n) + (total_extra_loss / n),
         "acc": total_acc / n,
         "grad_norm": (total_grad_norm / grad_norm_steps if grad_norm_steps > 0 else None),
+        "nonfinite_steps": nonfinite_steps,
         "step": step,
         "acc_by_type": acc_by_type,
         "total_by_type": dict(total_by_type),
@@ -220,6 +282,23 @@ def _is_better_metric(candidate: float, best: float, mode: str) -> bool:
     if mode == "max":
         return candidate > best
     return candidate < best
+
+
+def _meld_metric_from_stats(stats: Dict) -> float | None:
+    acc_by_type = stats.get("acc_by_type", {}) or {}
+    total_by_type = stats.get("total_by_type", {}) or {}
+    response_types = ("none", "chi", "pon", "daiminkan")
+    weighted_correct = 0.0
+    weighted_total = 0.0
+    for name in response_types:
+        total = float(total_by_type.get(name, 0.0))
+        if total <= 0:
+            continue
+        weighted_total += total
+        weighted_correct += total * float(acc_by_type.get(name, 0.0))
+    if weighted_total <= 0:
+        return None
+    return weighted_correct / weighted_total
 
 
 def train_model(
@@ -260,7 +339,7 @@ def train_model(
     start_epoch = 0
     global_step = 0
     best_metric = -float("inf") if task.best_metric_mode == "max" else float("inf")
-    best_ce = float("inf")
+    best_meld = -float("inf")
 
     if resume_path is not None and resume_path.exists():
         if weights_only:
@@ -311,14 +390,19 @@ def train_model(
         val_extra = f" {val_extra}" if val_extra else ""
         grad_norm = train_stats.get("grad_norm")
         gnorm_str = f" gnorm={grad_norm:.3f}" if grad_norm is not None else ""
+        skipped_str = (
+            f" skipped={train_stats['nonfinite_steps']}"
+            if train_stats.get("nonfinite_steps", 0) > 0
+            else ""
+        )
         print(
-            f"  train ce={train_stats['ce']:.4f}{train_extra} acc={train_stats['acc']:.3f}{gnorm_str} "
+            f"  train ce={train_stats['ce']:.4f}{train_extra} acc={train_stats['acc']:.3f}{gnorm_str}{skipped_str} "
             f"| val ce={val_stats['ce']:.4f}{val_extra} acc={val_stats['acc']:.3f} "
             f"| {elapsed:.0f}s"
         )
 
         save_checkpoint(
-            output_dir / "latest.pth", model, optimizer, scheduler,
+            output_dir / "last.pth", model, optimizer, scheduler,
             epoch + 1, global_step, best_metric,
         )
 
@@ -331,13 +415,14 @@ def train_model(
             )
             print(f"  [best checkpoint saved, val_{task.best_metric_name}={best_metric:.4f}]")
 
-        if val_stats["ce"] < best_ce:
-            best_ce = val_stats["ce"]
+        meld_metric = _meld_metric_from_stats(val_stats)
+        if meld_metric is not None and meld_metric > best_meld:
+            best_meld = meld_metric
             save_checkpoint(
-                output_dir / "best_ce.pth", model, optimizer, scheduler,
-                epoch + 1, global_step, best_ce,
+                output_dir / "best_meld.pth", model, optimizer, scheduler,
+                epoch + 1, global_step, best_meld,
             )
-            print(f"  [best_ce checkpoint saved, val_ce={best_ce:.4f}]")
+            print(f"  [best_meld checkpoint saved, val_meld={best_meld:.4f}]")
 
         log_row = {
             "epoch": epoch + 1,
@@ -348,6 +433,7 @@ def train_model(
             "train_objective": train_stats["objective"],
             "train_acc": train_stats["acc"],
             "train_grad_norm": train_stats.get("grad_norm"),
+            "train_nonfinite_steps": train_stats.get("nonfinite_steps", 0),
             "val_ce": val_stats["ce"],
             "val_value_loss": val_stats["val_loss"],
             "val_extra_loss": val_stats["extra_loss"],
@@ -356,6 +442,7 @@ def train_model(
             "lr": optimizer.param_groups[0]["lr"],
             "val_acc_by_type": val_stats.get("acc_by_type", {}),
             "val_total_by_type": val_stats.get("total_by_type", {}),
+            "val_meld_metric": meld_metric,
         }
         for key in task.log_metric_keys:
             log_row[f"train_{key}"] = train_stats.get(key)

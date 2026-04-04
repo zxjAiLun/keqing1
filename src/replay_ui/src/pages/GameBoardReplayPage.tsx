@@ -6,13 +6,30 @@ import { MahjongTable } from '../components/BattleBoard/MahjongTable';
 import { Tile } from '../components/BattleBoard/Tile';
 import { ReplayDecisionPanel } from '../components/DecisionPanel/ReplayDecisionPanel';
 import { StatsPanel } from './ReplayViewPage';
-import { entryToBattleState, buildLogitData, hasReplayPostAction, hasReplayReachPhase, type ReplayBoardPhase } from '../utils/replayAdapter';
+import { entryToBattleState, buildLogitData, hasReplayPostAction, hasReplayReachPhase, isCollapsibleResponsePassStep, type ReplayBoardPhase } from '../utils/replayAdapter';
 import { useReplayPlayer } from '../hooks/useReplayPlayer';
 import { replayApi } from '../api/replayApi';
 import { CN_BAKAZE } from '../utils/constants';
 import { sameReplayAction, TILE_ORDER } from '../utils/tileUtils';
 import { normalizeReplayPlayerNames, replayPlayerDisplayName } from '../utils/replayNames';
 import type { Action, ReplayData } from '../types/replay';
+import {
+  backLinkButtonStyle,
+  centeredStatusStyle,
+  errorStatusTextStyle,
+  floatingPerspectiveStyle,
+  floatingSwitchBtnStyle,
+  floatingTopBarStyle,
+  floatingTopBarWrapStyle,
+  gameReplayRootStyle,
+  iconBtnStyle,
+  mutedStatusTextStyle,
+  perspectiveDrawerStyle,
+  perspectiveToggleStyle,
+  sidePanelContainerStyle,
+  smallBtnStyle,
+  toolbarToggleStyle,
+} from './gameReplayStyles';
 
 export function GameBoardReplayPage() {
   const location = useLocation();
@@ -22,7 +39,6 @@ export function GameBoardReplayPage() {
   const replayIdFromRoute = routeState?.replayId ?? params.get('id');
   const playerIdFromQuery = Number(params.get('player_id') ?? '0');
   const requestedPlayerId = Number.isFinite(playerIdFromQuery) ? playerIdFromQuery : 0;
-
   const [data, setData] = useState<ReplayData | null>(null);
   const [events, setEvents] = useState<Record<string, unknown>[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -80,6 +96,14 @@ export function GameBoardReplayPage() {
   const currentHasPostPhase = hasReplayPostAction(currentEntry);
   const currentHasReachPhase = hasReplayReachPhase(currentEntry);
 
+  const isRedundantResponseStep = useCallback((step: number) => {
+    if (!data || step <= 0 || step >= data.log.length) return false;
+    const entry = data.log[step];
+    const prevEntry = data.log[step - 1];
+    if (!entry || !prevEntry) return false;
+    return isCollapsibleResponsePassStep(entry, prevEntry);
+  }, [data]);
+
   const resetBoardPhase = useCallback(() => {
     setBoardPhase('pre');
   }, []);
@@ -97,6 +121,7 @@ export function GameBoardReplayPage() {
         return;
       }
       for (let i = currentStep + 1; i < data.log.length; i++) {
+        if (isRedundantResponseStep(i)) continue;
         if (data.log[i]?.chosen) {
           goToStep(i);
           setBoardPhase('pre');
@@ -119,6 +144,7 @@ export function GameBoardReplayPage() {
       return;
     }
     for (let i = currentStep - 1; i >= 0; i--) {
+      if (isRedundantResponseStep(i)) continue;
       if (!data.log[i]?.chosen) continue;
       goToStep(i);
       if (hasReplayPostAction(data.log[i])) {
@@ -130,7 +156,7 @@ export function GameBoardReplayPage() {
       }
       return;
     }
-  }, [data, currentEntry, boardPhase, currentHasPostPhase, currentHasReachPhase, currentStep, goToStep]);
+  }, [data, currentEntry, boardPhase, currentHasPostPhase, currentHasReachPhase, currentStep, goToStep, isRedundantResponseStep]);
 
   const handleStepForward = useCallback(() => {
     resetBoardPhase();
@@ -283,18 +309,18 @@ export function GameBoardReplayPage() {
 
   if (loading) {
     return (
-      <div style={{ background: 'var(--page-bg)', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+      <div style={centeredStatusStyle}>
         <Loader2 size={32} className="animate-spin" style={{ color: 'var(--accent)' }} />
-        <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>加载回放数据中...</p>
+        <p style={mutedStatusTextStyle}>加载回放数据中...</p>
       </div>
     );
   }
 
   if (error || !data) {
     return (
-      <div style={{ background: 'var(--page-bg)', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-        <p style={{ color: 'var(--error)', fontSize: 14 }}>{error || '未找到回放数据'}</p>
-        <button onClick={() => navigate('/review')} style={{ color: 'var(--accent)', fontSize: 14, background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>
+      <div style={centeredStatusStyle}>
+        <p style={errorStatusTextStyle}>{error || '未找到回放数据'}</p>
+        <button onClick={() => navigate('/review')} style={backLinkButtonStyle}>
           返回上传
         </button>
       </div>
@@ -302,13 +328,7 @@ export function GameBoardReplayPage() {
   }
 
   return (
-    <div
-      style={{
-        height: 'calc(100vh - var(--mobile-shell-offset, 0px))',
-        background: 'var(--page-bg)',
-        overflow: 'hidden',
-      }}
-    >
+    <div style={gameReplayRootStyle}>
       {showStats && data && <StatsPanel data={data} onClose={() => setShowStats(false)} />}
 
       {battleState ? (
@@ -427,15 +447,7 @@ export function GameBoardReplayPage() {
           </div>
 
           {!narrowLayout && (
-            <div
-              style={{
-                width: 198,
-                minWidth: 198,
-                height: '100%',
-                borderLeft: '1px solid var(--border)',
-                background: 'var(--page-bg)',
-              }}
-            >
+            <div style={sidePanelContainerStyle}>
               <ReplayDecisionPanel
                 entry={currentEntry}
                 step={currentStep}
@@ -455,120 +467,6 @@ export function GameBoardReplayPage() {
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// 样式
-// ---------------------------------------------------------------------------
-const iconBtnStyle: React.CSSProperties = {
-  padding: '3px 8px', borderRadius: 4, border: '1px solid var(--border)',
-  background: 'var(--sidebar-hover-bg)', color: 'var(--text-secondary)',
-  fontSize: 13, cursor: 'pointer', flexShrink: 0,
-};
-
-const smallBtnStyle: React.CSSProperties = {
-  padding: 3, borderRadius: 4, border: '1px solid var(--border)',
-  background: 'var(--sidebar-hover-bg)', color: 'var(--text-secondary)',
-  cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-};
-
-const floatingSwitchBtnStyle: React.CSSProperties = {
-  width: '100%',
-  borderRadius: 8,
-  border: '1px solid rgba(255,255,255,0.12)',
-  padding: '7px 9px',
-  textAlign: 'left',
-  fontSize: 12,
-  whiteSpace: 'nowrap',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-};
-
-const perspectiveToggleStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 6,
-  borderRadius: 10,
-  border: '1px solid rgba(255,255,255,0.12)',
-  background: 'rgba(17, 24, 39, 0.86)',
-  color: '#f3f4f6',
-  padding: '8px 10px',
-  fontSize: 12,
-  cursor: 'pointer',
-  boxShadow: '0 8px 24px rgba(0,0,0,0.28)',
-  backdropFilter: 'blur(10px)',
-};
-
-const perspectiveDrawerStyle: React.CSSProperties = {
-  position: 'absolute',
-  left: 0,
-  bottom: 'calc(100% + 8px)',
-  zIndex: 30,
-  background: 'rgba(17, 24, 39, 0.92)',
-  border: '1px solid rgba(255,255,255,0.12)',
-  borderRadius: 12,
-  padding: '10px 10px 8px',
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 6,
-  minWidth: 170,
-  boxShadow: '0 8px 24px rgba(0,0,0,0.28)',
-  backdropFilter: 'blur(10px)',
-};
-
-const floatingTopBarWrapStyle: React.CSSProperties = {
-  position: 'absolute',
-  top: 12,
-  left: 168,
-  right: 12,
-  zIndex: 34,
-  display: 'flex',
-  flexDirection: 'column',
-  alignItems: 'flex-start',
-  gap: 8,
-  pointerEvents: 'none',
-};
-
-const toolbarToggleStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 6,
-  padding: '7px 10px',
-  borderRadius: 999,
-  border: '1px solid rgba(255,255,255,0.12)',
-  background: 'rgba(12, 16, 20, 0.52)',
-  color: '#f3f4f6',
-  fontSize: 12,
-  cursor: 'pointer',
-  boxShadow: '0 12px 24px rgba(0,0,0,0.18)',
-  backdropFilter: 'blur(10px)',
-  pointerEvents: 'auto',
-};
-
-const floatingTopBarStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 10,
-  flexWrap: 'wrap',
-  padding: '10px 12px',
-  borderRadius: 16,
-  width: 'min(980px, calc(100% - 32px))',
-  background: 'linear-gradient(90deg, rgba(12, 16, 20, 0.78) 0%, rgba(12, 16, 20, 0.72) 58%, rgba(12, 16, 20, 0.24) 78%, rgba(12, 16, 20, 0.04) 100%)',
-  border: '1px solid rgba(255,255,255,0.08)',
-  boxShadow: '0 16px 32px rgba(0,0,0,0.18)',
-  backdropFilter: 'blur(14px)',
-  pointerEvents: 'auto',
-};
-
-const floatingPerspectiveStyle: React.CSSProperties = {
-  position: 'absolute',
-  left: 12,
-  bottom: 12,
-  zIndex: 30,
-  display: 'flex',
-  flexDirection: 'column',
-  alignItems: 'flex-start',
-  gap: 6,
-};
 
 type ReplayEvent = Record<string, unknown>;
 type ResultSummary = {
@@ -932,7 +830,7 @@ function buildReplayResultSummary(
   const doraMarkers = [String(startEv.dora_marker ?? '')].filter(Boolean);
   let inferredKyotaku = Number(startEv.kyotaku ?? 0);
   const inferredHonba = Number(startEv.honba ?? kyokuKey.honba ?? 0);
-  let resultIndex = kyokuEvents.indexOf(resultEvent);
+  const resultIndex = kyokuEvents.indexOf(resultEvent);
   for (let i = 1; i < resultIndex; i++) {
     const ev = kyokuEvents[i];
     const type = String(ev.type ?? '');
@@ -1067,135 +965,118 @@ function ReplayResultOverlay({ summary, playerNames }: { summary: ResultSummary;
         justifyContent: 'center',
         pointerEvents: 'none',
         zIndex: 40,
-        background: 'rgba(8, 12, 16, 0.28)',
-        backdropFilter: 'blur(2px)',
+        background: 'var(--result-overlay-bg)',
       }}
     >
       <div
         style={{
           width: 900,
           maxWidth: '92%',
-          minHeight: 360,
-          borderRadius: 24,
-          background: 'linear-gradient(180deg, rgba(22,26,31,0.96) 0%, rgba(12,16,20,0.96) 100%)',
-          border: '1px solid rgba(212,168,83,0.28)',
-          boxShadow: '0 24px 60px rgba(0,0,0,0.35)',
-          padding: '22px 26px 18px',
-          color: '#f4efe3',
+          background: 'var(--result-panel-bg)',
+          border: '1px solid var(--result-panel-border)',
+          borderRadius: 8,
+          boxShadow: 'var(--result-panel-shadow)',
+          padding: '18px 22px 16px',
+          color: 'var(--result-title)',
           display: 'grid',
-          gridTemplateRows: 'auto auto auto 1fr auto',
-          gap: 14,
+          gridTemplateRows: 'auto auto auto auto',
+          gap: 12,
         }}
       >
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', alignItems: 'start', gap: 16 }}>
+        {/* 标题行：本场 / 供托内联在右侧 */}
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
           <div>
-            <div style={{ fontSize: 30, lineHeight: 1.1, fontWeight: 900, color: 'var(--gold)' }}>{summary.title}</div>
-            <div style={{ marginTop: 6, fontSize: 14, color: 'rgba(244,239,227,0.74)' }}>{summary.subtitle}</div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: 'var(--result-title)', lineHeight: 1.1 }}>{summary.title}</div>
+            <div style={{ marginTop: 4, fontSize: 13, color: 'var(--result-subtitle)' }}>{summary.subtitle}</div>
           </div>
-          <div style={{ display: 'grid', gap: 4, textAlign: 'right' }}>
-            <div style={{ fontSize: 13, color: 'rgba(244,239,227,0.7)' }}>本场: {summary.honba}</div>
-            <div style={{ fontSize: 13, color: 'rgba(244,239,227,0.7)' }}>供托: {summary.kyotaku}</div>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexShrink: 0 }}>
+            <span style={{ fontSize: 12, color: 'var(--result-muted)' }}>{summary.honba}本场</span>
+            <span style={{ fontSize: 12, color: 'var(--result-muted)' }}>{summary.kyotaku}供托</span>
           </div>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-          <IndicatorRow title="宝牌指示牌" tiles={summary.doraMarkers} />
-          <IndicatorRow title="里宝牌指示牌" tiles={summary.uraMarkers} emptyLabel="未记录" />
+        {/* 宝牌行 */}
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: 'var(--result-muted)', width: 80, flexShrink: 0 }}>宝牌</span>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {summary.doraMarkers.length > 0
+              ? summary.doraMarkers.map((tile, idx) => <Tile key={`d-${tile}-${idx}`} tile={tile} size="small" />)
+              : <span style={{ fontSize: 11, color: 'var(--result-muted)' }}>—</span>
+            }
+          </div>
+          <span style={{ fontSize: 11, color: 'var(--result-muted)', width: 80, flexShrink: 0, marginLeft: 12 }}>里宝牌</span>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {summary.uraMarkers.length > 0
+              ? summary.uraMarkers.map((tile, idx) => <Tile key={`u-${tile}-${idx}`} tile={tile} size="small" />)
+              : <span style={{ fontSize: 11, color: 'var(--result-muted)' }}>—</span>
+            }
+          </div>
         </div>
 
-        <div style={{ display: 'grid', gap: 12, alignItems: 'start' }}>
-          <div style={{ display: 'grid', gap: 10 }}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: 'rgba(244,239,227,0.78)' }}>
-              {summary.winner !== null ? `和牌手牌 · ${replayPlayerDisplayName(playerNames, summary.winner)}` : '局结果'}
+        {/* 手牌 + 役种 明细 */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, alignItems: 'start' }}>
+          {/* 左：和牌手牌 */}
+          <div>
+            <div style={{ fontSize: 12, color: 'var(--result-muted)', marginBottom: 6 }}>
+              {summary.winner !== null ? `和牌 · ${replayPlayerDisplayName(playerNames, summary.winner)}` : '局结果'}
             </div>
             {summary.winner !== null ? (
-              <>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  {summary.winnerHand.map((tile, idx) => (
-                    <Tile key={`${tile}-${idx}`} tile={tile} size="normal" highlighted={tile === summary.winTile && idx === summary.winnerHand.lastIndexOf(tile)} />
-                  ))}
-                </div>
-                {summary.winnerMelds.length > 0 && (
-                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                    {summary.winnerMelds.map((meld, idx) => (
-                      <div key={`${meld.type}-${idx}`} style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                        <span style={{ fontSize: 11, color: 'rgba(244,239,227,0.6)' }}>{meld.type}</span>
-                        {[...meld.consumed, meld.pai].filter(Boolean).map((tile, tileIdx) => (
-                          <Tile key={`${tile}-${tileIdx}`} tile={tile} size="small" />
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {summary.winnerHand.map((tile, idx) => (
+                  <Tile
+                    key={`h-${tile}-${idx}`}
+                    tile={tile}
+                    size="small"
+                    highlighted={tile === summary.winTile && idx === summary.winnerHand.lastIndexOf(tile)}
+                  />
+                ))}
+              </div>
             ) : (
-              <div style={{ fontSize: 13, color: 'rgba(244,239,227,0.72)' }}>流局，没有和牌者手牌展示。</div>
+              <div style={{ fontSize: 12, color: 'var(--result-muted)' }}>流局</div>
             )}
           </div>
-
-          <div style={{ display: 'grid', gap: 8, alignContent: 'start' }}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: 'rgba(244,239,227,0.78)' }}>役种 / 结算明细</div>
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-                gap: '8px 20px',
-                alignItems: 'start',
-              }}
-            >
-              {summary.yakuLines.length > 0 ? summary.yakuLines.map((line, idx) => (
-                <div key={`${line}-${idx}`} style={{ fontSize: 14, color: '#f4efe3' }}>{line}</div>
-              )) : (
-                <div style={{ fontSize: 13, color: 'rgba(244,239,227,0.66)' }}>无役种列表</div>
-              )}
-            </div>
+          {/* 右：役种列表 */}
+          <div>
+            <div style={{ fontSize: 12, color: 'var(--result-muted)', marginBottom: 6 }}>役种</div>
+            {summary.yakuLines.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                {summary.yakuLines.map((line, idx) => (
+                  <div key={`y-${idx}`} style={{ fontSize: 12, color: 'var(--result-title)' }}>{line}</div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: 'var(--result-muted)' }}>—</div>
+            )}
           </div>
         </div>
 
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(4, 1fr)',
-            gap: 10,
-            borderTop: '1px solid rgba(255,255,255,0.08)',
-            paddingTop: 14,
-          }}
-        >
+        {/* 分差列表 — 天凤风格扁平行 */}
+        <div style={{ borderTop: '1px solid var(--result-panel-border)', paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 2 }}>
           {summary.scoreLines.map((row) => (
-            <div key={row.pid} style={{ padding: '10px 12px', borderRadius: 14, background: 'rgba(255,255,255,0.04)' }}>
-              <div style={{ fontSize: 12, color: 'rgba(244,239,227,0.62)', marginBottom: 4 }}>
+            <div key={row.pid} style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '4px 8px',
+              borderRadius: 4,
+              background: 'var(--result-row-bg)',
+              gap: 8,
+            }}>
+              <span style={{ fontSize: 12, color: 'var(--result-muted)', minWidth: 80 }}>
                 {row.label} {row.name}
-              </div>
-              <div style={{ fontFamily: 'Menlo, monospace', fontSize: 13, color: '#f4efe3' }}>
-                {row.before.toLocaleString()} {row.delta >= 0 ? '+' : ''}{row.delta.toLocaleString()}
-              </div>
-              <div style={{ marginTop: 4, fontSize: 12, color: row.delta >= 0 ? '#8ce98c' : '#ff9898' }}>
-                {'=>'} {row.after.toLocaleString()}
-              </div>
+              </span>
+              <span style={{ fontFamily: 'Menlo, monospace', fontSize: 12, color: 'var(--result-title)' }}>
+                {row.before.toLocaleString()}
+              </span>
+              <span style={{ fontFamily: 'Menlo, monospace', fontSize: 12, color: row.delta >= 0 ? 'var(--result-positive)' : 'var(--result-negative)', minWidth: 70, textAlign: 'right' }}>
+                {row.delta >= 0 ? '+' : ''}{row.delta.toLocaleString()}
+              </span>
+              <span style={{ fontFamily: 'Menlo, monospace', fontSize: 12, color: 'var(--result-muted)', minWidth: 80, textAlign: 'right' }}>
+                → {row.after.toLocaleString()}
+              </span>
             </div>
           ))}
         </div>
-      </div>
-    </div>
-  );
-}
-
-function IndicatorRow({
-  title,
-  tiles,
-  emptyLabel = '无',
-}: {
-  title: string;
-  tiles: string[];
-  emptyLabel?: string;
-}) {
-  return (
-    <div style={{ display: 'grid', gap: 8 }}>
-      <div style={{ fontSize: 12, fontWeight: 800, color: 'rgba(244,239,227,0.72)' }}>{title}</div>
-      <div style={{ display: 'flex', gap: 6, minHeight: 46, alignItems: 'center' }}>
-        {tiles.length > 0 ? tiles.map((tile, idx) => <Tile key={`${tile}-${idx}`} tile={tile} size="normal" />) : (
-          <div style={{ fontSize: 12, color: 'rgba(244,239,227,0.5)' }}>{emptyLabel}</div>
-        )}
       </div>
     </div>
   );

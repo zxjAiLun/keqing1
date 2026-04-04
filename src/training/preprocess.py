@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import gc
 import importlib
 import json
 import re
 import sys
+import time
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -55,6 +57,13 @@ _SUITS = ("m", "p", "s")
 _PAI_RE = re.compile(r'"([1-9])([mps])r?"')
 _V3_CACHE_CLEAR_EVERY = 8
 _WORKER_PROCESSED_FILES = 0
+_WORKER_ENCODE_FNS: dict[str, object] = {}
+_WORKER_ENCODE_TIMED_FNS: dict[str, object] = {}
+_WORKER_CLEAR_CACHE_HOOKS: dict[str, object] = {}
+
+
+class PreprocessBuildError(RuntimeError):
+    pass
 
 
 def _permute_mjson_text(text: str, perm: tuple) -> str:
@@ -69,6 +78,45 @@ def _permute_mjson_text(text: str, perm: tuple) -> str:
         return f'"{num}{new_suit}"'
 
     return _PAI_RE.sub(replace_pai, text)
+
+
+def _parse_mjai_jsonl_text(text: str) -> List[Dict]:
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+def _get_encode_fn(module_name: str):
+    fn = _WORKER_ENCODE_FNS.get(module_name)
+    if fn is None:
+        fn = importlib.import_module(module_name).encode
+        _WORKER_ENCODE_FNS[module_name] = fn
+    return fn
+
+
+def _get_encode_timed_fn(module_name: str):
+    fn = _WORKER_ENCODE_TIMED_FNS.get(module_name)
+    if fn is not None or module_name in _WORKER_ENCODE_TIMED_FNS:
+        return fn
+    try:
+        fn = importlib.import_module(module_name).encode_with_timings
+    except Exception:
+        fn = None
+    _WORKER_ENCODE_TIMED_FNS[module_name] = fn
+    return fn
+
+
+def _get_clear_progress_caches_hook(module_name: str):
+    hook = _WORKER_CLEAR_CACHE_HOOKS.get(module_name)
+    if hook is not None or module_name in _WORKER_CLEAR_CACHE_HOOKS:
+        return hook
+    if module_name != "keqingv3.features":
+        _WORKER_CLEAR_CACHE_HOOKS[module_name] = None
+        return None
+    try:
+        hook = importlib.import_module("keqingv3.progress_oracle").clear_progress_caches
+    except Exception:
+        hook = None
+    _WORKER_CLEAR_CACHE_HOOKS[module_name] = hook
+    return hook
 
 
 class BasePreprocessAdapter:
@@ -202,13 +250,15 @@ def events_to_cached_arrays(
     ad hoc exporters in selfplay.
     """
     chosen_adapter = adapter or BasePreprocessAdapter()
-    encode_fn = importlib.import_module(encode_module).encode
+    encode_fn = _get_encode_fn(encode_module)
+    encode_timed_fn = _get_encode_timed_fn(encode_module)
     return _parse_events_to_arrays(
         events,
         actor_name_filter=actor_name_filter,
         adapter=chosen_adapter,
         value_strategy=value_strategy,
         encode_fn=encode_fn,
+        encode_timed_fn=encode_timed_fn,
     )
 
 
@@ -221,19 +271,26 @@ def save_events_to_cache_file(
     adapter_name: str = "base",
     value_strategy: str = "heuristic",
     encode_module: str = "keqingv1.features",
+    compress_output: bool = True,
 ) -> bool:
     chosen_adapter = adapter or create_preprocess_adapter(adapter_name)
-    result = events_to_cached_arrays(
-        events,
-        actor_name_filter=actor_name_filter,
-        adapter=chosen_adapter,
-        value_strategy=value_strategy,
-        encode_module=encode_module,
-    )
+    try:
+        result = events_to_cached_arrays(
+            events,
+            actor_name_filter=actor_name_filter,
+            adapter=chosen_adapter,
+            value_strategy=value_strategy,
+            encode_module=encode_module,
+        )
+    except PreprocessBuildError:
+        return False
     if result is None:
         return False
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(out_path, **result)
+    if compress_output:
+        np.savez_compressed(out_path, **result)
+    else:
+        np.savez(out_path, **result)
     return True
 
 
@@ -244,6 +301,7 @@ def _parse_events_to_arrays(
     adapter: BasePreprocessAdapter,
     value_strategy: str = "heuristic",
     encode_fn=encode,
+    encode_timed_fn=None,
 ) -> Optional[Dict[str, np.ndarray]]:
     rows = {
         "tile_feat": [],
@@ -254,20 +312,58 @@ def _parse_events_to_arrays(
     }
     rows.update(adapter.init_rows())
 
+    timings = {
+        "sample_build_s": 0.0,
+        "encode_s": 0.0,
+        "tracker_s": 0.0,
+        "progress_s": 0.0,
+        "fill_s": 0.0,
+        "standard_shanten_s": 0.0,
+        "waits_s": 0.0,
+        "ukeire_improvement_s": 0.0,
+        "shape_s": 0.0,
+        "standard_shanten_calls": 0.0,
+        "waits_calls": 0.0,
+        "standard_shanten_hits": 0.0,
+        "standard_shanten_misses": 0.0,
+        "waits_hits": 0.0,
+        "waits_misses": 0.0,
+    }
+
     try:
+        t_build0 = time.perf_counter()
         samples = build_supervised_samples(
             events,
             actor_name_filter=actor_name_filter,
             value_strategy=value_strategy,
         )
+        timings["sample_build_s"] = time.perf_counter() - t_build0
     except IllegalLabelActionError:
         raise
-    except Exception:
-        return None
+    except Exception as exc:
+        raise PreprocessBuildError(str(exc)) from exc
 
+    t_encode0 = time.perf_counter()
     for s in samples:
         try:
-            tile_feat, scalar = encode_fn(s.state, s.actor)
+            if encode_timed_fn is not None:
+                tile_feat, scalar, encode_timings = encode_timed_fn(s.state, s.actor)
+                if isinstance(encode_timings, dict):
+                    timings["tracker_s"] += float(encode_timings.get("tracker_s", 0.0))
+                    timings["progress_s"] += float(encode_timings.get("progress_s", 0.0))
+                    timings["fill_s"] += float(encode_timings.get("fill_s", 0.0))
+                    timings["standard_shanten_s"] += float(encode_timings.get("standard_shanten_s", 0.0))
+                    timings["waits_s"] += float(encode_timings.get("waits_s", 0.0))
+                    timings["ukeire_improvement_s"] += float(encode_timings.get("ukeire_improvement_s", 0.0))
+                    timings["shape_s"] += float(encode_timings.get("shape_s", 0.0))
+                    timings["standard_shanten_calls"] += float(encode_timings.get("standard_shanten_calls", 0.0))
+                    timings["waits_calls"] += float(encode_timings.get("waits_calls", 0.0))
+                    timings["standard_shanten_hits"] += float(encode_timings.get("standard_shanten_hits", 0.0))
+                    timings["standard_shanten_misses"] += float(encode_timings.get("standard_shanten_misses", 0.0))
+                    timings["waits_hits"] += float(encode_timings.get("waits_hits", 0.0))
+                    timings["waits_misses"] += float(encode_timings.get("waits_misses", 0.0))
+            else:
+                tile_feat, scalar = encode_fn(s.state, s.actor)
             mask = np.array(build_legal_mask(s.legal_actions), dtype=np.float32)
             action_idx = action_to_idx(s.label_action)
             if mask[action_idx] == 0:
@@ -282,6 +378,7 @@ def _parse_events_to_arrays(
                 rows[key].append(val)
         except Exception:
             continue
+    timings["encode_s"] = time.perf_counter() - t_encode0
 
     if not rows["tile_feat"]:
         return None
@@ -298,6 +395,7 @@ def _parse_events_to_arrays(
             result[key] = np.array(rows[key], dtype=np.float16)
         else:
             result[key] = np.array(rows[key], dtype=object)
+    result["_timings"] = timings
     return result
 
 
@@ -306,60 +404,135 @@ def _concat_results(results: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarra
     return {key: np.concatenate([r[key] for r in results], axis=0) for key in keys}
 
 
-def process_file(args: Tuple) -> Tuple[str, int]:
+def process_file(args: Tuple) -> Tuple[str, int, Dict[str, float], str, str]:
     global _WORKER_PROCESSED_FILES
-    src_path, out_path, augment, actor_name_filter, adapter, value_strategy, encode_module = args
-    clear_progress_caches = None
-    if encode_module == "keqingv3.features":
-        try:
-            clear_progress_caches = importlib.import_module(
-                "keqingv3.progress_oracle"
-            ).clear_progress_caches
-        except Exception:
-            clear_progress_caches = None
+    src_path, out_path, augment, actor_name_filter, adapter, value_strategy, encode_module, compress_output = args
+    clear_progress_caches = _get_clear_progress_caches_hook(encode_module)
+    timings = {
+        "read_s": 0.0,
+        "base_s": 0.0,
+        "sample_build_s": 0.0,
+        "encode_s": 0.0,
+        "tracker_s": 0.0,
+        "progress_s": 0.0,
+        "fill_s": 0.0,
+        "standard_shanten_s": 0.0,
+        "waits_s": 0.0,
+        "ukeire_improvement_s": 0.0,
+        "shape_s": 0.0,
+        "standard_shanten_calls": 0.0,
+        "waits_calls": 0.0,
+        "standard_shanten_hits": 0.0,
+        "standard_shanten_misses": 0.0,
+        "waits_hits": 0.0,
+        "waits_misses": 0.0,
+        "augment_s": 0.0,
+        "save_s": 0.0,
+        "total_s": 0.0,
+    }
+    t0 = time.perf_counter()
     if out_path.exists():
-        return ("skip", 0)
+        timings["total_s"] = time.perf_counter() - t0
+        return ("skip", 0, timings, str(src_path), "")
     try:
+        t_read0 = time.perf_counter()
         text = src_path.read_text(encoding="utf-8")
-        events = read_mjai_jsonl(src_path)
+        events = _parse_mjai_jsonl_text(text)
+        timings["read_s"] = time.perf_counter() - t_read0
     except Exception:
-        return ("error", 0)
+        timings["total_s"] = time.perf_counter() - t0
+        return ("error", 0, timings, str(src_path), "read_text_or_parse_failed")
 
     all_results: List[Dict[str, np.ndarray]] = []
-    result = events_to_cached_arrays(
-        events,
-        actor_name_filter=actor_name_filter,
-        adapter=adapter,
-        value_strategy=value_strategy,
-        encode_module=encode_module,
-    )
+    t_base0 = time.perf_counter()
+    try:
+        result = events_to_cached_arrays(
+            events,
+            actor_name_filter=actor_name_filter,
+            adapter=adapter,
+            value_strategy=value_strategy,
+            encode_module=encode_module,
+        )
+    except IllegalLabelActionError as exc:
+        timings["base_s"] = time.perf_counter() - t_base0
+        timings["total_s"] = time.perf_counter() - t0
+        return ("error", 0, timings, str(src_path), f"IllegalLabelActionError: {exc}")
+    except PreprocessBuildError:
+        timings["base_s"] = time.perf_counter() - t_base0
+        timings["total_s"] = time.perf_counter() - t0
+        return ("error", 0, timings, str(src_path), "PreprocessBuildError")
+    if result is not None:
+        extra_timings = result.pop("_timings", None)
+        if isinstance(extra_timings, dict):
+            timings["sample_build_s"] += float(extra_timings.get("sample_build_s", 0.0))
+            timings["encode_s"] += float(extra_timings.get("encode_s", 0.0))
+            timings["tracker_s"] += float(extra_timings.get("tracker_s", 0.0))
+            timings["progress_s"] += float(extra_timings.get("progress_s", 0.0))
+            timings["fill_s"] += float(extra_timings.get("fill_s", 0.0))
+            timings["standard_shanten_s"] += float(extra_timings.get("standard_shanten_s", 0.0))
+            timings["waits_s"] += float(extra_timings.get("waits_s", 0.0))
+            timings["ukeire_improvement_s"] += float(extra_timings.get("ukeire_improvement_s", 0.0))
+            timings["shape_s"] += float(extra_timings.get("shape_s", 0.0))
+            timings["standard_shanten_calls"] += float(extra_timings.get("standard_shanten_calls", 0.0))
+            timings["waits_calls"] += float(extra_timings.get("waits_calls", 0.0))
+            timings["standard_shanten_hits"] += float(extra_timings.get("standard_shanten_hits", 0.0))
+            timings["standard_shanten_misses"] += float(extra_timings.get("standard_shanten_misses", 0.0))
+            timings["waits_hits"] += float(extra_timings.get("waits_hits", 0.0))
+            timings["waits_misses"] += float(extra_timings.get("waits_misses", 0.0))
+    timings["base_s"] = time.perf_counter() - t_base0
     if result is not None:
         all_results.append(result)
 
     if augment:
+        t_aug0 = time.perf_counter()
         for perm in _SUIT_PERMS[1:]:
             permuted_text = _permute_mjson_text(text, perm)
             try:
-                perm_events = [json.loads(line) for line in permuted_text.splitlines() if line.strip()]
+                perm_events = _parse_mjai_jsonl_text(permuted_text)
                 result = _parse_events_to_arrays(
                     perm_events,
                     actor_name_filter=actor_name_filter,
                     adapter=adapter,
                     value_strategy=value_strategy,
-                    encode_fn=importlib.import_module(encode_module).encode,
+                    encode_fn=_get_encode_fn(encode_module),
                 )
                 if result is not None:
+                    extra_timings = result.pop("_timings", None)
+                    if isinstance(extra_timings, dict):
+                        timings["sample_build_s"] += float(extra_timings.get("sample_build_s", 0.0))
+                        timings["encode_s"] += float(extra_timings.get("encode_s", 0.0))
+                        timings["tracker_s"] += float(extra_timings.get("tracker_s", 0.0))
+                        timings["progress_s"] += float(extra_timings.get("progress_s", 0.0))
+                        timings["fill_s"] += float(extra_timings.get("fill_s", 0.0))
+                        timings["standard_shanten_s"] += float(extra_timings.get("standard_shanten_s", 0.0))
+                        timings["waits_s"] += float(extra_timings.get("waits_s", 0.0))
+                        timings["ukeire_improvement_s"] += float(extra_timings.get("ukeire_improvement_s", 0.0))
+                        timings["shape_s"] += float(extra_timings.get("shape_s", 0.0))
+                        timings["standard_shanten_calls"] += float(extra_timings.get("standard_shanten_calls", 0.0))
+                        timings["waits_calls"] += float(extra_timings.get("waits_calls", 0.0))
+                        timings["standard_shanten_hits"] += float(extra_timings.get("standard_shanten_hits", 0.0))
+                        timings["standard_shanten_misses"] += float(extra_timings.get("standard_shanten_misses", 0.0))
+                        timings["waits_hits"] += float(extra_timings.get("waits_hits", 0.0))
+                        timings["waits_misses"] += float(extra_timings.get("waits_misses", 0.0))
                     result.update(adapter.permute_result_extras(result, perm))
                     all_results.append(result)
+            except PreprocessBuildError:
+                continue
             except Exception:
                 pass
+        timings["augment_s"] = time.perf_counter() - t_aug0
 
     if not all_results:
         status = ("empty", 0)
     else:
         merged = _concat_results(all_results)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(out_path, **merged)
+        t_save0 = time.perf_counter()
+        if compress_output:
+            np.savez_compressed(out_path, **merged)
+        else:
+            np.savez(out_path, **merged)
+        timings["save_s"] = time.perf_counter() - t_save0
         status = ("ok", len(merged["tile_feat"]))
 
     _WORKER_PROCESSED_FILES += 1
@@ -369,7 +542,8 @@ def process_file(args: Tuple) -> Tuple[str, int]:
     ):
         clear_progress_caches()
         gc.collect()
-    return status
+    timings["total_s"] = time.perf_counter() - t0
+    return status[0], status[1], timings, str(src_path), ""
 
 
 def run_preprocess(
@@ -388,7 +562,12 @@ def run_preprocess(
     parser.set_defaults(augment=None)
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--maxtasksperchild", type=int, default=None)
+    parser.add_argument("--progress-every", type=int, default=None)
+    parser.add_argument("--eta-window", type=int, default=None)
     parser.add_argument("--actor_name_filter", nargs="+", type=str, default=None)
+    parser.add_argument("--compress-output", dest="compress_output", action="store_true")
+    parser.add_argument("--no-compress-output", dest="compress_output", action="store_false")
+    parser.set_defaults(compress_output=None)
     parser.add_argument(
         "--value-strategy",
         type=str,
@@ -421,6 +600,21 @@ def run_preprocess(
         else cfg.get("maxtasksperchild", 64)
     )
     augment = args.augment if args.augment is not None else bool(cfg.get("augment", False))
+    progress_every = (
+        args.progress_every
+        if args.progress_every is not None
+        else int(cfg.get("progress_every", 20))
+    )
+    eta_window = (
+        args.eta_window
+        if args.eta_window is not None
+        else int(cfg.get("eta_window", 200))
+    )
+    compress_output = (
+        args.compress_output
+        if args.compress_output is not None
+        else bool(cfg.get("compress_output", True))
+    )
     actor_name_filter_raw = args.actor_name_filter if args.actor_name_filter is not None else cfg.get("actor_name_filter")
     actor_name_filter = set(actor_name_filter_raw) if actor_name_filter_raw else None
     value_strategy = args.value_strategy or cfg.get("value_strategy", default_value_strategy)
@@ -440,29 +634,85 @@ def run_preprocess(
                 adapter,
                 value_strategy,
                 encode_module,
+                compress_output,
             ))
 
     total = len(tasks)
     filter_info = f"，actor_filter={list(actor_name_filter)}" if actor_name_filter else ""
     print(
         f"共 {total} 个文件，使用 {workers} 个进程，augment={augment} "
-        f"value_strategy={value_strategy} maxtasksperchild={maxtasksperchild}{filter_info}"
+        f"value_strategy={value_strategy} maxtasksperchild={maxtasksperchild} "
+        f"compress_output={compress_output}{filter_info}"
     )
 
-    done = skipped = errors = total_samples = 0
+    done = skipped = errors = empty = total_samples = 0
+    wall_t0 = time.perf_counter()
+    recent_files: deque[tuple[bool, float]] = deque(maxlen=max(1, eta_window))
+    failure_log_path = output_dir / "preprocess_failures.jsonl"
+    if failure_log_path.exists():
+        failure_log_path.unlink()
+    timing_sums = {
+        "read_s": 0.0,
+        "base_s": 0.0,
+        "sample_build_s": 0.0,
+        "encode_s": 0.0,
+        "tracker_s": 0.0,
+        "progress_s": 0.0,
+        "fill_s": 0.0,
+        "standard_shanten_s": 0.0,
+        "waits_s": 0.0,
+        "ukeire_improvement_s": 0.0,
+        "shape_s": 0.0,
+        "standard_shanten_calls": 0.0,
+        "waits_calls": 0.0,
+        "standard_shanten_hits": 0.0,
+        "standard_shanten_misses": 0.0,
+        "waits_hits": 0.0,
+        "waits_misses": 0.0,
+        "augment_s": 0.0,
+        "save_s": 0.0,
+        "total_s": 0.0,
+    }
     with Pool(processes=workers, maxtasksperchild=maxtasksperchild) as pool:
-        for status, n_samples in pool.imap_unordered(process_file, tasks, chunksize=4):
+        for status, n_samples, timings, src_path_str, detail in pool.imap_unordered(process_file, tasks, chunksize=4):
             done += 1
+            recent_files.append((status != "skip", float(timings.get("total_s", 0.0))))
+            for key in timing_sums:
+                timing_sums[key] += float(timings.get(key, 0.0))
             if status == "ok":
                 total_samples += n_samples
             elif status == "skip":
                 skipped += 1
-            elif status in ("error", "empty"):
+            elif status == "empty":
+                empty += 1
+                with failure_log_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({"status": status, "path": src_path_str, "detail": detail}, ensure_ascii=False) + "\n")
+            elif status == "error":
                 errors += 1
-            if done % 200 == 0 or done == total:
-                print(f"  [{done}/{total}] 跳过={skipped} 错误={errors} 样本={total_samples:,}")
+                with failure_log_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps({"status": status, "path": src_path_str, "detail": detail}, ensure_ascii=False) + "\n")
+            if done % progress_every == 0 or done == total:
+                elapsed_s = time.perf_counter() - wall_t0
+                remaining_files = max(0, total - done)
+                recent_work = [cost for worked, cost in recent_files if worked]
+                recent_work_ratio = (
+                    sum(1 for worked, _cost in recent_files if worked) / max(1, len(recent_files))
+                )
+                recent_avg_work_s = (
+                    sum(recent_work) / max(1, len(recent_work))
+                )
+                eta_s = remaining_files * recent_work_ratio * recent_avg_work_s
+                print(
+                    f"  [{done}/{total}] 跳过={skipped} 空={empty} 错误={errors} 样本={total_samples:,} "
+                    f"| 已运行={elapsed_s:.0f}s"
+                    f" 预计剩余={eta_s:.0f}s"
+                )
 
-    print(f"\n完成！总样本数: {total_samples:,}，跳过: {skipped}，错误: {errors}")
+    print(
+        f"\n完成！总样本数: {total_samples:,}，跳过: {skipped}，空: {empty}，错误: {errors}"
+    )
+    if empty or errors:
+        print(f"失败明细已写入: {failure_log_path}")
 
 
 __all__ = [

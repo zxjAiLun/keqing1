@@ -2,13 +2,16 @@
 import { useState, useEffect, useRef } from "react";
 import { MahjongTable } from "../components/BattleBoard/MahjongTable";
 import { fetchWithTimeout } from "../api/battleApi";
-import { PageHeader, PageShell, SectionTitle, subtleButtonStyle } from "../components/Layout/PageScaffold";
+import { PageHeader, PageShell, SectionTitle } from "../components/Layout/PageScaffold";
+import { subtleButtonStyle } from "../components/Layout/layoutStyles";
+import type { BattleState } from "../types/battle";
 
 export function BotBattlePage() {
   const [gameId, setGameId] = useState<string | null>(null);
-  const [state, setState] = useState<any>(null);
+  const [state, setState] = useState<BattleState | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [botModel, setBotModel] = useState("keqingv1");
   const pollingRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
 
@@ -16,7 +19,11 @@ export function BotBattlePage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetchWithTimeout("/api/battle/start_4bot", { method: "POST" });
+      const res = await fetchWithTimeout("/api/battle/start_4bot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bot_model: botModel }),
+      });
       if (!res.ok) throw new Error("启动失败");
       const data = await res.json();
       setGameId(data.game_id);
@@ -107,6 +114,32 @@ export function BotBattlePage() {
 
         <div className="card" style={{ maxWidth: 320 }}>
           <SectionTitle title="开始一局自动对战" description="启动后会持续轮询局面，结束后可导出实验结果。" />
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+            <label style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}>
+              Bot 类型
+            </label>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {["keqingv1", "keqingv2", "keqingv3", "rulebase"].map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setBotModel(m)}
+                  style={{
+                    padding: "5px 12px",
+                    borderRadius: 6,
+                    fontSize: 13,
+                    fontWeight: 500,
+                    border: `2px solid ${botModel === m ? "#8e44ad" : "var(--border-muted)"}`,
+                    background: botModel === m ? "#8e44ad" : "var(--surface-subtle)",
+                    color: botModel === m ? "#fff" : "var(--text-secondary)",
+                    cursor: "pointer",
+                    transition: "all var(--transition)",
+                  }}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          </div>
           <button
             onClick={startBotBattle}
             disabled={loading}

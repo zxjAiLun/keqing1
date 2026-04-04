@@ -10,9 +10,9 @@ type InputType = 'tenhou_url' | 'mjai_json';
 
 // 模型列表：从新到旧，第一个为「最新」
 const MODEL_LIST: { value: string; label: string }[] = [
+  { value: 'keqingv3', label: 'KeqingV3' },
   { value: 'keqingv2', label: 'KeqingV2' },
   { value: 'keqingv1', label: 'KeqingV1' },
-  { value: 'v5',       label: 'V5Model' },
 ];
 const LATEST_MODEL = MODEL_LIST[0].value;
 

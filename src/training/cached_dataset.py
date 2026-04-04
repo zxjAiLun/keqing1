@@ -83,6 +83,10 @@ class BaseCacheAdapter:
         del perm, action_idx
         return row_extra
 
+    def permute_scalar(self, scalar: np.ndarray, perm: tuple) -> np.ndarray:
+        del perm
+        return scalar
+
     def build_sample(
         self,
         tile_feat: np.ndarray,
@@ -277,6 +281,16 @@ class V3AuxAdapter(BaseCacheAdapter):
             np.float32(row_extra.get("dealin_target", 0.0)),
         )
 
+    def permute_scalar(self, scalar: np.ndarray, perm: tuple) -> np.ndarray:
+        # Keep suit-dependent scalar semantics aligned with tile/action permutation:
+        # [18:21] = aka_m / aka_p / aka_s flags
+        # [30:33] = man / pin / sou tile ratios
+        new_scalar = scalar.copy()
+        for dst, src in enumerate(perm):
+            new_scalar[18 + dst] = scalar[18 + src]
+            new_scalar[30 + dst] = scalar[30 + src]
+        return new_scalar
+
     @staticmethod
     def collate(batch: List[Tuple]) -> Tuple:
         tile_feats, scalars, masks, action_idxs, values, score_targets, win_targets, dealin_targets = zip(*batch)
@@ -356,11 +370,12 @@ class GenericCachedMjaiDataset(IterableDataset):
 
                 for perm in perms_to_use:
                     tf, mk, new_ai = apply_suit_perm(tile_feats[i], masks[i], action_idx, perm)
+                    sc = self.adapter.permute_scalar(scalars[i], perm)
                     perm_extra = self.adapter.permute_row_extra(row_extra, perm, new_ai)
                     buffer.append(
                         self.adapter.build_sample(
                             tf,
-                            scalars[i],
+                            sc,
                             mk,
                             new_ai,
                             values[i],

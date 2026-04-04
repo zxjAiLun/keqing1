@@ -106,6 +106,7 @@ function mergeReplayEntryWithPrevious(
   return {
     ...prevEntry,
     ...entry,
+    is_obs: entry.is_obs === true,
     discards: entry.discards ?? prevEntry.discards,
     melds: entry.melds ?? prevEntry.melds,
     dora_markers: entry.dora_markers ?? prevEntry.dora_markers,
@@ -168,6 +169,30 @@ function supportsReachPhase(entry: DecisionLogEntry): boolean {
   return action?.type === 'reach';
 }
 
+function isResponseNoneAction(entry: DecisionLogEntry | null | undefined): boolean {
+  const action = entry?.gt_action ?? entry?.chosen;
+  return action?.type === 'none';
+}
+
+function hasNonNoneCandidates(entry: DecisionLogEntry | null | undefined): boolean {
+  return Boolean(entry?.candidates?.some((candidate) => candidate.action?.type !== 'none'));
+}
+
+export function isCollapsibleResponsePassStep(
+  entry: DecisionLogEntry | null | undefined,
+  prevEntry?: DecisionLogEntry | null,
+): boolean {
+  const prevAction = prevEntry ? (prevEntry.gt_action ?? prevEntry.chosen) : null;
+  return Boolean(
+    entry
+    && prevEntry
+    && isResponseNoneAction(entry)
+    && prevEntry.is_obs
+    && prevAction?.type === 'dahai'
+    && !hasNonNoneCandidates(entry)
+  );
+}
+
 export function hasReplayPostAction(entry: DecisionLogEntry | null | undefined): boolean {
   return Boolean(entry && supportsPostActionPhase(entry));
 }
@@ -186,7 +211,11 @@ export function entryToBattleState(
   phase: ReplayBoardPhase = 'pre',
   prevEntry?: DecisionLogEntry | null,
 ): BattleState {
+  if (isCollapsibleResponsePassStep(entry, prevEntry)) {
+    return entryToBattleState(prevEntry!, playerNames, viewPlayerId, 'post');
+  }
   const mergedEntry = mergeReplayEntryWithPrevious(entry, prevEntry);
+  const previousAction = prevEntry ? (prevEntry.gt_action ?? prevEntry.chosen) : null;
   // Record<number, X[]> → X[][]（4家，空补齐）
   function toArray<T>(rec: Record<number, T[]> | undefined): T[][] {
     return [0, 1, 2, 3].map(i => rec?.[i] ?? []);
@@ -200,11 +229,16 @@ export function entryToBattleState(
     : toArray(mergedEntry.melds) as MeldEntry[][];
   const action = mergedEntry.gt_action ?? mergedEntry.chosen;
   const isPreDiscardPhase = phase === 'pre' && action?.type === 'dahai';
+  const suppressSnapshotDrawActor = action?.type === 'none';
   const pendingDiscardActorFromSnapshot =
     mergedEntry.actor_to_move !== null && mergedEntry.actor_to_move !== undefined && mergedEntry.last_discard === null
       ? mergedEntry.actor_to_move
       : null;
-  const showsReplayDraw = isPreDiscardPhase ? action.actor : pendingDiscardActorFromSnapshot;
+  const showsReplayDraw = isPreDiscardPhase
+    ? action.actor
+    : suppressSnapshotDrawActor
+      ? null
+      : pendingDiscardActorFromSnapshot;
   const normalizedTsumoPai =
     isPreDiscardPhase && action.actor === viewPlayerId
       ? (mergedEntry.tsumo_pai ?? (action.tsumogiri ? action.pai ?? null : null))
@@ -327,9 +361,12 @@ export function entryToBattleState(
   }
 
   if (action.type === 'dahai') {
-    const declaresReach = mergedEntry.gt_action?.type === 'reach' && mergedEntry.gt_action.actor === action.actor;
+    const declaresReach =
+      (mergedEntry.gt_action?.type === 'reach' && mergedEntry.gt_action.actor === action.actor)
+      || (previousAction?.type === 'reach' && previousAction.actor === action.actor);
     if (action.actor === viewPlayerId) {
-      nextState.hand = removeTileOnce(nextState.hand, action.pai);
+      const handWithDraw = baseState.tsumo_pai ? [...nextState.hand, baseState.tsumo_pai] : [...nextState.hand];
+      nextState.hand = removeTileOnce(handWithDraw, action.pai);
       nextState.tsumo_pai = null;
     }
     if (declaresReach) {

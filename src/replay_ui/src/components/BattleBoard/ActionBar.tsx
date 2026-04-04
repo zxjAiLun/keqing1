@@ -37,6 +37,20 @@ export function ActionBar({ legalActions, onAction, disabled, pendingReach }: Ac
     <div style={containerStyle}>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
 
+        {/* 跳过/Pass：响应窗口里固定放最前，避免被挤到最后一排 */}
+        {hasNone && (
+          <button
+            style={btnStyle("none")}
+            disabled={disabled}
+            onClick={() => {
+              const noneAction = legalActions.find((a) => a.type === "none");
+              if (noneAction) onAction(noneAction);
+            }}
+          >
+            跳过
+          </button>
+        )}
+
         {/* 胡牌（自摸/荣和）优先显示 */}
         {horaActions.map((action, i) => (
           <button key={`hora-${i}`} style={btnStyle("hora")} disabled={disabled}
@@ -76,20 +90,6 @@ export function ActionBar({ legalActions, onAction, disabled, pendingReach }: Ac
             {kanLabel(action)}
           </button>
         ))}
-
-        {/* 跳过/Pass */}
-        {hasNone && (
-          <button
-            style={btnStyle("none")}
-            disabled={disabled}
-            onClick={() => {
-              const noneAction = legalActions.find((a) => a.type === "none");
-              if (noneAction) onAction(noneAction);
-            }}
-          >
-            跳过
-          </button>
-        )}
       </div>
     </div>
   );
@@ -118,25 +118,30 @@ const containerStyle: React.CSSProperties = {
   flexDirection: 'column',
   gap: 8,
   width: '100%',
-  maxWidth: 920,
-  padding: '10px 14px',
-  borderRadius: 'var(--radius-md)',
-  background: 'var(--card-bg)',
-  border: '1px solid var(--border)',
-  backdropFilter: 'blur(12px)',
-  transition: 'background var(--transition), border-color var(--transition)',
+  maxWidth: 1080,
+  padding: '14px 18px',
+  borderRadius: 16,
+  background: 'linear-gradient(180deg, rgba(14,20,30,0.78) 0%, rgba(14,20,30,0.62) 100%)',
+  border: '1px solid rgba(255,255,255,0.14)',
+  backdropFilter: 'blur(16px)',
+  boxShadow: '0 14px 40px rgba(0,0,0,0.32)',
+  transition: 'background var(--transition), border-color var(--transition), transform var(--transition)',
 };
 
 function btnStyle(type: string): React.CSSProperties {
   const base: React.CSSProperties = {
-    padding: '6px 14px',
-    borderRadius: 'var(--radius-sm)',
+    padding: '12px 22px',
+    borderRadius: 12,
     border: 'none',
     fontWeight: 700,
-    fontSize: 12,
+    fontSize: 15,
+    lineHeight: 1.1,
     cursor: 'pointer',
-    transition: 'opacity 0.15s',
+    transition: 'opacity 0.15s, transform 0.15s',
     whiteSpace: 'nowrap',
+    minHeight: 48,
+    minWidth: 96,
+    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.12)',
   };
   switch (type) {
     case "hora":
@@ -152,8 +157,20 @@ function btnStyle(type: string): React.CSSProperties {
     case "kakan":
       return { ...base, background: 'linear-gradient(135deg, #8e44ad 0%, #7d3c9e 100%)', color: '#fff' };
     case "none":
-      return { ...base, background: 'var(--sidebar-bg)', color: 'var(--text-muted)', border: '1px solid var(--border)', fontWeight: 600 };
+      return {
+        ...base,
+        background: 'linear-gradient(135deg, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0.10) 100%)',
+        color: '#ffffff',
+        border: '1px solid rgba(255,255,255,0.22)',
+        fontWeight: 700,
+        minWidth: 112,
+      };
     default:
-      return { ...base, background: 'var(--card-bg)', color: 'var(--text-primary)', border: '1px solid var(--border)' };
+      return {
+        ...base,
+        background: 'rgba(255,255,255,0.08)',
+        color: '#fff',
+        border: '1px solid rgba(255,255,255,0.14)',
+      };
   }
 }

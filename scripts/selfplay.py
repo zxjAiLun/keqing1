@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""自对战脚本：加载 KeqingBot 跑 N 局全Bot对战，统计顺位/胜率，可选保存牌谱/.npz。
+"""自对战脚本：加载共享运行时 bot 跑 N 局全Bot对战，统计顺位/胜率，可选保存牌谱/.npz。
 
 用法:
     python scripts/selfplay.py --model best.pth --games 100
@@ -24,7 +24,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from gateway.battle import BattleConfig, BattleManager, BattleRoom, _shuffle_wall
-from keqingv1.bot import KeqingBot
+from inference.bot_registry import create_runtime_bot
 from mahjong_env.legal_actions import enumerate_legal_actions
 from mahjong_env.state import GameState
 from mahjong_env.tiles import normalize_tile
@@ -51,6 +51,7 @@ class PlayerStatInfo:
         self.total_deal_in_points = 0
         self.total_score = 0
         self.total_win_turns = 0
+        self.yaku_counts: Counter = Counter()
 
     def to_dict(self) -> dict:
         return {
@@ -68,6 +69,7 @@ class PlayerStatInfo:
             "total_deal_in_points": self.total_deal_in_points,
             "total_score": self.total_score,
             "total_win_turns": self.total_win_turns,
+            "yaku_counts": dict(self.yaku_counts),
         }
 
     def record_round(
@@ -106,6 +108,8 @@ class PlayerStatInfo:
                 self.ron_wins += 1
             if not riichi_declared:
                 self.damaten_wins += 1
+            for yaku_key in _extract_counted_yaku_keys(hora_ev):
+                self.yaku_counts[yaku_key] += 1
 
         if (
             hora_ev is not None
@@ -170,18 +174,56 @@ class PlayerStatInfo:
         }
 
 
+_EXCLUDED_YAKU_KEYS = {
+    "Dora",
+    "Ura Dora",
+    "Aka Dora",
+    "Chankan",
+    "Rinshan Kaihou",
+    "Haitei",
+    "Houtei",
+    "Nagashi Mangan",
+    "Tenhou",
+    "Chiihou",
+    "Kokushi Musou",
+    "Kokushi Musou 13 Men",
+    "Suuankou",
+    "Suuankou Tanki",
+    "Daisangen",
+    "Shousuushii",
+    "Daisuushii",
+    "Tsuuiisou",
+    "Chinroutou",
+    "Ryuuiisou",
+    "Chuuren Poutou",
+    "Junsei Chuuren Poutou",
+    "Suukantsu",
+}
+
+
+def _extract_counted_yaku_keys(hora_event: dict) -> List[str]:
+    yaku_details = hora_event.get("yaku_details") or []
+    keys: List[str] = []
+    for detail in yaku_details:
+        key = str(detail.get("key") or detail.get("name") or "").strip()
+        if not key or key in _EXCLUDED_YAKU_KEYS:
+            continue
+        keys.append(key)
+    return keys
+
+
 # ---------------------------------------------------------------------------
 # Bot 决策辅助
 # ---------------------------------------------------------------------------
 
 
-def _bot_decide(bot: KeqingBot, event: dict) -> Optional[dict]:
+def _bot_decide(bot: object, event: dict) -> Optional[dict]:
     """将单条 mjai 事件喂给 bot，返回 bot 的响应动作（或 None）。"""
     return bot.react(event)
 
 
 def _broadcast_event(
-    bots: List[KeqingBot],
+    bots: List[object],
     event: dict,
     *,
     skip: Optional[int] = None,
@@ -340,7 +382,7 @@ def _canonicalize_action_for_server(
 
 
 def _broadcast_events(
-    bots: List[KeqingBot],
+    bots: List[object],
     events: List[dict],
     *,
     skip: Optional[int] = None,
@@ -422,7 +464,7 @@ def _next_actor_after_meld_response(
     return int(room.state.actor_to_move)
 
 
-def _timed_react(bot: KeqingBot, event: dict) -> Tuple[Optional[dict], float]:
+def _timed_react(bot: object, event: dict) -> Tuple[Optional[dict], float]:
     started = time.perf_counter()
     action = bot.react(event)
     return action, time.perf_counter() - started
@@ -451,6 +493,13 @@ def _resolve_model_path(model_spec: str) -> str:
     )
 
 
+def _resolve_bot_source(bot_spec: str) -> Tuple[str, str]:
+    if bot_spec == "rulebase":
+        return "rulebase", "rulebase"
+    resolved = _resolve_model_path(bot_spec)
+    return resolved, _default_model_label(resolved)
+
+
 def _default_output_dir(model_label: str) -> str:
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     return str(Path("artifacts/selfplay_benchmarks") / f"{model_label}_{timestamp}")
@@ -476,6 +525,37 @@ def _resolve_seat_models(
         labels = [_default_model_label(path) for path in paths]
 
     return paths, labels
+
+
+def _resolve_seat_bots(
+    model: str,
+    seat_bots: Optional[List[str]],
+    seat_models: Optional[List[str]],
+    seat_labels: Optional[List[str]],
+) -> Tuple[List[str], List[str], List[str]]:
+    if seat_bots:
+        if len(seat_bots) != 4:
+            raise ValueError("--seat-bots 必须提供 4 个 bot 类型")
+        sources: List[str] = []
+        labels: List[str] = []
+        kinds: List[str] = []
+        for bot_spec in seat_bots:
+            if bot_spec not in {"keqingv1", "keqingv2", "keqingv3", "rulebase"}:
+                raise ValueError(
+                    "--seat-bots 仅支持 keqingv1/keqingv2/keqingv3/rulebase"
+                )
+            source, default_label = _resolve_bot_source(bot_spec)
+            sources.append(source)
+            labels.append(default_label)
+            kinds.append(bot_spec)
+        if seat_labels:
+            if len(seat_labels) != 4:
+                raise ValueError("--seat-labels 必须提供 4 个标签")
+            labels = seat_labels
+        return sources, labels, kinds
+
+    paths, labels = _resolve_seat_models(model, seat_models, seat_labels)
+    return paths, labels, labels[:]
 
 
 def _build_machine_names(model_labels: List[str]) -> List[str]:
@@ -543,7 +623,7 @@ MODEL_ROOT = Path("artifacts/models")
 def run_one_kyoku(
     manager: BattleManager,
     room: BattleRoom,
-    bots: List[KeqingBot],
+    bots: List[object],
     seed: Optional[int] = None,
 ) -> dict:
     """跑完一局（从 start_kyoku 到 hora/ryukyoku），返回结果 dict。"""
@@ -886,7 +966,7 @@ def _merge_counter_dict(
 def run_one_game(
     manager: BattleManager,
     room: BattleRoom,
-    bots: List[KeqingBot],
+    bots: List[object],
     seed: Optional[int] = None,
 ) -> dict:
     kyoku_results: List[dict] = []
@@ -1156,7 +1236,7 @@ def _save_error_artifacts(
     game_id: int,
     room: BattleRoom,
     exc: BaseException,
-    bots: List[KeqingBot],
+    bots: List[object],
 ) -> Dict[str, str]:
     err_dir = output_dir / "errors"
     err_dir.mkdir(parents=True, exist_ok=True)
@@ -1370,6 +1450,116 @@ def _score_interest(events: list, scores: List[int]) -> float:
     return hora_count * 1000 + score_spread
 
 
+def _build_label_summary(
+    model_rank_counts: Dict[str, Counter],
+    model_total_scores: Dict[str, int],
+    model_games: Counter,
+    model_stat_infos: Dict[str, PlayerStatInfo],
+    model_decision_seconds: Dict[str, float],
+    model_decision_counts: Counter,
+) -> dict[str, dict]:
+    return {
+        model_label: {
+            "games": int(model_games[model_label]),
+            "avg_rank": (
+                sum(
+                    rank * count
+                    for rank, count in model_rank_counts[model_label].items()
+                )
+                / max(1, model_games[model_label])
+            ),
+            "avg_score": model_total_scores[model_label]
+            / max(1, model_games[model_label]),
+            "rank_counts": dict(model_rank_counts[model_label]),
+            "top1_rate": model_rank_counts[model_label][1]
+            / max(1, model_games[model_label]),
+            "top4_rate": model_rank_counts[model_label][4]
+            / max(1, model_games[model_label]),
+            "yaku_counts": dict(model_stat_infos[model_label].yaku_counts),
+            "decision_total_seconds": model_decision_seconds[model_label],
+            "decision_count": int(model_decision_counts[model_label]),
+            "avg_decision_seconds": model_decision_seconds[model_label]
+            / max(1, model_decision_counts[model_label]),
+        }
+        for model_label in sorted(model_games)
+    }
+
+
+def _format_progress_label_summary(label_summary: dict[str, dict]) -> str:
+    parts = []
+    for model_label, summary in label_summary.items():
+        parts.append(
+            f"{model_label}: avg_rank={summary['avg_rank']:.3f} "
+            f"avg_score={summary['avg_score']:.1f} "
+            f"top1={summary['top1_rate'] * 100:.1f}%"
+        )
+    return " | ".join(parts)
+
+
+def _format_progress_benchmark_side_summary(
+    benchmark_side_summary: dict[str, dict],
+) -> str:
+    if not benchmark_side_summary:
+        return ""
+    solo = benchmark_side_summary.get("solo_side")
+    trio = benchmark_side_summary.get("trio_side")
+    if not solo or not trio:
+        return ""
+    return (
+        f"单机侧 {solo['label']}: avg_rank={solo['avg_rank']:.3f} avg_score={solo['avg_score']:.1f} "
+        f"| 三机侧 {trio['label']}: avg_rank={trio['avg_rank']:.3f} avg_score={trio['avg_score']:.1f}"
+    )
+
+
+def _build_benchmark_side_summary(
+    seat_model_labels: List[str],
+    label_summary: dict[str, dict],
+    model_stats: dict[str, dict],
+) -> dict[str, dict]:
+    label_counts = Counter(seat_model_labels)
+    if len(label_counts) != 2:
+        return {}
+
+    solo_items = [item for item in label_counts.items() if item[1] == 1]
+    trio_items = [item for item in label_counts.items() if item[1] == 3]
+    if len(solo_items) != 1 or len(trio_items) != 1:
+        return {}
+
+    solo_label = solo_items[0][0]
+    trio_label = trio_items[0][0]
+    solo_summary = label_summary.get(solo_label)
+    trio_summary = label_summary.get(trio_label)
+    solo_stats = model_stats.get(solo_label, {})
+    trio_stats = model_stats.get(trio_label, {})
+    if not solo_summary or not trio_summary:
+        return {}
+
+    return {
+        "solo_side": {
+            "label": solo_label,
+            "count": 1,
+            "avg_rank": solo_summary.get("avg_rank", 0.0),
+            "avg_score": solo_summary.get("avg_score", 0.0),
+            "top1_rate": solo_summary.get("top1_rate", 0.0),
+            "hora_rate": solo_stats.get("hora_rate", 0.0),
+            "deal_in_rate": solo_stats.get("deal_in_rate", 0.0),
+            "riichi_rate": solo_stats.get("riichi_rate", 0.0),
+            "meld_rate": solo_stats.get("meld_rate", 0.0),
+        },
+        "trio_side": {
+            "label": trio_label,
+            "count": 3,
+            "avg_rank": trio_summary.get("avg_rank", 0.0),
+            "avg_score": trio_summary.get("avg_score", 0.0),
+            "top1_rate": trio_summary.get("top1_rate", 0.0),
+            "hora_rate": trio_stats.get("hora_rate", 0.0),
+            "deal_in_rate": trio_stats.get("deal_in_rate", 0.0),
+            "riichi_rate": trio_stats.get("riichi_rate", 0.0),
+            "meld_rate": trio_stats.get("meld_rate", 0.0),
+        },
+    }
+
+
 def _build_stats_snapshot(
     *,
     args,
@@ -1382,6 +1572,8 @@ def _build_stats_snapshot(
     model_games: Counter,
     player_stat_infos: Dict[str, PlayerStatInfo],
     model_stat_infos: Dict[str, PlayerStatInfo],
+    model_decision_seconds: Dict[str, float],
+    model_decision_counts: Counter,
     total_rounds_played: int,
     hora_total: int,
     total_turns: int,
@@ -1400,6 +1592,25 @@ def _build_stats_snapshot(
 ) -> dict:
     total_decision_seconds = sum(aggregate_decision_seconds_by_actor.values())
     total_decision_count = sum(aggregate_decision_counts_by_actor.values())
+    label_summary = _build_label_summary(
+        model_rank_counts=model_rank_counts,
+        model_total_scores=model_total_scores,
+        model_games=model_games,
+        model_stat_infos=model_stat_infos,
+        model_decision_seconds=model_decision_seconds,
+        model_decision_counts=model_decision_counts,
+    )
+    model_stats = {
+        model_label: model_stat_infos[model_label].summary(
+            total_rounds=total_rounds_played
+        )
+        for model_label in sorted(model_stat_infos)
+    }
+    benchmark_side_summary = _build_benchmark_side_summary(
+        seat_model_labels=seat_model_labels,
+        label_summary=label_summary,
+        model_stats=model_stats,
+    )
     return {
         "games": args.games,
         "completed_games": completed_games,
@@ -1410,36 +1621,13 @@ def _build_stats_snapshot(
         "seat_model_labels": seat_model_labels,
         "rank_counts": dict(rank_counts),
         "avg_scores": [s / max(1, completed_games) for s in total_scores],
-        "model_summary": {
-            model_label: {
-                "games": int(model_games[model_label]),
-                "avg_rank": (
-                    sum(
-                        rank * count
-                        for rank, count in model_rank_counts[model_label].items()
-                    )
-                    / max(1, model_games[model_label])
-                ),
-                "avg_score": model_total_scores[model_label]
-                / max(1, model_games[model_label]),
-                "rank_counts": dict(model_rank_counts[model_label]),
-                "top1_rate": model_rank_counts[model_label][1]
-                / max(1, model_games[model_label]),
-                "top4_rate": model_rank_counts[model_label][4]
-                / max(1, model_games[model_label]),
-            }
-            for model_label in sorted(model_games)
-        },
+        "model_summary": label_summary,
         "player_stats": {
             actor_id: player_stat_infos[actor_id].summary(total_rounds=total_rounds_played)
             for actor_id in sorted(player_stat_infos)
         },
-        "model_stats": {
-            model_label: model_stat_infos[model_label].summary(
-                total_rounds=total_rounds_played
-            )
-            for model_label in sorted(model_stat_infos)
-        },
+        "model_stats": model_stats,
+        "benchmark_side_summary": benchmark_side_summary,
         "hora_per_game": hora_total / max(1, completed_games),
         "avg_turns": total_turns / max(1, completed_games),
         "event_type_counts": dict(aggregate_event_counts),
@@ -1489,7 +1677,7 @@ def _append_progress_line(output_dir: Path, record: dict) -> None:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="KeqingBot 全Bot自对战")
+    p = argparse.ArgumentParser(description="RuntimeBot 全Bot自对战")
     p.add_argument(
         "--model",
         required=True,
@@ -1501,6 +1689,13 @@ def parse_args():
         default=None,
         metavar=("P0", "P1", "P2", "P3"),
         help="按座位指定 4 个模型路径；未指定时四家共用 --model",
+    )
+    p.add_argument(
+        "--seat-bots",
+        nargs=4,
+        default=None,
+        metavar=("B0", "B1", "B2", "B3"),
+        help="按座位指定 4 个 bot；可混用 keqingv1/keqingv2/keqingv3/rulebase。提供后优先于 --seat-models",
     )
     p.add_argument(
         "--seat-labels",
@@ -1591,26 +1786,28 @@ def main():
     if args.seed is not None:
         random.seed(args.seed)
 
-    seat_model_paths, seat_model_labels = _resolve_seat_models(
-        resolved_model, args.seat_models, args.seat_labels
+    seat_model_paths, seat_model_labels, seat_bot_kinds = _resolve_seat_bots(
+        resolved_model, args.seat_bots, args.seat_models, args.seat_labels
     )
     machine_names = _build_machine_names(seat_model_labels)
     print("加载模型阵容:", flush=True)
-    for machine_id, (model_path, model_label, machine_name) in enumerate(
-        zip(seat_model_paths, seat_model_labels, machine_names)
+    for machine_id, (model_path, model_label, machine_name, bot_kind) in enumerate(
+        zip(seat_model_paths, seat_model_labels, machine_names, seat_bot_kinds)
     ):
         print(
-            f"  机体{machine_id}: {machine_name} ({model_label}) -> {model_path}",
+            f"  机体{machine_id}: {machine_name} ({model_label}) -> {model_path} [{bot_kind}]",
             flush=True,
         )
     machine_bots = [
-        KeqingBot(
+        create_runtime_bot(
+            bot_name=seat_bot_kinds[i],
             player_id=i,
-            model_path=seat_model_paths[i],
+            project_root=Path.cwd(),
+            model_path=None if seat_model_paths[i] == "rulebase" else seat_model_paths[i],
             device=args.device,
+            verbose=args.verbose,
             beam_k=args.beam_k,
             beam_lambda=args.beam_lambda,
-            verbose=args.verbose,
         )
         for i in range(4)
     ]
@@ -1638,6 +1835,8 @@ def main():
         str(pid): PlayerStatInfo() for pid in range(4)
     }
     model_stat_infos: Dict[str, PlayerStatInfo] = defaultdict(PlayerStatInfo)
+    model_decision_seconds: Dict[str, float] = defaultdict(float)
+    model_decision_counts: Counter = Counter()
     game_results = []  # [{game_id, scores, ranks, interest, events}]
     error_games = []
     total_rounds_played = 0
@@ -1655,6 +1854,8 @@ def main():
             model_games=model_games,
             player_stat_infos=player_stat_infos,
             model_stat_infos=model_stat_infos,
+            model_decision_seconds=model_decision_seconds,
+            model_decision_counts=model_decision_counts,
             total_rounds_played=total_rounds_played,
             hora_total=hora_total,
             total_turns=total_turns,
@@ -1669,6 +1870,7 @@ def main():
             error_games=error_games,
             elapsed=0.0,
             completed_games=0,
+            cache_export=None,
         ),
     )
 
@@ -1676,6 +1878,7 @@ def main():
         seat_assignment = _seat_assignment(4, fixed_seats=args.fixed_seats)
         game_seat_model_paths = [seat_model_paths[machine_id] for machine_id in seat_assignment]
         game_seat_model_labels = [seat_model_labels[machine_id] for machine_id in seat_assignment]
+        game_seat_bot_kinds = [seat_bot_kinds[machine_id] for machine_id in seat_assignment]
         game_player_names = [machine_names[machine_id] for machine_id in seat_assignment]
         game_bots = [machine_bots[machine_id] for machine_id in seat_assignment]
         for seat, bot in enumerate(game_bots):
@@ -1714,6 +1917,7 @@ def main():
                     "error": str(exc),
                     "player_names": game_player_names[:],
                     "seat_model_labels": game_seat_model_labels[:],
+                    "seat_bot_kinds": game_seat_bot_kinds[:],
                     "seat_assignment": seat_assignment[:],
                     **artifacts,
                 }
@@ -1738,6 +1942,7 @@ def main():
                     "error_count": len(error_games),
                     "player_names": game_player_names,
                     "seat_model_labels": game_seat_model_labels,
+                    "seat_bot_kinds": game_seat_bot_kinds,
                     "seat_assignment": seat_assignment,
                 },
             )
@@ -1754,6 +1959,8 @@ def main():
                     model_games=model_games,
                     player_stat_infos=player_stat_infos,
                     model_stat_infos=model_stat_infos,
+                    model_decision_seconds=model_decision_seconds,
+                    model_decision_counts=model_decision_counts,
                     total_rounds_played=total_rounds_played,
                     hora_total=hora_total,
                     total_turns=total_turns,
@@ -1768,6 +1975,7 @@ def main():
                     error_games=error_games,
                     elapsed=elapsed,
                     completed_games=completed_games,
+                    cache_export=None,
                 ),
             )
             continue
@@ -1790,6 +1998,15 @@ def main():
             aggregate_decision_counts_by_actor[str(actor_id)] += int(
                 info.get("decision_count", 0)
             )
+            actor_idx = int(actor_id)
+            if 0 <= actor_idx < len(game_seat_model_labels):
+                model_label = game_seat_model_labels[actor_idx]
+                model_decision_seconds[model_label] += float(
+                    info.get("total_seconds", 0.0)
+                )
+                model_decision_counts[model_label] += int(
+                    info.get("decision_count", 0)
+                )
         ranks = _rank_of_scores(scores)
         interest = _score_interest(events, scores)
         hora_count = sum(1 for e in events if e.get("type") == "hora")
@@ -1837,6 +2054,7 @@ def main():
                 "ranks": ranks,
                 "seat_model_labels": game_seat_model_labels[:],
                 "seat_model_paths": game_seat_model_paths[:],
+                "seat_bot_kinds": game_seat_bot_kinds[:],
                 "player_names": game_player_names[:],
                 "seat_assignment": seat_assignment[:],
                 "interest": interest,
@@ -1850,28 +2068,52 @@ def main():
 
         if (game_idx + 1) % max(1, args.games // 10) == 0 or game_idx == args.games - 1:
             done = game_idx + 1
-            avg_rank = sum(r * c for r, c in rank_counts.items()) / max(1, done * 4)
+            label_summary = _build_label_summary(
+                model_rank_counts=model_rank_counts,
+                model_total_scores=model_total_scores,
+                model_games=model_games,
+                model_stat_infos=model_stat_infos,
+                model_decision_seconds=model_decision_seconds,
+                model_decision_counts=model_decision_counts,
+            )
+            progress_model_stats = {
+                model_label: model_stat_infos[model_label].summary(
+                    total_rounds=total_rounds_played
+                )
+                for model_label in sorted(model_stat_infos)
+            }
+            benchmark_side_summary = _build_benchmark_side_summary(
+                seat_model_labels=seat_model_labels,
+                label_summary=label_summary,
+                model_stats=progress_model_stats,
+            )
+            summary_line = (
+                _format_progress_benchmark_side_summary(benchmark_side_summary)
+                if benchmark_side_summary
+                else _format_progress_label_summary(label_summary)
+            )
             print(
-                f"  [{done}/{args.games}] 平均顺位={avg_rank:.2f} hora/{format_label}={hora_total / done:.2f}",
+                f"  [{done}/{args.games}] hora/{format_label}={hora_total / done:.2f}"
+                + (f" | {summary_line}" if summary_line else ""),
                 flush=True,
             )
 
         elapsed = time.perf_counter() - started_at
         completed_games = len(game_results)
+        progress_label_summary = _build_label_summary(
+            model_rank_counts=model_rank_counts,
+            model_total_scores=model_total_scores,
+            model_games=model_games,
+            model_stat_infos=model_stat_infos,
+            model_decision_seconds=model_decision_seconds,
+            model_decision_counts=model_decision_counts,
+        )
         solo_label = _default_model_label(resolved_model)
-        solo_summary = {}
-        if model_games.get(solo_label):
-            solo_games = model_games[solo_label]
+        solo_summary = progress_label_summary.get(solo_label, {})
+        if solo_summary:
             solo_summary = {
                 "label": solo_label,
-                "games": int(solo_games),
-                "avg_rank": sum(
-                    rank * count for rank, count in model_rank_counts[solo_label].items()
-                )
-                / max(1, solo_games),
-                "avg_score": model_total_scores[solo_label] / max(1, solo_games),
-                "top1_rate": model_rank_counts[solo_label][1] / max(1, solo_games),
-                "top4_rate": model_rank_counts[solo_label][4] / max(1, solo_games),
+                **solo_summary,
             }
         _append_progress_line(
             output_dir,
@@ -1889,7 +2131,9 @@ def main():
                 "error_count": len(error_games),
                 "player_names": game_player_names,
                 "seat_model_labels": game_seat_model_labels,
+                "seat_bot_kinds": game_seat_bot_kinds,
                 "seat_assignment": seat_assignment,
+                "label_summary": progress_label_summary,
                 "solo_model_summary": solo_summary,
             },
         )
@@ -1906,6 +2150,8 @@ def main():
                 model_games=model_games,
                 player_stat_infos=player_stat_infos,
                 model_stat_infos=model_stat_infos,
+                model_decision_seconds=model_decision_seconds,
+                model_decision_counts=model_decision_counts,
                 total_rounds_played=total_rounds_played,
                 hora_total=hora_total,
                 total_turns=total_turns,
@@ -1920,6 +2166,7 @@ def main():
                 error_games=error_games,
                 elapsed=elapsed,
                 completed_games=completed_games,
+                cache_export=None,
             ),
         )
 
@@ -1944,19 +2191,57 @@ def main():
     print(f"  平均耗时: {elapsed / max(1, completed_games):.2f}s/局", flush=True)
     print(f"  平均巡数: {total_turns / max(1, completed_games):.2f}", flush=True)
     if model_games:
+        final_label_summary = _build_label_summary(
+            model_rank_counts=model_rank_counts,
+            model_total_scores=model_total_scores,
+            model_games=model_games,
+            model_stat_infos=model_stat_infos,
+            model_decision_seconds=model_decision_seconds,
+            model_decision_counts=model_decision_counts,
+        )
+        final_model_stats = {
+            model_label: model_stat_infos[model_label].summary(
+                total_rounds=total_rounds_played
+            )
+            for model_label in sorted(model_stat_infos)
+        }
+        benchmark_side_summary = _build_benchmark_side_summary(
+            seat_model_labels=seat_model_labels,
+            label_summary=final_label_summary,
+            model_stats=final_model_stats,
+        )
         print("  模型汇总:", flush=True)
-        for model_label in sorted(model_games):
-            games_played = model_games[model_label]
-            avg_rank = sum(
-                rank * count for rank, count in model_rank_counts[model_label].items()
-            ) / max(1, games_played)
-            avg_score = model_total_scores[model_label] / max(1, games_played)
-            top1 = model_rank_counts[model_label][1]
-            top4 = model_rank_counts[model_label][4]
+        for model_label, summary in final_label_summary.items():
+            top_yaku = ", ".join(
+                f"{key}={count}"
+                for key, count in sorted(
+                    summary.get("yaku_counts", {}).items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            ) or "-"
             print(
-                f"    {model_label}: games={games_played} avg_rank={avg_rank:.3f} "
-                f"avg_score={avg_score:.1f} top1={top1 / max(1, games_played) * 100:.1f}% "
-                f"top4={top4 / max(1, games_played) * 100:.1f}%",
+                f"    {model_label}: games={summary['games']} avg_rank={summary['avg_rank']:.3f} "
+                f"avg_score={summary['avg_score']:.1f} top1={summary['top1_rate'] * 100:.1f}% "
+                f"top4={summary['top4_rate'] * 100:.1f}% "
+                f"think_events={summary['decision_count']} think_time={summary['decision_total_seconds']:.2f}s "
+                f"avg_think={summary['avg_decision_seconds']:.4f}s",
+                flush=True,
+            )
+            print(f"      yaku: {top_yaku}", flush=True)
+        if benchmark_side_summary:
+            print("  1v3聚合:", flush=True)
+            solo_side = benchmark_side_summary["solo_side"]
+            trio_side = benchmark_side_summary["trio_side"]
+            print(
+                f"    单机侧 {solo_side['label']}: avg_rank={solo_side['avg_rank']:.3f} "
+                f"avg_score={solo_side['avg_score']:.1f} top1={solo_side['top1_rate'] * 100:.1f}% "
+                f"hora_rate={solo_side['hora_rate'] * 100:.1f}% deal_in_rate={solo_side['deal_in_rate'] * 100:.1f}%",
+                flush=True,
+            )
+            print(
+                f"    三机侧 {trio_side['label']}: avg_rank={trio_side['avg_rank']:.3f} "
+                f"avg_score={trio_side['avg_score']:.1f} top1={trio_side['top1_rate'] * 100:.1f}% "
+                f"hora_rate={trio_side['hora_rate'] * 100:.1f}% deal_in_rate={trio_side['deal_in_rate'] * 100:.1f}%",
                 flush=True,
             )
     if aggregate_action_counts:
@@ -1994,12 +2279,15 @@ def main():
     if error_games:
         print(f"  错误日志 -> {output_dir / 'errors'}", flush=True)
 
+    replay_model_for_exports = (
+        None if any(kind == "rulebase" for kind in seat_bot_kinds) else resolved_model
+    )
     replay_manifest = _save_replay_samples(
         output_dir,
         game_results,
         args.save_games,
         save_all=args.save_all_games,
-        replay_model_path=resolved_model,
+        replay_model_path=replay_model_for_exports,
     )
     if replay_manifest:
         print(f"  保存 {len(replay_manifest)} 局牌谱 -> {output_dir / 'replays'}", flush=True)
@@ -2012,7 +2300,7 @@ def main():
         game_results,
         args.export_anomaly_games,
         min_score=args.anomaly_min_score,
-        replay_model_path=resolved_model,
+        replay_model_path=replay_model_for_exports,
     )
     if anomaly_manifest:
         print(
@@ -2079,6 +2367,8 @@ def main():
         model_games=model_games,
         player_stat_infos=player_stat_infos,
         model_stat_infos=model_stat_infos,
+        model_decision_seconds=model_decision_seconds,
+        model_decision_counts=model_decision_counts,
         total_rounds_played=total_rounds_played,
         hora_total=hora_total,
         total_turns=total_turns,

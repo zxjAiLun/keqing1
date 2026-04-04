@@ -93,7 +93,7 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint",
         required=True,
-        help="Path to best.npz (created by train_v2.py or train_sl.py).",
+        help="Path to best.npz checkpoint artifact.",
     )
     parser.add_argument(
         "--out",

@@ -13,7 +13,7 @@ from urllib.parse import urlparse, parse_qs
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
-from replay.bot import normalize_replay_decisions
+from replay.normalize import normalize_replay_decisions
 
 
 class _NumpyEncoder(json.JSONEncoder):
@@ -71,48 +71,46 @@ def _normalize_replay_events(events: list[dict] | None) -> list[dict]:
 
         event_type = event.get("type")
         if event_type == "hora":
-            has_score_details = bool(event.get("cost")) or event.get("han") not in (None, 0) or event.get("fu") not in (None, 0)
-            if not has_score_details:
-                actor = int(event.get("actor", 0))
-                target = int(event.get("target", actor))
-                is_tsumo = actor == target
-                pai = event.get("pai")
-                if not pai:
-                    if is_tsumo:
-                        pai = state.last_tsumo_raw[actor] or state.last_tsumo[actor]
-                    elif state.last_discard:
-                        pai = state.last_discard.get("pai_raw") or state.last_discard.get("pai")
-                ura_markers = [str(m) for m in (event.get("ura_dora_markers") or event.get("ura_markers") or [])]
-                if pai:
-                    try:
-                        result = score_hora(
-                            state,
-                            actor=actor,
-                            target=target,
-                            pai=str(pai),
-                            is_tsumo=is_tsumo,
-                            ura_dora_markers=ura_markers,
-                        )
-                        deltas = list(event.get("deltas") or result.deltas)
-                        scores = list(event.get("scores") or [int(state.scores[i] + deltas[i]) for i in range(4)])
-                        normalized[idx] = {
-                            **event,
-                            "pai": str(pai),
-                            "is_tsumo": is_tsumo,
-                            "han": result.han,
-                            "fu": result.fu,
-                            "yaku": result.yaku,
-                            "yaku_details": result.yaku_details,
-                            "cost": result.cost,
-                            "deltas": deltas,
-                            "scores": scores,
-                            "honba": int(event.get("honba", state.honba)),
-                            "kyotaku": int(event.get("kyotaku", state.kyotaku)),
-                            "ura_dora_markers": ura_markers,
-                        }
-                        event = normalized[idx]
-                    except Exception:
-                        pass
+            actor = int(event.get("actor", 0))
+            target = int(event.get("target", actor))
+            is_tsumo = actor == target
+            pai = event.get("pai")
+            if not pai:
+                if is_tsumo:
+                    pai = state.last_tsumo_raw[actor] or state.last_tsumo[actor]
+                elif state.last_discard:
+                    pai = state.last_discard.get("pai_raw") or state.last_discard.get("pai")
+            ura_markers = [str(m) for m in (event.get("ura_dora_markers") or event.get("ura_markers") or [])]
+            if pai:
+                try:
+                    result = score_hora(
+                        state,
+                        actor=actor,
+                        target=target,
+                        pai=str(pai),
+                        is_tsumo=is_tsumo,
+                        ura_dora_markers=ura_markers,
+                    )
+                    deltas = list(result.deltas)
+                    scores = [int(state.scores[i] + deltas[i]) for i in range(4)]
+                    normalized[idx] = {
+                        **event,
+                        "pai": str(pai),
+                        "is_tsumo": is_tsumo,
+                        "han": result.han,
+                        "fu": result.fu,
+                        "yaku": result.yaku,
+                        "yaku_details": result.yaku_details,
+                        "cost": result.cost,
+                        "deltas": deltas,
+                        "scores": scores,
+                        "honba": int(event.get("honba", state.honba)),
+                        "kyotaku": int(event.get("kyotaku", state.kyotaku)),
+                        "ura_dora_markers": ura_markers,
+                    }
+                    event = normalized[idx]
+                except Exception:
+                    pass
 
         try:
             apply_event(state, event)
@@ -154,8 +152,6 @@ def _infer_player_bot_type(player_name: str | None, fallback: str | None = None)
         return "keqingv1"
     if "keqingv3" in raw:
         return "keqingv3"
-    if "modelv5" in raw or "v5" in raw:
-        return "v5"
     if "keqingv2" in raw:
         return "keqingv2"
     return fallback or "keqingv1"
@@ -166,7 +162,6 @@ def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
         "keqingv1": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv1" / "best.pth",
         "keqingv2": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv2" / "best.pth",
         "keqingv3": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv3" / "best.pth",
-        "v5": BASE_DIR.parent.parent / "artifacts" / "models" / "modelv5" / "best.pth",
     }
     return mapping[bot_type]
 

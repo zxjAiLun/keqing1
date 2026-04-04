@@ -83,6 +83,7 @@ class BattleRoom:
     pending_rinshan: bool = False  # 是否需要摸岭上牌（大明杠/暗杠/加杠后）
     pending_kakan: Optional[Dict] = None
     replay_draw_actor: Optional[int] = None  # 当前展示中的“摸到第14张”状态
+    bot_event_cursor: Dict[int, int] = field(default_factory=dict)
     last_heartbeat: float = field(
         default_factory=lambda: __import__("time").time()
     )  # 最后心跳时间
@@ -363,6 +364,7 @@ class BattleManager:
             room.state.kyotaku += 1
             room.state.players[actor].reached = True
             room.state.players[actor].pending_reach = False
+            room.state.players[actor].ippatsu_eligible = True
             room.events.append(
                 {
                     "type": "reach_accepted",
@@ -492,7 +494,9 @@ class BattleManager:
         room.state.last_tsumo_raw[actor] = None
         room.state.actor_to_move = actor
         room.pending_rinshan = meld_type in ("daiminkan", "ankan")
-        room.replay_draw_actor = actor if meld_type in ("chi", "pon") else None
+        # live battle 中 chi/pon 后只是“副露后待打牌”，不是实际摸牌。
+        # replay_draw_actor 仅用于真实 draw/replay draw 的第 14 张展示。
+        room.replay_draw_actor = None
 
         event = {
             "type": meld_type,
@@ -638,6 +642,7 @@ class BattleManager:
         target: int,
         pai: str,
         is_tsumo: bool = False,
+        is_chankan: bool = False,
     ) -> Dict:
         room.phase = "ended"
         room.winner = actor
@@ -652,6 +657,7 @@ class BattleManager:
             is_tsumo=is_tsumo,
             ura_dora_markers=self._active_ura_markers(room, actor),
             is_rinshan=is_tsumo and room.state.players[actor].rinshan_tsumo,
+            is_chankan=is_chankan,
             is_haitei=room.remaining_wall() == 0 and is_tsumo,
             is_houtei=room.remaining_wall() == 0 and not is_tsumo,
         )
@@ -795,7 +801,14 @@ class BattleManager:
             self.reach(room, actor)
         elif action_type == "hora":
             is_tsumo = target == actor
-            self.hora(room, actor, target, pai, is_tsumo=is_tsumo)
+            self.hora(
+                room,
+                actor,
+                target,
+                pai,
+                is_tsumo=is_tsumo,
+                is_chankan=bool(is_kakan_response and not is_tsumo),
+            )
         elif action_type == "none":
             if is_response:
                 discarder = last_discard["actor"]
@@ -850,23 +863,51 @@ class BattleManager:
     def get_state_for_player(self, room: BattleRoom, player_id: int) -> Dict:
         snap = self.get_snap_with_shanten(room, player_id)
 
-        legal_specs = enumerate_legal_action_specs(snap, player_id)
         # 响应弃牌时（last_discard 来自他家），保留 none（skip）
         # 自己摸牌打牌回合，none 无意义，过滤掉
-        is_response = (
+        has_discard_response = (
             snap.get("last_discard") and snap["last_discard"].get("actor") != player_id
         )
-        is_kakan_response = (
+        has_kakan_response = (
             snap.get("last_kakan") and snap["last_kakan"].get("actor") != player_id
         )
+        is_response = bool(
+            room.phase == "playing"
+            and room.state.actor_to_move == player_id
+            and has_discard_response
+        )
+        is_kakan_response = bool(
+            room.phase == "playing"
+            and room.state.actor_to_move == player_id
+            and has_kakan_response
+        )
+        is_self_turn = (
+            room.phase == "playing"
+            and room.state.actor_to_move == player_id
+            and not has_discard_response
+            and not has_kakan_response
+        )
+        has_action_priority = bool(is_response or is_kakan_response or is_self_turn)
+        input_context: Optional[str]
+        if is_response:
+            input_context = "discard_response"
+        elif is_kakan_response:
+            input_context = "kakan_response"
+        elif is_self_turn:
+            input_context = "self_turn"
+        else:
+            input_context = None
+
         legal_actions = []
-        for spec in legal_specs:
-            if spec.type == "none" and not is_response and not is_kakan_response:
-                continue
-            action_dict = spec.to_mjai()
-            if spec.type != "none" and "actor" not in action_dict:
-                action_dict["actor"] = player_id if spec.actor is None else spec.actor
-            legal_actions.append(action_dict)
+        if has_action_priority:
+            legal_specs = enumerate_legal_action_specs(snap, player_id)
+            for spec in legal_specs:
+                if spec.type == "none" and not is_response and not is_kakan_response:
+                    continue
+                action_dict = spec.to_mjai()
+                if spec.type != "none" and "actor" not in action_dict:
+                    action_dict["actor"] = player_id if spec.actor is None else spec.actor
+                legal_actions.append(action_dict)
 
         return {
             "game_id": room.game_id,
@@ -889,6 +930,8 @@ class BattleManager:
             "reached": [p.reached for p in room.state.players],
             "pending_reach": [p.pending_reach for p in room.state.players],
             "replay_draw_actor": room.replay_draw_actor,
+            "needs_input": bool(has_action_priority and legal_actions),
+            "input_context": input_context,
             "legal_actions": legal_actions,
             "remaining_wall": room.remaining_wall(),
             "human_player_id": room.human_player_id,

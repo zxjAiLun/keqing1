@@ -296,7 +296,8 @@
         <label for="bot-type">模型类型</label>
         <select id="bot-type">
           <option value="keqingv1" selected>KeqingV1</option>
-          <option value="v5">V5Model</option>
+          <option value="keqingv2">KeqingV2</option>
+          <option value="keqingv3">KeqingV3</option>
         </select>
       </div>
       <div style="flex:2;min-width:200px">
@@ -759,7 +760,8 @@ jsonTextarea.addEventListener('input', () => {
 // bot 类型切换时自动更新默认 checkpoint 路径
 const BOT_DEFAULTS = {
   keqingv1: 'artifacts/models/keqingv1/latest.pth',
-  v5: 'artifacts/models/modelv5/latest.pth',
+  keqingv2: 'artifacts/models/keqingv2/best.pth',
+  keqingv3: 'artifacts/models/keqingv3/best.pth',
 };
 const checkpointInput = document.getElementById('checkpoint');
 document.getElementById('bot-type').addEventListener('change', function() {

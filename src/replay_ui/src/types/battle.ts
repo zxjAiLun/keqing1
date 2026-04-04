@@ -78,12 +78,15 @@ export interface BattleState {
   actor_to_move: number | null;
   /** 后端不返回 pai_raw，忽略此字段 */
   last_discard: { actor: number; pai: string; pai_raw?: string } | null;
+  last_kakan?: { actor: number; pai?: string } | null;
   hand: string[];
   tsumo_pai: string | null;
   discards: DiscardEntry[][];
   melds: MeldEntry[][];
   reached: boolean[];
   pending_reach: boolean[];
+  needs_input?: boolean;
+  input_context?: "self_turn" | "discard_response" | "kakan_response" | null;
   legal_actions: Action[];
   remaining_wall: number;
   human_player_id: number;
@@ -96,7 +99,7 @@ export interface StartBattleRequest {
   player_name: string;
   bot_count?: number;
   seed?: number;
-  bot_model?: string; // "modelv5" | "modelv5_naga" | "keqingv1" | "keqingv2"
+  bot_model?: string; // "keqingv1" | "keqingv2" | "keqingv3" | "rulebase"
 }
 
 export interface StartBattleResponse {

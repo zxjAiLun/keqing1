@@ -287,22 +287,22 @@ const panelStyle = (compact: boolean): React.CSSProperties => ({
   maxHeight: compact ? 300 : undefined,
   flexShrink: 0,
   height: compact ? 'auto' : '100%',
-  background: 'var(--sidebar-bg)',
-  borderLeft: compact ? 'none' : '1px solid var(--border)',
-  borderTop: compact ? '1px solid var(--border)' : 'none',
+  background: 'var(--sidepanel-bg)',
+  borderLeft: compact ? 'none' : '1px solid var(--sidepanel-border)',
+  borderTop: compact ? '1px solid var(--sidepanel-border)' : 'none',
   display: 'flex',
   flexDirection: 'column',
   overflow: 'hidden',
-  transition: 'background var(--transition)',
+  backdropFilter: 'blur(6px)',
 });
 
 const sectionStyle: React.CSSProperties = {
-  padding: '10px 12px',
+  padding: '8px 10px',
 };
 
 const dividerStyle: React.CSSProperties = {
   height: 1,
-  background: 'var(--border)',
+  background: 'var(--overlay-border)',
   flexShrink: 0,
 };
 

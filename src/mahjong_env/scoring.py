@@ -44,7 +44,7 @@ class HoraResult:
     deltas: List[int]
 
 
-def _state_from_snapshot(snapshot: dict) -> GameState:
+def _state_from_snapshot(snapshot: dict, *, actor: int | None = None) -> GameState:
     state = GameState()
     state.bakaze = snapshot.get("bakaze", "E")
     state.kyoku = int(snapshot.get("kyoku", 1))
@@ -59,9 +59,10 @@ def _state_from_snapshot(snapshot: dict) -> GameState:
     state.last_tsumo_raw = list(snapshot.get("last_tsumo_raw", [None, None, None, None]))
     state.remaining_wall = snapshot.get("remaining_wall")
     state.players = [PlayerState() for _ in range(4)]
+    hand_owner = actor if actor is not None else snapshot.get("actor")
     for pid in range(4):
         player = state.players[pid]
-        hand = snapshot.get("hand", []) if pid == snapshot.get("actor") else []
+        hand = snapshot.get("hand", []) if pid == hand_owner else []
         player.hand = Counter(hand)
         player.discards = list((snapshot.get("discards") or [[], [], [], []])[pid])
         player.melds = list((snapshot.get("melds") or [[], [], [], []])[pid])
@@ -93,11 +94,34 @@ def _tiles_to_converter_args(tiles: List[str]) -> Dict[str, str]:
     for tile in tiles:
         one_line = _tile_to_one_line(tile)
         grouped[one_line[-1]].append(one_line[0])
+
+    def _sorted_group(suit: str) -> str | None:
+        values = grouped[suit]
+        if not values:
+            return None
+        # Under aka-dora rules, a suit cannot contain four plain 5s.
+        # If all four copies of 5 are present and none is explicitly marked
+        # red, promote one to aka so the 136-tile pool stays physically valid.
+        if suit in "mps":
+            five_count = values.count("5")
+            aka_count = values.count("0")
+            if five_count >= 4 and aka_count == 0:
+                promoted = False
+                adjusted: list[str] = []
+                for value in values:
+                    if not promoted and value == "5":
+                        adjusted.append("0")
+                        promoted = True
+                    else:
+                        adjusted.append(value)
+                values = adjusted
+        return "".join(sorted(values))
+
     return {
-        "man": "".join(grouped["m"]) or None,
-        "pin": "".join(grouped["p"]) or None,
-        "sou": "".join(grouped["s"]) or None,
-        "honors": "".join(grouped["z"]) or None,
+        "man": _sorted_group("m"),
+        "pin": _sorted_group("p"),
+        "sou": _sorted_group("s"),
+        "honors": _sorted_group("z"),
     }
 
 
@@ -343,6 +367,13 @@ def can_hora(
 ) -> bool:
     player = state.players[actor]
     remaining_wall = state.remaining_wall
+    resolved_is_rinshan = bool(player.rinshan_tsumo) if is_rinshan is None else is_rinshan
+    resolved_is_haitei = (
+        bool(remaining_wall == 0) and is_tsumo
+    ) if is_haitei is None else is_haitei
+    resolved_is_houtei = (
+        bool(remaining_wall == 0) and not is_tsumo
+    ) if is_houtei is None else is_houtei
     try:
         score_hora(
             state,
@@ -350,12 +381,32 @@ def can_hora(
             target=target,
             pai=pai,
             is_tsumo=is_tsumo,
-            is_rinshan=bool(player.rinshan_tsumo) if is_rinshan is None else is_rinshan,
+            is_rinshan=resolved_is_rinshan,
             is_chankan=is_chankan,
-            is_haitei=(bool(remaining_wall == 0) and is_tsumo) if is_haitei is None else is_haitei,
-            is_houtei=(bool(remaining_wall == 0) and not is_tsumo) if is_houtei is None else is_houtei,
+            is_haitei=resolved_is_haitei,
+            is_houtei=resolved_is_houtei,
         )
     except Exception:
+        # Project replay semantics allow the final live-wall kan draw to be
+        # tagged as both rinshan and haitei. The scoring backend rejects that
+        # combination, but legality reconstruction should still recognize the
+        # winning shape so strict replay preprocessing does not fail.
+        if is_tsumo and resolved_is_rinshan and resolved_is_haitei:
+            try:
+                score_hora(
+                    state,
+                    actor=actor,
+                    target=target,
+                    pai=pai,
+                    is_tsumo=is_tsumo,
+                    is_rinshan=resolved_is_rinshan,
+                    is_chankan=is_chankan,
+                    is_haitei=False,
+                    is_houtei=resolved_is_houtei,
+                )
+            except Exception:
+                return False
+            return True
         return False
     return True
 
@@ -372,7 +423,7 @@ def can_hora_from_snapshot(
     is_haitei: Optional[bool] = None,
     is_houtei: Optional[bool] = None,
 ) -> bool:
-    state = _state_from_snapshot(snapshot)
+    state = _state_from_snapshot(snapshot, actor=actor)
     return can_hora(
         state,
         actor=actor,

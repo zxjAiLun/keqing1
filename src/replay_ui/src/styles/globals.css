@@ -54,16 +54,73 @@
   --seat-2: #8e44ad;
   --seat-3: #27ae60;
 
-  /* 牌桌 */
-  --table-bg: #e8ecf0;
-  --table-border: #d1d5db;
-  --table-shadow: 0 8px 32px rgba(0,0,0,0.08);
+  /* 牌桌 — 2D天凤风纯平桌面（浅色模式） */
+  --table-bg-r: 232;
+  --table-bg-g: 224;
+  --table-bg-b: 208;
+  --table-bg: rgb(var(--table-bg-r), var(--table-bg-g), var(--table-bg-b));
+  --table-border: transparent;
+  --table-shadow: none;
+  --table-texture-opacity: 0;
+  --table-radius: 0;
 
-  /* 麻将牌 */
-  --tile-bg: #f5f0e8;
-  --tile-shadow: 0 4px 0px #b8b0a4, 0 6px 0px #a8a098, 0 8px 3px rgba(0,0,0,0.25);
-  --tile-selected-ring: 0 0 0 3px #d4a853, 0 0 12px rgba(212,168,83,0.5);
-  --tile-back-bg: linear-gradient(145deg, #1a3d6b 0%, #0d2540 60%, #091830 100%);
+  /* 牌桌文字颜色（浅色模式用深色） */
+  --table-text: #3a3530;
+  --table-text-muted: #6b635a;
+  --table-text-faint: rgba(58,53,48,0.35);
+
+  /* 牌桌交互态过渡 — 天凤风格克制动效 */
+  --table-transition-fast: 0.12s ease;
+  --table-transition-mid: 0.18s ease;
+  --tile-glow-gold: rgba(180,140,60,0.35);
+  --tile-glow-gold-strong: rgba(180,140,60,0.55);
+  --state-emphasis-shadow: 0 0 0 2px rgba(180,140,60,0.7), 0 2px 8px rgba(0,0,0,0.15);
+
+  /* 外围低存在感控件 */
+  --overlay-bg: rgba(40, 35, 30, 0.55);
+  --overlay-border: rgba(0,0,0,0.08);
+  --overlay-toolbar-bg: rgba(40, 35, 30, 0.50);
+  --overlay-toolbar-border: rgba(0,0,0,0.06);
+  --sidepanel-bg: var(--sidebar-bg);
+  --sidepanel-border: rgba(0,0,0,0.08);
+  --control-muted: rgba(80,75,70,0.70);
+
+  /* 麻将牌 — 白面 */
+  --tile-bg: #f0ebe0;
+  --tile-shadow: 0 4px 0px #b8b0a0, 0 7px 0px #a09888, 0 10px 4px rgba(0,0,0,0.20);
+  --tile-selected-ring: 0 0 0 3px #c9a033, 0 0 14px rgba(180,140,60,0.55);
+  /* 麻将牌 — 黑背（默认深蓝，RGB 可通过 JS 覆盖） */
+  --tile-back-r: 15;
+  --tile-back-g: 30;
+  --tile-back-b: 60;
+  --tile-back-bg: linear-gradient(145deg,
+    rgb(calc(var(--tile-back-r) + 8), calc(var(--tile-back-g) + 12), calc(var(--tile-back-b) + 20)) 0%,
+    rgb(var(--tile-back-r), var(--tile-back-g), var(--tile-back-b)) 50%,
+    rgb(calc(var(--tile-back-r) - 5), calc(var(--tile-back-g) - 8), calc(var(--tile-back-b) - 10)) 100%);
+
+  /* 中央区 — 浅色模式下淡暖灰底 */
+  --center-bg: rgba(180, 170, 155, 0.30);
+  --center-border: rgba(100, 90, 75, 0.25);
+  --center-shadow: none;
+
+  /* 左下控制条 */
+  --ctrlbar-bg: rgba(30, 28, 25, 0.80);
+  --ctrlbar-border: rgba(0,0,0,0.08);
+  --ctrlbar-text: rgba(220,215,210,0.90);
+  --ctrlbar-active-text: rgba(255,220,100,0.95);
+  --ctrlbar-active-bg: rgba(180,140,60,0.20);
+
+  /* 结算层 — 天凤风格黑幕面板 */
+  --result-overlay-bg: rgba(30, 25, 20, 0.75);
+  --result-panel-bg: rgba(35, 30, 25, 0.96);
+  --result-panel-border: rgba(0,0,0,0.12);
+  --result-panel-shadow: 0 16px 48px rgba(0,0,0,0.40);
+  --result-title: #f4efe3;
+  --result-subtitle: rgba(244,239,227,0.70);
+  --result-positive: #5ec8e8;
+  --result-negative: #f07070;
+  --result-muted: rgba(244,239,227,0.55);
+  --result-row-bg: rgba(255,255,255,0.06);
 
   /* Canvas 牌桌绘制色（white 主题） */
   --canvas-tile-face: #f5f0e8;
@@ -152,16 +209,73 @@
   --seat-2: #a78bfa;
   --seat-3: #34d399;
 
-  /* 牌桌 — 深绿 felt 质感 */
-  --table-bg: #1a2e1a;
-  --table-border: rgba(255,255,255,0.1);
-  --table-shadow: 0 0 60px rgba(34,197,94,0.1), 0 20px 60px rgba(0,0,0,0.6), inset 0 0 80px rgba(0,0,0,0.3);
+  /* 牌桌 — 2D天凤风纯平桌面 */
+  --table-bg-r: 14;
+  --table-bg-g: 24;
+  --table-bg-b: 36;
+  --table-bg: rgb(var(--table-bg-r), var(--table-bg-g), var(--table-bg-b));
+  --table-border: transparent;
+  --table-shadow: none;
+  --table-texture-opacity: 0;
+  --table-radius: 0;
+
+  /* 牌桌文字颜色（深色模式用浅色） */
+  --table-text: rgba(244,239,227,0.92);
+  --table-text-muted: rgba(244,239,227,0.50);
+  --table-text-faint: rgba(244,239,227,0.25);
+
+  /* 牌桌交互态过渡 — 天凤风格克制动效 */
+  --table-transition-fast: 0.12s ease;
+  --table-transition-mid: 0.18s ease;
+  --tile-glow-gold: rgba(251,191,36,0.22);
+  --tile-glow-gold-strong: rgba(251,191,36,0.45);
+  --state-emphasis-shadow: 0 0 0 2px rgba(251,191,36,0.6), 0 2px 8px rgba(0,0,0,0.3);
+
+  /* 外围低存在感控件 */
+  --overlay-bg: rgba(4, 6, 12, 0.65);
+  --overlay-border: rgba(255,255,255,0.07);
+  --overlay-toolbar-bg: rgba(4, 6, 12, 0.60);
+  --overlay-toolbar-border: rgba(255,255,255,0.06);
+  --sidepanel-bg: rgba(4, 6, 12, 0.75);
+  --sidepanel-border: rgba(255,255,255,0.06);
+  --control-muted: rgba(200,210,225,0.70);
 
   /* 麻将牌 */
-  --tile-bg: #1e2a3a;
-  --tile-shadow: 0 4px 0px #0f1a26, 0 6px 0px #0a1220, 0 8px 3px rgba(0,0,0,0.5);
-  --tile-selected-ring: 0 0 0 3px #fbbf24, 0 0 16px rgba(251,191,36,0.5);
-  --tile-back-bg: linear-gradient(145deg, #1a2a3a 0%, #0d1a26 60%, #08101a 100%);
+  --tile-bg: #ddd8cc;
+  --tile-shadow: 0 4px 0px #a09888, 0 7px 0px #8c8278, 0 10px 4px rgba(0,0,0,0.4);
+  --tile-selected-ring: 0 0 0 3px #fbbf24, 0 0 14px rgba(251,191,36,0.55);
+  /* 麻将牌 — 黑背（默认深蓝，RGB 可通过 JS 覆盖） */
+  --tile-back-r: 15;
+  --tile-back-g: 30;
+  --tile-back-b: 60;
+  --tile-back-bg: linear-gradient(145deg,
+    rgb(calc(var(--tile-back-r) + 8), calc(var(--tile-back-g) + 12), calc(var(--tile-back-b) + 20)) 0%,
+    rgb(var(--tile-back-r), var(--tile-back-g), var(--tile-back-b)) 50%,
+    rgb(calc(var(--tile-back-r) - 5), calc(var(--tile-back-g) - 8), calc(var(--tile-back-b) - 10)) 100%);
+
+  /* 中央区 — 天凤实际样式：淡蓝灰底 + 淡边框 */
+  --center-bg: rgba(30, 50, 80, 0.30);
+  --center-border: rgba(120, 160, 200, 0.30);
+  --center-shadow: none;
+
+  /* 左下控制条 */
+  --ctrlbar-bg: rgba(6, 8, 16, 0.82);
+  --ctrlbar-border: rgba(255,255,255,0.06);
+  --ctrlbar-text: rgba(200,210,225,0.80);
+  --ctrlbar-active-text: rgba(255,220,100,0.95);
+  --ctrlbar-active-bg: rgba(251,191,36,0.15);
+
+  /* 结算层 — 天凤风格黑幕面板 */
+  --result-overlay-bg: rgba(4, 6, 12, 0.78);
+  --result-panel-bg: rgba(6, 8, 16, 0.96);
+  --result-panel-border: rgba(255,255,255,0.08);
+  --result-panel-shadow: 0 16px 48px rgba(0,0,0,0.6);
+  --result-title: #f4efe3;
+  --result-subtitle: rgba(244,239,227,0.68);
+  --result-positive: #5ec8e8;
+  --result-negative: #f07070;
+  --result-muted: rgba(244,239,227,0.5);
+  --result-row-bg: rgba(255,255,255,0.04);
 
   /* Canvas 牌桌绘制色（modern 主题） */
   --canvas-tile-face: #ddd8cc;
@@ -342,6 +456,20 @@ textarea:focus {
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- 4b. 导航链接（Sidebar/Drawer） ---------- */
+.nav-link-item {
+  color: var(--sidebar-text);
+  text-decoration: none;
+  transition: background var(--transition), color var(--transition);
+}
+.nav-link-item:hover {
+  background: var(--sidebar-hover-bg);
+}
+.nav-link-active {
+  background: var(--sidebar-active-bg) !important;
+  color: var(--sidebar-active-text) !important;
+}
 
 /* ---------- 5. 上传区 ---------- */
 .upload-zone {

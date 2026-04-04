@@ -28,7 +28,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-testpaths = ["tests/v5model"]
+testpaths = ["tests"]
 
 [dependency-groups]
 dev = [
