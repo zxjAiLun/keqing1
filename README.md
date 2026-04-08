@@ -269,6 +269,18 @@ uv run pytest tests/test_normal_progress.py tests/test_features_v3.py tests/test
 uv run python -m py_compile src/keqingv3/progress_oracle.py src/training/trainer.py
 ```
 
+Rust progress-analysis 路径常用验证：
+
+```bash
+cd rust/keqing_core
+cargo test
+cd /media/bailan/DISK1/AUbuntuProject/project/keqing1
+uv run python rust/keqing_core/build.py
+uv pip install --reinstall rust/keqing_core/target/wheels/keqing_core-*.whl
+PYTHONPATH=src uv run pytest tests/test_progress_oracle_rust.py tests/test_normal_progress.py tests/test_features_v3.py
+PYTHONPATH=src uv run python scripts/benchmark_progress_oracle_rust.py
+```
+
 前端构建：
 
 ```bash
@@ -287,11 +299,15 @@ npm run build
 - `keqingv3` 预处理热路径集中在：
   - `src/keqingv3/progress_oracle.py`
   - `src/keqingv3/feature_tracker.py`
+- `src/keqing_core/` + `rust/keqing_core/` 是 `keqingv3` progress-analysis 的 Rust 能力层；
+  不应把 battle / replay / selfplay 规则真值迁入这里
 - 如果 push 触发全局 hook 环境问题，优先确认测试命令是否通过 `uv run pytest`
 
 ## 更多设计说明
 
 - [docs/keqingv3_design.md](docs/keqingv3_design.md)
+- [docs/rust_phase2a_status.md](docs/rust_phase2a_status.md)
+- [docs/rust_refactor_handoff_2026-04-08.md](docs/rust_refactor_handoff_2026-04-08.md)
 - [docs/old/data_pipeline_overview.md](docs/old/data_pipeline_overview.md)
 
 ## 致谢

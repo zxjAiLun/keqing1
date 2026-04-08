@@ -1,0 +1,195 @@
+"""Optional Rust acceleration for Keqing core helpers.
+
+This package prefers a package-local ``keqing_core._native`` extension.
+In source-development mode the Python package under ``src/`` shadows the
+installed wheel package, so we also probe installed site-packages for the
+compiled submodule and load it explicitly when present.
+"""
+
+from __future__ import annotations
+
+from importlib import machinery as _importlib_machinery
+from importlib import util as _importlib_util
+from pathlib import Path as _Path
+import site as _site
+import sys as _sys
+import warnings as _warnings
+
+from riichienv import calculate_shanten as _riichienv_shanten
+
+_USE_RUST = False
+_RUST_AVAILABLE = False
+_RUST_FUNC = None
+_RUST_SHANTEN_MANY = None
+_RUST_SUMMARIZE_3N2_CANDIDATES = None
+_RUST_IMPORT_ERROR = None
+
+
+def _is_native_extension(path: _Path) -> bool:
+    if not path.is_file():
+        return False
+    return any(str(path).endswith(suffix) for suffix in _importlib_machinery.EXTENSION_SUFFIXES)
+
+
+def _candidate_native_paths() -> list[_Path]:
+    package_dir = _Path(__file__).resolve().parent
+    candidates = sorted(
+        path for path in package_dir.glob("_native*") if _is_native_extension(path)
+    )
+    search_roots = []
+    try:
+        search_roots.extend(_site.getsitepackages())
+    except AttributeError:
+        pass
+    try:
+        search_roots.append(_site.getusersitepackages())
+    except AttributeError:
+        pass
+    for root in search_roots:
+        package_root = _Path(root) / "keqing_core"
+        if not package_root.exists():
+            continue
+        candidates.extend(
+            sorted(path for path in package_root.glob("_native*") if _is_native_extension(path))
+        )
+    deduped: list[_Path] = []
+    seen: set[_Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        deduped.append(resolved)
+    return deduped
+
+
+def _load_native_module():
+    module_name = f"{__name__}._native"
+    first_error = None
+    for candidate in _candidate_native_paths():
+        spec = _importlib_util.spec_from_file_location(module_name, candidate)
+        if spec is None or spec.loader is None:
+            continue
+        module = _importlib_util.module_from_spec(spec)
+        try:
+            _sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+        except ImportError as exc:
+            _sys.modules.pop(module_name, None)
+            if first_error is None:
+                first_error = exc
+            continue
+        setattr(_sys.modules[__name__], "_native", module)
+        return module, None
+
+    return None, first_error
+
+
+_rust_ext, _RUST_IMPORT_ERROR = _load_native_module()
+if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
+    _RUST_AVAILABLE = True
+    _RUST_FUNC = _rust_ext.counts34_to_ids_py
+    _RUST_SHANTEN_MANY = getattr(_rust_ext, "standard_shanten_many_py", None)
+    _RUST_SUMMARIZE_3N2_CANDIDATES = getattr(_rust_ext, "summarize_3n2_candidates_py", None)
+
+
+def counts34_to_ids(counts34):
+    if _USE_RUST and _RUST_AVAILABLE and _RUST_FUNC is not None:
+        return _rust_counts34_to_ids(counts34)
+    return _python_counts34_to_ids(counts34)
+
+
+def _rust_counts34_to_ids(counts34):
+    return tuple(_RUST_FUNC(list(counts34)))
+
+
+def _python_counts34_to_ids(counts34):
+    total = sum(counts34)
+    if total == 0:
+        return ()
+    ids = []
+    for t34, cnt in enumerate(counts34):
+        if cnt > 0:
+            for copy_idx in range(cnt):
+                ids.append(t34 * 4 + copy_idx)
+    return tuple(ids)
+
+
+def calc_standard_shanten(counts34):
+    if not counts34:
+        return 8
+    ids = counts34_to_ids(counts34)
+    return int(_riichienv_shanten(ids))
+
+
+def standard_shanten_many(counts34_list):
+    if _USE_RUST and _RUST_AVAILABLE and _RUST_SHANTEN_MANY is not None:
+        payload = [list(counts34) for counts34 in counts34_list]
+        return tuple(int(v) for v in _RUST_SHANTEN_MANY(payload))
+    return tuple(calc_standard_shanten(counts34) for counts34 in counts34_list)
+
+
+def summarize_3n2_candidates(counts34, visible_counts34, summarize_fn):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_SUMMARIZE_3N2_CANDIDATES is not None):
+        raise RuntimeError("Rust 3n+2 candidate summaries are not available")
+    return tuple(
+        (
+            int(discard_tile34),
+            tuple(int(value) for value in after_counts34),
+            int(shanten),
+            int(waits_count),
+            int(ukeire_type_count),
+            int(ukeire_live_count),
+            int(good_shape_ukeire_type_count),
+            int(good_shape_ukeire_live_count),
+            int(improvement_type_count),
+            int(improvement_live_count),
+        )
+        for (
+            discard_tile34,
+            after_counts34,
+            shanten,
+            waits_count,
+            ukeire_type_count,
+            ukeire_live_count,
+            good_shape_ukeire_type_count,
+            good_shape_ukeire_live_count,
+            improvement_type_count,
+            improvement_live_count,
+        ) in _RUST_SUMMARIZE_3N2_CANDIDATES(list(counts34), list(visible_counts34), summarize_fn)
+    )
+
+
+def is_available():
+    return _RUST_AVAILABLE
+
+
+def is_enabled():
+    return _USE_RUST and _RUST_AVAILABLE
+
+
+def has_3n2_candidate_summaries():
+    return _USE_RUST and _RUST_AVAILABLE and _RUST_SUMMARIZE_3N2_CANDIDATES is not None
+
+
+def enable_rust(enable=True):
+    global _USE_RUST
+    if enable and not _RUST_AVAILABLE:
+        detail = f": {_RUST_IMPORT_ERROR}" if _RUST_IMPORT_ERROR else ""
+        _warnings.warn(
+            f"Rust library not available{detail}",
+            RuntimeWarning,
+        )
+    _USE_RUST = bool(enable) and _RUST_AVAILABLE
+
+
+__all__ = [
+    "counts34_to_ids",
+    "calc_standard_shanten",
+    "standard_shanten_many",
+    "summarize_3n2_candidates",
+    "is_available",
+    "is_enabled",
+    "has_3n2_candidate_summaries",
+    "enable_rust",
+]
