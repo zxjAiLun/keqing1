@@ -281,6 +281,16 @@ PYTHONPATH=src uv run pytest tests/test_progress_oracle_rust.py tests/test_norma
 PYTHONPATH=src uv run python scripts/benchmark_progress_oracle_rust.py
 ```
 
+pre-push / CI 约定：
+
+```bash
+bash scripts/verify_python.sh
+```
+
+- 本地全局 Git hook 现在应优先调用仓库内的 `scripts/verify_python.sh`
+- CI 使用同一脚本，并在运行前执行 `uv sync --locked --group dev`
+- 这样可以避免系统 `pytest` / 系统 Python 绕开 `.venv` 导致的依赖缺失
+
 前端构建：
 
 ```bash
