@@ -20,6 +20,8 @@ from riichienv import calculate_shanten as _riichienv_shanten
 _USE_RUST = False
 _RUST_AVAILABLE = False
 _RUST_FUNC = None
+_RUST_SHANTEN_NORMAL = None
+_RUST_SHANTEN_ALL = None
 _RUST_SHANTEN_MANY = None
 _RUST_SUMMARIZE_3N2_CANDIDATES = None
 _RUST_IMPORT_ERROR = None
@@ -89,8 +91,11 @@ _rust_ext, _RUST_IMPORT_ERROR = _load_native_module()
 if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
     _RUST_AVAILABLE = True
     _RUST_FUNC = _rust_ext.counts34_to_ids_py
+    _RUST_SHANTEN_NORMAL = getattr(_rust_ext, "calc_shanten_normal_py", None)
+    _RUST_SHANTEN_ALL = getattr(_rust_ext, "calc_shanten_all_py", None)
     _RUST_SHANTEN_MANY = getattr(_rust_ext, "standard_shanten_many_py", None)
     _RUST_SUMMARIZE_3N2_CANDIDATES = getattr(_rust_ext, "summarize_3n2_candidates_py", None)
+    _USE_RUST = True
 
 
 def counts34_to_ids(counts34):
@@ -118,8 +123,29 @@ def _python_counts34_to_ids(counts34):
 def calc_standard_shanten(counts34):
     if not counts34:
         return 8
+    if _USE_RUST and _RUST_AVAILABLE and _RUST_SHANTEN_ALL is not None:
+        total_tiles = sum(int(v) for v in counts34)
+        return int(_RUST_SHANTEN_ALL(list(counts34), total_tiles // 3))
     ids = counts34_to_ids(counts34)
     return int(_riichienv_shanten(ids))
+
+
+def calc_shanten_normal(counts34):
+    if not counts34:
+        return 8
+    if _USE_RUST and _RUST_AVAILABLE and _RUST_SHANTEN_NORMAL is not None:
+        total_tiles = sum(int(v) for v in counts34)
+        return int(_RUST_SHANTEN_NORMAL(list(counts34), total_tiles // 3))
+    return calc_standard_shanten(counts34)
+
+
+def calc_shanten_all(counts34):
+    if not counts34:
+        return 8
+    if _USE_RUST and _RUST_AVAILABLE and _RUST_SHANTEN_ALL is not None:
+        total_tiles = sum(int(v) for v in counts34)
+        return int(_RUST_SHANTEN_ALL(list(counts34), total_tiles // 3))
+    return calc_standard_shanten(counts34)
 
 
 def standard_shanten_many(counts34_list):
@@ -185,7 +211,9 @@ def enable_rust(enable=True):
 
 __all__ = [
     "counts34_to_ids",
+    "calc_shanten_normal",
     "calc_standard_shanten",
+    "calc_shanten_all",
     "standard_shanten_many",
     "summarize_3n2_candidates",
     "is_available",

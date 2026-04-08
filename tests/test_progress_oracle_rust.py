@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import random
+import subprocess
+import sys
 
 import pytest
 
@@ -129,6 +131,23 @@ def test_standard_shanten_many_rust_python_parity_random_cases():
     assert actual == expected
 
 
+def test_calc_shanten_all_matches_standard_shanten_on_current_public_surface():
+    rng = random.Random(20260418)
+    samples = [
+        _random_counts(13, rng)
+        for _ in range(40)
+    ] + [
+        _random_counts(14, rng)
+        for _ in range(40)
+    ]
+
+    _set_rust_mode(True)
+    actual = [keqing_core.calc_shanten_all(sample) for sample in samples]
+    expected = [calc_standard_shanten_from_counts(sample) for sample in samples]
+
+    assert actual == expected
+
+
 def test_analyze_normal_progress_rust_python_parity_random_cases():
     rng = random.Random(20260409)
     hand_cases = [
@@ -158,6 +177,23 @@ def test_analyze_normal_progress_rust_python_parity_random_cases():
 def test_enable_rust_roundtrip_tracks_runtime_availability():
     keqing_core.enable_rust(False)
     assert keqing_core._USE_RUST is False
+
+
+def test_rust_auto_enabled_when_extension_is_available():
+    code = (
+        "import keqing_core; "
+        "print(int(keqing_core.is_available()), int(keqing_core.is_enabled()), int(keqing_core._USE_RUST))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    available, enabled, use_rust = [int(part) for part in proc.stdout.strip().split()]
+    if available:
+        assert enabled == 1
+        assert use_rust == 1
 
     keqing_core.enable_rust(True)
     assert keqing_core._USE_RUST is keqing_core.is_available()

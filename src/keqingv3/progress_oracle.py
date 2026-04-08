@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from mahjong.shanten import Shanten
 from keqing_core import has_3n2_candidate_summaries as _has_3n2_candidate_summaries
+from keqing_core import calc_shanten_normal as _calc_shanten_normal_native
 from keqing_core import calc_standard_shanten as _calc_standard_shanten_native
 from keqing_core import is_enabled as _is_rust_enabled
 from keqing_core import summarize_3n2_candidates as _summarize_3n2_candidates_native
@@ -200,7 +201,7 @@ def calc_shanten_waits_from_counts(
     tehai_count = sum(counts34)
     if tehai_count == 0:
         return 8, 0, tuple([False] * 34), 0
-    shanten = int(Shanten().calculate_shanten_for_regular_hand(list(counts34)))
+    shanten = int(_calc_shanten_normal_native(counts34))
     waits34 = tuple(find_regular_waits(counts34)) if shanten == 0 else tuple([False] * 34)
     return shanten, sum(waits34), waits34, tehai_count
 
