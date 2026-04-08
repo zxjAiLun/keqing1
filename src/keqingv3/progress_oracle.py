@@ -5,11 +5,9 @@ from functools import lru_cache
 import time
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-from mahjong.shanten import Shanten
 from keqing_core import has_3n2_candidate_summaries as _has_3n2_candidate_summaries
 from keqing_core import calc_shanten_normal as _calc_shanten_normal_native
 from keqing_core import calc_standard_shanten as _calc_standard_shanten_native
-from keqing_core import is_enabled as _is_rust_enabled
 from keqing_core import summarize_3n2_candidates as _summarize_3n2_candidates_native
 from keqing_core import standard_shanten_many as _standard_shanten_many_native
 
@@ -217,44 +215,6 @@ def calc_shanten_waits_from_hand(hand: List[str], counts_builder) -> tuple[int, 
     return shanten, waits_count, list(waits), tehai_count
 
 
-def _tenpai_live_wait_count(
-    counts13: tuple[int, ...],
-    visible_counts_local: tuple[int, ...],
-) -> int:
-    shanten, _waits_count, waits_tiles, _tehai_count = calc_shanten_waits_from_counts(counts13)
-    if shanten != 0:
-        return 0
-    return sum(max(0, 4 - visible_counts_local[t34]) for t34, flag in enumerate(waits_tiles) if flag)
-
-
-def _best_tenpai_wait_live_after_draw(
-    counts14: tuple[int, ...],
-    visible_counts_local: tuple[int, ...],
-) -> int:
-    best_wait_live = 0
-    for discard34 in _candidate_discards_no_meld_break(counts14):
-        after_counts13 = list(counts14)
-        after_counts13[discard34] -= 1
-        after_counts13_t = tuple(after_counts13)
-        after_shanten, _w_cnt, _w_tiles, _tehai = calc_shanten_waits_from_counts(after_counts13_t)
-        if after_shanten != 0:
-            continue
-        wait_live = _tenpai_live_wait_count(after_counts13_t, visible_counts_local)
-        if wait_live > best_wait_live:
-            best_wait_live = wait_live
-    return best_wait_live
-
-
-def _is_good_shape_draw_for_one_shanten(
-    counts13: tuple[int, ...],
-    draw_tile34: int,
-    visible_counts_local: tuple[int, ...],
-) -> bool:
-    counts14 = list(counts13)
-    counts14[draw_tile34] += 1
-    return _best_tenpai_wait_live_after_draw(tuple(counts14), visible_counts_local) > 4
-
-
 def _make_progress(
     shanten: int,
     waits_count: int,
@@ -286,10 +246,10 @@ def _candidate_progress_key(candidate: CandidateProgressV1) -> tuple[int, int, i
     return (
         -candidate.shanten,
         candidate.ukeire_live_count,
-        candidate.good_shape_ukeire_live_count,
-        candidate.improvement_live_count,
         candidate.ukeire_type_count,
-        candidate.improvement_type_count,
+        candidate.waits_count,
+        0,
+        0,
     )
 
 
@@ -394,12 +354,7 @@ def _summarize_3n1_cached(
                 ukeire_tiles[tile34] = True
             continue
 
-        is_good_shape_draw = use_regular_detail and shanten == 1 and _is_good_shape_draw_for_one_shanten(
-            counts_3n1,
-            tile34,
-            visible_counts_local,
-        )
-        best_after = None
+        improves = False
         seen_discards: Set[int] = set()
         discard_entries: list[tuple[int, tuple[int, ...]]] = []
         for discard34, cnt in enumerate(counts_3n2):
@@ -413,31 +368,9 @@ def _summarize_3n1_cached(
         _progress_profiler_inc("standard_shanten_calls", len(discard_entries))
         discard_shantens = _calc_standard_shanten_many([counts for _, counts in discard_entries])
         _progress_profiler_add("standard_shanten_s", time.perf_counter() - t0)
-        for (discard34, after_counts_3n1_t), after_shanten in zip(discard_entries, discard_shantens):
-            after_wait_live = 0
-            after_good_shape = False
-            if shanten == 1 and after_shanten == 0 and use_regular_detail:
-                t0 = time.perf_counter()
-                _progress_profiler_inc("waits_calls")
-                after_regular_shanten, _w_cnt, after_waits_tiles, _tehai = calc_shanten_waits_from_counts(after_counts_3n1_t)
-                _progress_profiler_add("waits_s", time.perf_counter() - t0)
-                if after_regular_shanten == 0:
-                    after_wait_live = sum(
-                        max(0, 4 - visible_counts_local[t34]) for t34, flag in enumerate(after_waits_tiles) if flag
-                    )
-                    after_good_shape = after_wait_live > 4
-            key = (-after_shanten, after_wait_live)
-            if best_after is None or key > best_after[0]:
-                best_after = (key, after_shanten, after_good_shape)
-        if best_after is None:
-            continue
-        _, after_shanten, after_good_shape = best_after
-        if after_shanten < shanten:
+        improves = any(after_shanten < shanten for after_shanten in discard_shantens)
+        if improves:
             ukeire_tiles[tile34] = True
-            if shanten == 1 and is_good_shape_draw:
-                good_shape_ukeire_tiles[tile34] = True
-            elif after_shanten == 0 and after_good_shape:
-                good_shape_ukeire_tiles[tile34] = True
     if shanten_gt2_counts:
         t0 = time.perf_counter()
         _progress_profiler_inc("standard_shanten_calls", len(shanten_gt2_counts))

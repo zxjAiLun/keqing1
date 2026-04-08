@@ -1,15 +1,4 @@
-"""keqingv3 特征编码器。
-
-输出：
-  tile_features   : np.ndarray shape (C_TILE=57, 34)
-  scalar_features : np.ndarray shape (N_SCALAR=56,)
-
-关键变化：
-  - 标准型进展改为统一 3n+1 / 3n+2 分析器驱动
-  - 新增 `normal_ukeire_tiles` / `normal_improvement_tiles`
-  - 新增 `seen_tile_ratio`
-  - scalar 扩到 56，加入 `tiles_left`、特殊型向听、顺位压力等
-"""
+"""keqingv3 特征编码器。"""
 
 from __future__ import annotations
 
@@ -247,13 +236,10 @@ def _encode_impl(state: Dict, actor: int, *, collect_timings: bool):
 
     # ---- ch 54-55: 标准型进展 tiles ----
     normal_ukeire_tiles = state.get("normal_ukeire_tiles", progress.ukeire_tiles)
-    normal_improvement_tiles = state.get("normal_improvement_tiles", progress.improvement_tiles)
     for i, flag in enumerate(normal_ukeire_tiles[:34]):
         if flag:
             tile_feat[54, i] = 1.0
-    for i, flag in enumerate(normal_improvement_tiles[:34]):
-        if flag:
-            tile_feat[55, i] = 1.0
+    # v3 no longer models improvement tiles; keep the channel zero-filled for shape stability.
 
     # ---- ch 56: 已见枚数 / 4 ----
     tile_feat[56, :] = np.clip(np.asarray(visible_counts, dtype=np.float32) / 4.0, 0.0, 1.0)
@@ -318,12 +304,6 @@ def _encode_impl(state: Dict, actor: int, *, collect_timings: bool):
         if progress.waits_count > 0
         else 0.0
     )
-    improvement_minus_5x_wait = (
-        progress.improvement_live_count - 5 * tenpai_live_tile_count
-        if progress.waits_count > 0
-        else 0.0
-    )
-
     # ===== Scalar features =====
     # [0-2] bakaze 3-bit（E/S/W，N场三者均为0）
     scalar[0] = 1.0 if bakaze == "E" else 0.0
@@ -407,7 +387,7 @@ def _encode_impl(state: Dict, actor: int, *, collect_timings: bool):
 
     # [38-45] 进展 / 风险
     scalar[38] = min(progress.ukeire_live_count / 34.0, 1.0)
-    scalar[39] = min(progress.improvement_live_count / 34.0, 1.0)
+    scalar[39] = 0.0
     scalar[40] = min(tenpai_live_tile_count / 136.0, 1.0)
     scalar[41] = pair_count / 7.0
     scalar[42] = taatsu_count / 6.0
@@ -424,9 +404,9 @@ def _encode_impl(state: Dict, actor: int, *, collect_timings: bool):
     scalar[50] = top_gap / 30000.0
     scalar[51] = bottom_gap / 30000.0
     scalar[52] = tiles_left / 70.0
-    # [53-55] 好型 / 改良 / wait 隐蔽度
-    scalar[53] = min(progress.good_shape_ukeire_live_count / 34.0, 1.0)
-    scalar[54] = float(np.clip(improvement_minus_5x_wait / 34.0, -1.0, 1.0))
+    # [53-55] v3 no longer models good-shape/improvement; keep reserved slots stable.
+    scalar[53] = 0.0
+    scalar[54] = 0.0
     scalar[55] = float(np.clip(wait_hiddenness_ratio, 0.0, 1.0))
 
     if collect_timings:

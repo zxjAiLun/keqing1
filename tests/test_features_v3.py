@@ -66,10 +66,11 @@ def test_encode_v3_progress_and_seen_tiles_reference_case():
     # seen_tile_ratio should reflect own hand visibility
     assert np.isclose(tile_feat[56, 10], 0.25)  # 2p seen once in hand
     assert np.isclose(tile_feat[56, 13], 0.25)  # 5p(red normalized to 5p) seen once
-    # 43% good-shape ratio => 6 live good-shape tiles
-    assert np.isclose(scalar[53], 6.0 / 34.0)
-    assert np.isclose(scalar[54], 0.0)  # non-tenpai: this derived feature stays neutral
+    # good-shape / improvement are intentionally disabled in v3 now
+    assert np.isclose(scalar[53], 0.0)
+    assert np.isclose(scalar[54], 0.0)
     assert 0.0 <= scalar[55] <= 1.0
+    assert np.count_nonzero(tile_feat[55]) == 0
 
 
 def test_encode_v3_uses_snapshot_feature_tracker_from_gamestate():

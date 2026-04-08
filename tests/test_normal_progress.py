@@ -37,10 +37,11 @@ def test_normal_progress_tenpai_has_waits_and_may_have_improvements():
     assert progress.waits_count > 0
     assert any(progress.waits_tiles)
     assert progress.ukeire_type_count == 0
-    assert progress.improvement_type_count >= 0
+    assert progress.improvement_type_count == 0
+    assert progress.improvement_live_count == 0
 
 
-def test_normal_progress_good_shape_ukeire_matches_reference_case():
+def test_normal_progress_reference_case_zeroes_good_shape_metrics():
     hand14 = _parse_hand("13458m34678p668s4m")
     hand13 = list(hand14)
     hand13.remove("1m")
@@ -48,11 +49,11 @@ def test_normal_progress_good_shape_ukeire_matches_reference_case():
 
     assert progress.shanten == 2
     assert progress.ukeire_live_count == 48
-    assert progress.good_shape_ukeire_live_count >= 0
-    assert progress.good_shape_ukeire_type_count <= progress.ukeire_type_count
+    assert progress.good_shape_ukeire_live_count == 0
+    assert progress.good_shape_ukeire_type_count == 0
 
 
-def test_one_shanten_good_shape_ukeire_is_well_formed():
+def test_one_shanten_reference_case_zeroes_good_shape_metrics():
     hand14 = _parse_hand("4m2067p4s5z0s")
     hand13 = list(hand14)
     hand13.remove("4m")
@@ -60,11 +61,11 @@ def test_one_shanten_good_shape_ukeire_is_well_formed():
 
     assert progress.shanten == 1
     assert progress.ukeire_live_count == 14
-    assert progress.good_shape_ukeire_live_count == 6
-    assert progress.good_shape_ukeire_type_count == 2
+    assert progress.good_shape_ukeire_live_count == 0
+    assert progress.good_shape_ukeire_type_count == 0
 
 
-def test_one_shanten_good_shape_reference_case_matches_all_equal_discards():
+def test_one_shanten_reference_case_matches_all_equal_discards():
     hand14 = _parse_hand("4m2067p4s5z0s")
     for discard in ("4m", "2p", "P"):
         hand13 = list(hand14)
@@ -72,7 +73,7 @@ def test_one_shanten_good_shape_reference_case_matches_all_equal_discards():
         progress = _calc_normal_progress(hand13, [])
         assert progress.shanten == 1
         assert progress.ukeire_live_count == 14
-        assert progress.good_shape_ukeire_live_count == 6
+        assert progress.good_shape_ukeire_live_count == 0
 
 
 def test_two_shanten_reference_case_matches_16_live_ukeire():
@@ -101,4 +102,3 @@ def test_calc_shanten_waits_includes_kokushi_waits_without_melds():
     assert shanten == 0
     assert waits_count == 1
     assert waits_tiles[33] is True  # 7z / C
-

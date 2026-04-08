@@ -10,7 +10,7 @@ data_dirs:
   - artifacts/converted_mjai/ds1
   # - artifacts/converted_mjai/ds2
 
-output_dir: processed_v3_fixaux
+output_dir: processed_v3
 
 # 预处理并行度
 workers: 18

@@ -320,7 +320,6 @@ def test_summarize_3n2_does_not_touch_native_candidate_path_when_seam_unavailabl
 
     monkeypatch.setattr(progress_oracle, "_summarize_3n2_candidates_native", _unexpected_native_call)
     monkeypatch.setattr(progress_oracle, "_has_3n2_candidate_summaries", lambda: False)
-    monkeypatch.setattr(progress_oracle, "_is_rust_enabled", lambda: True)
     hand_counts = _random_counts(14, random.Random(20260416))
     visible_counts = _random_visible_counts(hand_counts, random.Random(20260417))
 
