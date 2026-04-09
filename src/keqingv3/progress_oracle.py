@@ -5,6 +5,9 @@ from functools import lru_cache
 import time
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+from keqing_core import calc_discard_deltas as _calc_discard_deltas_native
+from keqing_core import calc_draw_deltas as _calc_draw_deltas_native
+from keqing_core import calc_required_tiles as _calc_required_tiles_native
 from keqing_core import has_3n2_candidate_summaries as _has_3n2_candidate_summaries
 from keqing_core import calc_shanten_normal as _calc_shanten_normal_native
 from keqing_core import calc_standard_shanten as _calc_standard_shanten_native
@@ -119,6 +122,86 @@ def _candidate_discards_no_meld_break(counts34: tuple[int, ...] | List[int]) -> 
         if not _tile_in_obvious_meld(counts34, tile34):
             preferred.append(tile34)
     return tuple(preferred) if preferred else tuple(fallback)
+
+
+def _calc_required_tiles(counts34: tuple[int, ...], visible_counts34: tuple[int, ...]) -> tuple[tuple[int, int], ...]:
+    try:
+        return tuple(_calc_required_tiles_native(counts34, visible_counts34, sum(counts34) // 3))
+    except RuntimeError:
+        shanten = calc_standard_shanten_from_counts(counts34)
+        out: list[tuple[int, int]] = []
+        for tile34 in range(34):
+            live_count = max(0, 4 - visible_counts34[tile34])
+            if live_count <= 0 or counts34[tile34] >= 4:
+                continue
+            work = list(counts34)
+            work[tile34] += 1
+            after = calc_standard_shanten_from_counts(tuple(work))
+            if after < shanten:
+                out.append((tile34, live_count))
+        return tuple(out)
+
+
+def _calc_draw_deltas(
+    counts34: tuple[int, ...],
+    visible_counts34: tuple[int, ...],
+) -> tuple[tuple[int, int, int], ...]:
+    try:
+        return tuple(_calc_draw_deltas_native(counts34, visible_counts34, sum(counts34) // 3))
+    except RuntimeError:
+        shanten = calc_standard_shanten_from_counts(counts34)
+        out: list[tuple[int, int, int]] = []
+        for tile34 in range(34):
+            live_count = max(0, 4 - visible_counts34[tile34])
+            if live_count <= 0 or counts34[tile34] >= 4:
+                continue
+            work = list(counts34)
+            work[tile34] += 1
+            after = calc_standard_shanten_from_counts(tuple(work))
+            out.append((tile34, live_count, after - shanten))
+        return tuple(out)
+
+
+def _calc_discard_deltas(counts34: tuple[int, ...]) -> tuple[tuple[int, int], ...]:
+    try:
+        return tuple(_calc_discard_deltas_native(counts34, sum(counts34) // 3))
+    except RuntimeError:
+        shanten = calc_standard_shanten_from_counts(counts34)
+        out: list[tuple[int, int]] = []
+        for tile34, cnt in enumerate(counts34):
+            if cnt <= 0:
+                continue
+            work = list(counts34)
+            work[tile34] -= 1
+            after = calc_standard_shanten_from_counts(tuple(work))
+            out.append((tile34, after - shanten))
+        return tuple(out)
+
+
+def _populate_ukeire_tiles_3n1(
+    counts_3n1: tuple[int, ...],
+    visible_counts_local: tuple[int, ...],
+    shanten: int,
+    ukeire_tiles: List[bool],
+) -> None:
+    if shanten == 0:
+        return
+    if shanten > 2:
+        for tile34, _live_count in _calc_required_tiles(counts_3n1, visible_counts_local):
+            ukeire_tiles[tile34] = True
+        return
+
+    draw_deltas = _calc_draw_deltas(counts_3n1, visible_counts_local)
+    for tile34, _live_count, draw_shanten_diff in draw_deltas:
+        if draw_shanten_diff < 0:
+            ukeire_tiles[tile34] = True
+            continue
+
+        counts_3n2 = list(counts_3n1)
+        counts_3n2[tile34] += 1
+        discard_deltas = _calc_discard_deltas(tuple(counts_3n2))
+        if any(draw_shanten_diff + discard_diff < 0 for _discard34, discard_diff in discard_deltas):
+            ukeire_tiles[tile34] = True
 
 
 def _is_complete_regular_counts(
@@ -324,61 +407,16 @@ def _summarize_3n1_cached(
         if not use_regular_detail:
             waits_count = 0
             waits_tiles = tuple([False] * 34)
+
+    if _ACTIVE_PROGRESS_PROFILER is None:
+        _populate_ukeire_tiles_3n1(counts_3n1, visible_counts_local, shanten, ukeire_tiles)
+        return _make_progress(
+            shanten, waits_count, waits_tiles, tehai_count,
+            ukeire_tiles, good_shape_ukeire_tiles, improvement_tiles, visible_counts_local,
+        )
+
     loop_t0 = time.perf_counter()
-    shanten_gt2_tiles: list[int] = []
-    shanten_gt2_counts: list[tuple[int, ...]] = []
-    for tile34 in range(34):
-        live = max(0, 4 - visible_counts_local[tile34])
-        if live <= 0:
-            continue
-        counts_3n2 = list(counts_3n1)
-        counts_3n2[tile34] += 1
-
-        if shanten > 2:
-            shanten_gt2_tiles.append(tile34)
-            shanten_gt2_counts.append(tuple(counts_3n2))
-            continue
-
-        if shanten == 2:
-            discard_counts: list[tuple[int, ...]] = []
-            for discard34 in _candidate_discards_no_meld_break(counts_3n2):
-                after_counts_3n1 = list(counts_3n2)
-                after_counts_3n1[discard34] -= 1
-                discard_counts.append(tuple(after_counts_3n1))
-            t0 = time.perf_counter()
-            _progress_profiler_inc("standard_shanten_calls", len(discard_counts))
-            shanten_after_discards = _calc_standard_shanten_many(discard_counts)
-            _progress_profiler_add("standard_shanten_s", time.perf_counter() - t0)
-            improves = any(after_shanten < shanten for after_shanten in shanten_after_discards)
-            if improves:
-                ukeire_tiles[tile34] = True
-            continue
-
-        improves = False
-        seen_discards: Set[int] = set()
-        discard_entries: list[tuple[int, tuple[int, ...]]] = []
-        for discard34, cnt in enumerate(counts_3n2):
-            if cnt <= 0 or discard34 in seen_discards:
-                continue
-            seen_discards.add(discard34)
-            after_counts_3n1 = list(counts_3n2)
-            after_counts_3n1[discard34] -= 1
-            discard_entries.append((discard34, tuple(after_counts_3n1)))
-        t0 = time.perf_counter()
-        _progress_profiler_inc("standard_shanten_calls", len(discard_entries))
-        discard_shantens = _calc_standard_shanten_many([counts for _, counts in discard_entries])
-        _progress_profiler_add("standard_shanten_s", time.perf_counter() - t0)
-        improves = any(after_shanten < shanten for after_shanten in discard_shantens)
-        if improves:
-            ukeire_tiles[tile34] = True
-    if shanten_gt2_counts:
-        t0 = time.perf_counter()
-        _progress_profiler_inc("standard_shanten_calls", len(shanten_gt2_counts))
-        draw_shantens = _calc_standard_shanten_many(shanten_gt2_counts)
-        _progress_profiler_add("standard_shanten_s", time.perf_counter() - t0)
-        for tile34, draw_shanten in zip(shanten_gt2_tiles, draw_shantens):
-            if draw_shanten < shanten:
-                ukeire_tiles[tile34] = True
+    _populate_ukeire_tiles_3n1(counts_3n1, visible_counts_local, shanten, ukeire_tiles)
     _progress_profiler_add("ukeire_improvement_s", time.perf_counter() - loop_t0)
 
     return _make_progress(

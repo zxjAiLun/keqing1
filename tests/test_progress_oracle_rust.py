@@ -16,6 +16,7 @@ from keqingv3.progress_oracle import (
     _summarize_3n1_cached,
     _summarize_3n2_cached,
     analyze_normal_progress_from_counts,
+    calc_shanten_waits_from_counts,
     calc_standard_shanten_from_counts,
     clear_progress_caches,
 )
@@ -146,6 +147,90 @@ def test_calc_shanten_all_matches_standard_shanten_on_current_public_surface():
     expected = [calc_standard_shanten_from_counts(sample) for sample in samples]
 
     assert actual == expected
+
+
+def test_required_tiles_contains_live_waits_for_tenpai_case():
+    counts = (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 2) + (0,) * 20
+    visible = counts
+
+    _set_rust_mode(True)
+    required = keqing_core.calc_required_tiles(counts, visible, sum(counts) // 3)
+    draw_deltas = keqing_core.calc_draw_deltas(counts, visible, sum(counts) // 3)
+    expected = tuple(
+        (tile34, live_count)
+        for tile34, live_count, shanten_diff in draw_deltas
+        if shanten_diff < 0
+    )
+
+    assert required == expected
+
+
+def test_draw_and_discard_deltas_return_stable_shapes():
+    rng = random.Random(20260419)
+    counts = _random_counts(13, rng)
+    visible = _random_visible_counts(counts, rng)
+
+    _set_rust_mode(True)
+    draw_deltas = keqing_core.calc_draw_deltas(counts, visible, sum(counts) // 3)
+    discard_deltas = keqing_core.calc_discard_deltas(counts, sum(counts) // 3)
+
+    assert all(len(item) == 3 for item in draw_deltas)
+    assert all(len(item) == 2 for item in discard_deltas)
+    assert all(0 <= tile34 < 34 for tile34, *_ in draw_deltas)
+    assert all(0 <= tile34 < 34 for tile34, _ in discard_deltas)
+
+
+def test_3n1_high_shanten_path_consumes_required_tiles(monkeypatch):
+    hand_counts = (
+        0, 0, 1, 0, 0, 0, 0, 0, 1,
+        0, 0, 0, 0, 1, 0, 0, 1, 0,
+        0, 1, 0, 0, 1, 0, 1, 1, 1,
+        0, 0, 0, 1, 1, 2, 0,
+    )
+    visible_counts = hand_counts
+    calls = {"required": 0}
+
+    def _wrapped_required_tiles(counts34, visible34):
+        calls["required"] += 1
+        return ((0, 1),)
+
+    monkeypatch.setattr(progress_oracle, "_calc_required_tiles", _wrapped_required_tiles)
+    _set_rust_mode(False)
+
+    progress = analyze_normal_progress_from_counts(hand_counts, visible_counts)
+
+    assert progress.shanten > 2
+    assert calls["required"] == 1
+    assert progress.ukeire_tiles[0] is True
+
+
+def test_3n1_low_shanten_path_consumes_draw_and_discard_deltas(monkeypatch):
+    hand_counts = (
+        0, 0, 0, 0, 0, 1, 1, 1, 0,
+        0, 0, 0, 0, 1, 0, 1, 0, 0,
+        3, 1, 1, 1, 0, 0, 1, 0, 0,
+        0, 1, 0, 0, 0, 0, 0,
+    )
+    visible_counts = hand_counts
+    calls = {"draw": 0, "discard": 0}
+
+    def _wrapped_draw_deltas(counts34, visible34):
+        calls["draw"] += 1
+        return ((11, 1, 0),)
+
+    def _wrapped_discard_deltas(counts34):
+        calls["discard"] += 1
+        return ((0, -1),)
+
+    monkeypatch.setattr(progress_oracle, "_calc_draw_deltas", _wrapped_draw_deltas)
+    monkeypatch.setattr(progress_oracle, "_calc_discard_deltas", _wrapped_discard_deltas)
+    _set_rust_mode(False)
+
+    progress = analyze_normal_progress_from_counts(hand_counts, visible_counts)
+
+    assert progress.shanten in (1, 2)
+    assert calls == {"draw": 1, "discard": 1}
+    assert progress.ukeire_tiles[11] is True
 
 
 def test_analyze_normal_progress_rust_python_parity_random_cases():

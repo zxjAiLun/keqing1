@@ -23,6 +23,9 @@ _RUST_FUNC = None
 _RUST_SHANTEN_NORMAL = None
 _RUST_SHANTEN_ALL = None
 _RUST_SHANTEN_MANY = None
+_RUST_REQUIRED_TILES = None
+_RUST_DRAW_DELTAS = None
+_RUST_DISCARD_DELTAS = None
 _RUST_SUMMARIZE_3N2_CANDIDATES = None
 _RUST_IMPORT_ERROR = None
 
@@ -94,6 +97,9 @@ if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
     _RUST_SHANTEN_NORMAL = getattr(_rust_ext, "calc_shanten_normal_py", None)
     _RUST_SHANTEN_ALL = getattr(_rust_ext, "calc_shanten_all_py", None)
     _RUST_SHANTEN_MANY = getattr(_rust_ext, "standard_shanten_many_py", None)
+    _RUST_REQUIRED_TILES = getattr(_rust_ext, "calc_required_tiles_py", None)
+    _RUST_DRAW_DELTAS = getattr(_rust_ext, "calc_draw_deltas_py", None)
+    _RUST_DISCARD_DELTAS = getattr(_rust_ext, "calc_discard_deltas_py", None)
     _RUST_SUMMARIZE_3N2_CANDIDATES = getattr(_rust_ext, "summarize_3n2_candidates_py", None)
     _USE_RUST = True
 
@@ -153,6 +159,33 @@ def standard_shanten_many(counts34_list):
         payload = [list(counts34) for counts34 in counts34_list]
         return tuple(int(v) for v in _RUST_SHANTEN_MANY(payload))
     return tuple(calc_standard_shanten(counts34) for counts34 in counts34_list)
+
+
+def calc_required_tiles(counts34, visible_counts34, len_div3):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_REQUIRED_TILES is not None):
+        raise RuntimeError("Rust required_tiles capability is not available")
+    return tuple(
+        (int(tile34), int(live_count))
+        for tile34, live_count in _RUST_REQUIRED_TILES(list(counts34), list(visible_counts34), int(len_div3))
+    )
+
+
+def calc_draw_deltas(counts34, visible_counts34, len_div3):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_DRAW_DELTAS is not None):
+        raise RuntimeError("Rust draw_deltas capability is not available")
+    return tuple(
+        (int(tile34), int(live_count), int(shanten_diff))
+        for tile34, live_count, shanten_diff in _RUST_DRAW_DELTAS(list(counts34), list(visible_counts34), int(len_div3))
+    )
+
+
+def calc_discard_deltas(counts34, len_div3):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_DISCARD_DELTAS is not None):
+        raise RuntimeError("Rust discard_deltas capability is not available")
+    return tuple(
+        (int(tile34), int(shanten_diff))
+        for tile34, shanten_diff in _RUST_DISCARD_DELTAS(list(counts34), int(len_div3))
+    )
 
 
 def summarize_3n2_candidates(counts34, visible_counts34, summarize_fn):
@@ -215,6 +248,9 @@ __all__ = [
     "calc_standard_shanten",
     "calc_shanten_all",
     "standard_shanten_many",
+    "calc_required_tiles",
+    "calc_draw_deltas",
+    "calc_discard_deltas",
     "summarize_3n2_candidates",
     "is_available",
     "is_enabled",
