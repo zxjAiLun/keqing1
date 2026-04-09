@@ -57,10 +57,13 @@ class GameState:
     feature_tracker: Optional[RoundFeatureTracker] = None
 
     def snapshot(self, actor: int) -> Dict:
-        hand_counter = self.players[actor].hand
-        hand_list: List[str] = []
-        for tile, cnt in sorted(hand_counter.items()):
-            hand_list.extend([tile] * cnt)
+        if self.feature_tracker is not None:
+            hand_list = sorted(self.feature_tracker.players[actor].hand_tiles)
+        else:
+            hand_counter = self.players[actor].hand
+            hand_list: List[str] = []
+            for tile, cnt in sorted(hand_counter.items()):
+                hand_list.extend([tile] * cnt)
         snap = {
             "bakaze": self.bakaze,
             "kyoku": self.kyoku,
@@ -93,7 +96,6 @@ class GameState:
         }
         if self.feature_tracker is not None:
             snap["feature_tracker"] = self.feature_tracker.snapshot_for_actor(
-                snap,
                 actor,
                 tsumo_pai=self.last_tsumo[actor],
             )
@@ -232,12 +234,13 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
         pai_raw = event["pai"]
         tsumogiri = bool(event.get("tsumogiri", False))
         tile_key, resolved_pai_raw = _resolve_dahai_tile_key(state, actor, pai_raw, tsumogiri)
-        _remove_tile(
-            state.players[actor].hand,
-            tile_key,
-            1,
-            context=f"apply_event dahai actor={actor}",
-        )
+        if not bool(event.get("skip_hand_update", False)):
+            _remove_tile(
+                state.players[actor].hand,
+                tile_key,
+                1,
+                context=f"apply_event dahai actor={actor}",
+            )
         if state.feature_tracker is not None:
             state.feature_tracker.on_dahai(actor, tile_key)
         reach_declared = state.players[actor].pending_reach
@@ -259,13 +262,14 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
         for p in state.players:
             p.ippatsu_eligible = False
         consumed = [_normalize_or_keep_aka(x) for x in event.get("consumed", [])]
-        for t in consumed:
-            _remove_tile(
-                state.players[actor].hand,
-                t,
-                1,
-                context=f"apply_event {et} actor={actor}",
-            )
+        if not bool(event.get("skip_hand_update", False)):
+            for t in consumed:
+                _remove_tile(
+                    state.players[actor].hand,
+                    t,
+                    1,
+                    context=f"apply_event {et} actor={actor}",
+                )
         if state.feature_tracker is not None:
             state.feature_tracker.on_open_meld(
                 actor,
@@ -296,13 +300,14 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
         for p in state.players:
             p.ippatsu_eligible = False
         consumed = [_normalize_or_keep_aka(x) for x in event["consumed"]]
-        for t in consumed:
-            _remove_tile(
-                state.players[actor].hand,
-                t,
-                1,
-                context=f"apply_event ankan actor={actor}",
-            )
+        if not bool(event.get("skip_hand_update", False)):
+            for t in consumed:
+                _remove_tile(
+                    state.players[actor].hand,
+                    t,
+                    1,
+                    context=f"apply_event ankan actor={actor}",
+                )
         ankan_pai = _normalize_or_keep_aka(event["consumed"][0]) if "pai" not in event else _normalize_or_keep_aka(event["pai"])
         if state.feature_tracker is not None:
             state.feature_tracker.on_ankan(actor, consumed, ankan_pai)
@@ -352,12 +357,13 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
                 if state.players[actor].hand.get(t, 0) > 0:
                     added_tile = t
                     break
-        _remove_tile(
-            state.players[actor].hand,
-            added_tile,
-            1,
-            context=f"apply_event kakan_accepted actor={actor}",
-        )
+        if not bool(event.get("skip_hand_update", False)):
+            _remove_tile(
+                state.players[actor].hand,
+                added_tile,
+                1,
+                context=f"apply_event kakan_accepted actor={actor}",
+            )
         if state.feature_tracker is not None:
             state.feature_tracker.on_kakan_accepted(actor, added_tile, pai)
         _upgrade_pon_meld_to_kakan(state.players[actor], pai, added_tile)
