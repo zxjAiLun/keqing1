@@ -160,3 +160,35 @@ pub fn summarize_3n2_candidates_py_impl(
 
     Ok(out)
 }
+
+fn candidate_progress_key(item: &CandidateProgressPy) -> (i32, i32, i32, i32, i32, i32) {
+    (
+        -item.2,
+        item.5,
+        item.4,
+        item.3,
+        0,
+        0,
+    )
+}
+
+pub fn summarize_best_3n2_candidate_py_impl(
+    py: Python<'_>,
+    counts34_seq: &Bound<'_, PyAny>,
+    visible_counts34_seq: &Bound<'_, PyAny>,
+    summarize_fn: &Bound<'_, PyAny>,
+) -> PyResult<Option<CandidateProgressPy>> {
+    let candidates = summarize_3n2_candidates_py_impl(py, counts34_seq, visible_counts34_seq, summarize_fn)?;
+    let mut best: Option<CandidateProgressPy> = None;
+    let mut best_key: Option<(i32, i32, i32, i32, i32, i32)> = None;
+
+    for candidate in candidates {
+        let key = candidate_progress_key(&candidate);
+        if best_key.as_ref().is_none_or(|current| key > *current) {
+            best_key = Some(key);
+            best = Some(candidate);
+        }
+    }
+
+    Ok(best)
+}

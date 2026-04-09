@@ -14,6 +14,7 @@ from keqingv3.progress_oracle import (
     _candidate_progress_key,
     _candidate_progress_v1_from_native,
     _select_candidate_discards_3n2,
+    _select_best_candidate_progress_3n2_python,
     _summarize_3n2_candidates_python,
     _summarize_3n1_cached,
     _summarize_3n2_cached,
@@ -381,6 +382,31 @@ def test_summarize_3n2_native_candidate_summaries_match_python():
     ]
 
 
+def test_summarize_best_3n2_candidate_native_matches_python():
+    if getattr(keqing_core, "_RUST_SUMMARIZE_BEST_3N2_CANDIDATE", None) is None:
+        pytest.skip("best-candidate 3n+2 native seam is only available after rebuilding the wheel")
+    rng = random.Random(20260425)
+    hand_counts = _random_counts(14, rng)
+    visible_counts = _random_visible_counts(hand_counts, rng)
+    discard_candidates = _select_candidate_discards_3n2(hand_counts)
+
+    expected = _select_best_candidate_progress_3n2_python(
+        hand_counts,
+        visible_counts,
+        discard_candidates,
+    )
+
+    _set_rust_mode(True)
+    actual = keqing_core.summarize_best_3n2_candidate(
+        hand_counts,
+        visible_counts,
+        _summarize_3n1_cached,
+    )
+
+    assert actual is not None
+    assert _candidate_progress_v1_from_native(actual) == expected
+
+
 def test_select_candidate_discards_3n2_prunes_worse_shanten_discards(monkeypatch):
     hand_counts = _random_counts(14, random.Random(20260420))
 
@@ -468,7 +494,7 @@ def test_summarize_3n2_does_not_touch_native_candidate_path_when_seam_unavailabl
     assert calls == 0
 
 
-def test_summarize_3n2_can_use_native_candidate_path_even_when_python_pruning_exists(monkeypatch):
+def test_summarize_3n2_does_not_need_legacy_native_candidate_path_when_python_pruning_exists(monkeypatch):
     calls = 0
     hand_counts = _random_counts(14, random.Random(20260423))
     visible_counts = _random_visible_counts(hand_counts, random.Random(20260424))
@@ -498,4 +524,42 @@ def test_summarize_3n2_can_use_native_candidate_path_even_when_python_pruning_ex
 
     analyze_normal_progress_from_counts(hand_counts, visible_counts)
 
-    assert calls == 1
+    assert calls == 0
+
+
+def test_summarize_3n2_prefers_native_best_candidate_path(monkeypatch):
+    calls = {"best": 0, "candidates": 0}
+    hand_counts = _random_counts(14, random.Random(20260426))
+    visible_counts = _random_visible_counts(hand_counts, random.Random(20260427))
+    discard34 = next(idx for idx, cnt in enumerate(hand_counts) if cnt > 0)
+
+    def _fake_best_native(_counts, _visible_counts, summarize_fn):
+        calls["best"] += 1
+        after_counts = list(hand_counts)
+        after_counts[discard34] -= 1
+        progress = summarize_fn(tuple(after_counts), visible_counts)
+        return (
+            discard34,
+            tuple(after_counts),
+            progress.shanten,
+            progress.waits_count,
+            progress.ukeire_type_count,
+            progress.ukeire_live_count,
+            progress.good_shape_ukeire_type_count,
+            progress.good_shape_ukeire_live_count,
+            progress.improvement_type_count,
+            progress.improvement_live_count,
+        )
+
+    def _unexpected_candidates(*args, **kwargs):
+        calls["candidates"] += 1
+        raise AssertionError("candidate-list native seam should not be used when best-candidate seam is available")
+
+    monkeypatch.setattr(progress_oracle, "_summarize_best_3n2_candidate_native", _fake_best_native)
+    monkeypatch.setattr(progress_oracle, "_summarize_3n2_candidates_native", _unexpected_candidates)
+    monkeypatch.setattr(progress_oracle, "_has_3n2_candidate_summaries", lambda: True)
+    _set_rust_mode(True)
+
+    analyze_normal_progress_from_counts(hand_counts, visible_counts)
+
+    assert calls == {"best": 1, "candidates": 0}

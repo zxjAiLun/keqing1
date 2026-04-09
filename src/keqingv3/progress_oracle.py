@@ -11,6 +11,7 @@ from keqing_core import calc_required_tiles as _calc_required_tiles_native
 from keqing_core import has_3n2_candidate_summaries as _has_3n2_candidate_summaries
 from keqing_core import calc_shanten_normal as _calc_shanten_normal_native
 from keqing_core import calc_standard_shanten as _calc_standard_shanten_native
+from keqing_core import summarize_best_3n2_candidate as _summarize_best_3n2_candidate_native
 from keqing_core import summarize_3n2_candidates as _summarize_3n2_candidates_native
 from keqing_core import standard_shanten_many as _standard_shanten_many_native
 
@@ -405,6 +406,19 @@ def _summarize_3n2_candidates_python(
     return out
 
 
+def _select_best_candidate_progress_3n2_python(
+    counts_3n2: tuple[int, ...],
+    visible_counts_local: tuple[int, ...],
+    discard_candidates: Optional[Sequence[int]] = None,
+) -> Optional[CandidateProgressV1]:
+    best: Optional[tuple[tuple[int, int, int, int, int, int], CandidateProgressV1]] = None
+    for candidate in _summarize_3n2_candidates_python(counts_3n2, visible_counts_local, discard_candidates):
+        key = _candidate_progress_key(candidate)
+        if best is None or key > best[0]:
+            best = (key, candidate)
+    return None if best is None else best[1]
+
+
 @lru_cache(maxsize=_SUMMARY_CACHE_SIZE)
 def _summarize_3n1_cached(
     counts_3n1: tuple[int, ...],
@@ -455,40 +469,39 @@ def _summarize_3n2_cached(
     counts_3n2: tuple[int, ...],
     visible_counts_local: tuple[int, ...],
 ) -> NormalProgressInfo:
-    best = None
     loop_t0 = time.perf_counter()
+    best_after_counts: Optional[tuple[int, ...]] = None
     if _ACTIVE_PROGRESS_PROFILER is None and _has_3n2_candidate_summaries():
         try:
-            candidates = [
-                _candidate_progress_v1_from_native(item)
-                for item in _summarize_3n2_candidates_native(
+            best_candidate_native = _summarize_best_3n2_candidate_native(
                     counts_3n2,
                     visible_counts_local,
                     _summarize_3n1_cached,
                 )
-            ]
+            if best_candidate_native is not None:
+                best_after_counts = _candidate_progress_v1_from_native(best_candidate_native).after_counts34
         except RuntimeError:
             discard_candidates = _select_candidate_discards_3n2(counts_3n2)
-            candidates = _summarize_3n2_candidates_python(
+            best_candidate = _select_best_candidate_progress_3n2_python(
                 counts_3n2,
                 visible_counts_local,
                 discard_candidates,
             )
+            if best_candidate is not None:
+                best_after_counts = best_candidate.after_counts34
     else:
         discard_candidates = _select_candidate_discards_3n2(counts_3n2)
-        candidates = _summarize_3n2_candidates_python(
+        best_candidate = _select_best_candidate_progress_3n2_python(
             counts_3n2,
             visible_counts_local,
             discard_candidates,
         )
+        if best_candidate is not None:
+            best_after_counts = best_candidate.after_counts34
 
-    for candidate in candidates:
-        key = _candidate_progress_key(candidate)
-        if best is None or key > best[0]:
-            best = (key, candidate.after_counts34)
     _progress_profiler_add("ukeire_improvement_s", time.perf_counter() - loop_t0)
-    if best is not None:
-        return _summarize_3n1_cached(best[1], visible_counts_local)
+    if best_after_counts is not None:
+        return _summarize_3n1_cached(best_after_counts, visible_counts_local)
     return _summarize_3n1_cached(tuple(counts_3n2), visible_counts_local)
 
 

@@ -7,7 +7,7 @@ use pyo3::types::{PyAny, PyList};
 
 use crate::counts::TILE_COUNT;
 use crate::progress_delta::{calc_discard_deltas, calc_draw_deltas, calc_required_tiles};
-use crate::progress_batch::summarize_3n2_candidates_py_impl;
+use crate::progress_batch::{summarize_3n2_candidates_py_impl, summarize_best_3n2_candidate_py_impl};
 use crate::shanten_table::{calc_shanten_all, calc_shanten_normal, ensure_init};
 use crate::standard::counts34_to_ids;
 
@@ -115,6 +115,16 @@ fn summarize_3n2_candidates_py(
     summarize_3n2_candidates_py_impl(py, counts34, visible_counts34, summarize_fn)
 }
 
+#[pyfunction]
+fn summarize_best_3n2_candidate_py(
+    py: Python<'_>,
+    counts34: &Bound<'_, PyAny>,
+    visible_counts34: &Bound<'_, PyAny>,
+    summarize_fn: &Bound<'_, PyAny>,
+) -> PyResult<Option<(u8, Vec<u8>, i32, i32, i32, i32, i32, i32, i32, i32)>> {
+    summarize_best_3n2_candidate_py_impl(py, counts34, visible_counts34, summarize_fn)
+}
+
 #[pymodule]
 pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     ensure_init();
@@ -126,6 +136,7 @@ pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calc_draw_deltas_py, m)?)?;
     m.add_function(wrap_pyfunction!(calc_discard_deltas_py, m)?)?;
     m.add_function(wrap_pyfunction!(summarize_3n2_candidates_py, m)?)?;
+    m.add_function(wrap_pyfunction!(summarize_best_3n2_candidate_py, m)?)?;
     m.add("TILE_COUNT", TILE_COUNT)?;
     Ok(())
 }
