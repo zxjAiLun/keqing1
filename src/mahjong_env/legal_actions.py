@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Dict, List
 
+from keqing_core import calc_standard_shanten as _calc_standard_shanten
 from mahjong_env.scoring import can_hora_from_snapshot
 from mahjong_env.tiles import normalize_tile, AKA_DORA_TILES, tile_without_aka, tile_to_34 as _tile_to_34
 from mahjong_env.types import Action, ActionSpec
@@ -157,36 +158,29 @@ def _reach_discard_candidates(
     last_tsumo: str | None,
     last_tsumo_raw: str | None,
 ) -> List[tuple[str, bool]]:
-    from mahjong.shanten import Shanten
-    from mahjong.tile import TilesConverter
-    from mahjong_env.tiles import tile_to_136 as _to_136
-
     candidates: List[tuple[str, bool]] = []
     seen: set[tuple[str, bool]] = set()
-    shanten_calc = Shanten()
+    counts34 = [0] * 34
+    for tile, cnt in hand.items():
+        t34 = _tile_to_34(tile)
+        if 0 <= t34 < 34:
+            counts34[t34] += cnt
 
     for tile in list(hand.keys()):
         pai_out = tile
         tsumogiri = last_tsumo == tile
         if tsumogiri and last_tsumo_raw is not None:
             pai_out = last_tsumo_raw
-        test_hand = dict(hand)
-        test_hand[tile] -= 1
-        if test_hand[tile] == 0:
-            del test_hand[tile]
-        hand136: List[int] = []
-        for t, cnt in test_hand.items():
-            idx136 = _to_136(t)
-            if idx136 >= 0:
-                hand136.extend([idx136] * cnt)
-        if not hand136:
+        t34 = _tile_to_34(tile)
+        if not (0 <= t34 < 34) or counts34[t34] <= 0:
             continue
-        tiles34 = TilesConverter.to_34_array(hand136)
-        if shanten_calc.calculate_shanten(tiles34) == 0:
+        counts34[t34] -= 1
+        if _calc_standard_shanten(tuple(counts34)) == 0:
             key = (pai_out, tsumogiri)
             if key not in seen:
                 seen.add(key)
                 candidates.append(key)
+        counts34[t34] += 1
     return candidates
 
 

@@ -7,6 +7,7 @@ pub mod counts;
 pub mod progress_delta;
 pub mod progress_batch;
 pub mod progress_summary;
+pub mod scoring_pool;
 pub mod shanten_table;
 pub mod standard;
 pub mod shanten;

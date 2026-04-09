@@ -9,6 +9,7 @@ use crate::counts::TILE_COUNT;
 use crate::progress_delta::{calc_discard_deltas, calc_draw_deltas, calc_required_tiles};
 use crate::progress_batch::{summarize_3n2_candidates_py_impl, summarize_best_3n2_candidate_py_impl};
 use crate::progress_summary::summarize_3n1;
+use crate::scoring_pool::build_136_pool_entries;
 use crate::shanten_table::{calc_shanten_all, calc_shanten_normal, ensure_init};
 use crate::standard::counts34_to_ids;
 
@@ -107,6 +108,11 @@ fn calc_discard_deltas_py(counts34: &Bound<'_, PyList>, len_div3: u8) -> PyResul
 }
 
 #[pyfunction]
+fn build_136_pool_entries_py(tiles: Vec<String>) -> PyResult<Vec<(String, Vec<u8>)>> {
+    Ok(build_136_pool_entries(&tiles))
+}
+
+#[pyfunction]
 fn summarize_3n1_py(
     counts34: &Bound<'_, PyList>,
     visible_counts34: &Bound<'_, PyList>,
@@ -156,6 +162,7 @@ pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calc_required_tiles_py, m)?)?;
     m.add_function(wrap_pyfunction!(calc_draw_deltas_py, m)?)?;
     m.add_function(wrap_pyfunction!(calc_discard_deltas_py, m)?)?;
+    m.add_function(wrap_pyfunction!(build_136_pool_entries_py, m)?)?;
     m.add_function(wrap_pyfunction!(summarize_3n1_py, m)?)?;
     m.add_function(wrap_pyfunction!(summarize_3n2_candidates_py, m)?)?;
     m.add_function(wrap_pyfunction!(summarize_best_3n2_candidate_py, m)?)?;
