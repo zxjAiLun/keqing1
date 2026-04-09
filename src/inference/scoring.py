@@ -337,7 +337,9 @@ class DefaultActionScorer:
         self.dealin_prob_lambda = dealin_prob_lambda
 
     def score(self, ctx: DecisionContext) -> DecisionResult:
-        model_result = self.adapter.forward(ctx.model_snap, ctx.actor)
+        model_snap = dict(ctx.model_snap)
+        model_snap["legal_actions"] = ctx.legal_actions
+        model_result = self.adapter.forward(model_snap, ctx.actor)
         logits_np = np.asarray(model_result.policy_logits, dtype=np.float32)
         value_scalar = float(model_result.value)
         aux_bonus = _aux_bonus(
@@ -460,4 +462,3 @@ class DefaultActionScorer:
             model_value=value_scalar,
             model_aux=model_result.aux,
         )
-

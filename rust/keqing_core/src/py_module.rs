@@ -3,6 +3,7 @@
 //! This module provides Python bindings for the keqing_core Rust library.
 
 use pyo3::prelude::*;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::types::{PyAny, PyList};
 
 use crate::counts::TILE_COUNT;
@@ -12,6 +13,13 @@ use crate::progress_summary::summarize_3n1;
 use crate::scoring_pool::build_136_pool_entries;
 use crate::shanten_table::{calc_shanten_all, calc_shanten_normal, ensure_init};
 use crate::standard::counts34_to_ids;
+use crate::xmodel1_export::{
+    build_xmodel1_discard_records, validate_xmodel1_discard_record, xmodel1_schema_info,
+};
+use crate::xmodel1_schema::{
+    XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM, XMODEL1_MAX_CANDIDATES,
+    XMODEL1_SCHEMA_NAME, XMODEL1_SCHEMA_VERSION,
+};
 
 #[pyfunction]
 fn counts34_to_ids_py(counts34: &Bound<'_, PyList>) -> PyResult<Vec<u16>> {
@@ -152,6 +160,41 @@ fn summarize_best_3n2_candidate_py(
     summarize_best_3n2_candidate_py_impl(py, counts34, visible_counts34, summarize_fn)
 }
 
+#[pyfunction]
+fn build_xmodel1_discard_records_py(
+    data_dirs: Vec<String>,
+    output_dir: String,
+    smoke: bool,
+) -> PyResult<(usize, String, bool)> {
+    match build_xmodel1_discard_records(&data_dirs, &output_dir, smoke) {
+        Ok((count, manifest_path, produced_npz)) => Ok((count, manifest_path, produced_npz)),
+        Err(msg) => Err(PyRuntimeError::new_err(msg)),
+    }
+}
+
+#[pyfunction]
+fn xmodel1_schema_info_py() -> PyResult<(String, u32, usize, usize, usize)> {
+    let (name, version, max_candidates, candidate_dim, flag_dim) = xmodel1_schema_info();
+    Ok((
+        name.to_string(),
+        version,
+        max_candidates,
+        candidate_dim,
+        flag_dim,
+    ))
+}
+
+#[pyfunction]
+fn validate_xmodel1_discard_record_py(
+    chosen_candidate_idx: i16,
+    candidate_mask: Vec<u8>,
+    candidate_tile_id: Vec<i16>,
+) -> PyResult<bool> {
+    validate_xmodel1_discard_record(chosen_candidate_idx, &candidate_mask, &candidate_tile_id)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    Ok(true)
+}
+
 #[pymodule]
 pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     ensure_init();
@@ -166,6 +209,14 @@ pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(summarize_3n1_py, m)?)?;
     m.add_function(wrap_pyfunction!(summarize_3n2_candidates_py, m)?)?;
     m.add_function(wrap_pyfunction!(summarize_best_3n2_candidate_py, m)?)?;
+    m.add_function(wrap_pyfunction!(build_xmodel1_discard_records_py, m)?)?;
+    m.add_function(wrap_pyfunction!(xmodel1_schema_info_py, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_xmodel1_discard_record_py, m)?)?;
     m.add("TILE_COUNT", TILE_COUNT)?;
+    m.add("XMODEL1_SCHEMA_NAME", XMODEL1_SCHEMA_NAME)?;
+    m.add("XMODEL1_SCHEMA_VERSION", XMODEL1_SCHEMA_VERSION)?;
+    m.add("XMODEL1_MAX_CANDIDATES", XMODEL1_MAX_CANDIDATES)?;
+    m.add("XMODEL1_CANDIDATE_FEATURE_DIM", XMODEL1_CANDIDATE_FEATURE_DIM)?;
+    m.add("XMODEL1_CANDIDATE_FLAG_DIM", XMODEL1_CANDIDATE_FLAG_DIM)?;
     Ok(())
 }

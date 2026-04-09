@@ -1,0 +1,43 @@
+"""Xmodel1 schema constants and field definitions.
+
+This module mirrors the documented field-level protocol in
+`docs/xmodel1_schema_spec.md` and is the Python-side single source of truth for
+loader/model shape expectations.
+"""
+
+from __future__ import annotations
+
+from training.cache_schema import (
+    XMODEL1_AUX_TARGET_FIELDS,
+    XMODEL1_BASE_FIELDS,
+    XMODEL1_CANDIDATE_FEATURE_DIM,
+    XMODEL1_CANDIDATE_FLAG_DIM,
+    XMODEL1_MAX_CANDIDATES,
+    XMODEL1_METADATA_FIELDS,
+    XMODEL1_SCHEMA_NAME,
+    XMODEL1_SCHEMA_VERSION,
+    XMODEL1_TEACHER_FIELDS,
+)
+
+XMODEL1_DISCARD_REQUIRED_FIELDS = (
+    *XMODEL1_BASE_FIELDS,
+    *XMODEL1_TEACHER_FIELDS,
+    *XMODEL1_AUX_TARGET_FIELDS,
+    *XMODEL1_METADATA_FIELDS,
+)
+
+XMODEL1_SAMPLE_TYPE_DISCARD = 0
+XMODEL1_SAMPLE_TYPE_RIICHI = 1
+XMODEL1_SAMPLE_TYPE_CALL = 2
+
+__all__ = [
+    "XMODEL1_SCHEMA_NAME",
+    "XMODEL1_SCHEMA_VERSION",
+    "XMODEL1_MAX_CANDIDATES",
+    "XMODEL1_CANDIDATE_FEATURE_DIM",
+    "XMODEL1_CANDIDATE_FLAG_DIM",
+    "XMODEL1_DISCARD_REQUIRED_FIELDS",
+    "XMODEL1_SAMPLE_TYPE_DISCARD",
+    "XMODEL1_SAMPLE_TYPE_RIICHI",
+    "XMODEL1_SAMPLE_TYPE_CALL",
+]

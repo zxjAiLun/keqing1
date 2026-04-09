@@ -4,7 +4,12 @@ from .decoder import Meld
 class State:
     def __init__(self, name: str = 'NoName', room: str = '0_0'):
         self.name: str = name
-        self.room: str = room.replace('_', ',')
+        lobby_part, game_type = room.split('_', 1)
+        self.lobby_id: int | None = None
+        if lobby_part.upper().startswith('L') and lobby_part[1:].isdigit():
+            self.lobby_id = int(lobby_part[1:])
+            lobby_part = str(self.lobby_id)
+        self.room: str = f'{lobby_part},{game_type}'
         # 手牌(天鳳インデックス)
         self.hand: list[int] = []
         # 立直をかけているか

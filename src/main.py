@@ -68,9 +68,10 @@ def run_replay_server(port: int, logger: logging.Logger) -> None:
 
 def run_gateway_server(logger: logging.Logger) -> None:
     """启动 mjai-gateway (天凤协议转换)。"""
-    from gateway.main import main as gateway_main
-
-    gateway_main(logger)
+    try:
+        asyncio.run(start_gateway_async(gateway_settings.DEBUG, logger))
+    except KeyboardInterrupt:
+        pass
 
 
 async def start_gateway_async(debug: bool, logger: logging.Logger) -> None:

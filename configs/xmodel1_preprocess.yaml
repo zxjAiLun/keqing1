@@ -1,0 +1,12 @@
+# Xmodel1 预处理配置（Rust candidate export 目标目录约定）
+data_dirs:
+  - artifacts/converted_mjai/ds1
+
+output_dir: processed_xmodel1
+schema_name: xmodel1_discard_v1
+schema_version: 1
+
+# Rust exporter 将在后续阶段实现，此处先固定协议配置占位。
+max_candidates: 14
+candidate_feature_dim: 21
+candidate_flag_dim: 10

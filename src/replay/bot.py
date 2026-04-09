@@ -35,6 +35,7 @@ _BOT_CLASSES = {
     "keqingv1": RuntimeBot,
     "keqingv2": RuntimeBot,
     "keqingv3": RuntimeBot,
+    "xmodel1": RuntimeBot,
 }
 
 PLAYER_NAMES = ["East", "South", "West", "North"]
@@ -44,6 +45,7 @@ _DEFAULT_CHECKPOINTS = {
     "keqingv1": _PROJECT_ROOT / "artifacts/models/keqingv1/latest.pth",
     "keqingv2": _PROJECT_ROOT / "artifacts/models/keqingv2/best.pth",
     "keqingv3": _PROJECT_ROOT / "artifacts/models/keqingv3/best.pth",
+    "xmodel1": _PROJECT_ROOT / "artifacts/models/xmodel1/best.pth",
 }
 _REVIEW_EXPORTER = DefaultRuntimeReviewExporter()
 
@@ -197,7 +199,7 @@ def run_replay_from_source(
 
     events = _load_events_from_source(source, input_type=input_type)
     bot_cls = _BOT_CLASSES[bot_type]
-    bot = bot_cls(player_id=player_id, model_path=checkpoint)
+    bot = bot_cls(player_id=player_id, model_path=checkpoint, model_version=bot_type)
     setattr(bot, "player_names", [])
 
     _MELD_TYPES = {"chi", "pon", "daiminkan", "ankan", "kakan"}
@@ -555,8 +557,8 @@ def main():
     parser.add_argument(
         "--bot-type",
         default="keqingv1",
-        choices=["keqingv1", "keqingv2", "keqingv3"],
-        help="Bot 类型：keqingv1 / keqingv2 / keqingv3",
+        choices=["keqingv1", "keqingv2", "keqingv3", "xmodel1"],
+        help="Bot 类型：keqingv1 / keqingv2 / keqingv3 / xmodel1",
     )
     parser.add_argument("--output", default=None, help="HTML 输出路径")
     parser.add_argument(

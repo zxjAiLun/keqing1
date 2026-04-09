@@ -58,6 +58,8 @@ class Helo(Base):
             message: dict[str, str],
             send_to_tenhou: Callable[[dict], Awaitable[None]],
             send_to_mjai: Callable[[dict], Awaitable[dict]]):
+        if state.lobby_id is not None:
+            await send_to_tenhou({'tag': 'LOBBY', 'id': str(state.lobby_id)})
         await send_to_tenhou({'tag': 'JOIN', 't': state.room})
 
 

@@ -2,7 +2,7 @@
 # 预处理建议：
 #   uv run python scripts/preprocess_v3.py --config configs/keqingv3_preprocess.yaml
 data_dirs:
-  - processed_v3_fixaux/ds1
+  - preprocess_v3/ds2
 
 output_dir: artifacts/models/keqingv3
 device: cuda
@@ -30,6 +30,6 @@ pin_memory: true
 persistent_workers: true
 log_interval: 500
 aug_perms: 1
-files_per_epoch_ratio: 0.3
+files_per_epoch_ratio: 1.0
 win_pos_weight: 2.0
 dealin_pos_weight: 6.0

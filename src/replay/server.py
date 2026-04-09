@@ -150,6 +150,8 @@ def _infer_player_bot_type(player_name: str | None, fallback: str | None = None)
     raw = (player_name or "").lower()
     if "keqingv1" in raw:
         return "keqingv1"
+    if "xmodel1" in raw:
+        return "xmodel1"
     if "keqingv3" in raw:
         return "keqingv3"
     if "keqingv2" in raw:
@@ -162,6 +164,7 @@ def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
         "keqingv1": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv1" / "best.pth",
         "keqingv2": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv2" / "best.pth",
         "keqingv3": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv3" / "best.pth",
+        "xmodel1": BASE_DIR.parent.parent / "artifacts" / "models" / "xmodel1" / "best.pth",
     }
     return mapping[bot_type]
 

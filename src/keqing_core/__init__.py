@@ -30,6 +30,9 @@ _RUST_BUILD_136_POOL_ENTRIES = None
 _RUST_SUMMARIZE_3N1 = None
 _RUST_SUMMARIZE_3N2_CANDIDATES = None
 _RUST_SUMMARIZE_BEST_3N2_CANDIDATE = None
+_RUST_BUILD_XMODEL1_DISCARD_RECORDS = None
+_RUST_XMODEL1_SCHEMA_INFO = None
+_RUST_VALIDATE_XMODEL1_DISCARD_RECORD = None
 _RUST_IMPORT_ERROR = None
 
 
@@ -107,6 +110,9 @@ if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
     _RUST_SUMMARIZE_3N1 = getattr(_rust_ext, "summarize_3n1_py", None)
     _RUST_SUMMARIZE_3N2_CANDIDATES = getattr(_rust_ext, "summarize_3n2_candidates_py", None)
     _RUST_SUMMARIZE_BEST_3N2_CANDIDATE = getattr(_rust_ext, "summarize_best_3n2_candidate_py", None)
+    _RUST_BUILD_XMODEL1_DISCARD_RECORDS = getattr(_rust_ext, "build_xmodel1_discard_records_py", None)
+    _RUST_XMODEL1_SCHEMA_INFO = getattr(_rust_ext, "xmodel1_schema_info_py", None)
+    _RUST_VALIDATE_XMODEL1_DISCARD_RECORD = getattr(_rust_ext, "validate_xmodel1_discard_record_py", None)
     _USE_RUST = True
 
 
@@ -269,6 +275,73 @@ def summarize_best_3n2_candidate(counts34, visible_counts34, summarize_fn):
     )
 
 
+def build_xmodel1_discard_records(*, data_dirs=None, output_dir: str = "processed_xmodel1", smoke: bool = False):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_BUILD_XMODEL1_DISCARD_RECORDS is not None):
+        raise RuntimeError("Rust Xmodel1 discard export is not available")
+    data_dirs = list(data_dirs or [])
+    try:
+        return _RUST_BUILD_XMODEL1_DISCARD_RECORDS(data_dirs, str(output_dir), bool(smoke))
+    except TypeError:
+        # Backward compatibility for stale native wheels with the old no-arg stub.
+        return _RUST_BUILD_XMODEL1_DISCARD_RECORDS()
+
+
+def xmodel1_schema_info():
+    if _USE_RUST and _RUST_AVAILABLE and _RUST_XMODEL1_SCHEMA_INFO is not None:
+        name, version, max_candidates, candidate_dim, flag_dim = _RUST_XMODEL1_SCHEMA_INFO()
+        return (
+            str(name),
+            int(version),
+            int(max_candidates),
+            int(candidate_dim),
+            int(flag_dim),
+        )
+    from training.cache_schema import (
+        XMODEL1_CANDIDATE_FEATURE_DIM,
+        XMODEL1_CANDIDATE_FLAG_DIM,
+        XMODEL1_MAX_CANDIDATES,
+        XMODEL1_SCHEMA_NAME,
+        XMODEL1_SCHEMA_VERSION,
+    )
+
+    return (
+        XMODEL1_SCHEMA_NAME,
+        XMODEL1_SCHEMA_VERSION,
+        XMODEL1_MAX_CANDIDATES,
+        XMODEL1_CANDIDATE_FEATURE_DIM,
+        XMODEL1_CANDIDATE_FLAG_DIM,
+    )
+
+
+def validate_xmodel1_discard_record(chosen_candidate_idx, candidate_mask, candidate_tile_id):
+    if _USE_RUST and _RUST_AVAILABLE and _RUST_VALIDATE_XMODEL1_DISCARD_RECORD is not None:
+        return bool(
+            _RUST_VALIDATE_XMODEL1_DISCARD_RECORD(
+                int(chosen_candidate_idx),
+                list(candidate_mask),
+                list(candidate_tile_id),
+            )
+        )
+    from training.cache_schema import XMODEL1_MAX_CANDIDATES
+
+    if len(candidate_mask) != XMODEL1_MAX_CANDIDATES or len(candidate_tile_id) != XMODEL1_MAX_CANDIDATES:
+        raise ValueError("candidate arrays must match XMODEL1_MAX_CANDIDATES")
+    chosen_candidate_idx = int(chosen_candidate_idx)
+    if not (0 <= chosen_candidate_idx < XMODEL1_MAX_CANDIDATES):
+        raise ValueError("chosen_candidate_idx out of range")
+    if int(candidate_mask[chosen_candidate_idx]) != 1:
+        raise ValueError("chosen_candidate_idx must point to an active candidate")
+
+    for idx, (mask_value, tile_id) in enumerate(zip(candidate_mask, candidate_tile_id)):
+        mask_value = int(mask_value)
+        tile_id = int(tile_id)
+        if mask_value == 0 and tile_id != -1:
+            raise ValueError(f"padding candidate at index {idx} must use tile_id=-1")
+        if mask_value == 1 and not (0 <= tile_id < 34):
+            raise ValueError(f"active candidate at index {idx} must use tile34 in [0, 33]")
+    return True
+
+
 def is_available():
     return _RUST_AVAILABLE
 
@@ -305,6 +378,9 @@ __all__ = [
     "summarize_3n1",
     "summarize_3n2_candidates",
     "summarize_best_3n2_candidate",
+    "build_xmodel1_discard_records",
+    "xmodel1_schema_info",
+    "validate_xmodel1_discard_record",
     "is_available",
     "is_enabled",
     "has_3n2_candidate_summaries",

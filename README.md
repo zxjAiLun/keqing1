@@ -51,19 +51,58 @@ uv run python src/main.py replay --port 8000
 ### 3. 仅启动天凤 Gateway
 
 ```bash
-uv run python src/main.py tenhou --gateway-port 11600
+uv run python src/main.py --gateway-port 11600 tenhou
 ```
 
 兼容别名：
 
 ```bash
-uv run python src/main.py gateway --gateway-port 11600
+uv run python src/main.py --gateway-port 11600 gateway
 ```
 
 ### 4. 同时启动本地服务和 Gateway
 
 ```bash
-uv run python src/main.py serve --port 8000 --gateway-port 11600
+uv run python src/main.py --port 8000 --gateway-port 11600 serve
+```
+
+### 5. 启动指定房间的多个天凤机器人
+
+例如把两个匿名 `keqingv2` 机器人加入天凤 lobby `L2147` 的四麻东南战（半庄）队列：
+
+```bash
+uv run python scripts/launch_tenhou_bots.py --room L2147 --count 2 --bot keqingv2 --start-gateway
+```
+
+常用参数：
+
+- `--room L2147`：默认补成 `L2147_9`（四麻东南战 / hanchan）
+- `--room 2147_0`：数值房间；三麻可用 `2147_9`
+- `--game-type 9`：四麻东南战（半庄，多人匹配）
+- `--game-type 1`：四麻东风战（多人匹配）
+- `--count 2`：启动两个 bot 客户端
+- `--bot keqingv2`：可切换 `keqingv1 / keqingv2 / keqingv3 / rulebase`
+- `--name-prefix NoName`：默认以匿名 `NoName` 方式进房
+- `--start-gateway`：自动启动 `src/gateway/main.py`
+- `--model-path /path/to/best.pth`：显式指定 checkpoint
+
+专属 Tenhou 桥接层支持通过环境变量或 launcher 参数补充握手/认证信息：
+
+- `TENHOU_COOKIE` / `--tenhou-cookie`
+- `TENHOU_HELO_JSON` / `--tenhou-helo-json`
+- `TENHOU_URI` / `--tenhou-uri`
+- `TENHOU_ORIGIN` / `--tenhou-origin`
+
+例如：
+
+```bash
+uv run python scripts/launch_tenhou_bots.py \
+  --room L2147 \
+  --count 1 \
+  --bot keqingv2 \
+  --start-gateway \
+  --tenhou-cookie 'uid=...; other=...' \
+  --tenhou-helo-json '{"tid":"..."}'
 ```
 
 ## 训练数据流程
