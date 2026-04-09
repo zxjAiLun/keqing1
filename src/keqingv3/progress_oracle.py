@@ -457,13 +457,7 @@ def _summarize_3n2_cached(
 ) -> NormalProgressInfo:
     best = None
     loop_t0 = time.perf_counter()
-    discard_candidates = _select_candidate_discards_3n2(counts_3n2)
-    use_native_candidates = (
-        _ACTIVE_PROGRESS_PROFILER is None
-        and _has_3n2_candidate_summaries()
-        and len(discard_candidates) == len(_candidate_discards_no_meld_break(counts_3n2))
-    )
-    if use_native_candidates:
+    if _ACTIVE_PROGRESS_PROFILER is None and _has_3n2_candidate_summaries():
         try:
             candidates = [
                 _candidate_progress_v1_from_native(item)
@@ -474,12 +468,14 @@ def _summarize_3n2_cached(
                 )
             ]
         except RuntimeError:
+            discard_candidates = _select_candidate_discards_3n2(counts_3n2)
             candidates = _summarize_3n2_candidates_python(
                 counts_3n2,
                 visible_counts_local,
                 discard_candidates,
             )
     else:
+        discard_candidates = _select_candidate_discards_3n2(counts_3n2)
         candidates = _summarize_3n2_candidates_python(
             counts_3n2,
             visible_counts_local,

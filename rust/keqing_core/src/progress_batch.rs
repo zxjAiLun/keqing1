@@ -5,6 +5,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyTuple};
 
 use crate::counts::TILE_COUNT;
+use crate::progress_delta::calc_discard_deltas;
+use crate::shanten_table::calc_shanten_all;
 
 type CandidateProgressPy = (u8, Vec<u8>, i32, i32, i32, i32, i32, i32, i32, i32);
 
@@ -71,6 +73,56 @@ fn candidate_discards_no_meld_break(counts34: &[i32; TILE_COUNT]) -> Vec<usize> 
     }
 }
 
+fn to_u8_counts34(counts34: &[i32; TILE_COUNT]) -> [u8; TILE_COUNT] {
+    let mut out = [0u8; TILE_COUNT];
+    for (idx, value) in counts34.iter().enumerate() {
+        out[idx] = (*value).max(0) as u8;
+    }
+    out
+}
+
+fn select_candidate_discards_3n2(counts34: &[i32; TILE_COUNT]) -> Vec<usize> {
+    let candidate_discards = candidate_discards_no_meld_break(counts34);
+    if candidate_discards.is_empty() {
+        return candidate_discards;
+    }
+
+    let counts_u8 = to_u8_counts34(counts34);
+    let len_div3 = counts_u8.iter().sum::<u8>() / 3;
+    let current_shanten = calc_shanten_all(&counts_u8, len_div3);
+    let discard_deltas = calc_discard_deltas(&counts_u8, len_div3);
+    let mut best_after_shanten: Option<i8> = None;
+    let mut selected = Vec::new();
+
+    for discard34 in candidate_discards {
+        let Some(delta) = discard_deltas.iter().find(|item| item.tile34 as usize == discard34) else {
+            continue;
+        };
+        let after_shanten = current_shanten + delta.shanten_diff;
+        match best_after_shanten {
+            None => {
+                best_after_shanten = Some(after_shanten);
+                selected.push(discard34);
+            }
+            Some(best) if after_shanten < best => {
+                best_after_shanten = Some(after_shanten);
+                selected.clear();
+                selected.push(discard34);
+            }
+            Some(best) if after_shanten == best => {
+                selected.push(discard34);
+            }
+            Some(_) => {}
+        }
+    }
+
+    if selected.is_empty() {
+        candidate_discards_no_meld_break(counts34)
+    } else {
+        selected
+    }
+}
+
 pub fn summarize_3n2_candidates_py_impl(
     py: Python<'_>,
     counts34_seq: &Bound<'_, PyAny>,
@@ -82,7 +134,7 @@ pub fn summarize_3n2_candidates_py_impl(
     let visible_counts_py = PyTuple::new_bound(py, visible_counts34.iter().copied());
     let mut out = Vec::new();
 
-    for discard34 in candidate_discards_no_meld_break(&counts34) {
+    for discard34 in select_candidate_discards_3n2(&counts34) {
         let mut after_counts34 = counts34;
         after_counts34[discard34] -= 1;
         let after_counts_py = PyTuple::new_bound(py, after_counts34.iter().copied());
