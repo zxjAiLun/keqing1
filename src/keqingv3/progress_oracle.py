@@ -353,12 +353,37 @@ def _candidate_progress_v1_from_native(
     )
 
 
+def _select_candidate_discards_3n2(counts_3n2: tuple[int, ...]) -> tuple[int, ...]:
+    candidate_discards = _candidate_discards_no_meld_break(counts_3n2)
+    if not candidate_discards:
+        return ()
+
+    current_shanten = calc_standard_shanten_from_counts(counts_3n2)
+    discard_delta_map = {tile34: shanten_diff for tile34, shanten_diff in _calc_discard_deltas(counts_3n2)}
+    best_after_shanten: Optional[int] = None
+    selected: list[int] = []
+
+    for discard34 in candidate_discards:
+        shanten_diff = discard_delta_map.get(discard34)
+        if shanten_diff is None:
+            continue
+        after_shanten = current_shanten + shanten_diff
+        if best_after_shanten is None or after_shanten < best_after_shanten:
+            best_after_shanten = after_shanten
+            selected = [discard34]
+        elif after_shanten == best_after_shanten:
+            selected.append(discard34)
+
+    return tuple(selected) if selected else tuple(candidate_discards)
+
+
 def _summarize_3n2_candidates_python(
     counts_3n2: tuple[int, ...],
     visible_counts_local: tuple[int, ...],
+    discard_candidates: Optional[Sequence[int]] = None,
 ) -> list[CandidateProgressV1]:
     out: list[CandidateProgressV1] = []
-    for discard34 in _candidate_discards_no_meld_break(counts_3n2):
+    for discard34 in (discard_candidates or _candidate_discards_no_meld_break(counts_3n2)):
         counts_3n1 = list(counts_3n2)
         counts_3n1[discard34] -= 1
         counts_3n1_t = tuple(counts_3n1)
@@ -432,7 +457,13 @@ def _summarize_3n2_cached(
 ) -> NormalProgressInfo:
     best = None
     loop_t0 = time.perf_counter()
-    if _ACTIVE_PROGRESS_PROFILER is None and _has_3n2_candidate_summaries():
+    discard_candidates = _select_candidate_discards_3n2(counts_3n2)
+    use_native_candidates = (
+        _ACTIVE_PROGRESS_PROFILER is None
+        and _has_3n2_candidate_summaries()
+        and len(discard_candidates) == len(_candidate_discards_no_meld_break(counts_3n2))
+    )
+    if use_native_candidates:
         try:
             candidates = [
                 _candidate_progress_v1_from_native(item)
@@ -443,9 +474,17 @@ def _summarize_3n2_cached(
                 )
             ]
         except RuntimeError:
-            candidates = _summarize_3n2_candidates_python(counts_3n2, visible_counts_local)
+            candidates = _summarize_3n2_candidates_python(
+                counts_3n2,
+                visible_counts_local,
+                discard_candidates,
+            )
     else:
-        candidates = _summarize_3n2_candidates_python(counts_3n2, visible_counts_local)
+        candidates = _summarize_3n2_candidates_python(
+            counts_3n2,
+            visible_counts_local,
+            discard_candidates,
+        )
 
     for candidate in candidates:
         key = _candidate_progress_key(candidate)

@@ -9,9 +9,11 @@ import pytest
 import keqing_core
 import keqingv3.progress_oracle as progress_oracle
 from keqingv3.progress_oracle import (
+    NormalProgressInfo,
     _candidate_discards_no_meld_break,
     _candidate_progress_key,
     _candidate_progress_v1_from_native,
+    _select_candidate_discards_3n2,
     _summarize_3n2_candidates_python,
     _summarize_3n1_cached,
     _summarize_3n2_cached,
@@ -375,6 +377,57 @@ def test_summarize_3n2_native_candidate_summaries_match_python():
     assert [_candidate_progress_key(item) for item in actual] == [
         _candidate_progress_key(item) for item in expected
     ]
+
+
+def test_select_candidate_discards_3n2_prunes_worse_shanten_discards(monkeypatch):
+    hand_counts = _random_counts(14, random.Random(20260420))
+
+    monkeypatch.setattr(progress_oracle, "_candidate_discards_no_meld_break", lambda _counts: (0, 1, 2))
+    monkeypatch.setattr(progress_oracle, "_calc_discard_deltas", lambda _counts: ((0, 1), (1, 0), (2, 0)))
+    monkeypatch.setattr(progress_oracle, "calc_standard_shanten_from_counts", lambda _counts: 2)
+
+    assert _select_candidate_discards_3n2(hand_counts) == (1, 2)
+
+
+def test_summarize_3n2_only_summarizes_best_after_shanten_candidates(monkeypatch):
+    hand_counts = _random_counts(14, random.Random(20260421))
+    visible_counts = _random_visible_counts(hand_counts, random.Random(20260422))
+    calls: list[int] = []
+    clear_progress_caches()
+
+    def _fake_summary(after_counts, _visible_counts):
+        discard34 = next(idx for idx, (before, after) in enumerate(zip(hand_counts, after_counts)) if before != after)
+        calls.append(discard34)
+        ukeire_tiles = [False] * 34
+        if discard34 == 1:
+            ukeire_tiles[5] = True
+        return NormalProgressInfo(
+            shanten=1,
+            waits_count=0,
+            waits_tiles=[False] * 34,
+            tehai_count=sum(after_counts),
+            ukeire_type_count=sum(ukeire_tiles),
+            ukeire_live_count=sum(ukeire_tiles),
+            ukeire_tiles=ukeire_tiles,
+            good_shape_ukeire_type_count=0,
+            good_shape_ukeire_live_count=0,
+            good_shape_ukeire_tiles=[False] * 34,
+            improvement_type_count=0,
+            improvement_live_count=0,
+            improvement_tiles=[False] * 34,
+        )
+
+    monkeypatch.setattr(progress_oracle, "_candidate_discards_no_meld_break", lambda _counts: (0, 1, 2))
+    monkeypatch.setattr(progress_oracle, "_calc_discard_deltas", lambda _counts: ((0, 1), (1, 0), (2, 0)))
+    monkeypatch.setattr(progress_oracle, "calc_standard_shanten_from_counts", lambda _counts: 2)
+    monkeypatch.setattr(progress_oracle, "_summarize_3n1_cached", _fake_summary)
+    monkeypatch.setattr(progress_oracle, "_has_3n2_candidate_summaries", lambda: False)
+
+    progress = _summarize_3n2_cached(hand_counts, visible_counts)
+
+    assert calls[:2] == [1, 2]
+    assert 0 not in calls
+    assert progress.ukeire_tiles[5] is True
 
 
 def test_summarize_3n2_does_not_touch_native_candidate_path_when_rust_disabled(monkeypatch):
