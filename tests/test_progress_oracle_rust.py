@@ -183,6 +183,41 @@ def test_draw_and_discard_deltas_return_stable_shapes():
     assert all(0 <= tile34 < 34 for tile34, _ in discard_deltas)
 
 
+def test_summarize_3n1_native_matches_python_when_available():
+    if getattr(keqing_core, "_RUST_SUMMARIZE_3N1", None) is None:
+        pytest.skip("3n+1 native summary seam is only available after rebuilding the wheel")
+
+    rng = random.Random(20260428)
+    hand_counts = _random_counts(13, rng)
+    visible_counts = _random_visible_counts(hand_counts, rng)
+
+    expected = _progress_snapshot(_summarize_3n1_cached(hand_counts, visible_counts))
+
+    _set_rust_mode(True)
+    shanten, waits_count, waits_tiles, tehai_count, ukeire_type_count, ukeire_live_count, ukeire_tiles = keqing_core.summarize_3n1(
+        hand_counts,
+        visible_counts,
+    )
+
+    actual = {
+        "shanten": shanten,
+        "waits_count": waits_count,
+        "waits_tiles": tuple(waits_tiles),
+        "tehai_count": tehai_count,
+        "ukeire_type_count": ukeire_type_count,
+        "ukeire_live_count": ukeire_live_count,
+        "ukeire_tiles": tuple(ukeire_tiles),
+        "good_shape_ukeire_type_count": 0,
+        "good_shape_ukeire_live_count": 0,
+        "good_shape_ukeire_tiles": tuple([False] * 34),
+        "improvement_type_count": 0,
+        "improvement_live_count": 0,
+        "improvement_tiles": tuple([False] * 34),
+    }
+
+    assert actual == expected
+
+
 def test_3n1_high_shanten_path_consumes_required_tiles(monkeypatch):
     hand_counts = (
         0, 0, 1, 0, 0, 0, 0, 0, 1,

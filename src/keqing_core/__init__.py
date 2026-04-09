@@ -26,6 +26,7 @@ _RUST_SHANTEN_MANY = None
 _RUST_REQUIRED_TILES = None
 _RUST_DRAW_DELTAS = None
 _RUST_DISCARD_DELTAS = None
+_RUST_SUMMARIZE_3N1 = None
 _RUST_SUMMARIZE_3N2_CANDIDATES = None
 _RUST_SUMMARIZE_BEST_3N2_CANDIDATE = None
 _RUST_IMPORT_ERROR = None
@@ -101,6 +102,7 @@ if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
     _RUST_REQUIRED_TILES = getattr(_rust_ext, "calc_required_tiles_py", None)
     _RUST_DRAW_DELTAS = getattr(_rust_ext, "calc_draw_deltas_py", None)
     _RUST_DISCARD_DELTAS = getattr(_rust_ext, "calc_discard_deltas_py", None)
+    _RUST_SUMMARIZE_3N1 = getattr(_rust_ext, "summarize_3n1_py", None)
     _RUST_SUMMARIZE_3N2_CANDIDATES = getattr(_rust_ext, "summarize_3n2_candidates_py", None)
     _RUST_SUMMARIZE_BEST_3N2_CANDIDATE = getattr(_rust_ext, "summarize_best_3n2_candidate_py", None)
     _USE_RUST = True
@@ -190,6 +192,21 @@ def calc_discard_deltas(counts34, len_div3):
     )
 
 
+def summarize_3n1(counts34, visible_counts34):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_SUMMARIZE_3N1 is not None):
+        raise RuntimeError("Rust 3n+1 summary is not available")
+    item = _RUST_SUMMARIZE_3N1(list(counts34), list(visible_counts34))
+    return (
+        int(item[0]),
+        int(item[1]),
+        tuple(bool(v) for v in item[2]),
+        int(item[3]),
+        int(item[4]),
+        int(item[5]),
+        tuple(bool(v) for v in item[6]),
+    )
+
+
 def summarize_3n2_candidates(counts34, visible_counts34, summarize_fn):
     if not (_USE_RUST and _RUST_AVAILABLE and _RUST_SUMMARIZE_3N2_CANDIDATES is not None):
         raise RuntimeError("Rust 3n+2 candidate summaries are not available")
@@ -273,6 +290,7 @@ __all__ = [
     "calc_required_tiles",
     "calc_draw_deltas",
     "calc_discard_deltas",
+    "summarize_3n1",
     "summarize_3n2_candidates",
     "summarize_best_3n2_candidate",
     "is_available",

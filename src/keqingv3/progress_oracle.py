@@ -11,6 +11,7 @@ from keqing_core import calc_required_tiles as _calc_required_tiles_native
 from keqing_core import has_3n2_candidate_summaries as _has_3n2_candidate_summaries
 from keqing_core import calc_shanten_normal as _calc_shanten_normal_native
 from keqing_core import calc_standard_shanten as _calc_standard_shanten_native
+from keqing_core import summarize_3n1 as _summarize_3n1_native
 from keqing_core import summarize_best_3n2_candidate as _summarize_best_3n2_candidate_native
 from keqing_core import summarize_3n2_candidates as _summarize_3n2_candidates_native
 from keqing_core import standard_shanten_many as _standard_shanten_many_native
@@ -203,6 +204,43 @@ def _populate_ukeire_tiles_3n1(
         discard_deltas = _calc_discard_deltas(tuple(counts_3n2))
         if any(draw_shanten_diff + discard_diff < 0 for _discard34, discard_diff in discard_deltas):
             ukeire_tiles[tile34] = True
+
+
+def _summarize_3n1_python(
+    counts_3n1: tuple[int, ...],
+    visible_counts_local: tuple[int, ...],
+) -> NormalProgressInfo:
+    t0 = time.perf_counter()
+    _progress_profiler_inc("standard_shanten_calls")
+    standard_shanten = calc_standard_shanten_from_counts(counts_3n1)
+    _progress_profiler_add("standard_shanten_s", time.perf_counter() - t0)
+    shanten = standard_shanten
+    tehai_count = sum(counts_3n1)
+    waits_count = 0
+    waits_tiles: tuple[bool, ...] = tuple([False] * 34)
+    ukeire_tiles = [False] * 34
+    good_shape_ukeire_tiles = [False] * 34
+    improvement_tiles = [False] * 34
+    regular_shanten: Optional[int] = None
+    use_regular_detail = False
+    if shanten <= 1:
+        t0 = time.perf_counter()
+        _progress_profiler_inc("waits_calls")
+        regular_shanten, waits_count, waits_tiles, tehai_count = calc_shanten_waits_from_counts(counts_3n1)
+        _progress_profiler_add("waits_s", time.perf_counter() - t0)
+        use_regular_detail = regular_shanten == standard_shanten
+        if not use_regular_detail:
+            waits_count = 0
+            waits_tiles = tuple([False] * 34)
+
+    loop_t0 = time.perf_counter()
+    _populate_ukeire_tiles_3n1(counts_3n1, visible_counts_local, shanten, ukeire_tiles)
+    _progress_profiler_add("ukeire_improvement_s", time.perf_counter() - loop_t0)
+
+    return _make_progress(
+        shanten, waits_count, waits_tiles, tehai_count,
+        ukeire_tiles, good_shape_ukeire_tiles, improvement_tiles, visible_counts_local,
+    )
 
 
 def _is_complete_regular_counts(
@@ -425,42 +463,28 @@ def _summarize_3n1_cached(
     visible_counts_local: tuple[int, ...],
 ) -> NormalProgressInfo:
     t0 = time.perf_counter()
-    _progress_profiler_inc("standard_shanten_calls")
-    standard_shanten = calc_standard_shanten_from_counts(counts_3n1)
-    _progress_profiler_add("standard_shanten_s", time.perf_counter() - t0)
-    shanten = standard_shanten
-    tehai_count = sum(counts_3n1)
-    waits_count = 0
-    waits_tiles: tuple[bool, ...] = tuple([False] * 34)
-    ukeire_tiles = [False] * 34
-    good_shape_ukeire_tiles = [False] * 34
-    improvement_tiles = [False] * 34
-    regular_shanten: Optional[int] = None
-    use_regular_detail = False
-    if shanten <= 1:
-        t0 = time.perf_counter()
-        _progress_profiler_inc("waits_calls")
-        regular_shanten, waits_count, waits_tiles, tehai_count = calc_shanten_waits_from_counts(counts_3n1)
-        _progress_profiler_add("waits_s", time.perf_counter() - t0)
-        use_regular_detail = regular_shanten == standard_shanten
-        if not use_regular_detail:
-            waits_count = 0
-            waits_tiles = tuple([False] * 34)
-
-    if _ACTIVE_PROGRESS_PROFILER is None:
-        _populate_ukeire_tiles_3n1(counts_3n1, visible_counts_local, shanten, ukeire_tiles)
-        return _make_progress(
-            shanten, waits_count, waits_tiles, tehai_count,
-            ukeire_tiles, good_shape_ukeire_tiles, improvement_tiles, visible_counts_local,
-        )
-
-    loop_t0 = time.perf_counter()
-    _populate_ukeire_tiles_3n1(counts_3n1, visible_counts_local, shanten, ukeire_tiles)
-    _progress_profiler_add("ukeire_improvement_s", time.perf_counter() - loop_t0)
-
+    try:
+        (
+            shanten,
+            waits_count,
+            waits_tiles,
+            tehai_count,
+            _ukeire_type_count,
+            _ukeire_live_count,
+            ukeire_tiles_t,
+        ) = _summarize_3n1_native(counts_3n1, visible_counts_local)
+    except RuntimeError:
+        return _summarize_3n1_python(counts_3n1, visible_counts_local)
+    _progress_profiler_add("ukeire_improvement_s", time.perf_counter() - t0)
     return _make_progress(
-        shanten, waits_count, waits_tiles, tehai_count,
-        ukeire_tiles, good_shape_ukeire_tiles, improvement_tiles, visible_counts_local,
+        shanten,
+        waits_count,
+        waits_tiles,
+        tehai_count,
+        list(ukeire_tiles_t),
+        [False] * 34,
+        [False] * 34,
+        visible_counts_local,
     )
 
 
@@ -471,7 +495,7 @@ def _summarize_3n2_cached(
 ) -> NormalProgressInfo:
     loop_t0 = time.perf_counter()
     best_after_counts: Optional[tuple[int, ...]] = None
-    if _ACTIVE_PROGRESS_PROFILER is None and _has_3n2_candidate_summaries():
+    if _has_3n2_candidate_summaries():
         try:
             best_candidate_native = _summarize_best_3n2_candidate_native(
                     counts_3n2,
