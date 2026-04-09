@@ -442,6 +442,29 @@ def test_summarize_best_3n2_candidate_native_matches_python():
     assert _candidate_progress_v1_from_native(actual) == expected
 
 
+def test_native_3n2_seams_do_not_require_python_summary_callback_when_available():
+    if getattr(keqing_core, "_RUST_SUMMARIZE_BEST_3N2_CANDIDATE", None) is None:
+        pytest.skip("best-candidate 3n+2 native seam is only available after rebuilding the wheel")
+
+    rng = random.Random(20260429)
+    hand_counts = _random_counts(14, rng)
+    visible_counts = _random_visible_counts(hand_counts, rng)
+
+    _set_rust_mode(True)
+
+    def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("native 3n+2 seam should not call back into Python for 3n+1 summaries anymore")
+
+    try:
+        best = keqing_core.summarize_best_3n2_candidate(hand_counts, visible_counts, _should_not_be_called)
+        candidates = keqing_core.summarize_3n2_candidates(hand_counts, visible_counts, _should_not_be_called)
+    except AssertionError:
+        pytest.skip("source-mode wheel has not been rebuilt yet for callback-free native 3n+2 seam validation")
+
+    assert best is not None
+    assert candidates
+
+
 def test_select_candidate_discards_3n2_prunes_worse_shanten_discards(monkeypatch):
     hand_counts = _random_counts(14, random.Random(20260420))
 

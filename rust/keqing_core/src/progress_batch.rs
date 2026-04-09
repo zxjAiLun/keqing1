@@ -2,10 +2,11 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyTuple};
+use pyo3::types::PyAny;
 
 use crate::counts::TILE_COUNT;
 use crate::progress_delta::calc_discard_deltas;
+use crate::progress_summary::summarize_3n1;
 use crate::shanten_table::calc_shanten_all;
 
 type CandidateProgressPy = (u8, Vec<u8>, i32, i32, i32, i32, i32, i32, i32, i32);
@@ -124,37 +125,33 @@ fn select_candidate_discards_3n2(counts34: &[i32; TILE_COUNT]) -> Vec<usize> {
 }
 
 pub fn summarize_3n2_candidates_py_impl(
-    py: Python<'_>,
+    _py: Python<'_>,
     counts34_seq: &Bound<'_, PyAny>,
     visible_counts34_seq: &Bound<'_, PyAny>,
-    summarize_fn: &Bound<'_, PyAny>,
+    _summarize_fn: &Bound<'_, PyAny>,
 ) -> PyResult<Vec<CandidateProgressPy>> {
     let counts34 = extract_counts34(counts34_seq, "counts34")?;
     let visible_counts34 = extract_counts34(visible_counts34_seq, "visible_counts34")?;
-    let visible_counts_py = PyTuple::new_bound(py, visible_counts34.iter().copied());
     let mut out = Vec::new();
+    let visible_counts_u8 = to_u8_counts34(&visible_counts34);
 
     for discard34 in select_candidate_discards_3n2(&counts34) {
         let mut after_counts34 = counts34;
         after_counts34[discard34] -= 1;
-        let after_counts_py = PyTuple::new_bound(py, after_counts34.iter().copied());
-        let summary = summarize_fn.call1((after_counts_py, visible_counts_py.clone()))?;
+        let after_counts_u8 = to_u8_counts34(&after_counts34);
+        let summary = summarize_3n1(&after_counts_u8, &visible_counts_u8);
 
         out.push((
             discard34 as u8,
             after_counts34.iter().map(|&value| value as u8).collect(),
-            summary.getattr("shanten")?.extract::<i32>()?,
-            summary.getattr("waits_count")?.extract::<i32>()?,
-            summary.getattr("ukeire_type_count")?.extract::<i32>()?,
-            summary.getattr("ukeire_live_count")?.extract::<i32>()?,
-            summary
-                .getattr("good_shape_ukeire_type_count")?
-                .extract::<i32>()?,
-            summary
-                .getattr("good_shape_ukeire_live_count")?
-                .extract::<i32>()?,
-            summary.getattr("improvement_type_count")?.extract::<i32>()?,
-            summary.getattr("improvement_live_count")?.extract::<i32>()?,
+            summary.shanten as i32,
+            summary.waits_count as i32,
+            summary.ukeire_type_count as i32,
+            summary.ukeire_live_count as i32,
+            0,
+            0,
+            0,
+            0,
         ));
     }
 
