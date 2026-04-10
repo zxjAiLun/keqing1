@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""keqingv4 alpha training entrypoint."""
+"""keqingv31 training entrypoint."""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from torch.utils.data import DataLoader
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train keqingv4 alpha from cached npz files")
-    parser.add_argument("--config", default="configs/keqingv4_default.yaml")
+    parser = argparse.ArgumentParser(description="Train keqingv31 from cached npz files")
+    parser.add_argument("--config", default="configs/keqingv31_default.yaml")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--device", default=None)
@@ -33,8 +33,8 @@ def main() -> None:
     sys.path.insert(0, str(root / "src"))
 
     from keqingv3.cached_dataset import CachedMjaiDatasetV3, split_cached_files
-    from keqingv4.model import KeqingV4Model
-    from keqingv4.trainer import train
+    from keqingv31.model import KeqingV31Model
+    from keqingv31.trainer import train
 
     args = _parse_args()
     cfg = _load_cfg(root / args.config)
@@ -45,7 +45,7 @@ def main() -> None:
     device = args.device or cfg.get("device", "cuda")
 
     if args.smoke:
-        cfg["output_dir"] = cfg.get("output_dir", "artifacts/models/keqingv4") + "_smoke"
+        cfg["output_dir"] = cfg.get("output_dir", "artifacts/models/keqingv31") + "_smoke"
         cfg["num_epochs"] = 1
         cfg["batch_size"] = 64
         cfg["num_workers"] = 0
@@ -99,18 +99,18 @@ def main() -> None:
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
     )
 
-    model = KeqingV4Model(
+    model = KeqingV31Model(
         hidden_dim=int(cfg.get("hidden_dim", 320)),
         num_res_blocks=int(cfg.get("num_res_blocks", 6)),
         action_embed_dim=int(cfg.get("action_embed_dim", 64)),
         dropout=float(cfg.get("dropout", 0.1)),
     )
 
-    output_dir = root / cfg.get("output_dir", "artifacts/models/keqingv4")
+    output_dir = root / cfg.get("output_dir", "artifacts/models/keqingv31")
     resume_path = root / args.resume if args.resume else None
 
     print(
-        f"keqingv4 train: train_files={len(train_files)} val_files={len(val_files)} "
+        f"keqingv31 train: train_files={len(train_files)} val_files={len(val_files)} "
         f"batch={batch_size} epochs={cfg.get('num_epochs')} device={device} output={output_dir}"
     )
 

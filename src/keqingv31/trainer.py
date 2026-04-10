@@ -1,4 +1,4 @@
-"""keqingv4 alpha trainer.
+"""keqingv31 trainer.
 
 Alpha phase intentionally reuses the v3 cache contract so architecture changes
 can be evaluated before cache/schema redesign.
@@ -13,11 +13,11 @@ import torch
 import torch.nn.functional as F
 
 from keqingv3.cached_dataset import CachedMjaiDatasetV3
-from keqingv4.model import KeqingV4Model
+from keqingv31.model import KeqingV31Model
 from training import TaskSpec, train_model
 
 
-def _unpack_v4_batch(batch, device: torch.device) -> Dict:
+def _unpack_v31_batch(batch, device: torch.device) -> Dict:
     (
         tile_feat,
         scalar,
@@ -40,7 +40,7 @@ def _unpack_v4_batch(batch, device: torch.device) -> Dict:
     }
 
 
-def _make_v4_task(cfg: Dict) -> TaskSpec:
+def _make_v31_task(cfg: Dict) -> TaskSpec:
     score_loss_weight = float(cfg.get("score_loss_weight", 0.5))
     win_loss_weight = float(cfg.get("win_loss_weight", 0.3))
     dealin_loss_weight = float(cfg.get("dealin_loss_weight", 0.3))
@@ -104,8 +104,8 @@ def _make_v4_task(cfg: Dict) -> TaskSpec:
         }
 
     return TaskSpec(
-        name="keqingv4_alpha",
-        unpack_batch=_unpack_v4_batch,
+        name="keqingv31",
+        unpack_batch=_unpack_v31_batch,
         compute_extra_loss=compute_extra_loss,
         log_metric_keys=(
             "score_loss",
@@ -126,7 +126,7 @@ def _make_v4_task(cfg: Dict) -> TaskSpec:
 
 
 def train(
-    model: KeqingV4Model,
+    model: KeqingV31Model,
     val_loader,
     cfg: Dict,
     output_dir: Path,
@@ -146,7 +146,7 @@ def train(
     from torch.utils.data import DataLoader
 
     if train_loader is None and train_files is None:
-        raise ValueError("train_loader or train_files is required for keqingv4 training")
+        raise ValueError("train_loader or train_files is required for keqingv31 training")
 
     train_loader_factory = None
     if train_files is not None:
@@ -183,7 +183,7 @@ def train(
         train_loader=train_loader,
         train_loader_factory=train_loader_factory,
         val_loader=val_loader,
-        task=_make_v4_task(cfg),
+        task=_make_v31_task(cfg),
         cfg=cfg,
         output_dir=output_dir,
         resume_path=resume_path,

@@ -1,9 +1,4 @@
-"""keqingv4 package.
+"""Fresh keqingv4 architecture slot.
 
-New keqing-family architecture line focused on stronger action comparison and
-round-income/value-centric latent structure.
+Reserved for the next-generation redesign after keqingv3.1.
 """
-
-from keqingv4.model import KeqingV4Model
-
-__all__ = ["KeqingV4Model"]

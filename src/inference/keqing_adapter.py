@@ -83,20 +83,37 @@ class KeqingModelAdapter:
         inferred_version = inferred_version or (
             "keqingv3" if (c_tile == 57 and n_scalar == 56) else "keqingv1"
         )
-        if inferred_version == "keqingv3":
+        if inferred_version == "keqingv31":
+            features_mod = importlib.import_module("keqingv3.features")
+            model_mod = importlib.import_module("keqingv31.model")
+            model = model_mod.KeqingV31Model(
+                hidden_dim=int(cfg.get("hidden_dim", 256)),
+                num_res_blocks=int(cfg.get("num_res_blocks", 5)),
+                c_tile=c_tile,
+                n_scalar=n_scalar,
+                action_embed_dim=int(cfg.get("action_embed_dim", 48)),
+                dropout=float(cfg.get("dropout", 0.1)),
+            )
+        elif inferred_version == "keqingv3":
             features_mod = importlib.import_module("keqingv3.features")
             model_mod = importlib.import_module("keqingv3.model")
+            model_cls = model_mod.MahjongModel
+            model = model_cls(
+                hidden_dim=hidden_dim,
+                num_res_blocks=num_res_blocks,
+                c_tile=c_tile,
+                n_scalar=n_scalar,
+            )
         else:
             features_mod = importlib.import_module("keqingv1.features")
             model_mod = importlib.import_module("keqingv1.model")
-
-        model_cls = model_mod.MahjongModel
-        model = model_cls(
-            hidden_dim=hidden_dim,
-            num_res_blocks=num_res_blocks,
-            c_tile=c_tile,
-            n_scalar=n_scalar,
-        )
+            model_cls = model_mod.MahjongModel
+            model = model_cls(
+                hidden_dim=hidden_dim,
+                num_res_blocks=num_res_blocks,
+                c_tile=c_tile,
+                n_scalar=n_scalar,
+            )
         model.load_state_dict(state_dict)
         model.to(device)
         model.eval()

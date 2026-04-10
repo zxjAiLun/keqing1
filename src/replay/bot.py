@@ -35,6 +35,7 @@ _BOT_CLASSES = {
     "keqingv1": RuntimeBot,
     "keqingv2": RuntimeBot,
     "keqingv3": RuntimeBot,
+    "keqingv31": RuntimeBot,
     "xmodel1": RuntimeBot,
 }
 
@@ -45,6 +46,7 @@ _DEFAULT_CHECKPOINTS = {
     "keqingv1": _PROJECT_ROOT / "artifacts/models/keqingv1/latest.pth",
     "keqingv2": _PROJECT_ROOT / "artifacts/models/keqingv2/best.pth",
     "keqingv3": _PROJECT_ROOT / "artifacts/models/keqingv3/best.pth",
+    "keqingv31": _PROJECT_ROOT / "artifacts/models/keqingv31/best.pth",
     "xmodel1": _PROJECT_ROOT / "artifacts/models/xmodel1/best.pth",
 }
 _REVIEW_EXPORTER = DefaultRuntimeReviewExporter()
@@ -557,8 +559,8 @@ def main():
     parser.add_argument(
         "--bot-type",
         default="keqingv1",
-        choices=["keqingv1", "keqingv2", "keqingv3", "xmodel1"],
-        help="Bot 类型：keqingv1 / keqingv2 / keqingv3 / xmodel1",
+        choices=["keqingv1", "keqingv2", "keqingv3", "keqingv31", "xmodel1"],
+        help="Bot 类型：keqingv1 / keqingv2 / keqingv3 / keqingv31 / xmodel1",
     )
     parser.add_argument("--output", default=None, help="HTML 输出路径")
     parser.add_argument(

@@ -99,7 +99,7 @@ export interface StartBattleRequest {
   player_name: string;
   bot_count?: number;
   seed?: number;
-  bot_model?: string; // "keqingv1" | "keqingv2" | "keqingv3" | "rulebase"
+  bot_model?: string; // "keqingv1" | "keqingv2" | "keqingv3" | "keqingv31" | "rulebase"
 }
 
 export interface StartBattleResponse {

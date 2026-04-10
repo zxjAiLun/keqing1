@@ -1,13 +1,13 @@
 from pathlib import Path
 
 from keqingv3.cached_dataset import split_cached_files
-from keqingv4.model import KeqingV4Model
-from keqingv4.trainer import train
+from keqingv31.model import KeqingV31Model
+from keqingv31.trainer import train
 from torch.utils.data import DataLoader
 from keqingv3.cached_dataset import CachedMjaiDatasetV3
 
 
-def test_keqingv4_training_smoke(tmp_path: Path):
+def test_keqingv31_training_smoke(tmp_path: Path):
     data_root = Path('processed_v3_fixaux/ds1')
     train_files, val_files = split_cached_files([data_root], val_ratio=0.2, seed=7)
     train_files = train_files[:1]
@@ -20,7 +20,7 @@ def test_keqingv4_training_smoke(tmp_path: Path):
         num_workers=0,
     )
 
-    model = KeqingV4Model(hidden_dim=64, num_res_blocks=2, action_embed_dim=16, dropout=0.0)
+    model = KeqingV31Model(hidden_dim=64, num_res_blocks=2, action_embed_dim=16, dropout=0.0)
     cfg = {
         'learning_rate': 3e-4,
         'weight_decay': 1e-4,

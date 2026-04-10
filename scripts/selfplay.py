@@ -540,9 +540,9 @@ def _resolve_seat_bots(
         labels: List[str] = []
         kinds: List[str] = []
         for bot_spec in seat_bots:
-            if bot_spec not in {"keqingv1", "keqingv2", "keqingv3", "rulebase"}:
+            if bot_spec not in {"keqingv1", "keqingv2", "keqingv3", "keqingv31", "rulebase"}:
                 raise ValueError(
-                    "--seat-bots 仅支持 keqingv1/keqingv2/keqingv3/rulebase"
+                    "--seat-bots 仅支持 keqingv1/keqingv2/keqingv3/keqingv31/rulebase"
                 )
             source, default_label = _resolve_bot_source(bot_spec)
             sources.append(source)
@@ -1190,6 +1190,10 @@ def _infer_replay_bot_type(model_path: str) -> str:
     lower = model_path.lower()
     if "keqingv1" in lower:
         return "keqingv1"
+    if "keqingv31" in lower or "v4" in lower:
+        return "keqingv31"
+    if "keqingv3" in lower:
+        return "keqingv3"
     if "v5" in lower:
         return "v5"
     return "keqingv2"
@@ -1695,7 +1699,7 @@ def parse_args():
         nargs=4,
         default=None,
         metavar=("B0", "B1", "B2", "B3"),
-        help="按座位指定 4 个 bot；可混用 keqingv1/keqingv2/keqingv3/rulebase。提供后优先于 --seat-models",
+        help="按座位指定 4 个 bot；可混用 keqingv1/keqingv2/keqingv3/keqingv31/rulebase。提供后优先于 --seat-models",
     )
     p.add_argument(
         "--seat-labels",

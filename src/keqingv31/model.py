@@ -1,4 +1,4 @@
-"""keqingv4 model.
+"""keqingv31 model.
 
 Architecture goals:
 - stronger action comparison than a flat policy head
@@ -47,7 +47,7 @@ class _ValueHead(nn.Module):
         return self.net(x)
 
 
-class KeqingV4Model(nn.Module):
+class KeqingV31Model(nn.Module):
     def __init__(
         self,
         hidden_dim: int = 320,

@@ -39,7 +39,7 @@ def main() -> None:
     parser.add_argument(
         "--bot",
         default="keqingv2",
-        help="Bot type: keqingv1/keqingv2/keqingv3/rulebase",
+        help="Bot type: keqingv1/keqingv2/keqingv3/keqingv31/rulebase",
     )
     parser.add_argument(
         "--name-prefix", default="NoName", help="Prefix for bot display names"

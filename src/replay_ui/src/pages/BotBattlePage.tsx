@@ -119,7 +119,7 @@ export function BotBattlePage() {
               Bot 类型
             </label>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {["keqingv1", "keqingv2", "keqingv3", "rulebase"].map((m) => (
+              {["keqingv1", "keqingv2", "keqingv3", "keqingv31", "rulebase"].map((m) => (
                 <button
                   key={m}
                   onClick={() => setBotModel(m)}

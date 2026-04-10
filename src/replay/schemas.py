@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 class ReplaySubmitRequest(BaseModel):
     input_type: Literal["tenhou_url", "tenhou6_json", "mjson_file", "mjson_text"] = "mjson_text"
     content: str = Field(..., description="URL / JSON 字符串 / base64 编码文件内容")
-    bot_type: Literal["keqingv1", "keqingv2", "keqingv3", "xmodel1"] = "keqingv1"
+    bot_type: Literal["keqingv1", "keqingv2", "keqingv3", "keqingv31", "xmodel1"] = "keqingv1"
     player_ids: list[int] = Field(default_factory=lambda: [0, 1, 2, 3], description="哪些玩家用 bot 跑")
     checkpoint: Optional[str] = Field(default=None, description="模型 checkpoint 路径")
 
@@ -24,7 +24,7 @@ class ReplayResponse(BaseModel):
 class ReplayMeta(BaseModel):
     replay_id: str
     created_at: str
-    bot_type: Literal["keqingv1", "keqingv2", "keqingv3", "xmodel1"]
+    bot_type: Literal["keqingv1", "keqingv2", "keqingv3", "keqingv31", "xmodel1"]
     kyoku_count: int
     total_steps: int
     player_names: list[str]
