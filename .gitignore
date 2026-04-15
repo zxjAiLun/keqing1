@@ -82,6 +82,7 @@ Thumbs.db
 *.tmp
 *.bak
 .cache/
+.env
 
 # Majsoul Profile
 .pw-majsoul-profile/
@@ -95,8 +96,14 @@ uv.lock
 
 tiles/
 third_party/
-docs/
+docs/*
 AGENTS.md
 docs/old0/
 archive/
 .omx/
+!docs/project_progress.md
+!docs/agent_sync.md
+!docs/project_overview_current.md
+!docs/minimax_token_plan_keqing1.md
+!docs/minimax_cc_templates_keqing1.md
+!docs/change_summary_2026-04-16.md
