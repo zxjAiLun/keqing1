@@ -15,7 +15,7 @@ from typing import Any
 from gateway.tenhou_bridge import normalize_tenhou_room
 
 logger = logging.getLogger(__name__)
-SUPPORTED_GATEWAY_BOTS = {"keqingv1", "keqingv2", "keqingv3", "keqingv31", "rulebase"}
+SUPPORTED_GATEWAY_BOTS = {"keqingv1", "keqingv2", "keqingv3", "keqingv31", "keqingv4", "rulebase"}
 
 
 def create_runtime_bot_for_gateway(**kwargs):

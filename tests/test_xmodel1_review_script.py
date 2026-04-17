@@ -13,7 +13,7 @@ def _write_sample_npz(path: Path) -> None:
 
     n = 2
     k = 14
-    d = 21
+    d = 35
     f = 10
     candidate_mask = np.zeros((n, k), dtype=np.uint8)
     candidate_mask[:, :3] = 1
@@ -52,7 +52,7 @@ def test_review_xmodel1_script_smoke(tmp_path: Path):
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=64,
-        candidate_feature_dim=21,
+        candidate_feature_dim=35,
         candidate_flag_dim=10,
         hidden_dim=32,
         num_res_blocks=1,
@@ -64,8 +64,9 @@ def test_review_xmodel1_script_smoke(tmp_path: Path):
                 "model_name": "xmodel1",
                 "state_tile_channels": 57,
                 "state_scalar_dim": 64,
-                "candidate_feature_dim": 21,
+                "candidate_feature_dim": 35,
                 "candidate_flag_dim": 10,
+                "special_candidate_feature_dim": 25,
                 "hidden_dim": 32,
                 "num_res_blocks": 1,
             },

@@ -74,8 +74,10 @@ def split_cached_files(
 
 class BaseCacheAdapter:
     extra_fields: tuple[str, ...] = ()
+    fail_fast = False
 
-    def load_optional_arrays(self, data, sample_count: int) -> Dict[str, np.ndarray]:
+    def load_optional_arrays(self, data, sample_count: int, *, path: Path | None = None) -> Dict[str, np.ndarray]:
+        del path
         del data, sample_count
         return {}
 
@@ -195,7 +197,8 @@ class MeldRankAdapter(BaseCacheAdapter):
             sign,
         )
 
-    def load_optional_arrays(self, data, sample_count: int) -> Dict[str, np.ndarray]:
+    def load_optional_arrays(self, data, sample_count: int, *, path: Path | None = None) -> Dict[str, np.ndarray]:
+        del path
         if "snap_json" in data:
             snap_json = data["snap_json"]
         else:
@@ -251,7 +254,8 @@ class MeldRankAdapter(BaseCacheAdapter):
 class V3AuxAdapter(BaseCacheAdapter):
     extra_fields = V3_AUX_EXTRA_FIELDS
 
-    def load_optional_arrays(self, data, sample_count: int) -> Dict[str, np.ndarray]:
+    def load_optional_arrays(self, data, sample_count: int, *, path: Path | None = None) -> Dict[str, np.ndarray]:
+        del path
         score_delta = data["score_delta_target"] if "score_delta_target" in data else np.zeros(sample_count, dtype=np.float32)
         win = data["win_target"] if "win_target" in data else np.zeros(sample_count, dtype=np.float32)
         dealin = data["dealin_target"] if "dealin_target" in data else np.zeros(sample_count, dtype=np.float32)
@@ -346,8 +350,10 @@ class GenericCachedMjaiDataset(IterableDataset):
                 masks = data[BASE_CACHE_FIELDS[2]]
                 action_idxs = data[BASE_CACHE_FIELDS[3]]
                 values = data[BASE_CACHE_FIELDS[4]]
-                extra_arrays = self.adapter.load_optional_arrays(data, len(tile_feats))
+                extra_arrays = self.adapter.load_optional_arrays(data, len(tile_feats), path=path)
             except Exception:
+                if self.adapter.fail_fast:
+                    raise
                 continue
 
             perms_to_use = []

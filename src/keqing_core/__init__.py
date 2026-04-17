@@ -11,11 +11,14 @@ from __future__ import annotations
 from importlib import machinery as _importlib_machinery
 from importlib import util as _importlib_util
 from pathlib import Path as _Path
+import numpy as _np
+import json as _json
 import site as _site
 import sys as _sys
 import warnings as _warnings
 
 from riichienv import calculate_shanten as _riichienv_shanten
+from training.cache_schema import KEQINGV4_SUMMARY_DIM
 
 _USE_RUST = False
 _RUST_AVAILABLE = False
@@ -31,8 +34,29 @@ _RUST_SUMMARIZE_3N1 = None
 _RUST_SUMMARIZE_3N2_CANDIDATES = None
 _RUST_SUMMARIZE_BEST_3N2_CANDIDATE = None
 _RUST_BUILD_XMODEL1_DISCARD_RECORDS = None
+_RUST_BUILD_KEQINGV4_CACHED_RECORDS = None
 _RUST_XMODEL1_SCHEMA_INFO = None
 _RUST_VALIDATE_XMODEL1_DISCARD_RECORD = None
+_RUST_REPLAY_STATE_SNAPSHOT_JSON = None
+_RUST_ENUMERATE_LEGAL_ACTION_SPECS_STRUCTURAL_JSON = None
+_RUST_ENUMERATE_HORA_CANDIDATES_JSON = None
+_RUST_CAN_HORA_SHAPE_FROM_SNAPSHOT_JSON = None
+_RUST_PREPARE_HORA_EVALUATION_FROM_SNAPSHOT_JSON = None
+_RUST_COMPUTE_HORA_DELTAS_JSON = None
+_RUST_PREPARE_HORA_TILE_ALLOCATION_JSON = None
+_RUST_BUILD_HORA_RESULT_PAYLOAD_JSON = None
+_RUST_EVALUATE_HORA_FROM_PREPARED_JSON = None
+_RUST_BUILD_KEQINGV4_DISCARD_SUMMARY_JSON = None
+_RUST_BUILD_KEQINGV4_CALL_SUMMARY_JSON = None
+_RUST_BUILD_KEQINGV4_SPECIAL_SUMMARY_JSON = None
+_RUST_BUILD_KEQINGV4_TYPED_SUMMARIES_JSON = None
+_RUST_PROJECT_KEQINGV4_CALL_SNAPSHOT_JSON = None
+_RUST_PROJECT_KEQINGV4_DISCARD_SNAPSHOT_JSON = None
+_RUST_PROJECT_KEQINGV4_RINSHAN_DRAW_SNAPSHOT_JSON = None
+_RUST_ENUMERATE_KEQINGV4_POST_MELD_DISCARDS_JSON = None
+_RUST_ENUMERATE_KEQINGV4_LIVE_DRAW_WEIGHTS_JSON = None
+_RUST_ENUMERATE_KEQINGV4_REACH_DISCARDS_JSON = None
+_RUST_PROJECT_KEQINGV4_REACH_SNAPSHOT_JSON = None
 _RUST_IMPORT_ERROR = None
 
 
@@ -47,6 +71,12 @@ def _candidate_native_paths() -> list[_Path]:
     candidates = sorted(
         path for path in package_dir.glob("_native*") if _is_native_extension(path)
     )
+    loaded_ext = globals().get("_rust_ext")
+    loaded_path = getattr(loaded_ext, "__file__", None) if loaded_ext is not None else None
+    if loaded_path is not None:
+        candidate_path = _Path(loaded_path)
+        if _is_native_extension(candidate_path):
+            candidates.append(candidate_path)
     search_roots = []
     try:
         search_roots.extend(_site.getsitepackages())
@@ -93,6 +123,22 @@ def _load_native_module():
         setattr(_sys.modules[__name__], "_native", module)
         return module, None
 
+    try:
+        import importlib as _importlib
+        fallback = _importlib.import_module("_native")
+        inner = getattr(fallback, "_native", None)
+        if inner is not None and hasattr(inner, "counts34_to_ids_py"):
+            _sys.modules[module_name] = inner
+            setattr(_sys.modules[__name__], "_native", inner)
+            return inner, None
+        if hasattr(fallback, "counts34_to_ids_py"):
+            _sys.modules[module_name] = fallback
+            setattr(_sys.modules[__name__], "_native", fallback)
+            return fallback, None
+    except ImportError as exc:
+        if first_error is None:
+            first_error = exc
+
     return None, first_error
 
 
@@ -111,8 +157,67 @@ if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
     _RUST_SUMMARIZE_3N2_CANDIDATES = getattr(_rust_ext, "summarize_3n2_candidates_py", None)
     _RUST_SUMMARIZE_BEST_3N2_CANDIDATE = getattr(_rust_ext, "summarize_best_3n2_candidate_py", None)
     _RUST_BUILD_XMODEL1_DISCARD_RECORDS = getattr(_rust_ext, "build_xmodel1_discard_records_py", None)
+    _RUST_BUILD_KEQINGV4_CACHED_RECORDS = getattr(_rust_ext, "build_keqingv4_cached_records_py", None)
     _RUST_XMODEL1_SCHEMA_INFO = getattr(_rust_ext, "xmodel1_schema_info_py", None)
     _RUST_VALIDATE_XMODEL1_DISCARD_RECORD = getattr(_rust_ext, "validate_xmodel1_discard_record_py", None)
+    _RUST_REPLAY_STATE_SNAPSHOT_JSON = getattr(_rust_ext, "replay_state_snapshot_json_py", None)
+    _RUST_ENUMERATE_LEGAL_ACTION_SPECS_STRUCTURAL_JSON = getattr(
+        _rust_ext, "enumerate_legal_action_specs_structural_json_py", None
+    )
+    _RUST_ENUMERATE_HORA_CANDIDATES_JSON = getattr(
+        _rust_ext, "enumerate_hora_candidates_json_py", None
+    )
+    _RUST_CAN_HORA_SHAPE_FROM_SNAPSHOT_JSON = getattr(
+        _rust_ext, "can_hora_shape_from_snapshot_json_py", None
+    )
+    _RUST_PREPARE_HORA_EVALUATION_FROM_SNAPSHOT_JSON = getattr(
+        _rust_ext, "prepare_hora_evaluation_from_snapshot_json_py", None
+    )
+    _RUST_COMPUTE_HORA_DELTAS_JSON = getattr(
+        _rust_ext, "compute_hora_deltas_json_py", None
+    )
+    _RUST_PREPARE_HORA_TILE_ALLOCATION_JSON = getattr(
+        _rust_ext, "prepare_hora_tile_allocation_json_py", None
+    )
+    _RUST_BUILD_HORA_RESULT_PAYLOAD_JSON = getattr(
+        _rust_ext, "build_hora_result_payload_json_py", None
+    )
+    _RUST_EVALUATE_HORA_FROM_PREPARED_JSON = getattr(
+        _rust_ext, "evaluate_hora_from_prepared_json_py", None
+    )
+    _RUST_BUILD_KEQINGV4_DISCARD_SUMMARY_JSON = getattr(
+        _rust_ext, "build_keqingv4_discard_summary_json_py", None
+    )
+    _RUST_BUILD_KEQINGV4_CALL_SUMMARY_JSON = getattr(
+        _rust_ext, "build_keqingv4_call_summary_json_py", None
+    )
+    _RUST_BUILD_KEQINGV4_SPECIAL_SUMMARY_JSON = getattr(
+        _rust_ext, "build_keqingv4_special_summary_json_py", None
+    )
+    _RUST_BUILD_KEQINGV4_TYPED_SUMMARIES_JSON = getattr(
+        _rust_ext, "build_keqingv4_typed_summaries_json_py", None
+    )
+    _RUST_PROJECT_KEQINGV4_CALL_SNAPSHOT_JSON = getattr(
+        _rust_ext, "project_keqingv4_call_snapshot_json_py", None
+    )
+    _RUST_PROJECT_KEQINGV4_DISCARD_SNAPSHOT_JSON = getattr(
+        _rust_ext, "project_keqingv4_discard_snapshot_json_py", None
+    )
+    _RUST_PROJECT_KEQINGV4_RINSHAN_DRAW_SNAPSHOT_JSON = getattr(
+        _rust_ext, "project_keqingv4_rinshan_draw_snapshot_json_py", None
+    )
+    _RUST_ENUMERATE_KEQINGV4_POST_MELD_DISCARDS_JSON = getattr(
+        _rust_ext, "enumerate_keqingv4_post_meld_discards_json_py", None
+    )
+    _RUST_ENUMERATE_KEQINGV4_LIVE_DRAW_WEIGHTS_JSON = getattr(
+        _rust_ext, "enumerate_keqingv4_live_draw_weights_json_py", None
+    )
+    _RUST_ENUMERATE_KEQINGV4_REACH_DISCARDS_JSON = getattr(
+        _rust_ext, "enumerate_keqingv4_reach_discards_json_py", None
+    )
+    _RUST_PROJECT_KEQINGV4_REACH_SNAPSHOT_JSON = getattr(
+        _rust_ext, "project_keqingv4_reach_snapshot_json_py", None
+    )
     _USE_RUST = True
 
 
@@ -275,15 +380,76 @@ def summarize_best_3n2_candidate(counts34, visible_counts34, summarize_fn):
     )
 
 
-def build_xmodel1_discard_records(*, data_dirs=None, output_dir: str = "processed_xmodel1", smoke: bool = False):
+def _first_exported_xmodel1_npz(output_dir: str) -> _Path | None:
+    root = _Path(output_dir)
+    if not root.exists():
+        return None
+    for path in sorted(root.rglob("*.npz")):
+        return path
+    return None
+
+
+def _rust_xmodel1_export_looks_complete(output_dir: str) -> bool:
+    sample = _first_exported_xmodel1_npz(output_dir)
+    if sample is None:
+        return False
+    try:
+        with _np.load(sample, allow_pickle=False) as data:
+            if "state_tile_feat" not in data or "state_scalar" not in data:
+                return False
+            state_tile_feat = data["state_tile_feat"]
+            state_scalar = data["state_scalar"]
+            if state_tile_feat.size == 0 or state_scalar.size == 0:
+                return False
+            return bool(_np.any(state_tile_feat != 0)) and bool(_np.any(state_scalar != 0))
+    except Exception:
+        return False
+
+
+def build_xmodel1_discard_records(
+    *,
+    data_dirs=None,
+    output_dir: str = "processed_xmodel1",
+    smoke: bool = False,
+    limit_files: int | None = None,
+    progress_every: int | None = None,
+    jobs: int | None = None,
+    resume: bool | None = None,
+):
     if not (_USE_RUST and _RUST_AVAILABLE and _RUST_BUILD_XMODEL1_DISCARD_RECORDS is not None):
         raise RuntimeError("Rust Xmodel1 discard export is not available")
     data_dirs = list(data_dirs or [])
     try:
-        return _RUST_BUILD_XMODEL1_DISCARD_RECORDS(data_dirs, str(output_dir), bool(smoke))
+        result = _RUST_BUILD_XMODEL1_DISCARD_RECORDS(
+            data_dirs,
+            str(output_dir),
+            bool(smoke),
+            None if limit_files is None else int(limit_files),
+            None if progress_every is None else int(progress_every),
+            None if jobs is None else int(jobs),
+            None if resume is None else bool(resume),
+        )
     except TypeError:
-        # Backward compatibility for stale native wheels with the old no-arg stub.
-        return _RUST_BUILD_XMODEL1_DISCARD_RECORDS()
+        try:
+            result = _RUST_BUILD_XMODEL1_DISCARD_RECORDS(
+                data_dirs,
+                str(output_dir),
+                bool(smoke),
+                None if limit_files is None else int(limit_files),
+            )
+        except TypeError:
+            result = _RUST_BUILD_XMODEL1_DISCARD_RECORDS(data_dirs, str(output_dir), bool(smoke))
+    produced_npz = bool(result[2]) if isinstance(result, tuple) and len(result) >= 3 else False
+    if produced_npz and not _rust_xmodel1_export_looks_complete(output_dir):
+        raise RuntimeError("Rust Xmodel1 full export did not produce complete v2 caches")
+    return result
+
+
+def build_keqingv4_cached_records(*, data_dirs=None, output_dir: str = "processed_v4", smoke: bool = False):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_BUILD_KEQINGV4_CACHED_RECORDS is not None):
+        raise RuntimeError("Rust keqingv4 cached export is not available")
+    data_dirs = list(data_dirs or [])
+    return _RUST_BUILD_KEQINGV4_CACHED_RECORDS(data_dirs, str(output_dir), bool(smoke))
 
 
 def xmodel1_schema_info():
@@ -342,6 +508,340 @@ def validate_xmodel1_discard_record(chosen_candidate_idx, candidate_mask, candid
     return True
 
 
+def replay_state_snapshot(events, actor: int):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_REPLAY_STATE_SNAPSHOT_JSON is not None):
+        raise RuntimeError("Rust replay state snapshot capability is not available")
+    payload = _json.dumps(events, ensure_ascii=False)
+    return _json.loads(_RUST_REPLAY_STATE_SNAPSHOT_JSON(payload, int(actor)))
+
+
+def enumerate_legal_action_specs_structural(state_snapshot, actor: int):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_ENUMERATE_LEGAL_ACTION_SPECS_STRUCTURAL_JSON is not None
+    ):
+        raise RuntimeError("Rust legal action structural capability is not available")
+    payload = _json.dumps(state_snapshot, ensure_ascii=False)
+    return _json.loads(_RUST_ENUMERATE_LEGAL_ACTION_SPECS_STRUCTURAL_JSON(payload, int(actor)))
+
+
+def enumerate_hora_candidates(state_snapshot, actor: int):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_ENUMERATE_HORA_CANDIDATES_JSON is not None
+    ):
+        raise RuntimeError("Rust hora candidate capability is not available")
+    payload = _json.dumps(state_snapshot, ensure_ascii=False)
+    return _json.loads(_RUST_ENUMERATE_HORA_CANDIDATES_JSON(payload, int(actor)))
+
+
+def can_hora_shape_from_snapshot(state_snapshot, actor: int, pai: str, is_tsumo: bool):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_CAN_HORA_SHAPE_FROM_SNAPSHOT_JSON is not None
+    ):
+        raise RuntimeError("Rust hora shape capability is not available")
+    payload = _json.dumps(state_snapshot, ensure_ascii=False)
+    return bool(
+        _RUST_CAN_HORA_SHAPE_FROM_SNAPSHOT_JSON(
+            payload,
+            int(actor),
+            str(pai),
+            bool(is_tsumo),
+        )
+    )
+
+
+def prepare_hora_evaluation_from_snapshot(
+    state_snapshot,
+    actor: int,
+    pai: str,
+    is_tsumo: bool,
+    *,
+    is_chankan: bool = False,
+    is_rinshan=None,
+    is_haitei=None,
+    is_houtei=None,
+):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_PREPARE_HORA_EVALUATION_FROM_SNAPSHOT_JSON is not None
+    ):
+        raise RuntimeError("Rust hora evaluation preparation capability is not available")
+    payload = _json.dumps(state_snapshot, ensure_ascii=False)
+    return _json.loads(
+        _RUST_PREPARE_HORA_EVALUATION_FROM_SNAPSHOT_JSON(
+            payload,
+            int(actor),
+            str(pai),
+            bool(is_tsumo),
+            bool(is_chankan),
+            is_rinshan,
+            is_haitei,
+            is_houtei,
+        )
+    )
+
+
+def compute_hora_deltas(oya: int, actor: int, target: int, is_tsumo: bool, cost):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_COMPUTE_HORA_DELTAS_JSON is not None
+    ):
+        raise RuntimeError("Rust hora delta capability is not available")
+    payload = _json.dumps(cost, ensure_ascii=False)
+    return _json.loads(
+        _RUST_COMPUTE_HORA_DELTAS_JSON(
+            int(oya),
+            int(actor),
+            int(target),
+            bool(is_tsumo),
+            payload,
+        )
+    )
+
+
+def prepare_hora_tile_allocation(prepared):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_PREPARE_HORA_TILE_ALLOCATION_JSON is not None
+    ):
+        raise RuntimeError("Rust hora tile allocation capability is not available")
+    payload = _json.dumps(prepared, ensure_ascii=False)
+    return _json.loads(_RUST_PREPARE_HORA_TILE_ALLOCATION_JSON(payload))
+
+
+def build_hora_result_payload(
+    *,
+    han: int,
+    fu: int,
+    is_open_hand: bool,
+    yaku_names,
+    base_yaku_details,
+    dora_count: int,
+    ura_count: int,
+    aka_count: int,
+    cost,
+    deltas,
+):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_BUILD_HORA_RESULT_PAYLOAD_JSON is not None
+    ):
+        raise RuntimeError("Rust hora result payload capability is not available")
+    return _json.loads(
+        _RUST_BUILD_HORA_RESULT_PAYLOAD_JSON(
+            int(han),
+            int(fu),
+            bool(is_open_hand),
+            _json.dumps(list(yaku_names), ensure_ascii=False),
+            _json.dumps(base_yaku_details, ensure_ascii=False),
+            int(dora_count),
+            int(ura_count),
+            int(aka_count),
+            _json.dumps(cost, ensure_ascii=False),
+            _json.dumps(list(deltas), ensure_ascii=False),
+        )
+    )
+
+
+def evaluate_hora_from_prepared(prepared):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_EVALUATE_HORA_FROM_PREPARED_JSON is not None
+    ):
+        raise RuntimeError("Rust hora truth capability is not available")
+    payload = _json.dumps(prepared, ensure_ascii=False)
+    return _json.loads(_RUST_EVALUATE_HORA_FROM_PREPARED_JSON(payload))
+
+
+def build_keqingv4_discard_summary(snapshot: dict, actor: int, legal_actions: list[dict]):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_BUILD_KEQINGV4_DISCARD_SUMMARY_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 discard summary capability is not available")
+    flat = _RUST_BUILD_KEQINGV4_DISCARD_SUMMARY_JSON(
+        _json.dumps(snapshot, ensure_ascii=False),
+        int(actor),
+        _json.dumps(legal_actions, ensure_ascii=False),
+    )
+    return _np.asarray(flat, dtype=_np.float32).reshape(34, KEQINGV4_SUMMARY_DIM)
+
+
+def build_keqingv4_call_summary(snapshot: dict, actor: int, legal_actions: list[dict]):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_BUILD_KEQINGV4_CALL_SUMMARY_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 call summary capability is not available")
+    flat = _RUST_BUILD_KEQINGV4_CALL_SUMMARY_JSON(
+        _json.dumps(snapshot, ensure_ascii=False),
+        int(actor),
+        _json.dumps(legal_actions, ensure_ascii=False),
+    )
+    return _np.asarray(flat, dtype=_np.float32).reshape(8, KEQINGV4_SUMMARY_DIM)
+
+
+def build_keqingv4_special_summary(snapshot: dict, actor: int, legal_actions: list[dict]):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_BUILD_KEQINGV4_SPECIAL_SUMMARY_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 special summary capability is not available")
+    flat = _RUST_BUILD_KEQINGV4_SPECIAL_SUMMARY_JSON(
+        _json.dumps(snapshot, ensure_ascii=False),
+        int(actor),
+        _json.dumps(legal_actions, ensure_ascii=False),
+    )
+    return _np.asarray(flat, dtype=_np.float32).reshape(3, KEQINGV4_SUMMARY_DIM)
+
+
+def build_keqingv4_typed_summaries(snapshot: dict, actor: int, legal_actions: list[dict]):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_BUILD_KEQINGV4_TYPED_SUMMARIES_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 typed summaries capability is not available")
+    discard_flat, call_flat, special_flat = _RUST_BUILD_KEQINGV4_TYPED_SUMMARIES_JSON(
+        _json.dumps(snapshot, ensure_ascii=False),
+        int(actor),
+        _json.dumps(legal_actions, ensure_ascii=False),
+    )
+    return (
+        _np.asarray(discard_flat, dtype=_np.float32).reshape(34, KEQINGV4_SUMMARY_DIM),
+        _np.asarray(call_flat, dtype=_np.float32).reshape(8, KEQINGV4_SUMMARY_DIM),
+        _np.asarray(special_flat, dtype=_np.float32).reshape(3, KEQINGV4_SUMMARY_DIM),
+    )
+
+
+def project_keqingv4_call_snapshot(snapshot: dict, actor: int, action: dict):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_PROJECT_KEQINGV4_CALL_SNAPSHOT_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 call snapshot projection capability is not available")
+    payload = _RUST_PROJECT_KEQINGV4_CALL_SNAPSHOT_JSON(
+        _json.dumps(snapshot, ensure_ascii=False),
+        int(actor),
+        _json.dumps(action, ensure_ascii=False),
+    )
+    if payload is None:
+        return None
+    return _json.loads(payload)
+
+
+def project_keqingv4_discard_snapshot(snapshot: dict, actor: int, pai: str):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_PROJECT_KEQINGV4_DISCARD_SNAPSHOT_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 discard snapshot projection capability is not available")
+    return _json.loads(
+        _RUST_PROJECT_KEQINGV4_DISCARD_SNAPSHOT_JSON(
+            _json.dumps(snapshot, ensure_ascii=False),
+            int(actor),
+            str(pai),
+        )
+    )
+
+
+def project_keqingv4_rinshan_draw_snapshot(snapshot: dict, actor: int, pai: str):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_PROJECT_KEQINGV4_RINSHAN_DRAW_SNAPSHOT_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 rinshan draw snapshot projection capability is not available")
+    return _json.loads(
+        _RUST_PROJECT_KEQINGV4_RINSHAN_DRAW_SNAPSHOT_JSON(
+            _json.dumps(snapshot, ensure_ascii=False),
+            int(actor),
+            str(pai),
+        )
+    )
+
+
+def enumerate_keqingv4_post_meld_discards(snapshot: dict, actor: int):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_ENUMERATE_KEQINGV4_POST_MELD_DISCARDS_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 post-meld discard enumeration capability is not available")
+    return _json.loads(
+        _RUST_ENUMERATE_KEQINGV4_POST_MELD_DISCARDS_JSON(
+            _json.dumps(snapshot, ensure_ascii=False),
+            int(actor),
+        )
+    )
+
+
+def enumerate_keqingv4_live_draw_weights(snapshot: dict):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_ENUMERATE_KEQINGV4_LIVE_DRAW_WEIGHTS_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 live draw weight enumeration capability is not available")
+    return [
+        (str(tile), int(weight))
+        for tile, weight in _json.loads(
+            _RUST_ENUMERATE_KEQINGV4_LIVE_DRAW_WEIGHTS_JSON(
+                _json.dumps(snapshot, ensure_ascii=False),
+            )
+        )
+    ]
+
+
+def enumerate_keqingv4_reach_discards(snapshot: dict, actor: int):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_ENUMERATE_KEQINGV4_REACH_DISCARDS_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 reach discard enumeration capability is not available")
+    return [
+        (str(pai), bool(tsumogiri))
+        for pai, tsumogiri in _json.loads(
+            _RUST_ENUMERATE_KEQINGV4_REACH_DISCARDS_JSON(
+                _json.dumps(snapshot, ensure_ascii=False),
+                int(actor),
+            )
+        )
+    ]
+
+
+def project_keqingv4_reach_snapshot(snapshot: dict, actor: int, pai: str):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_PROJECT_KEQINGV4_REACH_SNAPSHOT_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 reach snapshot projection capability is not available")
+    return _json.loads(
+        _RUST_PROJECT_KEQINGV4_REACH_SNAPSHOT_JSON(
+            _json.dumps(snapshot, ensure_ascii=False),
+            int(actor),
+            str(pai),
+        )
+    )
+
+
 def is_available():
     return _RUST_AVAILABLE
 
@@ -379,8 +879,29 @@ __all__ = [
     "summarize_3n2_candidates",
     "summarize_best_3n2_candidate",
     "build_xmodel1_discard_records",
+    "build_keqingv4_cached_records",
     "xmodel1_schema_info",
     "validate_xmodel1_discard_record",
+    "replay_state_snapshot",
+    "enumerate_legal_action_specs_structural",
+    "enumerate_hora_candidates",
+    "can_hora_shape_from_snapshot",
+    "prepare_hora_evaluation_from_snapshot",
+    "compute_hora_deltas",
+    "prepare_hora_tile_allocation",
+    "build_hora_result_payload",
+    "evaluate_hora_from_prepared",
+    "build_keqingv4_discard_summary",
+    "build_keqingv4_call_summary",
+    "build_keqingv4_special_summary",
+    "build_keqingv4_typed_summaries",
+    "project_keqingv4_call_snapshot",
+    "project_keqingv4_discard_snapshot",
+    "project_keqingv4_rinshan_draw_snapshot",
+    "enumerate_keqingv4_post_meld_discards",
+    "enumerate_keqingv4_live_draw_weights",
+    "enumerate_keqingv4_reach_discards",
+    "project_keqingv4_reach_snapshot",
     "is_available",
     "is_enabled",
     "has_3n2_candidate_summaries",

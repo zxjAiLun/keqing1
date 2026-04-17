@@ -57,12 +57,11 @@ def _normalize_replay_events(events: list[dict] | None) -> list[dict]:
     if not events:
         return events or []
 
-    from copy import deepcopy
-
+    from mahjong_env.replay_normalizer import normalize_replay_events
     from mahjong_env.scoring import score_hora
     from mahjong_env.state import GameState, apply_event
 
-    normalized = [deepcopy(ev) for ev in events]
+    normalized = normalize_replay_events(events)
     state = GameState()
 
     for idx, event in enumerate(normalized):

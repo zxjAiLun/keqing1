@@ -8,7 +8,7 @@ from xmodel1.cached_dataset import Xmodel1DiscardDataset
 def _write_fixture(path: Path) -> None:
     n = 3
     k = 14
-    d = 21
+    d = 35
     f = 10
     np.savez(
         path,
@@ -43,7 +43,7 @@ def test_xmodel1_dataset_reads_fixture(tmp_path: Path):
     rows = list(ds)
     assert len(rows) == 3
     assert rows[0][0].shape == (57, 34)
-    assert rows[0][2].shape == (14, 21)
+    assert rows[0][2].shape == (14, 35)
 
 
 def test_xmodel1_collate_returns_expected_keys(tmp_path: Path):
@@ -52,6 +52,6 @@ def test_xmodel1_collate_returns_expected_keys(tmp_path: Path):
     ds = Xmodel1DiscardDataset([fixture], shuffle=False)
     batch = Xmodel1DiscardDataset.collate(list(ds))
     assert batch["state_tile_feat"].shape == (3, 57, 34)
-    assert batch["candidate_feat"].shape == (3, 14, 21)
+    assert batch["candidate_feat"].shape == (3, 14, 35)
     assert batch["candidate_flags"].shape == (3, 14, 10)
     assert batch["chosen_candidate_idx"].shape == (3,)

@@ -2,17 +2,40 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from typing import Iterable, Tuple
 
 import numpy as np
 
-from keqingv3.feature_tracker import SnapshotFeatureTracker
 from keqingv3.features import C_TILE, N_SCALAR, encode as _encode_state, encode_with_timings
-from keqingv3.progress_oracle import analyze_normal_progress_from_counts
 from mahjong_env.legal_actions import enumerate_legal_actions
-from mahjong_env.replay import _calc_shanten_waits
-from mahjong_env.tiles import normalize_tile, tile_to_34
+from mahjong_env.tiles import tile_to_34
+from training.cache_schema import (
+    XMODEL1_CANDIDATE_FEATURE_DIM,
+    XMODEL1_MAX_CANDIDATES,
+    XMODEL1_MAX_SPECIAL_CANDIDATES,
+    XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+)
+from xmodel1.candidate_quality import build_candidate_features, build_special_candidate_arrays, iter_legal_discards
+
+EVENT_HISTORY_LEN = 48
+EVENT_HISTORY_FEATURE_DIM = 5
+EVENT_TYPE_PAD = 0
+EVENT_NO_ACTOR = 4
+EVENT_NO_TILE = -1
+EVENT_MAX_TURN_IDX = 24
+_EVENT_TYPE_ID = {
+    "tsumo": 1,
+    "dahai": 2,
+    "pon": 3,
+    "chi": 4,
+    "daiminkan": 5,
+    "ankan": 6,
+    "kakan": 7,
+    "reach": 8,
+    "dora": 9,
+    "hora": 10,
+    "ryukyoku": 11,
+}
 
 
 def encode(state: dict, actor: int, *, state_scalar_dim: int = 64):
@@ -26,62 +49,63 @@ def encode(state: dict, actor: int, *, state_scalar_dim: int = 64):
     return tile_feat, scalar.astype(np.float32)
 
 
-def _combined_hand(state: dict) -> list[str]:
-    hand = list(state.get("hand", []))
-    tsumo = state.get("tsumo_pai")
-    if tsumo:
-        hand.append(tsumo)
-    return hand
+def empty_event_history() -> np.ndarray:
+    out = np.zeros((EVENT_HISTORY_LEN, EVENT_HISTORY_FEATURE_DIM), dtype=np.int16)
+    out[:, 0] = EVENT_NO_ACTOR
+    out[:, 1] = EVENT_TYPE_PAD
+    out[:, 2] = EVENT_NO_TILE
+    return out
 
 
-def _counts34_from_hand(hand: list[str]) -> list[int]:
-    counts = [0] * 34
-    for tile in hand:
-        idx = tile_to_34(normalize_tile(tile))
-        if idx >= 0:
-            counts[idx] += 1
-    return counts
+def compute_event_history(all_events: list[dict], event_index: int) -> np.ndarray:
+    out = empty_event_history()
+    if event_index <= 0:
+        return out
+    end = min(int(event_index), len(all_events))
+    if end <= 0:
+        return out
+    kyoku_start = 0
+    for idx in range(end - 1, -1, -1):
+        if all_events[idx].get("type") == "start_kyoku":
+            kyoku_start = idx + 1
+            break
+    if kyoku_start >= end:
+        return out
+    slice_start = max(kyoku_start, end - EVENT_HISTORY_LEN)
+    dahai_count_so_far = sum(1 for item in all_events[kyoku_start:slice_start] if item.get("type") == "dahai")
+    token_count = end - slice_start
+    pad_len = EVENT_HISTORY_LEN - token_count
+    for offset, idx in enumerate(range(slice_start, end)):
+        event = all_events[idx]
+        etype = str(event.get("type", ""))
+        actor = int(event.get("actor", EVENT_NO_ACTOR))
+        if actor < 0 or actor > 3:
+            actor = EVENT_NO_ACTOR
+        pai = event.get("pai")
+        tile_id = EVENT_NO_TILE if pai is None else int(tile_to_34(pai))
+        if tile_id < 0:
+            tile_id = EVENT_NO_TILE
+        slot = pad_len + offset
+        out[slot, 0] = actor
+        out[slot, 1] = _EVENT_TYPE_ID.get(etype, 15)
+        out[slot, 2] = tile_id
+        out[slot, 3] = min(EVENT_MAX_TURN_IDX, max(0, dahai_count_so_far // 4))
+        out[slot, 4] = 0 if etype != "dahai" or bool(event.get("tsumogiri", False)) else 1
+        if etype == "dahai":
+            dahai_count_so_far += 1
+    return out
 
 
-def _seat_and_round_yakuhai_ids(state: dict, actor: int) -> set[int]:
-    bakaze = state.get("bakaze", "E")
-    oya = int(state.get("oya", 0))
-    wind_map = {"E": 27, "S": 28, "W": 29, "N": 30}
-    ids = {31, 32, 33}
-    if bakaze in wind_map:
-        ids.add(wind_map[bakaze])
-    ids.add(27 + ((actor - oya) % 4))
-    return ids
-
-
-def _simulate_discard_hand(state: dict, discard34: int) -> list[str]:
-    hand = _combined_hand(state)
-    removed = False
-    out: list[str] = []
-    for tile in hand:
-        if not removed and tile_to_34(normalize_tile(tile)) == discard34:
-            removed = True
-            continue
-        out.append(tile)
-    return out if removed else hand
-
-
-def _candidate_order_tile_ids(state: dict, legal_actions: Iterable[dict] | None = None) -> list[int]:
-    if legal_actions is not None:
-        tile_ids: list[int] = []
-        for action in legal_actions:
-            if action.get("type") != "dahai":
-                continue
-            pai = action.get("pai")
-            if not pai:
-                continue
-            idx = tile_to_34(normalize_tile(pai))
-            if idx >= 0 and idx not in tile_ids:
-                tile_ids.append(idx)
-        if tile_ids:
-            return tile_ids
-    counts = _counts34_from_hand(_combined_hand(state))
-    return [idx for idx, count in enumerate(counts) if count > 0]
+def resolve_runtime_event_history(snap: dict) -> np.ndarray:
+    value = snap.get("event_history")
+    if value is None:
+        return empty_event_history()
+    arr = np.asarray(value, dtype=np.int16)
+    if arr.shape != (EVENT_HISTORY_LEN, EVENT_HISTORY_FEATURE_DIM):
+        raise ValueError(
+            f"event_history shape {arr.shape} != ({EVENT_HISTORY_LEN}, {EVENT_HISTORY_FEATURE_DIM})"
+        )
+    return arr
 
 
 def build_runtime_candidate_arrays(
@@ -89,123 +113,65 @@ def build_runtime_candidate_arrays(
     actor: int,
     legal_actions: Iterable[dict] | None = None,
     *,
-    max_candidates: int,
-    candidate_feature_dim: int,
-    candidate_flag_dim: int,
+    max_candidates: int = XMODEL1_MAX_CANDIDATES,
+    candidate_feature_dim: int = XMODEL1_CANDIDATE_FEATURE_DIM,
+    candidate_flag_dim: int = 10,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if legal_actions is None:
         legal_actions = [a.to_mjai() for a in enumerate_legal_actions(state, actor)]
-    tile_ids = _candidate_order_tile_ids(state, legal_actions)
-
+    else:
+        legal_actions = [dict(a) for a in legal_actions]
+    discard_actions = iter_legal_discards(legal_actions)
     candidate_feat = np.zeros((max_candidates, candidate_feature_dim), dtype=np.float32)
     candidate_tile_id = np.full((max_candidates,), -1, dtype=np.int16)
     candidate_mask = np.zeros((max_candidates,), dtype=np.uint8)
     candidate_flags = np.zeros((max_candidates, candidate_flag_dim), dtype=np.uint8)
-
-    tracker = SnapshotFeatureTracker.from_state(state, actor)
-    yakuhai_ids = _seat_and_round_yakuhai_ids(state, actor)
-    visible_before = list(tracker.visible_counts34)
-    current_shanten = int(state.get("shanten", 8))
-    current_waits_count = int(state.get("waits_count", 0))
-
-    for slot, discard34 in enumerate(tile_ids[:max_candidates]):
-        after_hand = _simulate_discard_hand(state, discard34)
-        after_counts34 = _counts34_from_hand(after_hand)
-        visible_after = list(visible_before)
-        visible_after[discard34] = min(4, visible_after[discard34] + 1)
-        progress = analyze_normal_progress_from_counts(tuple(after_counts34), tuple(visible_after))
-        after_shanten, after_waits_cnt, after_waits_tiles, _ = _calc_shanten_waits(
-            after_hand,
-            (state.get("melds") or [[], [], [], []])[actor],
-        )
-        wait_live_count = sum(
-            max(0, 4 - visible_after[t34])
-            for t34, flag in enumerate(after_waits_tiles)
-            if flag
-        )
-        pair_count = sum(1 for c in after_counts34 if c >= 2)
-        taatsu_count = 0
-        for base in (0, 9, 18):
-            suit = after_counts34[base : base + 9]
-            for i in range(8):
-                if suit[i] > 0 and suit[i + 1] > 0:
-                    taatsu_count += 1
-            for i in range(7):
-                if suit[i] > 0 and suit[i + 2] > 0:
-                    taatsu_count += 1
-
-        yakuhai_pair_preserved = 1.0 if any(after_counts34[idx] >= 2 for idx in yakuhai_ids) else 0.0
-        dual_pon_value = 1.0 if any(after_counts34[idx] >= 2 and idx in yakuhai_ids for idx in yakuhai_ids) else 0.0
-        tile_counter = Counter(idx for idx, c in enumerate(after_counts34) for _ in range(c))
-        tanyao_path = 1.0 if tile_counter and all(idx not in {0, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33} for idx in tile_counter) else 0.0
-        suit_presence = [sum(after_counts34[base : base + 9]) > 0 for base in (0, 9, 18)]
-        flush_path = 1.0 if sum(1 for v in suit_presence if v) <= 1 else 0.0
-        confirmed_han_floor = float(yakuhai_pair_preserved + tanyao_path)
-
-        break_tenpai = 1 if current_shanten == 0 and after_shanten != 0 else 0
-        break_best_wait = 1 if current_shanten == 0 and after_waits_cnt < current_waits_count else 0
-        break_meld_structure = 1 if current_shanten <= 1 and after_shanten > current_shanten else 0
-        drop_open_yakuhai_pair = 1 if tracker.meld_count > 0 and discard34 in yakuhai_ids and yakuhai_pair_preserved == 0.0 else 0
-        drop_dual_pon_value = 1 if tracker.meld_count > 0 and discard34 in yakuhai_ids and dual_pon_value == 0.0 else 0
-
-        is_honor = 1 if discard34 >= 27 else 0
-        is_terminal = 1 if discard34 in {0, 8, 9, 17, 18, 26} else 0
-        is_yakuhai = 1 if discard34 in yakuhai_ids else 0
-
-        feat = np.array(
-            [
-                after_shanten / 8.0,
-                1.0 if after_shanten == 0 else 0.0,
-                after_waits_cnt / 34.0,
-                wait_live_count / 136.0,
-                progress.ukeire_type_count / 34.0,
-                progress.ukeire_live_count / 136.0,
-                progress.good_shape_ukeire_live_count / 136.0,
-                wait_live_count / 136.0,
-                pair_count / 7.0,
-                taatsu_count / 6.0,
-                max(0.0, min(1.0, (pair_count + taatsu_count) / 8.0)),
-                min(confirmed_han_floor / 8.0, 1.0),
-                1.0 if tracker.meld_count == 0 or confirmed_han_floor > 0 else 0.0,
-                yakuhai_pair_preserved,
-                dual_pon_value,
-                tanyao_path,
-                flush_path,
-                1.0 if any(flag for idx, flag in enumerate(state.get("reached", [False] * 4)) if idx != actor) else 0.0,
-                0.0,
-                0.0,
-                1.0 if visible_after[discard34] >= 3 else 0.0,
-            ],
-            dtype=np.float32,
-        )
-        flags = np.array(
-            [
-                break_tenpai,
-                break_best_wait,
-                break_meld_structure,
-                drop_open_yakuhai_pair,
-                drop_dual_pon_value,
-                is_honor,
-                is_terminal,
-                0,
-                0,
-                is_yakuhai,
-            ],
-            dtype=np.uint8,
-        )
-
-        candidate_feat[slot] = feat
-        candidate_tile_id[slot] = discard34
+    for slot, action in enumerate(discard_actions[:max_candidates]):
+        feat, flags, _quality, _rank, _hard_bad = build_candidate_features(state, actor, action)
+        candidate_feat[slot] = feat.astype(np.float32, copy=False)
+        candidate_tile_id[slot] = int(tile_to_34(action["pai"]))
         candidate_mask[slot] = 1
-        candidate_flags[slot] = flags
-
+        candidate_flags[slot] = flags.astype(np.uint8, copy=False)
     return candidate_feat, candidate_tile_id, candidate_mask, candidate_flags
+
+
+def build_runtime_special_candidate_arrays(
+    state: dict,
+    actor: int,
+    legal_actions: Iterable[dict] | None = None,
+    *,
+    max_candidates: int = XMODEL1_MAX_SPECIAL_CANDIDATES,
+    feature_dim: int = XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if legal_actions is None:
+        legal_actions = [a.to_mjai() for a in enumerate_legal_actions(state, actor)]
+    else:
+        legal_actions = [dict(a) for a in legal_actions]
+    feat, type_id, mask, _quality, _rank_bucket, _hard_bad, _chosen_idx = build_special_candidate_arrays(
+        state,
+        actor,
+        legal_actions,
+        chosen_action=None,
+        max_candidates=max_candidates,
+        feature_dim=feature_dim,
+        include_terminal_actions=True,
+    )
+    return feat.astype(np.float32, copy=False), type_id.astype(np.int16, copy=False), mask.astype(np.uint8, copy=False)
 
 
 __all__ = [
     "C_TILE",
     "N_SCALAR",
+    "EVENT_HISTORY_FEATURE_DIM",
+    "EVENT_HISTORY_LEN",
+    "EVENT_NO_ACTOR",
+    "EVENT_NO_TILE",
+    "EVENT_TYPE_PAD",
+    "compute_event_history",
+    "empty_event_history",
+    "resolve_runtime_event_history",
     "encode",
     "encode_with_timings",
     "build_runtime_candidate_arrays",
+    "build_runtime_special_candidate_arrays",
 ]

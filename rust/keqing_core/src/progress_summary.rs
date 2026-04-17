@@ -15,6 +15,96 @@ pub struct Summary3n1 {
     pub ukeire_tiles: [bool; TILE_COUNT],
 }
 
+fn candidate_progress_key(summary: &Summary3n1) -> (i32, i32, i32, i32) {
+    (
+        -(summary.shanten as i32),
+        summary.ukeire_live_count as i32,
+        summary.ukeire_type_count as i32,
+        summary.waits_count as i32,
+    )
+}
+
+fn tile_in_obvious_meld(counts34: &[u8; TILE_COUNT], tile34: usize) -> bool {
+    let cnt = counts34[tile34];
+    if cnt == 0 {
+        return false;
+    }
+    if cnt >= 3 {
+        return true;
+    }
+    if tile34 >= 27 {
+        return false;
+    }
+    let pos = tile34 % 9;
+    let base = tile34 - pos;
+    if pos >= 2 && counts34[base + pos - 1] > 0 && counts34[base + pos - 2] > 0 {
+        return true;
+    }
+    if (1..=7).contains(&pos) && counts34[base + pos - 1] > 0 && counts34[base + pos + 1] > 0 {
+        return true;
+    }
+    if pos <= 6 && counts34[base + pos + 1] > 0 && counts34[base + pos + 2] > 0 {
+        return true;
+    }
+    false
+}
+
+fn select_candidate_discards_3n2(counts34: &[u8; TILE_COUNT]) -> Vec<usize> {
+    let mut preferred = Vec::new();
+    let mut fallback = Vec::new();
+    let mut seen = [false; TILE_COUNT];
+    for (tile34, &cnt) in counts34.iter().enumerate() {
+        if cnt == 0 || seen[tile34] {
+            continue;
+        }
+        seen[tile34] = true;
+        fallback.push(tile34);
+        if !tile_in_obvious_meld(counts34, tile34) {
+            preferred.push(tile34);
+        }
+    }
+    let candidate_discards = if preferred.is_empty() {
+        fallback.clone()
+    } else {
+        preferred
+    };
+    if candidate_discards.is_empty() {
+        return candidate_discards;
+    }
+    let len_div3 = counts34.iter().sum::<u8>() / 3;
+    let current_shanten = calc_shanten_all(counts34, len_div3);
+    let discard_deltas = calc_discard_deltas(counts34, len_div3);
+    let mut best_after_shanten: Option<i8> = None;
+    let mut selected = Vec::new();
+    for discard34 in candidate_discards {
+        let Some(delta) = discard_deltas
+            .iter()
+            .find(|item| item.tile34 as usize == discard34)
+        else {
+            continue;
+        };
+        let after_shanten = current_shanten + delta.shanten_diff;
+        match best_after_shanten {
+            None => {
+                best_after_shanten = Some(after_shanten);
+                selected.push(discard34);
+            }
+            Some(best) if after_shanten < best => {
+                best_after_shanten = Some(after_shanten);
+                selected.clear();
+                selected.push(discard34);
+            }
+            Some(best) if after_shanten == best => selected.push(discard34),
+            Some(_) => {}
+        }
+    }
+    if selected.is_empty() {
+        fallback
+    } else {
+        selected
+    }
+}
+
 fn is_suited_sequence_start(tile34: usize) -> bool {
     tile34 < 27 && (tile34 % 9) <= 6
 }
@@ -147,7 +237,8 @@ pub fn summarize_3n1(
             continue;
         }
         ukeire_type_count += 1;
-        ukeire_live_count = ukeire_live_count.saturating_add(4u8.saturating_sub(visible_counts34[tile34]));
+        ukeire_live_count =
+            ukeire_live_count.saturating_add(4u8.saturating_sub(visible_counts34[tile34]));
     }
 
     Summary3n1 {
@@ -158,6 +249,41 @@ pub fn summarize_3n1(
         ukeire_type_count,
         ukeire_live_count,
         ukeire_tiles,
+    }
+}
+
+pub fn summarize_like_python(
+    hand_counts34: &[u8; TILE_COUNT],
+    visible_counts34: &[u8; TILE_COUNT],
+) -> Summary3n1 {
+    let tile_count: u8 = hand_counts34.iter().sum();
+    match tile_count % 3 {
+        1 => summarize_3n1(hand_counts34, visible_counts34),
+        2 => {
+            let mut best_summary: Option<Summary3n1> = None;
+            let mut best_key: Option<(i32, i32, i32, i32)> = None;
+            for discard34 in select_candidate_discards_3n2(hand_counts34) {
+                let mut after_counts = *hand_counts34;
+                after_counts[discard34] -= 1;
+                let summary = summarize_3n1(&after_counts, visible_counts34);
+                let key = candidate_progress_key(&summary);
+                if best_key.as_ref().is_none_or(|current| key > *current) {
+                    best_key = Some(key);
+                    best_summary = Some(summary);
+                }
+            }
+
+            best_summary.unwrap_or_else(|| summarize_3n1(hand_counts34, visible_counts34))
+        }
+        _ => Summary3n1 {
+            shanten: 8,
+            waits_count: 0,
+            waits_tiles: [false; TILE_COUNT],
+            tehai_count: tile_count,
+            ukeire_type_count: 0,
+            ukeire_live_count: 0,
+            ukeire_tiles: [false; TILE_COUNT],
+        },
     }
 }
 
@@ -176,10 +302,13 @@ mod tests {
     #[test]
     fn summarize_3n1_reports_waits_for_tenpai_hand() {
         let counts = hand(&[
-            (4, 1), (5, 1),
+            (4, 1),
+            (5, 1),
             (17, 3),
             (21, 3),
-            (22, 1), (23, 1), (24, 1),
+            (22, 1),
+            (23, 1),
+            (24, 1),
             (32, 2),
         ]);
         let summary = summarize_3n1(&counts, &counts);
@@ -190,14 +319,44 @@ mod tests {
     #[test]
     fn summarize_3n1_reports_ukeire_for_non_tenpai_hand() {
         let counts = hand(&[
-            (0, 1), (1, 1), (2, 1),
-            (3, 1), (4, 1), (5, 1),
-            (6, 1), (7, 1), (9, 1),
-            (10, 1), (12, 1), (13, 1),
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (5, 1),
+            (6, 1),
+            (7, 1),
+            (9, 1),
+            (10, 1),
+            (12, 1),
+            (13, 1),
             (18, 1),
         ]);
         let summary = summarize_3n1(&counts, &counts);
         assert!(summary.shanten > 0);
         assert!(summary.ukeire_type_count > 0);
+    }
+
+    #[test]
+    fn summarize_like_python_uses_best_after_discard_for_14_tile_hand() {
+        let counts = hand(&[
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (5, 1),
+            (6, 1),
+            (7, 1),
+            (8, 1),
+            (9, 2),
+            (10, 1),
+            (11, 1),
+            (22, 1),
+        ]);
+        let summary = summarize_like_python(&counts, &counts);
+        assert_eq!(summary.tehai_count, 13);
+        assert!(summary.shanten >= 0);
     }
 }

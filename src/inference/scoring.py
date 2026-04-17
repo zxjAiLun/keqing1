@@ -12,9 +12,174 @@ from inference.contracts import (
     ScoredCandidate,
 )
 from inference.keqing_adapter import KeqingModelAdapter
+from keqing_core import (
+    enumerate_keqingv4_live_draw_weights as _rust_enumerate_keqingv4_live_draw_weights,
+    enumerate_keqingv4_post_meld_discards as _rust_enumerate_keqingv4_post_meld_discards,
+    enumerate_keqingv4_reach_discards as _rust_enumerate_keqingv4_reach_discards,
+    enumerate_legal_action_specs_structural as _rust_enumerate_legal_action_specs_structural,
+    project_keqingv4_call_snapshot as _rust_project_keqingv4_call_snapshot,
+    project_keqingv4_discard_snapshot as _rust_project_keqingv4_discard_snapshot,
+    project_keqingv4_reach_snapshot as _rust_project_keqingv4_reach_snapshot,
+    project_keqingv4_rinshan_draw_snapshot as _rust_project_keqingv4_rinshan_draw_snapshot,
+)
 from keqingv1.action_space import NONE_IDX, action_to_idx, build_legal_mask
-from mahjong_env.legal_actions import _reach_discard_candidates
-from mahjong_env.tiles import normalize_tile
+from mahjong_env.legal_actions import _reach_discard_candidates, enumerate_legal_actions
+from mahjong_env.tiles import normalize_tile, tile_to_34
+
+_TILE34_STR = (
+    "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m",
+    "1p", "2p", "3p", "4p", "5p", "6p", "7p", "8p", "9p",
+    "1s", "2s", "3s", "4s", "5s", "6s", "7s", "8s", "9s",
+    "E", "S", "W", "N", "P", "F", "C",
+)
+_SPECIAL_ACTION_SLOT = {"reach": 0, "hora": 1, "ryukyoku": 2}
+
+
+def _xmodel1_special_type_for_action(action: dict) -> int | None:
+    from xmodel1.schema import (
+        XMODEL1_SPECIAL_TYPE_ANKAN,
+        XMODEL1_SPECIAL_TYPE_CHI_HIGH,
+        XMODEL1_SPECIAL_TYPE_CHI_LOW,
+        XMODEL1_SPECIAL_TYPE_CHI_MID,
+        XMODEL1_SPECIAL_TYPE_DAIMINKAN,
+        XMODEL1_SPECIAL_TYPE_HORA,
+        XMODEL1_SPECIAL_TYPE_KAKAN,
+        XMODEL1_SPECIAL_TYPE_NONE,
+        XMODEL1_SPECIAL_TYPE_PON,
+        XMODEL1_SPECIAL_TYPE_REACH,
+        XMODEL1_SPECIAL_TYPE_RYUKYOKU,
+    )
+
+    action_type = action.get("type")
+    if action_type == "reach":
+        return XMODEL1_SPECIAL_TYPE_REACH
+    if action_type == "hora":
+        return XMODEL1_SPECIAL_TYPE_HORA
+    if action_type == "pon":
+        return XMODEL1_SPECIAL_TYPE_PON
+    if action_type == "daiminkan":
+        return XMODEL1_SPECIAL_TYPE_DAIMINKAN
+    if action_type == "ankan":
+        return XMODEL1_SPECIAL_TYPE_ANKAN
+    if action_type == "kakan":
+        return XMODEL1_SPECIAL_TYPE_KAKAN
+    if action_type == "ryukyoku":
+        return XMODEL1_SPECIAL_TYPE_RYUKYOKU
+    if action_type == "none":
+        return XMODEL1_SPECIAL_TYPE_NONE
+    if action_type != "chi":
+        return None
+    pai = normalize_tile(action.get("pai", ""))
+    pai_rank = int(pai[0]) if len(pai) == 2 and pai[0].isdigit() else 0
+    consumed = sorted(
+        int(tile[0]) for tile in [normalize_tile(value) for value in action.get("consumed", [])] if len(tile) == 2 and tile[0].isdigit()
+    )
+    if len(consumed) < 2 or pai_rank < consumed[0]:
+        return XMODEL1_SPECIAL_TYPE_CHI_LOW
+    if pai_rank < consumed[1]:
+        return XMODEL1_SPECIAL_TYPE_CHI_MID
+    return XMODEL1_SPECIAL_TYPE_CHI_HIGH
+
+
+def _xmodel1_candidate_components(
+    adapter: KeqingModelAdapter,
+    snap: dict,
+    actor: int,
+    legal_actions: list[dict],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    candidate_feat, candidate_tile_id, candidate_mask, _candidate_flags = adapter._runtime_candidate_builder(
+        snap,
+        actor,
+        legal_actions,
+    )
+    if adapter._runtime_special_candidate_builder is not None:
+        special_feat, special_type_id, special_mask = adapter._runtime_special_candidate_builder(
+            snap,
+            actor,
+            legal_actions,
+        )
+    else:
+        special_feat = np.zeros((0, 25), dtype=np.float32)
+        special_type_id = np.zeros((0,), dtype=np.int16)
+        special_mask = np.zeros((0,), dtype=np.uint8)
+    return candidate_feat, candidate_tile_id, candidate_mask, special_feat, special_type_id, special_mask
+
+
+def _score_xmodel1_candidates(
+    adapter: KeqingModelAdapter,
+    ctx: DecisionContext,
+    model_result: ModelForwardResult,
+) -> DecisionResult:
+    payload = model_result.xmodel1
+    assert payload is not None
+    legal_actions = ctx.legal_actions
+    candidate_feat, candidate_tile_id, candidate_mask, special_feat, special_type_id, special_mask = _xmodel1_candidate_components(
+        adapter,
+        dict(ctx.model_snap, legal_actions=legal_actions),
+        ctx.actor,
+        legal_actions,
+    )
+    composed_ev = payload.win_prob * payload.pts_given_win - payload.dealin_prob * payload.pts_given_dealin
+    candidates: list[ScoredCandidate] = []
+    chosen_action = legal_actions[0]
+    best_score = -1e18
+    legal_dahai = [action for action in legal_actions if action.get("type") == "dahai"]
+    best_reach_discard = None
+    if legal_dahai:
+        def _reach_discard_score(action: dict) -> float:
+            tile34 = tile_to_34(normalize_tile(action.get("pai", "")))
+            slot_mask = (candidate_mask > 0) & (candidate_tile_id == tile34)
+            if not np.any(slot_mask):
+                return -1e9
+            return float(np.max(payload.discard_logits[slot_mask]))
+
+        best_reach_discard = max(legal_dahai, key=_reach_discard_score)
+    for action in legal_actions:
+        if action.get("type") == "dahai":
+            tile34 = tile_to_34(normalize_tile(action.get("pai", "")))
+            slot_mask = (candidate_mask > 0) & (candidate_tile_id == tile34)
+            if not np.any(slot_mask):
+                logit = -1e9
+                final = -1e9
+            else:
+                slot = int(np.where(slot_mask)[0][np.argmax(payload.discard_logits[slot_mask])])
+                risk = float(np.dot(payload.opp_tenpai_probs, candidate_feat[slot, 11:14]))
+                logit = float(payload.discard_logits[slot])
+                final = logit + 0.3 * composed_ev - 0.3 * risk
+            meta = {}
+        else:
+            special_type = _xmodel1_special_type_for_action(action)
+            slot_mask = (special_mask > 0) & (special_type_id == special_type) if special_type is not None else np.zeros_like(special_mask, dtype=bool)
+            if not np.any(slot_mask):
+                logit = -1e9
+                final = -1e9
+            else:
+                slot = int(np.where(slot_mask)[0][np.argmax(payload.special_logits[slot_mask])])
+                risk = float(np.dot(payload.opp_tenpai_probs, special_feat[slot, 14:17]))
+                logit = float(payload.special_logits[slot])
+                final = logit + 0.3 * composed_ev - 0.3 * risk
+            meta = {"xmodel1_special_type": int(special_type) if special_type is not None else None}
+            if action.get("type") == "reach" and best_reach_discard is not None:
+                meta["reach_discard"] = best_reach_discard
+        candidates.append(
+            ScoredCandidate(
+                action=action,
+                logit=logit,
+                final_score=final,
+                beam_score=final,
+                meta=meta,
+            )
+        )
+        if final > best_score:
+            best_score = final
+            chosen_action = action
+    candidates.sort(key=lambda item: item.final_score, reverse=True)
+    return DecisionResult(
+        chosen=chosen_action,
+        candidates=candidates,
+        model_value=float(model_result.value),
+        model_aux=model_result.aux,
+    )
 
 
 def _aux_bonus(
@@ -36,12 +201,14 @@ def _legal_score(
     value: float = 0.0,
     style_lambda: float = 0.0,
     aux_bonus: float = 0.0,
+    special_bonus: float = 0.0,
 ) -> float:
     idx = action_to_idx(action)
     score = float(policy_logits[NONE_IDX if idx == NONE_IDX else idx])
     if action.get("type") != "none":
         score += style_lambda * value
         score += aux_bonus
+        score += special_bonus
     return score
 
 
@@ -52,6 +219,7 @@ def _candidate_final_score(
     value: float,
     style_lambda: float,
     aux_bonus: float,
+    special_bonus_scores: dict[int, float] | None = None,
 ) -> float:
     idx = action_to_idx(action)
     if idx in beam_value_scores:
@@ -63,8 +231,102 @@ def _candidate_final_score(
             value=value,
             style_lambda=style_lambda,
             aux_bonus=aux_bonus,
+            special_bonus=(special_bonus_scores or {}).get(idx, 0.0),
         )
     )
+
+
+def _special_meta_from_summary(action: dict, summary_vec: np.ndarray) -> dict:
+    action_type = action.get("type", "")
+    meta: dict[str, object] = {
+        "special_semantics": action_type,
+        "special_summary_bias": float(summary_vec[12]),
+        "special_summary_present": float(summary_vec[13]),
+    }
+    if action_type == "reach":
+        meta.update(
+            {
+                "reach_decl_tenpai": float(summary_vec[1]),
+                "reach_decl_waits_ratio": float(summary_vec[2]),
+                "reach_decl_ukeire_live": float(summary_vec[4]),
+                "reach_decl_improvement_live": float(summary_vec[6]),
+            }
+        )
+    elif action_type == "hora":
+        meta.update(
+            {
+                "hora_tsumo": float(summary_vec[2]),
+                "hora_ron": float(summary_vec[3]),
+                "hora_rinshan": float(summary_vec[4]),
+                "hora_chankan": float(summary_vec[5]),
+                "hora_haitei": float(summary_vec[6]),
+                "hora_houtei": float(summary_vec[7]),
+            }
+        )
+    elif action_type == "ryukyoku":
+        meta.update(
+            {
+                "ryukyoku_yaochu_ratio": float(summary_vec[2]),
+                "ryukyoku_abortive_flag": float(summary_vec[3]),
+                "ryukyoku_abortive_pressure": float(summary_vec[4]),
+            }
+        )
+    return meta
+
+
+def _build_v4_special_meta(
+    adapter: KeqingModelAdapter,
+    snap: dict,
+    actor: int,
+    legal_actions: list[dict],
+) -> dict[int, dict]:
+    if getattr(adapter, "model_version", None) != "keqingv4":
+        return {}
+    try:
+        _discard_summary, _call_summary, special_summary = adapter.resolve_runtime_v4_summaries(
+            snap,
+            actor,
+            legal_actions,
+        )
+    except Exception:
+        return {}
+    out: dict[int, dict] = {}
+    for action in legal_actions:
+        action_type = action.get("type", "")
+        slot = _SPECIAL_ACTION_SLOT.get(action_type)
+        if slot is None:
+            continue
+        out[action_to_idx(action)] = _special_meta_from_summary(action, special_summary[slot])
+    return out
+
+
+def _special_action_calibration_bonus(meta: dict) -> float:
+    semantics = meta.get("special_semantics")
+    if semantics == "reach":
+        return float(
+            0.20 * meta.get("special_summary_bias", 0.0)
+            + 0.25 * meta.get("reach_decl_tenpai", 0.0)
+            + 0.30 * meta.get("reach_decl_waits_ratio", 0.0)
+            + 0.20 * meta.get("reach_decl_ukeire_live", 0.0)
+            + 0.10 * meta.get("reach_decl_improvement_live", 0.0)
+        )
+    if semantics == "hora":
+        return float(
+            0.80 * meta.get("special_summary_bias", 0.0)
+            + 0.25 * meta.get("hora_tsumo", 0.0)
+            + 0.15 * meta.get("hora_rinshan", 0.0)
+            + 0.10 * meta.get("hora_chankan", 0.0)
+            + 0.08 * meta.get("hora_haitei", 0.0)
+            + 0.08 * meta.get("hora_houtei", 0.0)
+        )
+    if semantics == "ryukyoku":
+        return float(
+            0.20 * meta.get("special_summary_bias", 0.0)
+            + 0.45 * meta.get("ryukyoku_abortive_flag", 0.0)
+            + 0.20 * meta.get("ryukyoku_yaochu_ratio", 0.0)
+            + 0.10 * meta.get("ryukyoku_abortive_pressure", 0.0)
+        )
+    return 0.0
 
 
 def _find_best_legal(
@@ -73,16 +335,19 @@ def _find_best_legal(
     value: float = 0.0,
     style_lambda: float = 0.0,
     aux_bonus: float = 0.0,
+    special_bonus_scores: dict[int, float] | None = None,
 ) -> dict:
     best_score = -1e18
     best_action = legal_actions[0]
     for a in legal_actions:
+        idx = action_to_idx(a)
         score = _legal_score(
             policy_logits,
             a,
             value=value,
             style_lambda=style_lambda,
             aux_bonus=aux_bonus,
+            special_bonus=(special_bonus_scores or {}).get(idx, 0.0),
         )
         if score > best_score:
             best_score = score
@@ -104,6 +369,11 @@ def _simulate_discard_snapshot(
     actor: int,
     pai: str,
 ) -> dict:
+    try:
+        return _rust_project_keqingv4_discard_snapshot(snap, actor, pai)
+    except Exception:
+        pass
+
     hand = list(snap.get("hand", []))
     removed = False
     new_hand = []
@@ -121,6 +391,274 @@ def _simulate_discard_snapshot(
     fake_snap["discards"] = discards
     fake_snap["tsumo_pai"] = None
     return fake_snap
+
+
+def _simulate_meld_snapshot(
+    snap: dict,
+    actor: int,
+    action: dict,
+) -> dict:
+    try:
+        projected = _rust_project_keqingv4_call_snapshot(snap, actor, action)
+        if projected is not None:
+            return projected
+    except Exception:
+        pass
+
+    meld_type = action.get("type", "")
+    consumed = list(action.get("consumed", []))
+    pai = action.get("pai", "")
+
+    fake_snap = dict(snap)
+    new_hand = list(snap.get("hand", []))
+    for c in consumed:
+        norm_c = normalize_tile(c)
+        for i, t in enumerate(new_hand):
+            if normalize_tile(t) == norm_c:
+                new_hand.pop(i)
+                break
+    fake_snap["hand"] = new_hand
+
+    melds = [list(m) for m in snap.get("melds", [[], [], [], []])]
+    melds[actor] = melds[actor] + [
+        {
+            "type": meld_type,
+            "pai": normalize_tile(pai) if pai else pai,
+            "consumed": [normalize_tile(c) for c in consumed],
+            "target": action.get("target"),
+        }
+    ]
+    fake_snap["melds"] = melds
+    fake_snap["last_discard"] = None
+    fake_snap["last_kakan"] = None
+    fake_snap["actor_to_move"] = actor
+    fake_snap["tsumo_pai"] = None
+    return fake_snap
+
+
+def _visible_counts34_from_snap(snap: dict) -> tuple[int, ...]:
+    visible = [0] * 34
+    for tile in snap.get("hand", []):
+        idx = tile_to_34(normalize_tile(tile))
+        if idx >= 0:
+            visible[idx] += 1
+    tsumo_tile = snap.get("tsumo_pai")
+    if tsumo_tile:
+        idx = tile_to_34(normalize_tile(tsumo_tile))
+        if idx >= 0:
+            visible[idx] += 1
+    for meld_group in snap.get("melds", [[], [], [], []]):
+        for meld in meld_group:
+            for tile in meld.get("consumed", []):
+                idx = tile_to_34(normalize_tile(tile))
+                if idx >= 0:
+                    visible[idx] += 1
+            pai = meld.get("pai")
+            if pai:
+                idx = tile_to_34(normalize_tile(pai))
+                if idx >= 0:
+                    visible[idx] += 1
+    for disc_group in snap.get("discards", [[], [], [], []]):
+        for discard in disc_group:
+            pai = discard.get("pai") if isinstance(discard, dict) else discard
+            if not pai:
+                continue
+            idx = tile_to_34(normalize_tile(pai))
+            if idx >= 0:
+                visible[idx] += 1
+    for marker in snap.get("dora_markers", []):
+        idx = tile_to_34(normalize_tile(marker))
+        if idx >= 0:
+            visible[idx] += 1
+    return tuple(visible)
+
+
+def _live_draw_tile_weights(snap: dict) -> list[tuple[str, int]]:
+    try:
+        return _rust_enumerate_keqingv4_live_draw_weights(snap)
+    except Exception:
+        pass
+
+    visible = _visible_counts34_from_snap(snap)
+    result: list[tuple[str, int]] = []
+    for tile34, seen in enumerate(visible):
+        live = max(0, 4 - int(seen))
+        if live > 0:
+            result.append((_TILE34_STR[tile34], live))
+    return result
+
+
+def _simulate_rinshan_draw_snapshot(
+    snap: dict,
+    actor: int,
+    pai: str,
+) -> dict:
+    try:
+        return _rust_project_keqingv4_rinshan_draw_snapshot(snap, actor, pai)
+    except Exception:
+        pass
+
+    fake_snap = dict(snap)
+    hand = list(snap.get("hand", []))
+    hand.append(pai)
+    fake_snap["hand"] = hand
+    fake_snap["tsumo_pai"] = pai
+    last_tsumo = list(snap.get("last_tsumo", [None, None, None, None]))
+    while len(last_tsumo) <= actor:
+        last_tsumo.append(None)
+    last_tsumo[actor] = normalize_tile(pai)
+    fake_snap["last_tsumo"] = last_tsumo
+    last_tsumo_raw = list(snap.get("last_tsumo_raw", [None, None, None, None]))
+    while len(last_tsumo_raw) <= actor:
+        last_tsumo_raw.append(None)
+    last_tsumo_raw[actor] = pai
+    fake_snap["last_tsumo_raw"] = last_tsumo_raw
+    fake_snap["actor_to_move"] = actor
+    fake_snap["last_discard"] = None
+    fake_snap["last_kakan"] = None
+    return fake_snap
+
+
+def _post_meld_discard_actions(
+    snap: dict,
+    actor: int,
+) -> list[dict]:
+    try:
+        return _rust_enumerate_keqingv4_post_meld_discards(snap, actor)
+    except Exception:
+        pass
+
+    seen: set[str] = set()
+    actions: list[dict] = []
+    for tile in snap.get("hand", []):
+        key = normalize_tile(tile)
+        if key in seen:
+            continue
+        seen.add(key)
+        actions.append(
+            {
+                "type": "dahai",
+                "actor": actor,
+                "pai": tile,
+                "tsumogiri": False,
+            }
+        )
+    return actions
+
+
+def _best_post_meld_discard_score(
+    adapter: KeqingModelAdapter,
+    snap: dict,
+    actor: int,
+    *,
+    score_delta_lambda: float,
+    win_prob_lambda: float,
+    dealin_prob_lambda: float,
+) -> tuple[dict | None, float]:
+    discard_actions = _post_meld_discard_actions(snap, actor)
+    if not discard_actions:
+        return None, -1e18
+
+    result = adapter.forward(snap, actor)
+    cont_logits = np.asarray(result.policy_logits, dtype=np.float32)
+    mask = np.array(build_legal_mask(discard_actions), dtype=np.float32)
+    cont_logits = np.where(mask > 0, cont_logits, -1e9)
+    cont_aux_bonus = _aux_bonus(
+        result.aux,
+        score_delta_lambda,
+        win_prob_lambda,
+        dealin_prob_lambda,
+    )
+    best_discard = _find_best_legal(
+        cont_logits,
+        discard_actions,
+        value=float(result.value),
+        style_lambda=0.0,
+        aux_bonus=cont_aux_bonus,
+    )
+    best_score = _legal_score(
+        cont_logits,
+        best_discard,
+        value=float(result.value),
+        style_lambda=0.0,
+        aux_bonus=cont_aux_bonus,
+    )
+    return best_discard, best_score
+
+
+def _best_post_draw_action_score(
+    adapter: KeqingModelAdapter,
+    snap: dict,
+    actor: int,
+    *,
+    score_delta_lambda: float,
+    win_prob_lambda: float,
+    dealin_prob_lambda: float,
+) -> float:
+    try:
+        legal_actions = _rust_enumerate_legal_action_specs_structural(snap, actor)
+    except Exception:
+        legal_actions = [
+            action.to_mjai() if hasattr(action, "to_mjai") else dict(action)
+            for action in enumerate_legal_actions(snap, actor)
+        ]
+    if not legal_actions:
+        return -1e18
+
+    result = adapter.forward(snap, actor)
+    cont_logits = np.asarray(result.policy_logits, dtype=np.float32)
+    mask = np.array(build_legal_mask(legal_actions), dtype=np.float32)
+    cont_logits = np.where(mask > 0, cont_logits, -1e9)
+    cont_aux_bonus = _aux_bonus(
+        result.aux,
+        score_delta_lambda,
+        win_prob_lambda,
+        dealin_prob_lambda,
+    )
+    best_action = _find_best_legal(
+        cont_logits,
+        legal_actions,
+        value=float(result.value),
+        style_lambda=0.0,
+        aux_bonus=cont_aux_bonus,
+    )
+    return _legal_score(
+        cont_logits,
+        best_action,
+        value=float(result.value),
+        style_lambda=0.0,
+        aux_bonus=cont_aux_bonus,
+    )
+
+
+def _weighted_rinshan_followup_score(
+    adapter: KeqingModelAdapter,
+    snap: dict,
+    actor: int,
+    *,
+    beam_lambda: float,
+    score_delta_lambda: float,
+    win_prob_lambda: float,
+    dealin_prob_lambda: float,
+) -> float:
+    total_weight = 0.0
+    total_score = 0.0
+    for draw_tile, weight in _live_draw_tile_weights(snap):
+        draw_snap = _simulate_rinshan_draw_snapshot(snap, actor, draw_tile)
+        followup_score = _best_post_draw_action_score(
+            adapter,
+            draw_snap,
+            actor,
+            score_delta_lambda=score_delta_lambda,
+            win_prob_lambda=win_prob_lambda,
+            dealin_prob_lambda=dealin_prob_lambda,
+        )
+        total_score += float(weight) * followup_score
+        total_weight += float(weight)
+    if total_weight <= 0.0:
+        value, aux = _eval_snapshot_outputs(adapter, snap, actor)
+        return beam_lambda * value + _aux_bonus(aux, score_delta_lambda, win_prob_lambda, dealin_prob_lambda)
+    return total_score / total_weight
 
 
 def _dahai_beam_search(
@@ -193,35 +731,36 @@ def _meld_value_eval(
 
     for a in meld_actions:
         meld_type = a.get("type", "")
-        consumed = a.get("consumed", [])
-        pai = a.get("pai", "")
+        fake_snap = _simulate_meld_snapshot(snap, actor, a)
 
-        fake_snap = dict(snap)
-        new_hand = list(snap.get("hand", []))
-        for c in consumed:
-            norm_c = normalize_tile(c)
-            for i, t in enumerate(new_hand):
-                if normalize_tile(t) == norm_c:
-                    new_hand.pop(i)
-                    break
-        fake_snap["hand"] = new_hand
-
-        melds = [list(m) for m in snap.get("melds", [[], [], [], []])]
-        melds[actor] = melds[actor] + [
-            {
-                "type": meld_type,
-                "pai": normalize_tile(pai),
-                "consumed": [normalize_tile(c) for c in consumed],
-            }
-        ]
-        fake_snap["melds"] = melds
-
-        value, aux = _eval_snapshot_outputs(adapter, fake_snap, actor)
-        score = (
-            float(policy_logits[action_to_idx(a)])
-            + beam_lambda * value
-            + _aux_bonus(aux, score_delta_lambda, win_prob_lambda, dealin_prob_lambda)
-        )
+        if meld_type in {"chi", "pon"}:
+            _best_discard, followup_score = _best_post_meld_discard_score(
+                adapter,
+                fake_snap,
+                actor,
+                score_delta_lambda=score_delta_lambda,
+                win_prob_lambda=win_prob_lambda,
+                dealin_prob_lambda=dealin_prob_lambda,
+            )
+            score = float(policy_logits[action_to_idx(a)]) + followup_score
+        elif meld_type in {"daiminkan", "ankan", "kakan"}:
+            followup_score = _weighted_rinshan_followup_score(
+                adapter,
+                fake_snap,
+                actor,
+                beam_lambda=beam_lambda,
+                score_delta_lambda=score_delta_lambda,
+                win_prob_lambda=win_prob_lambda,
+                dealin_prob_lambda=dealin_prob_lambda,
+            )
+            score = float(policy_logits[action_to_idx(a)]) + followup_score
+        else:
+            value, aux = _eval_snapshot_outputs(adapter, fake_snap, actor)
+            score = (
+                float(policy_logits[action_to_idx(a)])
+                + beam_lambda * value
+                + _aux_bonus(aux, score_delta_lambda, win_prob_lambda, dealin_prob_lambda)
+            )
         value_scores[action_to_idx(a)] = score
         if score > best_score:
             best_score = score
@@ -241,6 +780,7 @@ def _reach_value_eval(
     score_delta_lambda: float,
     win_prob_lambda: float,
     dealin_prob_lambda: float,
+    special_bonus_scores: dict[int, float] | None = None,
 ) -> tuple[dict, dict[int, float], dict[int, dict]]:
     reach_idx = action_to_idx(reach_action)
     hand = Counter(snap.get("hand", []))
@@ -248,7 +788,10 @@ def _reach_value_eval(
     last_tsumo_raw_all = list(snap.get("last_tsumo_raw", [None, None, None, None]))
     last_tsumo = last_tsumo_all[actor] if actor < len(last_tsumo_all) else None
     last_tsumo_raw = last_tsumo_raw_all[actor] if actor < len(last_tsumo_raw_all) else None
-    reach_discards = _reach_discard_candidates(hand, last_tsumo, last_tsumo_raw)
+    try:
+        reach_discards = _rust_enumerate_keqingv4_reach_discards(snap, actor)
+    except Exception:
+        reach_discards = _reach_discard_candidates(hand, last_tsumo, last_tsumo_raw)
 
     best_decl_action: dict | None = None
     best_reach_score = -1e18
@@ -259,15 +802,18 @@ def _reach_value_eval(
             "pai": pai_out,
             "tsumogiri": tsumogiri,
         }
-        fake_snap = _simulate_discard_snapshot(snap, actor, pai_out)
-        reached = list(snap.get("reached", [False, False, False, False]))
-        if actor < len(reached):
-            reached[actor] = True
-        fake_snap["reached"] = reached
-        pending_reach = list(snap.get("pending_reach", [False, False, False, False]))
-        if actor < len(pending_reach):
-            pending_reach[actor] = False
-        fake_snap["pending_reach"] = pending_reach
+        try:
+            fake_snap = _rust_project_keqingv4_reach_snapshot(snap, actor, pai_out)
+        except Exception:
+            fake_snap = _simulate_discard_snapshot(snap, actor, pai_out)
+            reached = list(snap.get("reached", [False, False, False, False]))
+            if actor < len(reached):
+                reached[actor] = True
+            fake_snap["reached"] = reached
+            pending_reach = list(snap.get("pending_reach", [False, False, False, False]))
+            if actor < len(pending_reach):
+                pending_reach[actor] = False
+            fake_snap["pending_reach"] = pending_reach
 
         value, aux = _eval_snapshot_outputs(adapter, fake_snap, actor)
         decl_idx = action_to_idx(decl_action)
@@ -276,6 +822,7 @@ def _reach_value_eval(
             + float(policy_logits[decl_idx])
             + beam_lambda * value
             + _aux_bonus(aux, score_delta_lambda, win_prob_lambda, dealin_prob_lambda)
+            + (special_bonus_scores or {}).get(reach_idx, 0.0)
         )
         if score > best_reach_score:
             best_reach_score = score
@@ -292,6 +839,7 @@ def _reach_value_eval(
             float(policy_logits[reach_idx])
             + beam_lambda * reach_value
             + _aux_bonus(reach_aux, score_delta_lambda, win_prob_lambda, dealin_prob_lambda)
+            + (special_bonus_scores or {}).get(reach_idx, 0.0)
         )
 
     value_scores: dict[int, float] = {reach_idx: best_reach_score}
@@ -302,8 +850,9 @@ def _reach_value_eval(
     best_score = best_reach_score
     best_action = reach_action
     for a in other_actions:
-        s = float(policy_logits[action_to_idx(a)])
-        value_scores[action_to_idx(a)] = s
+        idx = action_to_idx(a)
+        s = float(policy_logits[idx]) + (special_bonus_scores or {}).get(idx, 0.0)
+        value_scores[idx] = s
         if s > best_score:
             best_score = s
             best_action = a
@@ -327,6 +876,7 @@ class DefaultActionScorer:
         score_delta_lambda: float,
         win_prob_lambda: float,
         dealin_prob_lambda: float,
+        special_calibration_scale: float = 1.0,
     ):
         self.adapter = adapter
         self.beam_k = beam_k
@@ -335,11 +885,14 @@ class DefaultActionScorer:
         self.score_delta_lambda = score_delta_lambda
         self.win_prob_lambda = win_prob_lambda
         self.dealin_prob_lambda = dealin_prob_lambda
+        self.special_calibration_scale = special_calibration_scale
 
     def score(self, ctx: DecisionContext) -> DecisionResult:
         model_snap = dict(ctx.model_snap)
         model_snap["legal_actions"] = ctx.legal_actions
         model_result = self.adapter.forward(model_snap, ctx.actor)
+        if model_result.xmodel1 is not None:
+            return _score_xmodel1_candidates(self.adapter, ctx, model_result)
         logits_np = np.asarray(model_result.policy_logits, dtype=np.float32)
         value_scalar = float(model_result.value)
         aux_bonus = _aux_bonus(
@@ -364,6 +917,11 @@ class DefaultActionScorer:
 
         beam_value_scores: dict[int, float] = {}
         beam_meta: dict[int, dict] = {}
+        special_meta = _build_v4_special_meta(self.adapter, ctx.model_snap, ctx.actor, legal_dicts)
+        special_bonus_scores = {
+            idx: self.special_calibration_scale * _special_action_calibration_bonus(meta)
+            for idx, meta in special_meta.items()
+        }
         if self.beam_k > 0 and legal_meld:
             non_meld = [
                 a
@@ -389,10 +947,26 @@ class DefaultActionScorer:
                     value=value_scalar,
                     style_lambda=self.style_lambda,
                     aux_bonus=aux_bonus,
+                    special_bonus_scores=special_bonus_scores,
                 )
-                if _legal_score(logits_np, fallback, value_scalar, self.style_lambda, aux_bonus) > _legal_score(
-                    logits_np, chosen, value_scalar, self.style_lambda, aux_bonus
-                ):
+                chosen_score = _candidate_final_score(
+                    logits_np,
+                    chosen,
+                    beam_value_scores,
+                    value_scalar,
+                    self.style_lambda,
+                    aux_bonus,
+                    special_bonus_scores,
+                )
+                fallback_score = _legal_score(
+                    logits_np,
+                    fallback,
+                    value_scalar,
+                    self.style_lambda,
+                    aux_bonus,
+                    special_bonus=special_bonus_scores.get(action_to_idx(fallback), 0.0),
+                )
+                if fallback_score > chosen_score:
                     chosen = fallback
         elif self.beam_k > 0 and legal_reach:
             non_reach = [a for a in legal_dicts if a.get("type") != "reach"]
@@ -407,6 +981,7 @@ class DefaultActionScorer:
                 score_delta_lambda=self.score_delta_lambda,
                 win_prob_lambda=self.win_prob_lambda,
                 dealin_prob_lambda=self.dealin_prob_lambda,
+                special_bonus_scores=special_bonus_scores,
             )
         elif self.beam_k > 0 and len(legal_dahai) > 1:
             chosen, beam_value_scores = _dahai_beam_search(
@@ -428,6 +1003,7 @@ class DefaultActionScorer:
                 value=value_scalar,
                 style_lambda=self.style_lambda,
                 aux_bonus=aux_bonus,
+                special_bonus_scores=special_bonus_scores,
             )
 
         candidates = sorted(
@@ -442,13 +1018,17 @@ class DefaultActionScorer:
                         value_scalar,
                         self.style_lambda,
                         aux_bonus,
+                        special_bonus_scores,
                     ),
                     beam_score=(
                         float(beam_value_scores[action_to_idx(a)])
                         if action_to_idx(a) in beam_value_scores
                         else None
                     ),
-                    meta=beam_meta.get(action_to_idx(a), {}),
+                    meta={
+                        **special_meta.get(action_to_idx(a), {}),
+                        **beam_meta.get(action_to_idx(a), {}),
+                    },
                 )
                 for a in legal_dicts
             ],

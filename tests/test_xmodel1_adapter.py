@@ -12,7 +12,7 @@ from xmodel1.model import Xmodel1Model
 
 def _write_fixture(path: Path, n: int = 2) -> None:
     k = 14
-    d = 21
+    d = 35
     f = 10
     candidate_mask = np.zeros((n, k), dtype=np.uint8)
     candidate_mask[:, :3] = 1
@@ -54,7 +54,7 @@ def test_xmodel1_adapter_scores_batch_and_returns_review_row(tmp_path: Path):
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=64,
-        candidate_feature_dim=21,
+        candidate_feature_dim=35,
         candidate_flag_dim=10,
         hidden_dim=32,
         num_res_blocks=1,
@@ -64,4 +64,8 @@ def test_xmodel1_adapter_scores_batch_and_returns_review_row(tmp_path: Path):
     review = adapter.scored_row_to_review(scored, 0, k=2)
     assert len(review.top_k) == 2
     assert review.chosen_action.startswith("dahai:")
-
+    assert 0.0 <= review.win_prob <= 1.0
+    assert 0.0 <= review.dealin_prob <= 1.0
+    assert isinstance(review.pts_given_win, float)
+    assert isinstance(review.pts_given_dealin, float)
+    assert isinstance(review.composed_ev, float)

@@ -42,6 +42,8 @@ def test_finalize_aux_targets_hora_round():
     assert pending[0].sample.win_target == 0.0
     assert pending[0].sample.dealin_target == 0.0
     assert pending[1].sample.score_delta_target == 7700 / 30000.0
+    assert pending[1].sample.pts_given_win_target == 7700 / 30000.0
+    assert pending[2].sample.pts_given_dealin_target == 7700 / 30000.0
 
 
 def test_finalize_aux_targets_no_terminal():
@@ -53,6 +55,8 @@ def test_finalize_aux_targets_no_terminal():
         assert p.sample.score_delta_target == 0.0
         assert p.sample.win_target == 0.0
         assert p.sample.dealin_target == 0.0
+        assert p.sample.pts_given_win_target == 0.0
+        assert p.sample.pts_given_dealin_target == 0.0
         assert p.sample.ryukyoku_tenpai_target == 0.0
 
 

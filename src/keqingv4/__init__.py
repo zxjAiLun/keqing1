@@ -1,4 +1,6 @@
-"""Fresh keqingv4 architecture slot.
+"""keqingv4 package."""
 
-Reserved for the next-generation redesign after keqingv3.1.
-"""
+from keqingv4.cached_dataset import CachedMjaiDatasetV4
+from keqingv4.model import KeqingV4Model
+
+__all__ = ["KeqingV4Model", "CachedMjaiDatasetV4"]

@@ -2,20 +2,37 @@
 //!
 //! This module provides Python bindings for the keqing_core Rust library.
 
-use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList};
 
 use crate::counts::TILE_COUNT;
+use crate::event_apply::replay_state_snapshot;
+use crate::keqingv4_export::build_keqingv4_cached_records_with_options;
+use crate::keqingv4_summary::{
+    build_keqingv4_call_summary, build_keqingv4_discard_summary, build_keqingv4_special_summary,
+    enumerate_keqingv4_live_draw_weights, enumerate_keqingv4_post_meld_discards,
+    enumerate_keqingv4_reach_discards, project_keqingv4_call_snapshot,
+    project_keqingv4_discard_snapshot, project_keqingv4_reach_snapshot,
+    project_keqingv4_rinshan_draw_snapshot,
+};
+use crate::legal_actions::{
+    can_hora_shape_from_snapshot, enumerate_hora_candidates,
+    enumerate_legal_action_specs_structural, prepare_hora_evaluation_from_snapshot,
+};
+use crate::native_scoring::evaluate_hora_from_prepared;
+use crate::progress_batch::{
+    summarize_3n2_candidates_py_impl, summarize_best_3n2_candidate_py_impl,
+};
 use crate::progress_delta::{calc_discard_deltas, calc_draw_deltas, calc_required_tiles};
-use crate::progress_batch::{summarize_3n2_candidates_py_impl, summarize_best_3n2_candidate_py_impl};
 use crate::progress_summary::summarize_3n1;
+use crate::score_rules::{
+    build_hora_result_payload, compute_hora_deltas, prepare_hora_tile_allocation,
+};
 use crate::scoring_pool::build_136_pool_entries;
 use crate::shanten_table::{calc_shanten_all, calc_shanten_normal, ensure_init};
 use crate::standard::counts34_to_ids;
-use crate::xmodel1_export::{
-    build_xmodel1_discard_records, validate_xmodel1_discard_record, xmodel1_schema_info,
-};
+use crate::xmodel1_export::{validate_xmodel1_discard_record, xmodel1_schema_info};
 use crate::xmodel1_schema::{
     XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM, XMODEL1_MAX_CANDIDATES,
     XMODEL1_SCHEMA_NAME, XMODEL1_SCHEMA_VERSION,
@@ -24,14 +41,14 @@ use crate::xmodel1_schema::{
 #[pyfunction]
 fn counts34_to_ids_py(counts34: &Bound<'_, PyList>) -> PyResult<Vec<u16>> {
     let mut counts = [0i32; TILE_COUNT];
-    
+
     for (i, item) in counts34.iter().enumerate() {
         if i >= TILE_COUNT {
             break;
         }
         counts[i] = item.extract::<i32>()?;
     }
-    
+
     Ok(counts34_to_ids(&counts))
 }
 
@@ -61,7 +78,10 @@ fn calc_shanten_all_py(counts34: &Bound<'_, PyList>, len_div3: u8) -> PyResult<i
 }
 
 #[pyfunction]
-fn standard_shanten_many_py(_py: Python<'_>, counts_list: &Bound<'_, PyList>) -> PyResult<Vec<i32>> {
+fn standard_shanten_many_py(
+    _py: Python<'_>,
+    counts_list: &Bound<'_, PyList>,
+) -> PyResult<Vec<i32>> {
     let mut out = Vec::with_capacity(counts_list.len());
     ensure_init();
 
@@ -161,15 +181,201 @@ fn summarize_best_3n2_candidate_py(
 }
 
 #[pyfunction]
+#[pyo3(signature = (data_dirs, output_dir, smoke, limit_files=None, progress_every=None, jobs=None, resume=None))]
 fn build_xmodel1_discard_records_py(
     data_dirs: Vec<String>,
     output_dir: String,
     smoke: bool,
+    limit_files: Option<usize>,
+    progress_every: Option<usize>,
+    jobs: Option<usize>,
+    resume: Option<bool>,
 ) -> PyResult<(usize, String, bool)> {
-    match build_xmodel1_discard_records(&data_dirs, &output_dir, smoke) {
+    match crate::xmodel1_export::build_xmodel1_discard_records_with_options(
+        &data_dirs,
+        &output_dir,
+        crate::xmodel1_export::ExportRunOptions {
+            smoke,
+            resume: resume.unwrap_or(true),
+            progress_every: progress_every.unwrap_or(0),
+            jobs: jobs.unwrap_or(0),
+            limit_files: limit_files.unwrap_or(0),
+        },
+    ) {
         Ok((count, manifest_path, produced_npz)) => Ok((count, manifest_path, produced_npz)),
         Err(msg) => Err(PyRuntimeError::new_err(msg)),
     }
+}
+
+#[pyfunction]
+fn build_keqingv4_cached_records_py(
+    data_dirs: Vec<String>,
+    output_dir: String,
+    smoke: bool,
+) -> PyResult<(usize, String, bool)> {
+    let options = crate::xmodel1_export::ExportRunOptions {
+        smoke,
+        resume: false,
+        progress_every: 0,
+        jobs: 1,
+        limit_files: 0,
+    };
+    match build_keqingv4_cached_records_with_options(&data_dirs, &output_dir, options) {
+        Ok((count, manifest_path, produced_npz)) => Ok((count, manifest_path, produced_npz)),
+        Err(msg) => Err(PyRuntimeError::new_err(msg)),
+    }
+}
+
+#[pyfunction]
+fn build_keqingv4_discard_summary_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    legal_actions_json: &str,
+) -> PyResult<Vec<f32>> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let legal_actions: Vec<serde_json::Value> = serde_json::from_str(legal_actions_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    Ok(build_keqingv4_discard_summary(
+        &snapshot,
+        actor,
+        &legal_actions,
+    ))
+}
+
+#[pyfunction]
+fn build_keqingv4_call_summary_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    legal_actions_json: &str,
+) -> PyResult<Vec<f32>> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let legal_actions: Vec<serde_json::Value> = serde_json::from_str(legal_actions_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    Ok(build_keqingv4_call_summary(
+        &snapshot,
+        actor,
+        &legal_actions,
+    ))
+}
+
+#[pyfunction]
+fn build_keqingv4_special_summary_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    legal_actions_json: &str,
+) -> PyResult<Vec<f32>> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let legal_actions: Vec<serde_json::Value> = serde_json::from_str(legal_actions_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    Ok(build_keqingv4_special_summary(
+        &snapshot,
+        actor,
+        &legal_actions,
+    ))
+}
+
+#[pyfunction]
+fn build_keqingv4_typed_summaries_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    legal_actions_json: &str,
+) -> PyResult<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let legal_actions: Vec<serde_json::Value> = serde_json::from_str(legal_actions_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    Ok((
+        build_keqingv4_discard_summary(&snapshot, actor, &legal_actions),
+        build_keqingv4_call_summary(&snapshot, actor, &legal_actions),
+        build_keqingv4_special_summary(&snapshot, actor, &legal_actions),
+    ))
+}
+
+#[pyfunction]
+fn project_keqingv4_call_snapshot_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    action_json: &str,
+) -> PyResult<Option<String>> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let action: serde_json::Value = serde_json::from_str(action_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    match project_keqingv4_call_snapshot(&snapshot, actor, &action) {
+        Some(projected) => serde_json::to_string(&projected)
+            .map(Some)
+            .map_err(|err| PyRuntimeError::new_err(err.to_string())),
+        None => Ok(None),
+    }
+}
+
+#[pyfunction]
+fn project_keqingv4_discard_snapshot_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    pai: &str,
+) -> PyResult<String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let projected = project_keqingv4_discard_snapshot(&snapshot, actor, pai);
+    serde_json::to_string(&projected).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn project_keqingv4_rinshan_draw_snapshot_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    pai: &str,
+) -> PyResult<String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let projected = project_keqingv4_rinshan_draw_snapshot(&snapshot, actor, pai);
+    serde_json::to_string(&projected).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn enumerate_keqingv4_post_meld_discards_json_py(
+    snapshot_json: &str,
+    actor: usize,
+) -> PyResult<String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let actions = enumerate_keqingv4_post_meld_discards(&snapshot, actor);
+    serde_json::to_string(&actions).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn enumerate_keqingv4_live_draw_weights_json_py(snapshot_json: &str) -> PyResult<String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let weights = enumerate_keqingv4_live_draw_weights(&snapshot);
+    serde_json::to_string(&weights).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn enumerate_keqingv4_reach_discards_json_py(
+    snapshot_json: &str,
+    actor: usize,
+) -> PyResult<String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let actions = enumerate_keqingv4_reach_discards(&snapshot, actor);
+    serde_json::to_string(&actions).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn project_keqingv4_reach_snapshot_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    pai: &str,
+) -> PyResult<String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let projected = project_keqingv4_reach_snapshot(&snapshot, actor, pai);
+    serde_json::to_string(&projected).map_err(|err| PyRuntimeError::new_err(err.to_string()))
 }
 
 #[pyfunction]
@@ -195,6 +401,134 @@ fn validate_xmodel1_discard_record_py(
     Ok(true)
 }
 
+#[pyfunction]
+fn replay_state_snapshot_json_py(events_json: &str, actor: usize) -> PyResult<String> {
+    let events: Vec<serde_json::Value> = serde_json::from_str(events_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    replay_state_snapshot(&events, actor).map_err(PyRuntimeError::new_err)
+}
+
+#[pyfunction]
+fn enumerate_legal_action_specs_structural_json_py(
+    snapshot_json: &str,
+    actor: usize,
+) -> PyResult<String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let actions = enumerate_legal_action_specs_structural(&snapshot, actor)
+        .map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&actions).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn enumerate_hora_candidates_json_py(snapshot_json: &str, actor: usize) -> PyResult<String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let actions = enumerate_hora_candidates(&snapshot, actor).map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&actions).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn can_hora_shape_from_snapshot_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    pai: &str,
+    is_tsumo: bool,
+) -> PyResult<bool> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    can_hora_shape_from_snapshot(&snapshot, actor, pai, is_tsumo).map_err(PyRuntimeError::new_err)
+}
+
+#[pyfunction]
+#[pyo3(signature = (snapshot_json, actor, pai, is_tsumo, is_chankan, is_rinshan=None, is_haitei=None, is_houtei=None))]
+fn prepare_hora_evaluation_from_snapshot_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    pai: &str,
+    is_tsumo: bool,
+    is_chankan: bool,
+    is_rinshan: Option<bool>,
+    is_haitei: Option<bool>,
+    is_houtei: Option<bool>,
+) -> PyResult<String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let payload = prepare_hora_evaluation_from_snapshot(
+        &snapshot, actor, pai, is_tsumo, is_chankan, is_rinshan, is_haitei, is_houtei,
+    )
+    .map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&payload).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn compute_hora_deltas_json_py(
+    oya: usize,
+    actor: usize,
+    target: usize,
+    is_tsumo: bool,
+    cost_json: &str,
+) -> PyResult<String> {
+    let cost: serde_json::Value = serde_json::from_str(cost_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let deltas = compute_hora_deltas(oya, actor, target, is_tsumo, &cost)
+        .map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&deltas).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn prepare_hora_tile_allocation_json_py(prepared_json: &str) -> PyResult<String> {
+    let prepared: serde_json::Value = serde_json::from_str(prepared_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let payload = prepare_hora_tile_allocation(&prepared).map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&payload).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn build_hora_result_payload_json_py(
+    han: i32,
+    fu: i32,
+    is_open_hand: bool,
+    yaku_names_json: &str,
+    base_yaku_details_json: &str,
+    dora_count: i32,
+    ura_count: i32,
+    aka_count: i32,
+    cost_json: &str,
+    deltas_json: &str,
+) -> PyResult<String> {
+    let yaku_names: Vec<String> = serde_json::from_str(yaku_names_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let base_yaku_details: serde_json::Value = serde_json::from_str(base_yaku_details_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let cost: serde_json::Value = serde_json::from_str(cost_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let deltas: Vec<i32> = serde_json::from_str(deltas_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let payload = build_hora_result_payload(
+        han,
+        fu,
+        is_open_hand,
+        &yaku_names,
+        &base_yaku_details,
+        dora_count,
+        ura_count,
+        aka_count,
+        &cost,
+        &deltas,
+    )
+    .map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&payload).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn evaluate_hora_from_prepared_json_py(prepared_json: &str) -> PyResult<String> {
+    let prepared: serde_json::Value = serde_json::from_str(prepared_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let payload = evaluate_hora_from_prepared(&prepared).map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&payload).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
 #[pymodule]
 pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     ensure_init();
@@ -210,13 +544,61 @@ pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(summarize_3n2_candidates_py, m)?)?;
     m.add_function(wrap_pyfunction!(summarize_best_3n2_candidate_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_xmodel1_discard_records_py, m)?)?;
+    m.add_function(wrap_pyfunction!(build_keqingv4_cached_records_py, m)?)?;
+    m.add_function(wrap_pyfunction!(build_keqingv4_discard_summary_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(build_keqingv4_call_summary_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(build_keqingv4_special_summary_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(build_keqingv4_typed_summaries_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(project_keqingv4_call_snapshot_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        project_keqingv4_discard_snapshot_json_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        project_keqingv4_rinshan_draw_snapshot_json_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        enumerate_keqingv4_post_meld_discards_json_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        enumerate_keqingv4_live_draw_weights_json_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        enumerate_keqingv4_reach_discards_json_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        project_keqingv4_reach_snapshot_json_py,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(xmodel1_schema_info_py, m)?)?;
     m.add_function(wrap_pyfunction!(validate_xmodel1_discard_record_py, m)?)?;
+    m.add_function(wrap_pyfunction!(replay_state_snapshot_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        enumerate_legal_action_specs_structural_json_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(enumerate_hora_candidates_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(can_hora_shape_from_snapshot_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        prepare_hora_evaluation_from_snapshot_json_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(compute_hora_deltas_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(prepare_hora_tile_allocation_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(build_hora_result_payload_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(evaluate_hora_from_prepared_json_py, m)?)?;
     m.add("TILE_COUNT", TILE_COUNT)?;
     m.add("XMODEL1_SCHEMA_NAME", XMODEL1_SCHEMA_NAME)?;
     m.add("XMODEL1_SCHEMA_VERSION", XMODEL1_SCHEMA_VERSION)?;
     m.add("XMODEL1_MAX_CANDIDATES", XMODEL1_MAX_CANDIDATES)?;
-    m.add("XMODEL1_CANDIDATE_FEATURE_DIM", XMODEL1_CANDIDATE_FEATURE_DIM)?;
+    m.add(
+        "XMODEL1_CANDIDATE_FEATURE_DIM",
+        XMODEL1_CANDIDATE_FEATURE_DIM,
+    )?;
     m.add("XMODEL1_CANDIDATE_FLAG_DIM", XMODEL1_CANDIDATE_FLAG_DIM)?;
     Ok(())
 }

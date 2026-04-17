@@ -54,10 +54,11 @@ def main() -> None:
                 chosen_action=review.chosen_action,
                 top_k=review.top_k,
                 note=(
-                    f"score_delta={review.score_delta:.4f} "
                     f"win_prob={review.win_prob:.4f} "
                     f"dealin_prob={review.dealin_prob:.4f} "
-                    f"offense_quality={review.offense_quality:.4f}"
+                    f"pts_given_win={review.pts_given_win:.4f} "
+                    f"pts_given_dealin={review.pts_given_dealin:.4f} "
+                    f"composed_ev={review.composed_ev:.4f}"
                 ),
             )
         )

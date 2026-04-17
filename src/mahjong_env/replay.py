@@ -4,7 +4,7 @@ import copy
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol, Sequence, Set
+from typing import Dict, List, Optional, Protocol, Sequence, Set, Tuple
 
 from mahjong.shanten import Shanten
 from keqingv3.progress_oracle import (
@@ -177,6 +177,77 @@ def _calc_shanten_waits(hand: List[str], melds: List[dict]):
         return 8, 0, [False] * 34, tehai_count
 
 
+def _expand_hand_counter(counter) -> List[str]:
+    """把 PlayerState.hand (Counter) 展开成 list[tile_str] 供 _calc_shanten_waits 使用。"""
+    hand_list: List[str] = []
+    for tile, cnt in sorted(counter.items()):
+        hand_list.extend([tile] * int(cnt))
+    return hand_list
+
+
+def _compute_opp_tenpai_target(
+    sample_state: "GameState",
+    actor: int,
+) -> Tuple[float, float, float]:
+    """在决策时刻从上帝视角计算 3 个对手的 tenpai 状态。
+
+    顺序相对 actor:(actor+1)%4, (actor+2)%4, (actor+3)%4。
+    这是 xmodel1 opp_tenpai_head 的 BCE 监督标签。
+
+    实现:用 `keqing_core.calc_shanten_all`(Rust shanten 表)对对手 counts34 做判断,
+    shanten ≤ 0 视为 tenpai。这样和 Rust preprocess (`xmodel1_export.rs` 中同名逻辑)
+    使用**同一个 shanten source of truth**,保证 Python/Rust 两端导出的标签逐元素一致。
+
+    之前用 `_calc_shanten_waits` 的 Python 递归版本,在 degenerate fixture
+    (例如全 13 张同一种 tile) 下会和 Rust 表产生分歧;对合法牌局无差异,但会污染
+    parity 测试。改用 Rust 后该问题消失。
+
+    如果 Rust 扩展不可用或调用异常,退化为 shanten=8(非 tenpai),安全兜底。
+    """
+    try:
+        from keqing_core import calc_shanten_all as _rust_calc_shanten_all
+    except ImportError:  # pragma: no cover - Rust 扩展缺失时兜底
+        _rust_calc_shanten_all = None
+
+    result: List[float] = []
+    for rel in (1, 2, 3):
+        opp_idx = (actor + rel) % 4
+        if opp_idx < 0 or opp_idx >= len(sample_state.players):
+            result.append(0.0)
+            continue
+        player = sample_state.players[opp_idx]
+        hand_list = _expand_hand_counter(player.hand)
+        melds_opp = list(player.melds)
+        if not hand_list and not melds_opp:
+            result.append(0.0)
+            continue
+
+        counts34 = _hand_tile34_counts(hand_list)
+        # 与 Rust tracker (`apply_hand_count_delta` 的 clamp(0,4)) 对齐:
+        # 实战数据一张 tile 最多 4 张,但测试 fixture 可能造出 >4 张同牌的
+        # degenerate 状态。Rust preprocess 对这类状态会 clamp,如果 Python
+        # 不 clamp,Rust/Python 两端算出的 shanten 就会分叉,破坏 parity。
+        counts34 = [min(c, 4) for c in counts34]
+        tile_sum = sum(counts34)
+        if tile_sum == 0:
+            result.append(0.0)
+            continue
+
+        shanten_opp: int
+        if _rust_calc_shanten_all is not None:
+            try:
+                shanten_opp = int(_rust_calc_shanten_all(list(counts34)))
+            except Exception:
+                shanten_opp = 8
+        else:  # pragma: no cover - 依赖 riichienv 的 fallback 路径
+            try:
+                shanten_opp, *_ = _calc_shanten_waits(hand_list, melds_opp)
+            except Exception:
+                shanten_opp = 8
+        result.append(1.0 if shanten_opp is not None and shanten_opp <= 0 else 0.0)
+    return (result[0], result[1], result[2])
+
+
 def _meld_tile34_counts(melds: List[dict]) -> List[int]:
     counts = [0] * 34
     for meld in melds:
@@ -304,7 +375,17 @@ class ReplaySample:
     score_delta_target: float = 0.0
     win_target: float = 0.0
     dealin_target: float = 0.0
+    pts_given_win_target: float = 0.0
+    pts_given_dealin_target: float = 0.0
     ryukyoku_tenpai_target: float = 0.0
+    # 决策时刻 3 个对手的 tenpai 状态 (相对 actor,顺序为下家/对家/上家 = (actor+1)%4, (actor+2)%4, (actor+3)%4)。
+    # 作为 xmodel1 opp_tenpai_head 的 BCE 监督标签,1.0 表示该对手当前向听 ≤ 0。
+    # Stage 2 Python 原型:这个字段由 build_supervised_samples 在样本产出时通过 _calc_shanten_waits
+    # 对上帝视角下的对手手牌直接计算;Stage 2 Rust 迁移后改由 Rust preprocess emit。
+    opp_tenpai_target: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # 触发该监督样本的原始 replay 事件索引。xmodel1 preprocess 构造 event_history
+    # 时必须使用真实事件位置，而不是样本序号。
+    event_index: int = 0
 
 
 class IllegalLabelActionError(ValueError):
@@ -359,6 +440,16 @@ def _finalize_aux_targets(
             pending.sample.score_delta_target = 0.0
         pending.sample.win_target = 1.0 if hora_actor == actor else 0.0
         pending.sample.dealin_target = 1.0 if (hora_target == actor and hora_actor != actor) else 0.0
+        pending.sample.pts_given_win_target = (
+            max(0.0, pending.sample.score_delta_target)
+            if pending.sample.win_target > 0.0
+            else 0.0
+        )
+        pending.sample.pts_given_dealin_target = (
+            max(0.0, -pending.sample.score_delta_target)
+            if pending.sample.dealin_target > 0.0
+            else 0.0
+        )
         pending.sample.ryukyoku_tenpai_target = 1.0 if actor in ryukyoku_tenpai_players else 0.0
 
 
@@ -676,6 +767,10 @@ def build_supervised_samples(
                         f"'last_discard': {snap.get('last_discard')!r}, 'melds': {(snap.get('melds') or [[], [], [], []])[actor]!r}}}"
                     )
 
+                # Stage 2 Python 原型:opp_tenpai 在决策时刻用 sample_state 的上帝视角
+                # 直接算。sample_state 可能是 multi_ron_base_state(多家和了的基态快照)
+                # 或 state(主线);两者在该时刻对"对手手牌"的视图都是信的。
+                opp_tenpai = _compute_opp_tenpai_target(sample_state, actor)
                 sample = ReplaySample(
                     state=snap,
                     actor=actor,
@@ -687,6 +782,8 @@ def build_supervised_samples(
                     win_target=0.0,
                     dealin_target=0.0,
                     ryukyoku_tenpai_target=0.0,
+                    opp_tenpai_target=opp_tenpai,
+                    event_index=i,
                 )
                 samples.append(sample)
                 pending_round_samples.append(
@@ -737,6 +834,11 @@ def build_supervised_samples(
                     snap_p["shanten"] = shanten_p
                     snap_p["waits_count"] = waits_cnt_p
                     snap_p["waits_tiles"] = waits_tiles_p
+                    # Stage 2 Python 原型:对 pass-none 样本同样计算 opp_tenpai。
+                    # 此处 state 已应用了触发鸣牌机会的 dahai 事件,对手 hand/melds
+                    # 本事件上 invariant (dahai 只改丢牌方),所以 opp_tenpai 与
+                    # snap_p 的决策时刻一致。
+                    opp_tenpai_p = _compute_opp_tenpai_target(state, p)
                     sample = ReplaySample(
                         state=snap_p,
                         actor=p,
@@ -750,6 +852,8 @@ def build_supervised_samples(
                         win_target=0.0,
                         dealin_target=0.0,
                         ryukyoku_tenpai_target=0.0,
+                        opp_tenpai_target=opp_tenpai_p,
+                        event_index=i,
                     )
                     samples.append(sample)
                     pending_round_samples.append(

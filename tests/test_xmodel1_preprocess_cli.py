@@ -3,7 +3,10 @@ from __future__ import annotations
 import subprocess
 
 
-def test_xmodel1_preprocess_cli_smoke_reports_rust_or_fallback_path():
+REPO_ROOT = "/media/bailan/DISK1/AUbuntuProject/project/keqing1"
+
+
+def test_xmodel1_preprocess_cli_smoke_reports_rust_cli_path():
     result = subprocess.run(
         [
             "uv",
@@ -12,12 +15,10 @@ def test_xmodel1_preprocess_cli_smoke_reports_rust_or_fallback_path():
             "scripts/preprocess_xmodel1.py",
             "--smoke",
         ],
-        cwd="/media/bailan/DISK1/AUbuntuProject/project/keqing1",
+        cwd=REPO_ROOT,
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0
-    assert (
-        "Rust Xmodel1 export unavailable, using Python fallback" in result.stdout
-        or "Rust Xmodel1 export completed:" in result.stdout
-    )
+    assert "xmodel1 preprocess launcher -> cargo run --release" in result.stdout
+    assert "Rust Xmodel1 export completed:" in result.stdout

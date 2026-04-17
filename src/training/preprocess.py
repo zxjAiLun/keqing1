@@ -33,6 +33,7 @@ from keqingv1.action_space import (
     build_legal_mask,
 )
 from keqingv1.features import encode
+from training.cache_schema import KEQINGV4_EVENT_HISTORY_DIM, KEQINGV4_EVENT_HISTORY_LEN
 
 _MELD_ACTION_IDXS = {
     CHI_LOW_IDX,
@@ -137,6 +138,12 @@ class BasePreprocessAdapter:
             if name in result
         }
 
+    def finalize_result_extras(self, rows: Dict[str, list]) -> Dict[str, np.ndarray]:
+        result: Dict[str, np.ndarray] = {}
+        for key in self.extra_field_names:
+            result[key] = np.array(rows[key], dtype=object)
+        return result
+
 
 class MeldRankPreprocessAdapter(BasePreprocessAdapter):
     extra_field_names = ("snap_json",)
@@ -222,6 +229,85 @@ class V3PreprocessAdapter(BasePreprocessAdapter):
             "dealin_target": float(sample.dealin_target),
         }
 
+    def finalize_result_extras(self, rows: Dict[str, list]) -> Dict[str, np.ndarray]:
+        return {
+            "score_delta_target": np.array(rows["score_delta_target"], dtype=np.float16),
+            "win_target": np.array(rows["win_target"], dtype=np.float16),
+            "dealin_target": np.array(rows["dealin_target"], dtype=np.float16),
+        }
+
+
+class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
+    extra_field_names = (
+        "score_delta_target",
+        "win_target",
+        "dealin_target",
+        "pts_given_win_target",
+        "pts_given_dealin_target",
+        "opp_tenpai_target",
+        "event_history",
+        "v4_discard_summary",
+        "v4_call_summary",
+        "v4_special_summary",
+    )
+
+    def init_rows(self) -> Dict[str, list]:
+        return {
+            "score_delta_target": [],
+            "win_target": [],
+            "dealin_target": [],
+            "pts_given_win_target": [],
+            "pts_given_dealin_target": [],
+            "opp_tenpai_target": [],
+            "event_history": [],
+            "v4_discard_summary": [],
+            "v4_call_summary": [],
+            "v4_special_summary": [],
+        }
+
+    def sample_extras(self, sample, action_idx: int) -> Dict[str, object]:
+        del action_idx
+        from keqingv4.preprocess_features import build_typed_action_summaries
+
+        event_history = np.zeros((KEQINGV4_EVENT_HISTORY_LEN, KEQINGV4_EVENT_HISTORY_DIM), dtype=np.int16)
+        event_history[:, 0] = 4
+        event_history[:, 2] = -1
+
+        discard_summary, call_summary, special_summary = build_typed_action_summaries(
+            sample.state,
+            sample.actor,
+            sample.legal_actions,
+        )
+        return {
+            "score_delta_target": float(np.clip(sample.score_delta_target, -1.0, 1.0)),
+            "win_target": float(sample.win_target),
+            "dealin_target": float(sample.dealin_target),
+            "pts_given_win_target": float(getattr(sample, "pts_given_win_target", 0.0)),
+            "pts_given_dealin_target": float(getattr(sample, "pts_given_dealin_target", 0.0)),
+            "opp_tenpai_target": np.asarray(
+                getattr(sample, "opp_tenpai_target", (0.0, 0.0, 0.0)),
+                dtype=np.float32,
+            ).reshape(3),
+            "event_history": event_history,
+            "v4_discard_summary": discard_summary.astype(np.float16),
+            "v4_call_summary": call_summary.astype(np.float16),
+            "v4_special_summary": special_summary.astype(np.float16),
+        }
+
+    def finalize_result_extras(self, rows: Dict[str, list]) -> Dict[str, np.ndarray]:
+        return {
+            "score_delta_target": np.array(rows["score_delta_target"], dtype=np.float16),
+            "win_target": np.array(rows["win_target"], dtype=np.float16),
+            "dealin_target": np.array(rows["dealin_target"], dtype=np.float16),
+            "pts_given_win_target": np.array(rows["pts_given_win_target"], dtype=np.float32),
+            "pts_given_dealin_target": np.array(rows["pts_given_dealin_target"], dtype=np.float32),
+            "opp_tenpai_target": np.stack(rows["opp_tenpai_target"]).astype(np.float32),
+            "event_history": np.stack(rows["event_history"]).astype(np.int16),
+            "v4_discard_summary": np.stack(rows["v4_discard_summary"]).astype(np.float16),
+            "v4_call_summary": np.stack(rows["v4_call_summary"]).astype(np.float16),
+            "v4_special_summary": np.stack(rows["v4_special_summary"]).astype(np.float16),
+        }
+
 
 def create_preprocess_adapter(name: str) -> BasePreprocessAdapter:
     normalized = name.strip().lower()
@@ -231,6 +317,8 @@ def create_preprocess_adapter(name: str) -> BasePreprocessAdapter:
         return MeldRankPreprocessAdapter()
     if normalized == "v3_aux":
         return V3PreprocessAdapter()
+    if normalized == "keqingv4_aux":
+        return KeqingV4PreprocessAdapter()
     raise ValueError(f"unknown preprocess adapter: {name}")
 
 
@@ -390,11 +478,7 @@ def _parse_events_to_arrays(
         "action_idx": np.array(rows["action_idx"], dtype=np.int16),
         "value": np.array(rows["value"], dtype=np.float16),
     }
-    for key in adapter.extra_field_names:
-        if key in {"score_delta_target", "win_target", "dealin_target"}:
-            result[key] = np.array(rows[key], dtype=np.float16)
-        else:
-            result[key] = np.array(rows[key], dtype=object)
+    result.update(adapter.finalize_result_extras(rows))
     result["_timings"] = timings
     return result
 
@@ -720,6 +804,7 @@ __all__ = [
     "MeldRankPreprocessAdapter",
     "create_preprocess_adapter",
     "V3PreprocessAdapter",
+    "KeqingV4PreprocessAdapter",
     "events_to_cached_arrays",
     "save_events_to_cache_file",
     "run_preprocess",

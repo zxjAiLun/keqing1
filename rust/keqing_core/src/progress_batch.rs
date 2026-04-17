@@ -96,7 +96,10 @@ fn select_candidate_discards_3n2(counts34: &[i32; TILE_COUNT]) -> Vec<usize> {
     let mut selected = Vec::new();
 
     for discard34 in candidate_discards {
-        let Some(delta) = discard_deltas.iter().find(|item| item.tile34 as usize == discard34) else {
+        let Some(delta) = discard_deltas
+            .iter()
+            .find(|item| item.tile34 as usize == discard34)
+        else {
             continue;
         };
         let after_shanten = current_shanten + delta.shanten_diff;
@@ -159,14 +162,7 @@ pub fn summarize_3n2_candidates_py_impl(
 }
 
 fn candidate_progress_key(item: &CandidateProgressPy) -> (i32, i32, i32, i32, i32, i32) {
-    (
-        -item.2,
-        item.5,
-        item.4,
-        item.3,
-        0,
-        0,
-    )
+    (-item.2, item.5, item.4, item.3, 0, 0)
 }
 
 pub fn summarize_best_3n2_candidate_py_impl(
@@ -175,7 +171,8 @@ pub fn summarize_best_3n2_candidate_py_impl(
     visible_counts34_seq: &Bound<'_, PyAny>,
     summarize_fn: &Bound<'_, PyAny>,
 ) -> PyResult<Option<CandidateProgressPy>> {
-    let candidates = summarize_3n2_candidates_py_impl(py, counts34_seq, visible_counts34_seq, summarize_fn)?;
+    let candidates =
+        summarize_3n2_candidates_py_impl(py, counts34_seq, visible_counts34_seq, summarize_fn)?;
     let mut best: Option<CandidateProgressPy> = None;
     let mut best_key: Option<(i32, i32, i32, i32, i32, i32)> = None;
 

@@ -43,7 +43,7 @@ def test_xmodel1_keqing_adapter_forward_with_checkpoint(tmp_path: Path):
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=56,
-        candidate_feature_dim=21,
+        candidate_feature_dim=35,
         candidate_flag_dim=10,
         hidden_dim=32,
         num_res_blocks=1,
@@ -55,7 +55,7 @@ def test_xmodel1_keqing_adapter_forward_with_checkpoint(tmp_path: Path):
                 "model_name": "xmodel1",
                 "state_tile_channels": 57,
                 "state_scalar_dim": 56,
-                "candidate_feature_dim": 21,
+                "candidate_feature_dim": 35,
                 "candidate_flag_dim": 10,
                 "hidden_dim": 32,
                 "num_res_blocks": 1,
@@ -68,3 +68,6 @@ def test_xmodel1_keqing_adapter_forward_with_checkpoint(tmp_path: Path):
     adapter = KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
     result = adapter.forward(snap, actor)
     assert result.policy_logits.shape == (45,)
+    assert result.xmodel1 is not None
+    assert result.xmodel1.discard_logits.shape[0] == 14
+    assert result.xmodel1.special_logits.shape[0] == 12

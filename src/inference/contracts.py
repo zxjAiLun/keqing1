@@ -14,10 +14,26 @@ class ModelAuxOutputs:
 
 
 @dataclass(frozen=True)
+class Xmodel1RuntimeOutputs:
+    discard_logits: np.ndarray
+    candidate_tile_id: np.ndarray
+    candidate_mask: np.ndarray
+    special_logits: np.ndarray
+    special_type_id: np.ndarray
+    special_mask: np.ndarray
+    win_prob: float
+    dealin_prob: float
+    pts_given_win: float
+    pts_given_dealin: float
+    opp_tenpai_probs: np.ndarray
+
+
+@dataclass(frozen=True)
 class ModelForwardResult:
     policy_logits: np.ndarray
     value: float
     aux: ModelAuxOutputs = field(default_factory=ModelAuxOutputs)
+    xmodel1: Xmodel1RuntimeOutputs | None = None
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,53 @@
+# keqingv4 default config
+# v2 phase 1: model/trainer side first, preprocess contract expansion later.
+
+data_dirs:
+  - processed_v4/ds1
+  - processed_v4/ds2
+  - processed_v4/ds3
+
+output_dir: artifacts/models/keqingv4
+device: cuda
+
+hidden_dim: 256
+num_res_blocks: 5
+action_embed_dim: 48
+context_dim: 24
+dropout: 0.1
+
+num_epochs: 12
+batch_size: 1024
+accumulation_steps: 1
+learning_rate: 0.0002
+weight_decay: 0.0001
+warmup_steps: 3000
+val_ratio: 0.05
+num_workers: 0
+buffer_size: 256
+prefetch_factor: 2
+pin_memory: false
+persistent_workers: false
+log_interval: 100
+aug_perms: 0
+files_per_epoch_ratio: 1.0
+
+value_loss_weight: 0.8
+win_loss_weight: 0.5
+dealin_loss_weight: 0.5
+pts_given_win_loss_weight: 0.3
+pts_given_dealin_loss_weight: 0.3
+opp_tenpai_loss_weight: 0.25
+mc_reg_loss_weight: 0.05
+typed_rank_loss_weight: 0.15
+typed_rank_margin: 0.20
+reach_opportunity_weight: 1.5
+call_opportunity_weight: 1.5
+hora_opportunity_weight: 2.0
+chosen_reach_weight: 1.0
+chosen_dama_weight: 1.25
+chosen_call_weight: 1.0
+chosen_none_weight: 1.25
+chosen_hora_weight: 1.0
+chosen_continue_weight: 1.35
+win_pos_weight: 2.0
+dealin_pos_weight: 4.0

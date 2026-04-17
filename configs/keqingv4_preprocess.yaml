@@ -1,0 +1,18 @@
+# keqingv4 preprocess config
+# Run:
+#   uv run python scripts/preprocess_keqingv4.py
+
+data_dirs:
+  - artifacts/converted_mjai/ds1
+  - artifacts/converted_mjai/ds2
+  - artifacts/converted_mjai/ds3
+
+output_dir: processed_v4
+
+workers: 18
+maxtasksperchild: 24
+progress_every: 20
+
+augment: false
+compress_output: false
+value_strategy: mc_return

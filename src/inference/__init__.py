@@ -7,6 +7,7 @@ from inference.contracts import (
     ModelAuxOutputs,
     ModelForwardResult,
     ScoredCandidate,
+    Xmodel1RuntimeOutputs,
 )
 from inference.keqing_adapter import KeqingModelAdapter
 from inference.review import (
@@ -35,6 +36,7 @@ __all__ = [
     "ModelForwardResult",
     "RuntimeReviewExporter",
     "ScoredCandidate",
+    "Xmodel1RuntimeOutputs",
     "action_label",
     "action_primary_tile",
     "action_cmp_key",

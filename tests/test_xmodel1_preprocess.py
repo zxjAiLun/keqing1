@@ -1,6 +1,18 @@
 from __future__ import annotations
 
+import numpy as np
+
+from xmodel1.candidate_quality import build_candidate_features
+from xmodel1.candidate_quality import build_special_candidate_arrays
 from xmodel1.preprocess import events_to_xmodel1_arrays
+from xmodel1.schema import (
+    XMODEL1_SPECIAL_TYPE_CHI_HIGH,
+    XMODEL1_SPECIAL_TYPE_CHI_LOW,
+    XMODEL1_SPECIAL_TYPE_CHI_MID,
+    XMODEL1_SPECIAL_TYPE_NONE,
+    XMODEL1_SPECIAL_TYPE_PON,
+    XMODEL1_SPECIAL_TYPE_REACH,
+)
 
 
 def test_xmodel1_events_to_arrays_smoke():
@@ -29,5 +41,217 @@ def test_xmodel1_events_to_arrays_smoke():
     assert arrays is not None
     assert arrays["state_tile_feat"].shape[0] >= 1
     assert arrays["state_scalar"].shape[1] == 56
-    assert arrays["candidate_feat"].shape[1:] == (14, 21)
+    assert arrays["candidate_feat"].shape[1:] == (14, 35)
     assert arrays["candidate_flags"].shape[1:] == (14, 10)
+    assert arrays["special_candidate_feat"].shape[1:] == (12, 25)
+    assert arrays["special_candidate_mask"].shape[1] == 12
+
+
+def test_xmodel1_events_to_arrays_uses_true_replay_event_index_for_history():
+    events = [
+        {"type": "start_game", "names": ["A", "B", "C", "D"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+                ["1s"] * 13,
+                ["2s"] * 13,
+                ["3s"] * 13,
+            ],
+        },
+        {"type": "tsumo", "actor": 0, "pai": "4p"},
+        {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
+    ]
+    arrays = events_to_xmodel1_arrays(events, replay_id="fixture.mjson")
+    assert arrays is not None
+    history = arrays["event_history"][0]
+    non_pad = history[history[:, 1] != 0]
+    assert non_pad.shape[0] == 1
+    assert non_pad[-1].tolist() == [0, 1, 12, 0, 0]
+
+
+def test_xmodel1_events_to_arrays_exports_reach_dama_special_candidates():
+    events = [
+        {"type": "start_game", "names": ["A", "B", "C", "D"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+                ["1s"] * 13,
+                ["2s"] * 13,
+                ["3s"] * 13,
+            ],
+        },
+        {"type": "tsumo", "actor": 0, "pai": "4p"},
+        {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
+    ]
+    arrays = events_to_xmodel1_arrays(events, replay_id="fixture.mjson")
+    assert arrays is not None
+    mask = arrays["special_candidate_mask"][0]
+    type_ids = arrays["special_candidate_type_id"][0]
+    active = type_ids[mask > 0]
+    assert XMODEL1_SPECIAL_TYPE_REACH in active
+    assert arrays["chosen_special_candidate_idx"][0] >= 0
+
+
+def test_build_special_candidate_arrays_exports_call_none_candidates():
+    state = {
+        "hand": ["2m", "3m", "4m", "5m", "6m", "7m", "5p", "5p", "6p", "7p", "E", "E", "P"],
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "oya": 0,
+        "reached": [False, False, False, False],
+    }
+    legal_actions = [
+        {"type": "pon", "actor": 0, "pai": "5p", "consumed": ["5p", "5p"], "target": 1},
+        {"type": "none"},
+    ]
+    feat, type_id, mask, quality, rank, hard_bad, chosen_idx = build_special_candidate_arrays(
+        state,
+        0,
+        legal_actions,
+        {"type": "none"},
+    )
+    active = type_id[mask > 0]
+    assert XMODEL1_SPECIAL_TYPE_PON in active
+    assert XMODEL1_SPECIAL_TYPE_NONE in active
+    assert quality.shape == (12,)
+    assert rank.shape == (12,)
+    assert hard_bad.shape == (12,)
+    assert chosen_idx >= 0
+
+
+def test_build_special_candidate_arrays_exports_three_concrete_chi_candidates():
+    state = {
+        "hand": ["2m", "4m", "5m", "6m", "7m", "8m", "3p", "4p", "5p", "6s", "7s", "8s", "P"],
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "oya": 0,
+        "reached": [False, False, False, False],
+    }
+    legal_actions = [
+        {"type": "chi", "actor": 0, "pai": "2m", "consumed": ["3m", "4m"], "target": 1},
+        {"type": "chi", "actor": 0, "pai": "5m", "consumed": ["4m", "6m"], "target": 1},
+        {"type": "chi", "actor": 0, "pai": "7m", "consumed": ["5m", "6m"], "target": 1},
+        {"type": "none"},
+    ]
+    feat, type_id, mask, _quality, _rank, _hard_bad, _chosen_idx = build_special_candidate_arrays(
+        state,
+        0,
+        legal_actions,
+        {"type": "none"},
+    )
+    active = set(type_id[mask > 0])
+    assert XMODEL1_SPECIAL_TYPE_CHI_LOW in active
+    assert XMODEL1_SPECIAL_TYPE_CHI_MID in active
+    assert XMODEL1_SPECIAL_TYPE_CHI_HIGH in active
+
+
+def test_build_special_candidate_arrays_emits_richer_special_semantics():
+    state = {
+        "hand": ["2m", "3m", "4m", "5m", "6m", "7m", "5p", "5p", "6p", "7p", "E", "E", "P"],
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "oya": 0,
+        "reached": [False, True, False, False],
+        "dora_marker": "4p",
+    }
+    legal_actions = [
+        {"type": "pon", "actor": 0, "pai": "5p", "consumed": ["5p", "5p"], "target": 1},
+        {"type": "none"},
+    ]
+    feat, type_id, mask, quality, rank, hard_bad, chosen_idx = build_special_candidate_arrays(
+        state,
+        0,
+        legal_actions,
+        {"type": "pon", "pai": "5p", "consumed": ["5p", "5p"], "target": 1},
+    )
+    active_slots = np.where(mask > 0)[0]
+    assert len(active_slots) >= 2
+    pon_slot = int(np.where(type_id == XMODEL1_SPECIAL_TYPE_PON)[0][0])
+    none_slot = int(np.where(type_id == XMODEL1_SPECIAL_TYPE_NONE)[0][0])
+    assert float(feat[pon_slot, 12]) >= 0.0  # action_dora_bonus
+    assert float(feat[pon_slot, 14]) >= 0.0  # risk_proxy_shimocha
+    assert float(feat[none_slot, 8]) == 0.0  # none after_value_norm
+    assert quality[pon_slot] != 0.0
+    assert rank[pon_slot] in {0, 1, 2, 3}
+    assert hard_bad[pon_slot] in {0, 1}
+    assert chosen_idx == pon_slot
+
+
+def test_build_candidate_features_emits_after_state_path_metrics():
+    state = {
+        "hand": ["1m", "2m", "2m", "3m", "4m", "5m", "6m", "3p", "4p", "5p", "4s", "5s", "6s", "7s"],
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "oya": 0,
+        "reached": [False, True, False, False],
+        "dora_marker": "1m",
+    }
+    feat, flags, quality, rank, hard_bad = build_candidate_features(state, 0, {"type": "dahai", "pai": "1m"})
+
+    assert feat.shape == (35,)
+    assert flags.shape == (10,)
+    assert float(feat[27]) > 0.0  # confirmed_han_floor
+    assert float(feat[21]) == 1.0  # tanyao_path
+    assert float(feat[6]) > 0.0  # after_dora_count
+    assert float(feat[23]) == 1.0  # other player reached
+    assert quality != 0.0
+    assert rank in {0, 1, 2, 3}
+    assert hard_bad in {0, 1}
+
+
+def test_xmodel1_events_to_arrays_exports_none_special_only_sample():
+    events = [
+        {"type": "start_game", "names": ["A", "B", "C", "D"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+                ["5p", "5p", "7s", "7s", "8s", "8s", "9s", "9s", "E", "E", "S", "S", "W"],
+                ["2s"] * 13,
+                ["3s"] * 13,
+            ],
+        },
+        {"type": "tsumo", "actor": 0, "pai": "5p"},
+        {"type": "dahai", "actor": 0, "pai": "5p", "tsumogiri": True},
+        {"type": "tsumo", "actor": 1, "pai": "W"},
+    ]
+    arrays = events_to_xmodel1_arrays(events, replay_id="none_fixture.mjson")
+    assert arrays is not None
+    special_rows = np.where(arrays["sample_type"] == 2)[0]
+    assert len(special_rows) >= 1
+    row = special_rows[0]
+    assert int(arrays["chosen_candidate_idx"][row]) == -1
+    assert int(arrays["action_idx_target"][row]) == 44
+    active = arrays["special_candidate_type_id"][row][arrays["special_candidate_mask"][row] > 0]
+    assert XMODEL1_SPECIAL_TYPE_NONE in active

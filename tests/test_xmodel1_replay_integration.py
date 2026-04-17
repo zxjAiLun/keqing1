@@ -12,7 +12,7 @@ def _save_xmodel1_ckpt(path: Path) -> None:
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=64,
-        candidate_feature_dim=21,
+        candidate_feature_dim=35,
         candidate_flag_dim=10,
         hidden_dim=64,
         num_res_blocks=2,
@@ -25,7 +25,7 @@ def _save_xmodel1_ckpt(path: Path) -> None:
                 "model_name": "xmodel1",
                 "state_tile_channels": 57,
                 "state_scalar_dim": 64,
-                "candidate_feature_dim": 21,
+                "candidate_feature_dim": 35,
                 "candidate_flag_dim": 10,
                 "hidden_dim": 64,
                 "num_res_blocks": 2,

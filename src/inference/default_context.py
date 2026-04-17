@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from mahjong_env.event_history import compute_event_history
 from mahjong_env.legal_actions import enumerate_legal_actions
 from mahjong_env.state import apply_event
 
@@ -21,9 +22,12 @@ class DefaultDecisionContextBuilder:
         self.riichi_state = riichi_state
         self._inject_shanten_waits = inject_shanten_waits
         self._enumerate_legal_actions = enumerate_legal_actions_fn
+        self._event_log: list[dict[str, Any]] = []
 
     def build(self, state, actor: int, event: dict[str, Any]) -> Optional[DecisionContext]:
         etype = event.get("type", "")
+        if etype == "start_game":
+            self._event_log = []
 
         decision_base_snap: Optional[dict[str, Any]] = None
         pre_apply_hand: Optional[list] = None
@@ -58,7 +62,10 @@ class DefaultDecisionContextBuilder:
             apply_event(state, event)
         else:
             apply_event(state, event)
+            self._event_log.append(dict(event))
             return None
+
+        self._event_log.append(dict(event))
 
         runtime_snap = state.snapshot(actor)
         injected = False
@@ -109,6 +116,11 @@ class DefaultDecisionContextBuilder:
             model_snap["tsumo_pai"] = event.get("pai")
         else:
             model_snap["tsumo_pai"] = event.get("pai") if etype == "tsumo" else None
+
+        if self.model_version == "xmodel1":
+            event_history = compute_event_history(self._event_log, len(self._event_log) - 1)
+            runtime_snap["event_history"] = event_history.copy()
+            model_snap["event_history"] = event_history.copy()
 
         return DecisionContext(
             actor=actor,

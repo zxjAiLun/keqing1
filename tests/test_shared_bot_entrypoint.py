@@ -7,3 +7,4 @@ def test_replay_bot_classes_use_shared_runtime_bot():
     assert replay_bot._BOT_CLASSES["keqingv2"] is RuntimeBot
     assert replay_bot._BOT_CLASSES["keqingv3"] is RuntimeBot
     assert replay_bot._BOT_CLASSES["keqingv31"] is RuntimeBot
+    assert replay_bot._BOT_CLASSES["keqingv4"] is RuntimeBot

@@ -2,6 +2,45 @@ from mahjong_env.scoring import HoraResult
 from replay.server import _normalize_replay_events
 
 
+def test_normalize_replay_events_injects_legacy_kakan_accepted_before_followup_draw():
+    events = [
+        {"type": "start_game", "names": ["P0", "P1", "P2", "P3"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1p",
+            "tehais": [
+                ["8s"] * 4 + ["1m", "2m", "3m", "4p", "5p", "6p", "4s", "5s", "6s"],
+                ["1p"] * 13,
+                ["2p"] * 13,
+                ["3p"] * 13,
+            ],
+        },
+        {"type": "tsumo", "actor": 0, "pai": "8s"},
+        {"type": "pon", "actor": 0, "target": 1, "pai": "8s", "consumed": ["8s", "8s"]},
+        {"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False},
+        {"type": "tsumo", "actor": 0, "pai": "8s"},
+        {"type": "kakan", "actor": 0, "pai": "8s", "consumed": ["8s", "8s", "8s"]},
+        {"type": "tsumo", "actor": 0, "pai": "4s"},
+    ]
+
+    normalized = _normalize_replay_events(events)
+
+    assert [event["type"] for event in normalized[5:9]] == [
+        "tsumo",
+        "kakan",
+        "kakan_accepted",
+        "tsumo",
+    ]
+    assert normalized[7]["actor"] == 0
+    assert normalized[7]["pai"] == "8s"
+
+
 def test_normalize_replay_events_recomputes_stale_hora_with_ippatsu(monkeypatch):
     def fake_score_hora(state, *, actor, target, pai, is_tsumo, ura_dora_markers=None, **kwargs):
         assert actor == 1

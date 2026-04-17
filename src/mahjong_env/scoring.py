@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 
+import keqing_core
 from keqing_core import build_136_pool_entries as _build_136_pool_entries_native
 from mahjong.constants import EAST, NORTH, SOUTH, WEST
 from mahjong.hand_calculating.hand import HandCalculator
@@ -35,6 +36,40 @@ _ONE_LINE_TO_TILE = {
 }
 
 
+class _ScoreBackend(Protocol):
+    def estimate_hand_value(
+        self,
+        *,
+        tiles136: List[int],
+        win_tile: int,
+        melds: List[Meld],
+        dora_indicators: List[int],
+        config: HandConfig,
+    ) -> Any: ...
+
+
+class _PythonMahjongBackend:
+    def estimate_hand_value(
+        self,
+        *,
+        tiles136: List[int],
+        win_tile: int,
+        melds: List[Meld],
+        dora_indicators: List[int],
+        config: HandConfig,
+    ):
+        return _CALCULATOR.estimate_hand_value(
+            tiles136,
+            win_tile,
+            melds=melds,
+            dora_indicators=dora_indicators,
+            config=config,
+        )
+
+
+_SCORE_BACKEND: _ScoreBackend = _PythonMahjongBackend()
+
+
 @dataclass
 class HoraResult:
     han: int
@@ -44,6 +79,102 @@ class HoraResult:
     is_open_hand: bool
     cost: Dict
     deltas: List[int]
+
+
+@dataclass(frozen=True)
+class _HoraTruth:
+    han: int
+    fu: int
+    yaku: List[str]
+    base_yaku_details: List[Dict[str, int | str]]
+    is_open_hand: bool
+    cost: Dict
+    dora_count: int
+    ura_count: int
+    aka_count: int
+
+
+def _build_prepared_hora_payload_from_view(
+    *,
+    context: "_ScoreContext",
+    player_view: "_ScorePlayerView",
+    actor: int,
+    pai: str,
+    is_tsumo: bool,
+    ura_dora_markers: Optional[List[str]] = None,
+    is_rinshan: bool = False,
+    is_chankan: bool = False,
+    is_haitei: bool = False,
+    is_houtei: bool = False,
+) -> dict:
+    closed_tiles = list(player_view.hand_tiles)
+    if not is_tsumo:
+        closed_tiles.append(pai)
+    return {
+        "closed_tiles": closed_tiles,
+        "melds": [
+            {
+                "type": meld.get("type"),
+                "opened": meld.get("type") in {"chi", "pon", "daiminkan", "kakan"},
+                "tiles": _meld_tiles(meld),
+            }
+            for meld in player_view.melds
+        ],
+        "bakaze": context.bakaze,
+        "honba": context.honba,
+        "kyotaku": context.kyotaku,
+        "oya": context.oya,
+        "dora_markers": list(context.dora_markers),
+        "active_ura_markers": list(ura_dora_markers or []) if player_view.reached else [],
+        "reached": bool(player_view.reached),
+        "ippatsu_eligible": bool(player_view.ippatsu_eligible),
+        "is_tsumo": bool(is_tsumo),
+        "is_chankan": bool(is_chankan),
+        "resolved_is_rinshan": bool(is_rinshan),
+        "resolved_is_haitei": bool(is_haitei),
+        "resolved_is_houtei": bool(is_houtei),
+        "pai": pai,
+        "target": actor,
+        "_remaining_wall": context.remaining_wall,
+    }
+
+
+def _extract_hora_truth_from_native_payload(payload: dict) -> _HoraTruth:
+    yaku = [str(name) for name in (payload.get("yaku") or [])]
+    dora_like = {"Dora", "Ura Dora", "Aka Dora"}
+    yaku = [name for name in yaku if name not in dora_like]
+    dora_count = int(payload.get("dora_count") or 0)
+    ura_count = int(payload.get("ura_count") or 0)
+    aka_count = int(payload.get("aka_count") or 0)
+    if dora_count:
+        yaku.append("Dora")
+    if ura_count:
+        yaku.append("Ura Dora")
+    if aka_count:
+        yaku.append("Aka Dora")
+    return _HoraTruth(
+        han=int(payload.get("han") or 0),
+        fu=int(payload.get("fu") or 0),
+        yaku=yaku,
+        base_yaku_details=[dict(item) for item in (payload.get("base_yaku_details") or [])],
+        is_open_hand=bool(payload.get("is_open_hand")),
+        cost=dict(payload.get("cost") or {}),
+        dora_count=dora_count,
+        ura_count=ura_count,
+        aka_count=aka_count,
+    )
+
+
+def _evaluate_hora_truth_from_prepared_payload(prepared: dict) -> _HoraTruth | None:
+    if not keqing_core.is_enabled():
+        return None
+    try:
+        payload = keqing_core.evaluate_hora_from_prepared(prepared)
+    except RuntimeError:
+        return None
+    if payload.get("error") or not payload.get("cost"):
+        return None
+    return _extract_hora_truth_from_native_payload(payload)
 
 
 @dataclass(frozen=True)
@@ -256,6 +387,174 @@ def _to_mahjong_meld(meld: dict, pool: Dict[str, List[int]]) -> Meld:
     return Meld(meld_type="kan" if "kan" in meld_type else meld_type, tiles=tiles, opened=opened)
 
 
+def _to_mahjong_meld_from_payload(meld: dict, pool: Dict[str, List[int]]) -> Meld:
+    meld_type = meld.get("type")
+    tiles = [_take_tile_id(pool, tile) for tile in (meld.get("tiles") or [])]
+    opened = bool(meld.get("opened", False))
+    return Meld(meld_type="kan" if "kan" in str(meld_type) else meld_type, tiles=tiles, opened=opened)
+
+
+def _to_mahjong_meld_from_id_payload(meld: dict) -> Meld:
+    meld_type = meld.get("type")
+    tiles = [int(v) for v in (meld.get("tile_ids") or [])]
+    opened = bool(meld.get("opened", False))
+    return Meld(meld_type="kan" if "kan" in str(meld_type) else meld_type, tiles=tiles, opened=opened)
+
+
+def _prepared_hora_payload_from_snapshot(
+    snapshot: dict,
+    *,
+    actor: int,
+    pai: str,
+    is_tsumo: bool,
+    is_chankan: bool = False,
+    is_rinshan: Optional[bool] = None,
+    is_haitei: Optional[bool] = None,
+    is_houtei: Optional[bool] = None,
+):
+    if not keqing_core.is_enabled():
+        return None
+    try:
+        if not keqing_core.can_hora_shape_from_snapshot(snapshot, actor, pai, is_tsumo):
+            return False
+        return keqing_core.prepare_hora_evaluation_from_snapshot(
+            snapshot,
+            actor,
+            pai,
+            is_tsumo,
+            is_chankan=is_chankan,
+            is_rinshan=is_rinshan,
+            is_haitei=is_haitei,
+            is_houtei=is_houtei,
+        )
+    except RuntimeError:
+        return None
+
+
+def _prepared_hora_payload_from_state(
+    state: GameState,
+    *,
+    actor: int,
+    pai: str,
+    is_tsumo: bool,
+    is_chankan: bool = False,
+    is_rinshan: Optional[bool] = None,
+    is_haitei: Optional[bool] = None,
+    is_houtei: Optional[bool] = None,
+    ura_dora_markers: Optional[List[str]] = None,
+):
+    snapshot = state.snapshot(actor)
+    snapshot.pop("feature_tracker", None)
+    prepared = _prepared_hora_payload_from_snapshot(
+        snapshot,
+        actor=actor,
+        pai=pai,
+        is_tsumo=is_tsumo,
+        is_chankan=is_chankan,
+        is_rinshan=is_rinshan,
+        is_haitei=is_haitei,
+        is_houtei=is_houtei,
+    )
+    if isinstance(prepared, dict):
+        prepared["active_ura_markers"] = list(ura_dora_markers or []) if prepared.get("reached") else []
+        prepared["_remaining_wall"] = state.remaining_wall
+    return prepared
+
+
+def _estimate_hand_value_from_prepared_payload(
+    prepared: dict,
+    *,
+    actor: int,
+    pai: str,
+):
+    dora_markers = list(prepared.get("dora_markers", []))
+    allocation = None
+    if keqing_core.is_enabled():
+        try:
+            allocation = keqing_core.prepare_hora_tile_allocation(prepared)
+        except RuntimeError:
+            allocation = None
+    if allocation is not None:
+        closed_tile_ids = [int(v) for v in allocation.get("closed_tile_ids", [])]
+        win_tile = int(allocation["win_tile"])
+        meld_objects = []
+        meld_tile_ids: List[int] = []
+        for meld in allocation.get("melds", []):
+            meld_object = _to_mahjong_meld_from_id_payload(meld)
+            meld_objects.append(meld_object)
+            meld_tile_ids.extend(list(meld_object.tiles))
+        tiles136 = closed_tile_ids + meld_tile_ids
+        dora_ids = [int(v) for v in allocation.get("dora_ids", [])]
+        ura_ids = [int(v) for v in allocation.get("ura_ids", [])]
+    else:
+        hand_tiles = list(prepared.get("closed_tiles", []))
+        melds = list(prepared.get("melds", []))
+        all_tiles = hand_tiles[:]
+        for meld in melds:
+            all_tiles.extend(meld.get("tiles", []))
+        active_ura_markers = list(prepared.get("active_ura_markers", []))
+        all_tiles.extend(dora_markers)
+        all_tiles.extend(active_ura_markers)
+        pool = _build_136_pool(all_tiles)
+        closed_tile_ids = [_take_tile_id(pool, tile) for tile in hand_tiles]
+        win_tile = _find_win_tile_id(closed_tile_ids, hand_tiles, pai)
+        meld_objects = []
+        meld_tile_ids: List[int] = []
+        for meld in melds:
+            meld_object = _to_mahjong_meld_from_payload(meld, pool)
+            meld_objects.append(meld_object)
+            meld_tile_ids.extend(list(meld_object.tiles))
+        tiles136 = closed_tile_ids + meld_tile_ids
+        dora_ids = [_take_tile_id(pool, marker) for marker in dora_markers]
+        ura_ids = [_take_tile_id(pool, marker) for marker in active_ura_markers]
+    context = _ScoreContext(
+        bakaze=str(prepared["bakaze"]),
+        honba=int(prepared["honba"]),
+        kyotaku=int(prepared["kyotaku"]),
+        oya=int(prepared["oya"]),
+        dora_markers=dora_markers,
+        remaining_wall=prepared.get("_remaining_wall"),
+    )
+    config = _cached_hand_config(
+        is_tsumo=bool(prepared["is_tsumo"]),
+        is_riichi=bool(prepared["reached"]),
+        is_ippatsu=bool(prepared["ippatsu_eligible"]),
+        is_rinshan=bool(prepared["resolved_is_rinshan"]),
+        is_chankan=bool(prepared["is_chankan"]),
+        is_haitei=bool(prepared["resolved_is_haitei"]),
+        is_houtei=bool(prepared["resolved_is_houtei"]),
+        player_wind=_player_wind_from_context(context, actor),
+        round_wind=_round_wind_from_context(context),
+        kyoutaku_number=int(prepared["kyotaku"]),
+        tsumi_number=int(prepared["honba"]),
+    )
+    response = _estimate_hand_value_backend(
+        tiles136=tiles136,
+        win_tile=win_tile,
+        melds=meld_objects,
+        dora_indicators=dora_ids + ura_ids,
+        config=config,
+    )
+    return response, context, tiles136, dora_ids, ura_ids
+
+
+def _estimate_hand_value_backend(
+    *,
+    tiles136: List[int],
+    win_tile: int,
+    melds,
+    dora_indicators: List[int],
+    config: HandConfig,
+):
+    return _SCORE_BACKEND.estimate_hand_value(
+        tiles136=tiles136,
+        win_tile=win_tile,
+        melds=melds,
+        dora_indicators=dora_indicators,
+        config=config,
+    )
+
+
 def _find_win_tile_id(hand_tile_ids: List[int], hand_tiles: List[str], pai: str) -> int:
     for tile_id, tile in zip(reversed(hand_tile_ids), reversed(hand_tiles)):
         if tile == pai:
@@ -330,20 +629,7 @@ def _build_yaku_details(
     dora_indicator_ids: List[int],
     ura_indicator_ids: List[int],
 ) -> List[Dict[str, int | str]]:
-    details: List[Dict[str, int | str]] = []
-    dora_like = {"Dora", "Ura Dora", "Aka Dora"}
-
-    for yaku_obj in response.yaku or []:
-        name = str(yaku_obj.name)
-        if name in dora_like:
-            continue
-        details.append(
-            {
-                "key": name,
-                "name": name,
-                "han": _yaku_han(yaku_obj, bool(response.is_open_hand)),
-            }
-        )
+    details = _base_yaku_details(response)
 
     dora_count = sum(
         plus_dora(tile_id, dora_indicator_ids, add_aka_dora=False) for tile_id in tile_ids
@@ -363,6 +649,101 @@ def _build_yaku_details(
     return details
 
 
+def _base_yaku_details(response) -> List[Dict[str, int | str]]:
+    details: List[Dict[str, int | str]] = []
+    dora_like = {"Dora", "Ura Dora", "Aka Dora"}
+
+    for yaku_obj in response.yaku or []:
+        name = str(yaku_obj.name)
+        if name in dora_like:
+            continue
+        details.append(
+            {
+                "key": name,
+                "name": name,
+                "han": _yaku_han(yaku_obj, bool(response.is_open_hand)),
+            }
+        )
+    return details
+
+
+def _extract_hora_truth(
+    response,
+    *,
+    tile_ids: List[int],
+    dora_indicator_ids: List[int],
+    ura_indicator_ids: List[int],
+) -> _HoraTruth:
+    dora_count = sum(
+        plus_dora(tile_id, dora_indicator_ids, add_aka_dora=False) for tile_id in tile_ids
+    )
+    ura_count = sum(
+        plus_dora(tile_id, ura_indicator_ids, add_aka_dora=False) for tile_id in tile_ids
+    )
+    aka_count = sum(1 for tile_id in tile_ids if is_aka_dora(tile_id, aka_enabled=True))
+    return _HoraTruth(
+        han=int(response.han or 0),
+        fu=int(response.fu or 0),
+        yaku=[str(y.name) for y in (response.yaku or [])],
+        base_yaku_details=_base_yaku_details(response),
+        is_open_hand=bool(response.is_open_hand),
+        cost=dict(response.cost or {}),
+        dora_count=int(dora_count),
+        ura_count=int(ura_count),
+        aka_count=int(aka_count),
+    )
+
+
+def _finalize_hora_result(
+    *,
+    truth: _HoraTruth,
+    deltas: List[int],
+    tile_ids: List[int],
+    dora_indicator_ids: List[int],
+    ura_indicator_ids: List[int],
+) -> HoraResult:
+    if keqing_core.is_enabled():
+        try:
+            payload = keqing_core.build_hora_result_payload(
+                han=truth.han,
+                fu=truth.fu,
+                is_open_hand=truth.is_open_hand,
+                yaku_names=truth.yaku,
+                base_yaku_details=truth.base_yaku_details,
+                dora_count=truth.dora_count,
+                ura_count=truth.ura_count,
+                aka_count=truth.aka_count,
+                cost=truth.cost,
+                deltas=deltas,
+            )
+            return HoraResult(
+                han=int(payload["han"]),
+                fu=int(payload["fu"]),
+                yaku=list(payload["yaku"]),
+                yaku_details=list(payload["yaku_details"]),
+                is_open_hand=bool(payload["is_open_hand"]),
+                cost=dict(payload["cost"]),
+                deltas=list(payload["deltas"]),
+            )
+        except RuntimeError:
+            pass
+
+    return HoraResult(
+        han=truth.han,
+        fu=truth.fu,
+        yaku=truth.yaku,
+        yaku_details=[
+            *truth.base_yaku_details,
+            *([{"key": "Dora", "name": "Dora", "han": truth.dora_count}] if truth.dora_count else []),
+            *([{"key": "Ura Dora", "name": "Ura Dora", "han": truth.ura_count}] if truth.ura_count else []),
+            *([{"key": "Aka Dora", "name": "Aka Dora", "han": truth.aka_count}] if truth.aka_count else []),
+        ],
+        is_open_hand=truth.is_open_hand,
+        cost=dict(truth.cost),
+        deltas=deltas,
+    )
+
+
 def score_hora(
     state: GameState,
     *,
@@ -376,6 +757,119 @@ def score_hora(
     is_haitei: bool = False,
     is_houtei: bool = False,
 ) -> HoraResult:
+    prepared = _prepared_hora_payload_from_state(
+        state,
+        actor=actor,
+        pai=pai,
+        is_tsumo=is_tsumo,
+        is_chankan=is_chankan,
+        is_rinshan=is_rinshan,
+        is_haitei=is_haitei,
+        is_houtei=is_houtei,
+        ura_dora_markers=ura_dora_markers,
+    )
+    if prepared is False:
+        raise ValueError(f"invalid hora for actor={actor}: rust shape precheck failed")
+    if isinstance(prepared, dict):
+        context = _context_from_state(state)
+        allocation = None
+        if keqing_core.is_enabled():
+            try:
+                allocation = keqing_core.prepare_hora_tile_allocation(prepared)
+            except RuntimeError:
+                allocation = None
+        if allocation is not None:
+            tiles136 = [int(v) for v in allocation["closed_tile_ids"]]
+            tiles136.extend(
+                int(tile_id)
+                for meld in (allocation.get("melds") or [])
+                for tile_id in (meld.get("tile_ids") or [])
+            )
+            dora_ids = [int(v) for v in (allocation.get("dora_ids") or [])]
+            ura_ids = [int(v) for v in (allocation.get("ura_ids") or [])]
+        else:
+            tiles136 = []
+            dora_ids = []
+            ura_ids = []
+        truth = _evaluate_hora_truth_from_prepared_payload(prepared)
+        if truth is None:
+            response, context, tiles136, dora_ids, ura_ids = _estimate_hand_value_from_prepared_payload(
+                prepared,
+                actor=actor,
+                pai=pai,
+            )
+            if response.error or not response.cost:
+                raise ValueError(f"invalid hora for actor={actor}: {response.error or 'no cost'}")
+            truth = _extract_hora_truth(
+                response,
+                tile_ids=tiles136,
+                dora_indicator_ids=dora_ids,
+                ura_indicator_ids=ura_ids,
+            )
+        cost = truth.cost
+        if keqing_core.is_enabled():
+            try:
+                deltas = [
+                    int(v)
+                    for v in keqing_core.compute_hora_deltas(
+                        context.oya, actor, target, is_tsumo, dict(cost)
+                    )
+                ]
+            except RuntimeError:
+                deltas = [0, 0, 0, 0]
+                if is_tsumo:
+                    if actor == context.oya:
+                        payment = int(cost["main"] + cost["main_bonus"])
+                        for pid in range(4):
+                            if pid == actor:
+                                continue
+                            deltas[pid] -= payment
+                            deltas[actor] += payment
+                    else:
+                        dealer_payment = int(cost["main"] + cost["main_bonus"])
+                        non_dealer_payment = int(cost["additional"] + cost["additional_bonus"])
+                        for pid in range(4):
+                            if pid == actor:
+                                continue
+                            payment = dealer_payment if pid == context.oya else non_dealer_payment
+                            deltas[pid] -= payment
+                            deltas[actor] += payment
+                    deltas[actor] += int(cost.get("kyoutaku_bonus", 0))
+                else:
+                    payment = int(cost["main"] + cost["main_bonus"] + cost.get("kyoutaku_bonus", 0))
+                    deltas[target] -= payment
+                    deltas[actor] += payment
+        else:
+            deltas = [0, 0, 0, 0]
+            if is_tsumo:
+                if actor == context.oya:
+                    payment = int(cost["main"] + cost["main_bonus"])
+                    for pid in range(4):
+                        if pid == actor:
+                            continue
+                        deltas[pid] -= payment
+                        deltas[actor] += payment
+                else:
+                    dealer_payment = int(cost["main"] + cost["main_bonus"])
+                    non_dealer_payment = int(cost["additional"] + cost["additional_bonus"])
+                    for pid in range(4):
+                        if pid == actor:
+                            continue
+                        payment = dealer_payment if pid == context.oya else non_dealer_payment
+                        deltas[pid] -= payment
+                        deltas[actor] += payment
+                deltas[actor] += int(cost.get("kyoutaku_bonus", 0))
+            else:
+                payment = int(cost["main"] + cost["main_bonus"] + cost.get("kyoutaku_bonus", 0))
+                deltas[target] -= payment
+                deltas[actor] += payment
+        return _finalize_hora_result(
+            truth=truth,
+            deltas=deltas,
+            tile_ids=tiles136,
+            dora_indicator_ids=dora_ids,
+            ura_indicator_ids=ura_ids,
+        )
     return _score_hora_from_view(
         context=_context_from_state(state),
         player_view=_player_view_from_state(state, actor),
@@ -431,6 +925,19 @@ def _score_hora_from_view(
     tiles136 = closed_tile_ids + meld_tile_ids
     dora_ids = [_take_tile_id(pool, marker) for marker in context.dora_markers]
     ura_ids = [_take_tile_id(pool, marker) for marker in active_ura_markers]
+    prepared = _build_prepared_hora_payload_from_view(
+        context=context,
+        player_view=player_view,
+        actor=actor,
+        pai=pai,
+        is_tsumo=is_tsumo,
+        ura_dora_markers=ura_dora_markers,
+        is_rinshan=is_rinshan,
+        is_chankan=is_chankan,
+        is_haitei=is_haitei,
+        is_houtei=is_houtei,
+    )
+    truth = _evaluate_hora_truth_from_prepared_payload(prepared)
 
     config = _cached_hand_config(
         is_tsumo=is_tsumo,
@@ -445,54 +952,82 @@ def _score_hora_from_view(
         kyoutaku_number=context.kyotaku,
         tsumi_number=context.honba,
     )
-    response = _CALCULATOR.estimate_hand_value(
-        tiles136,
-        win_tile,
-        melds=meld_objects,
-        dora_indicators=dora_ids + ura_ids,
-        config=config,
-    )
-    if response.error or not response.cost:
-        raise ValueError(f"invalid hora for actor={actor}: {response.error or 'no cost'}")
+    if truth is None:
+        response = _estimate_hand_value_backend(
+            tiles136=tiles136,
+            win_tile=win_tile,
+            melds=meld_objects,
+            dora_indicators=dora_ids + ura_ids,
+            config=config,
+        )
+        if response.error or not response.cost:
+            raise ValueError(f"invalid hora for actor={actor}: {response.error or 'no cost'}")
 
-    cost = response.cost
-    deltas = [0, 0, 0, 0]
-    if is_tsumo:
-        if actor == context.oya:
-            payment = int(cost["main"] + cost["main_bonus"])
-            for pid in range(4):
-                if pid == actor:
-                    continue
-                deltas[pid] -= payment
-                deltas[actor] += payment
-        else:
-            dealer_payment = int(cost["main"] + cost["main_bonus"])
-            non_dealer_payment = int(cost["additional"] + cost["additional_bonus"])
-            for pid in range(4):
-                if pid == actor:
-                    continue
-                payment = dealer_payment if pid == context.oya else non_dealer_payment
-                deltas[pid] -= payment
-                deltas[actor] += payment
-        deltas[actor] += int(cost.get("kyoutaku_bonus", 0))
-    else:
-        payment = int(cost["main"] + cost["main_bonus"] + cost.get("kyoutaku_bonus", 0))
-        deltas[target] -= payment
-        deltas[actor] += payment
-
-    return HoraResult(
-        han=int(response.han or 0),
-        fu=int(response.fu or 0),
-        yaku=[str(y.name) for y in (response.yaku or [])],
-        yaku_details=_build_yaku_details(
+        truth = _extract_hora_truth(
             response,
             tile_ids=tiles136,
             dora_indicator_ids=dora_ids,
             ura_indicator_ids=ura_ids,
-        ),
-        is_open_hand=bool(response.is_open_hand),
-        cost=dict(cost),
+        )
+    cost = truth.cost
+    if keqing_core.is_enabled():
+        try:
+            deltas = [int(v) for v in keqing_core.compute_hora_deltas(context.oya, actor, target, is_tsumo, dict(cost))]
+        except RuntimeError:
+            deltas = [0, 0, 0, 0]
+            if is_tsumo:
+                if actor == context.oya:
+                    payment = int(cost["main"] + cost["main_bonus"])
+                    for pid in range(4):
+                        if pid == actor:
+                            continue
+                        deltas[pid] -= payment
+                        deltas[actor] += payment
+                else:
+                    dealer_payment = int(cost["main"] + cost["main_bonus"])
+                    non_dealer_payment = int(cost["additional"] + cost["additional_bonus"])
+                    for pid in range(4):
+                        if pid == actor:
+                            continue
+                        payment = dealer_payment if pid == context.oya else non_dealer_payment
+                        deltas[pid] -= payment
+                        deltas[actor] += payment
+                deltas[actor] += int(cost.get("kyoutaku_bonus", 0))
+            else:
+                payment = int(cost["main"] + cost["main_bonus"] + cost.get("kyoutaku_bonus", 0))
+                deltas[target] -= payment
+                deltas[actor] += payment
+    else:
+        deltas = [0, 0, 0, 0]
+        if is_tsumo:
+            if actor == context.oya:
+                payment = int(cost["main"] + cost["main_bonus"])
+                for pid in range(4):
+                    if pid == actor:
+                        continue
+                    deltas[pid] -= payment
+                    deltas[actor] += payment
+            else:
+                dealer_payment = int(cost["main"] + cost["main_bonus"])
+                non_dealer_payment = int(cost["additional"] + cost["additional_bonus"])
+                for pid in range(4):
+                    if pid == actor:
+                        continue
+                    payment = dealer_payment if pid == context.oya else non_dealer_payment
+                    deltas[pid] -= payment
+                    deltas[actor] += payment
+            deltas[actor] += int(cost.get("kyoutaku_bonus", 0))
+        else:
+            payment = int(cost["main"] + cost["main_bonus"] + cost.get("kyoutaku_bonus", 0))
+            deltas[target] -= payment
+            deltas[actor] += payment
+
+    return _finalize_hora_result(
+        truth=truth,
         deltas=deltas,
+        tile_ids=tiles136,
+        dora_indicator_ids=dora_ids,
+        ura_indicator_ids=ura_ids,
     )
 
 
@@ -508,6 +1043,44 @@ def can_hora(
     is_haitei: Optional[bool] = None,
     is_houtei: Optional[bool] = None,
 ) -> bool:
+    prepared = _prepared_hora_payload_from_state(
+        state,
+        actor=actor,
+        pai=pai,
+        is_tsumo=is_tsumo,
+        is_chankan=is_chankan,
+        is_rinshan=is_rinshan,
+        is_haitei=is_haitei,
+        is_houtei=is_houtei,
+    )
+    if prepared is False:
+        return False
+    if isinstance(prepared, dict):
+        try:
+            truth = _evaluate_hora_truth_from_prepared_payload(prepared)
+            invalid = truth is None
+            if invalid:
+                response, _context, _tiles136, _dora_ids, _ura_ids = _estimate_hand_value_from_prepared_payload(
+                    prepared,
+                    actor=actor,
+                    pai=pai,
+                )
+                invalid = bool(response.error or not response.cost)
+            if invalid:
+                if bool(prepared["is_tsumo"]) and bool(prepared["resolved_is_rinshan"]) and bool(prepared["resolved_is_haitei"]):
+                    prepared = {**prepared, "resolved_is_haitei": False}
+                    if _evaluate_hora_truth_from_prepared_payload(prepared) is not None:
+                        return True
+                    response, _context, _tiles136, _dora_ids, _ura_ids = _estimate_hand_value_from_prepared_payload(
+                        prepared,
+                        actor=actor,
+                        pai=pai,
+                    )
+                    return not (response.error or not response.cost)
+                return False
+            return True
+        except Exception:
+            return False
     player_view = _player_view_from_state(state, actor)
     context = _context_from_state(state)
     remaining_wall = context.remaining_wall
@@ -569,6 +1142,45 @@ def can_hora_from_snapshot(
     is_haitei: Optional[bool] = None,
     is_houtei: Optional[bool] = None,
 ) -> bool:
+    prepared = _prepared_hora_payload_from_snapshot(
+        snapshot,
+        actor=actor,
+        pai=pai,
+        is_tsumo=is_tsumo,
+        is_chankan=is_chankan,
+        is_rinshan=is_rinshan,
+        is_haitei=is_haitei,
+        is_houtei=is_houtei,
+    )
+    if prepared is False:
+        return False
+    if isinstance(prepared, dict):
+        prepared["_remaining_wall"] = snapshot.get("remaining_wall")
+        try:
+            truth = _evaluate_hora_truth_from_prepared_payload(prepared)
+            invalid = truth is None
+            if invalid:
+                response, _context, _tiles136, _dora_ids, _ura_ids = _estimate_hand_value_from_prepared_payload(
+                    prepared,
+                    actor=actor,
+                    pai=pai,
+                )
+                invalid = bool(response.error or not response.cost)
+            if invalid:
+                if bool(prepared["is_tsumo"]) and bool(prepared["resolved_is_rinshan"]) and bool(prepared["resolved_is_haitei"]):
+                    prepared = {**prepared, "resolved_is_haitei": False}
+                    if _evaluate_hora_truth_from_prepared_payload(prepared) is not None:
+                        return True
+                    response, _context, _tiles136, _dora_ids, _ura_ids = _estimate_hand_value_from_prepared_payload(
+                        prepared,
+                        actor=actor,
+                        pai=pai,
+                    )
+                    return not (response.error or not response.cost)
+                return False
+            return True
+        except Exception:
+            return False
     context = _context_from_snapshot(snapshot)
     player_view = _player_view_from_snapshot(snapshot, actor=actor)
     remaining_wall = context.remaining_wall

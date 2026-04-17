@@ -1,14 +1,16 @@
 # Xmodel1 discard-first 默认训练配置
 data_dirs:
-  - processed_xmodel1/ds1
+  - processed_xmodel1_v1b/ds1
+  - processed_xmodel1_v1b/ds2
 
-output_dir: artifacts/models/xmodel1
+output_dir: artifacts/xmodel1_runs/v1b_align
 device: cuda
 
 state_tile_channels: 57
-state_scalar_dim: 64
-candidate_feature_dim: 21
+state_scalar_dim: 56
+candidate_feature_dim: 35
 candidate_flag_dim: 10
+special_candidate_feature_dim: 25
 
 hidden_dim: 256
 num_res_blocks: 4
@@ -20,18 +22,25 @@ learning_rate: 0.0003
 weight_decay: 0.0001
 warmup_steps: 1000
 steps_per_epoch: 1000
+val_steps_per_epoch: 100
+files_per_epoch_ratio: 0.0
+files_per_epoch_count: 350
 
 val_ratio: 0.05
-num_workers: 2
-buffer_size: 512
+num_workers: 0
+pin_memory: false
+persistent_workers: false
+buffer_size: 128
 log_interval: 100
 
 ce_loss_weight: 1.0
+action_ce_loss_weight: 0.25
 rank_loss_weight: 0.5
 hard_bad_loss_weight: 0.25
-value_loss_weight: 0.5
-score_delta_loss_weight: 0.25
-win_loss_weight: 0.2
-dealin_loss_weight: 0.2
-offense_quality_loss_weight: 0.3
+# Stage 1 分解 EV:win/dealin BCE + pts_given_{win,dealin} 条件回归
+win_loss_weight: 0.5
+dealin_loss_weight: 0.5
+pts_win_loss_weight: 0.3
+pts_dealin_loss_weight: 0.3
+opp_tenpai_loss_weight: 0.25
 ranking_temperature: 1.0

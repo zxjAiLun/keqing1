@@ -142,9 +142,10 @@ def _run_epoch(
             mask = batch_data["mask"]
             action_idx = batch_data["action_idx"]
             value_target = batch_data["value_target"]
+            model_kwargs = batch_data.get("model_kwargs", {})
 
             with torch.amp.autocast(device_type=device.type, enabled=(device.type == "cuda")):
-                policy_logits, value_pred = model(tile_feat, scalar)
+                policy_logits, value_pred = model(tile_feat, scalar, **model_kwargs)
                 ce = masked_ce_loss(policy_logits, action_idx, mask)
                 val_loss = nn.functional.mse_loss(value_pred.squeeze(-1), value_target)
                 extra_loss, extra_metrics = task.compute_extra_loss(

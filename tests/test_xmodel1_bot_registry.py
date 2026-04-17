@@ -14,7 +14,7 @@ def test_create_runtime_bot_supports_xmodel1(tmp_path: Path):
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=64,
-        candidate_feature_dim=21,
+        candidate_feature_dim=35,
         candidate_flag_dim=10,
         hidden_dim=32,
         num_res_blocks=1,
@@ -26,7 +26,7 @@ def test_create_runtime_bot_supports_xmodel1(tmp_path: Path):
                 "model_name": "xmodel1",
                 "state_tile_channels": 57,
                 "state_scalar_dim": 64,
-                "candidate_feature_dim": 21,
+                "candidate_feature_dim": 35,
                 "candidate_flag_dim": 10,
                 "hidden_dim": 32,
                 "num_res_blocks": 1,

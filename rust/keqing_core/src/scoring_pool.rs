@@ -95,7 +95,9 @@ pub fn build_136_pool_entries(tiles: &[String]) -> Vec<(String, Vec<u8>)> {
             continue;
         }
         let start = if matches!(tile34, 4 | 13 | 22) { 1 } else { 0 };
-        let ids: Vec<u8> = (0..plain_count).map(|offset| base + start + offset as u8).collect();
+        let ids: Vec<u8> = (0..plain_count)
+            .map(|offset| base + start + offset as u8)
+            .collect();
         out.insert(tile_key(tile34, false), ids);
     }
 
@@ -108,7 +110,12 @@ mod tests {
 
     #[test]
     fn build_136_pool_entries_keeps_explicit_red_fives() {
-        let tiles = vec!["5mr".to_string(), "5m".to_string(), "5m".to_string(), "5m".to_string()];
+        let tiles = vec![
+            "5mr".to_string(),
+            "5m".to_string(),
+            "5m".to_string(),
+            "5m".to_string(),
+        ];
         let pool = build_136_pool_entries(&tiles);
         let map: BTreeMap<_, _> = pool.into_iter().collect();
         assert_eq!(map.get("5mr"), Some(&vec![16]));
@@ -117,7 +124,12 @@ mod tests {
 
     #[test]
     fn build_136_pool_entries_promotes_one_plain_five_when_all_four_are_plain() {
-        let tiles = vec!["5m".to_string(), "5m".to_string(), "5m".to_string(), "5m".to_string()];
+        let tiles = vec![
+            "5m".to_string(),
+            "5m".to_string(),
+            "5m".to_string(),
+            "5m".to_string(),
+        ];
         let pool = build_136_pool_entries(&tiles);
         let map: BTreeMap<_, _> = pool.into_iter().collect();
         assert_eq!(map.get("5mr"), Some(&vec![16]));

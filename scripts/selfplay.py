@@ -1187,7 +1187,20 @@ def _extract_player_names(events: List[dict]) -> Optional[List[str]]:
 
 
 def _infer_replay_bot_type(model_path: str) -> str:
+    try:
+        import torch
+
+        ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+        if isinstance(ckpt, dict):
+            model_version = ckpt.get("model_version") or ckpt.get("cfg", {}).get("model_name")
+            if isinstance(model_version, str) and model_version:
+                return model_version
+    except Exception:
+        pass
+
     lower = model_path.lower()
+    if "xmodel" in lower or "v1a" in lower or "baseline" in lower:
+        return "xmodel1"
     if "keqingv1" in lower:
         return "keqingv1"
     if "keqingv31" in lower or "v4" in lower:

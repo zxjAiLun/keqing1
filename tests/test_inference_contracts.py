@@ -1,4 +1,6 @@
 import inference.scoring as inference_scoring
+import numpy as np
+from training.cache_schema import KEQINGV4_SUMMARY_DIM
 from inference import (
     DecisionContext,
     DecisionResult,
@@ -13,13 +15,27 @@ from inference import (
     summarize_decision_matches,
     summarize_reach_followup,
     candidate_to_log_dict,
+    Xmodel1RuntimeOutputs,
 )
 from keqingv1.action_space import action_to_idx
 
 
 def test_inference_contract_dataclasses_roundtrip():
     aux = ModelAuxOutputs(score_delta=0.2, win_prob=0.4, dealin_prob=0.1)
-    forward = ModelForwardResult(policy_logits=[1.0, 2.0], value=0.3, aux=aux)
+    xmodel1 = Xmodel1RuntimeOutputs(
+        discard_logits=np.array([1.0], dtype=np.float32),
+        candidate_tile_id=np.array([0], dtype=np.int16),
+        candidate_mask=np.array([1], dtype=np.uint8),
+        special_logits=np.array([0.5], dtype=np.float32),
+        special_type_id=np.array([11], dtype=np.int16),
+        special_mask=np.array([1], dtype=np.uint8),
+        win_prob=0.4,
+        dealin_prob=0.1,
+        pts_given_win=0.3,
+        pts_given_dealin=0.2,
+        opp_tenpai_probs=np.array([0.2, 0.1, 0.0], dtype=np.float32),
+    )
+    forward = ModelForwardResult(policy_logits=[1.0, 2.0], value=0.3, aux=aux, xmodel1=xmodel1)
     ctx = DecisionContext(
         actor=1,
         event={"type": "tsumo", "actor": 1, "pai": "5mr"},
@@ -45,6 +61,7 @@ def test_inference_contract_dataclasses_roundtrip():
     assert ctx.model_snap["tsumo_pai"] == "5mr"
     assert result.candidates[0].final_score == 0.5
     assert result.model_aux.win_prob == 0.4
+    assert forward.xmodel1 is not None
 
 
 class _FakeAdapter:
@@ -71,6 +88,12 @@ def _policy_with_scores(scores: dict[tuple[str, str | None], float]):
             action["actor"] = 0
         logits[action_to_idx(action)] = score
     return logits
+
+
+def _empty_policy():
+    import numpy as np
+
+    return np.full((45,), -1e9, dtype=np.float32)
 
 
 def test_default_action_scorer_uses_model_snap_for_primary_forward():
@@ -229,6 +252,563 @@ def test_default_action_scorer_reach_uses_best_declaration_discard(monkeypatch):
     reach_candidate = next(c for c in result.candidates if c.action["type"] == "reach")
     assert reach_candidate.meta["reach_discard"]["pai"] == "4m"
     assert reach_candidate.beam_score == reach_candidate.final_score
+
+
+def test_default_action_scorer_meld_beam_uses_post_meld_best_discard_value():
+    primary_logits = _empty_policy()
+    primary_logits[action_to_idx({"type": "chi", "pai": "5m", "consumed": ["6m", "7m"]})] = 0.2
+    primary_logits[action_to_idx({"type": "none"})] = 0.1
+    adapter = _FakeAdapter(
+        [
+            ModelForwardResult(
+                policy_logits=primary_logits,
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({("dahai", "9m"): 1.2, ("dahai", "5mr"): -2.0}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=3,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "dahai", "actor": 3, "pai": "5m", "tsumogiri": False},
+        runtime_snap={
+            "marker": "runtime",
+            "hand": ["5mr", "6m", "7m", "9m"],
+            "discards": [[], [], [], []],
+            "melds": [[], [], [], []],
+            "last_discard": {"actor": 3, "pai": "5m"},
+        },
+        model_snap={"marker": "model"},
+        legal_actions=[
+            {"type": "chi", "actor": 0, "target": 3, "pai": "5m", "consumed": ["6m", "7m"]},
+            {"type": "none"},
+        ],
+    )
+
+    result = scorer.score(ctx)
+
+    assert result.chosen["type"] == "chi"
+    assert adapter.calls[2][0]["last_discard"] is None
+    assert adapter.calls[2][0]["actor_to_move"] == 0
+    chi_candidate = next(c for c in result.candidates if c.action["type"] == "chi")
+    none_candidate = next(c for c in result.candidates if c.action["type"] == "none")
+    assert chi_candidate.final_score > none_candidate.final_score
+
+
+def test_default_action_scorer_kan_beam_uses_rinshan_weighted_followups(monkeypatch):
+    monkeypatch.setattr(
+        inference_scoring,
+        "_live_draw_tile_weights",
+        lambda snap: [("4m", 2), ("5m", 1)],
+    )
+
+    primary_logits = _empty_policy()
+    primary_logits[action_to_idx({"type": "daiminkan", "pai": "5m", "consumed": ["5m", "5m", "5m"]})] = 0.2
+    primary_logits[action_to_idx({"type": "none"})] = 0.1
+    adapter = _FakeAdapter(
+        [
+            ModelForwardResult(
+                policy_logits=primary_logits,
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({("dahai", "9m"): 1.0, ("dahai", "4m"): -1.0}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({("dahai", "9m"): -0.6, ("dahai", "5m"): -2.0}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=3,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "dahai", "actor": 3, "pai": "5m", "tsumogiri": False},
+        runtime_snap={
+            "marker": "runtime",
+            "hand": ["5m", "5m", "5m", "9m"],
+            "discards": [[], [], [], []],
+            "melds": [[], [], [], []],
+            "dora_markers": [],
+            "last_discard": {"actor": 3, "pai": "5m"},
+        },
+        model_snap={"marker": "model"},
+        legal_actions=[
+            {"type": "daiminkan", "actor": 0, "target": 3, "pai": "5m", "consumed": ["5m", "5m", "5m"]},
+            {"type": "none"},
+        ],
+    )
+
+    result = scorer.score(ctx)
+
+    assert result.chosen["type"] == "daiminkan"
+    kan_candidate = next(c for c in result.candidates if c.action["type"] == "daiminkan")
+    none_candidate = next(c for c in result.candidates if c.action["type"] == "none")
+    assert kan_candidate.final_score > none_candidate.final_score
+    assert adapter.calls[2][0]["tsumo_pai"] == "4m"
+    assert adapter.calls[3][0]["tsumo_pai"] == "5m"
+
+
+def test_default_action_scorer_kan_beam_allows_rinshan_hora_followup(monkeypatch):
+    monkeypatch.setattr(
+        inference_scoring,
+        "_live_draw_tile_weights",
+        lambda snap: [("4p", 1)],
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_enumerate_legal_action_specs_structural",
+        lambda snap, actor: [{"type": "hora", "pai": "4p"}, {"type": "dahai", "actor": actor, "pai": "9m", "tsumogiri": False}],
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "enumerate_legal_actions",
+        lambda snap, actor: (_ for _ in ()).throw(AssertionError("python legal action enumeration should not be used")),
+    )
+
+    primary_logits = _empty_policy()
+    primary_logits[action_to_idx({"type": "daiminkan", "pai": "5m", "consumed": ["5m", "5m", "5m"]})] = 0.2
+    primary_logits[action_to_idx({"type": "none"})] = 0.1
+    followup_logits = _empty_policy()
+    followup_logits[action_to_idx({"type": "hora", "pai": "4p"})] = 3.0
+    followup_logits[action_to_idx({"type": "dahai", "pai": "9m", "tsumogiri": False})] = -1.0
+    adapter = _FakeAdapter(
+        [
+            ModelForwardResult(
+                policy_logits=primary_logits,
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=followup_logits,
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=3,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "dahai", "actor": 3, "pai": "5m", "tsumogiri": False},
+        runtime_snap={
+            "marker": "runtime",
+            "hand": ["5m", "5m", "5m", "9m"],
+            "discards": [[], [], [], []],
+            "melds": [[], [], [], []],
+            "dora_markers": [],
+            "last_discard": {"actor": 3, "pai": "5m"},
+            "_force_hora_legal": True,
+        },
+        model_snap={"marker": "model"},
+        legal_actions=[
+            {"type": "daiminkan", "actor": 0, "target": 3, "pai": "5m", "consumed": ["5m", "5m", "5m"]},
+            {"type": "none"},
+        ],
+    )
+
+    monkeypatch.setattr(
+        inference_scoring,
+        "enumerate_legal_actions",
+        lambda snap, actor: [{"type": "hora", "actor": actor, "target": actor, "pai": "4p"}] if snap.get("tsumo_pai") == "4p" else [],
+    )
+
+    result = scorer.score(ctx)
+
+    assert result.chosen["type"] == "daiminkan"
+    assert adapter.calls[2][0]["tsumo_pai"] == "4p"
+
+
+def test_default_action_scorer_keqingv4_reach_candidate_carries_special_meta(monkeypatch):
+    monkeypatch.setattr(
+        inference_scoring,
+        "_reach_discard_candidates",
+        lambda hand, last_tsumo, last_tsumo_raw: [("4m", False)],
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_enumerate_keqingv4_reach_discards",
+        lambda snap, actor: (_ for _ in ()).throw(RuntimeError("force python reach helper")),
+    )
+
+    class _FakeV4Adapter(_FakeAdapter):
+        model_version = "keqingv4"
+
+        def resolve_runtime_v4_summaries(self, snap, actor, legal_actions=None):
+            special = np.zeros((3, KEQINGV4_SUMMARY_DIM), dtype=np.float32)
+            special[0, 1] = 1.0
+            special[0, 2] = 0.25
+            special[0, 4] = 0.5
+            special[0, 6] = 0.125
+            special[0, 12] = 1.0
+            special[0, 13] = 1.0
+            return (
+                np.zeros((34, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+                np.zeros((8, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+                special,
+            )
+
+    adapter = _FakeV4Adapter(
+        [
+            ModelForwardResult(
+                policy_logits=_policy_with_scores(
+                    {
+                        ("reach", None): 0.8,
+                        ("dahai", "4m"): 0.1,
+                    }
+                ),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({}),
+                value=0.4,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "tsumo", "actor": 0, "pai": "4m"},
+        runtime_snap={
+            "marker": "runtime",
+            "hand": ["4m"],
+            "discards": [[], [], [], []],
+            "reached": [False, False, False, False],
+            "last_tsumo": ["4m", None, None, None],
+            "last_tsumo_raw": ["4m", None, None, None],
+        },
+        model_snap={
+            "marker": "model",
+            "hand": [],
+            "tsumo_pai": "4m",
+            "reached": [False, False, False, False],
+            "last_tsumo": ["4m", None, None, None],
+            "last_tsumo_raw": ["4m", None, None, None],
+        },
+        legal_actions=[
+            {"type": "reach", "actor": 0},
+            {"type": "dahai", "actor": 0, "pai": "4m", "tsumogiri": True},
+        ],
+    )
+
+    result = scorer.score(ctx)
+
+    reach_candidate = next(c for c in result.candidates if c.action["type"] == "reach")
+    assert reach_candidate.meta["special_semantics"] == "reach"
+    assert reach_candidate.meta["reach_decl_tenpai"] == 1.0
+    assert reach_candidate.meta["reach_decl_waits_ratio"] == 0.25
+    assert reach_candidate.meta["reach_discard"]["pai"] == "4m"
+
+
+def test_default_action_scorer_non_keqingv4_path_does_not_require_private_adapter_attr():
+    adapter = _FakeAdapter(
+        [
+            ModelForwardResult(
+                policy_logits=_policy_with_scores(
+                    {
+                        ("dahai", "9m"): 0.9,
+                        ("dahai", "1m"): 0.1,
+                    }
+                ),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=0,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "tsumo", "actor": 0, "pai": "9m"},
+        runtime_snap={"marker": "runtime"},
+        model_snap={"marker": "model"},
+        legal_actions=[
+            {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": True},
+            {"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False},
+        ],
+    )
+
+    result = scorer.score(ctx)
+
+    assert result.chosen["pai"] == "9m"
+
+
+def test_review_exporter_surfaces_special_candidate_meta():
+    exporter = DefaultRuntimeReviewExporter()
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "tsumo", "actor": 0, "pai": "4m"},
+        runtime_snap={"hand": ["4m"]},
+        model_snap={"hand": [], "tsumo_pai": "4m"},
+        legal_actions=[{"type": "reach", "actor": 0}],
+    )
+    decision = DecisionResult(
+        chosen={"type": "reach", "actor": 0},
+        candidates=[
+            ScoredCandidate(
+                action={"type": "reach", "actor": 0},
+                logit=0.8,
+                final_score=1.2,
+                beam_score=1.2,
+                meta={
+                    "special_semantics": "reach",
+                    "reach_decl_tenpai": 1.0,
+                    "reach_discard": {"type": "dahai", "pai": "4m", "tsumogiri": False},
+                },
+            )
+        ],
+        model_value=0.1,
+        model_aux=ModelAuxOutputs(),
+    )
+
+    entry = exporter.build_decision_entry(
+        step=0,
+        ctx=ctx,
+        decision=decision,
+        gt_action=None,
+        actor=0,
+    )
+
+    assert entry["candidates"][0]["special_semantics"] == "reach"
+    assert entry["candidates"][0]["reach_decl_tenpai"] == 1.0
+    assert entry["candidates"][0]["reach_discard"]["pai"] == "4m"
+
+
+def test_default_action_scorer_keqingv4_ryukyoku_can_gain_calibration_bonus():
+    class _FakeV4Adapter(_FakeAdapter):
+        model_version = "keqingv4"
+
+        def resolve_runtime_v4_summaries(self, snap, actor, legal_actions=None):
+            special = np.zeros((3, KEQINGV4_SUMMARY_DIM), dtype=np.float32)
+            special[2, 2] = 1.0
+            special[2, 3] = 1.0
+            special[2, 4] = 1.4
+            special[2, 12] = 1.0
+            special[2, 13] = 1.0
+            return (
+                np.zeros((34, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+                np.zeros((8, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+                special,
+            )
+
+    adapter = _FakeV4Adapter(
+        [
+            ModelForwardResult(
+                policy_logits=_policy_with_scores(
+                    {
+                        ("ryukyoku", None): 0.10,
+                        ("dahai", "9m"): 0.45,
+                    }
+                ),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "tsumo", "actor": 0, "pai": "5m"},
+        runtime_snap={"hand": ["1m", "9m"], "tsumo_pai": "5m"},
+        model_snap={"hand": ["1m", "9m"], "tsumo_pai": "5m"},
+        legal_actions=[
+            {"type": "ryukyoku"},
+            {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": False},
+        ],
+    )
+
+    result = scorer.score(ctx)
+
+    assert result.chosen["type"] == "ryukyoku"
+    ryukyoku_candidate = next(c for c in result.candidates if c.action["type"] == "ryukyoku")
+    assert ryukyoku_candidate.meta["special_semantics"] == "ryukyoku"
+    assert ryukyoku_candidate.final_score > 0.45
+
+
+def test_default_action_scorer_meld_fallback_compares_final_beam_score(monkeypatch):
+    monkeypatch.setattr(
+        inference_scoring,
+        "_meld_value_eval",
+        lambda *args, **kwargs: (
+            {"type": "chi", "actor": 0, "target": 3, "pai": "5m", "consumed": ["6m", "7m"]},
+            {action_to_idx({"type": "chi", "pai": "5m", "consumed": ["6m", "7m"]}): 5.0},
+        ),
+    )
+
+    primary_logits = _empty_policy()
+    primary_logits[action_to_idx({"type": "chi", "pai": "5m", "consumed": ["6m", "7m"]})] = 0.1
+    primary_logits[action_to_idx({"type": "dahai", "pai": "9m", "tsumogiri": False})] = 0.9
+    adapter = _FakeAdapter(
+        [
+            ModelForwardResult(
+                policy_logits=primary_logits,
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=3,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "dahai", "actor": 3, "pai": "5m", "tsumogiri": False},
+        runtime_snap={"marker": "runtime"},
+        model_snap={"marker": "model"},
+        legal_actions=[
+            {"type": "chi", "actor": 0, "target": 3, "pai": "5m", "consumed": ["6m", "7m"]},
+            {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": False},
+        ],
+    )
+
+    result = scorer.score(ctx)
+
+    assert result.chosen["type"] == "chi"
+
+
+def test_default_action_scorer_reach_eval_prefers_rust_reach_projection(monkeypatch):
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_enumerate_keqingv4_reach_discards",
+        lambda snap, actor: [("1p", False)],
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_reach_discard_candidates",
+        lambda hand, last_tsumo, last_tsumo_raw: (_ for _ in ()).throw(AssertionError("python reach discard helper should not be used")),
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_project_keqingv4_reach_snapshot",
+        lambda snap, actor, pai: {**snap, "projected_by": "rust", "reached": [True, False, False, False], "pending_reach": [False, False, False, False]},
+    )
+
+    primary_logits = _empty_policy()
+    primary_logits[action_to_idx({"type": "reach"})] = 0.5
+    primary_logits[action_to_idx({"type": "dahai", "pai": "1p", "tsumogiri": False})] = 0.2
+    adapter = _FakeAdapter(
+        [
+            ModelForwardResult(policy_logits=primary_logits, value=0.0, aux=ModelAuxOutputs()),
+        ]
+    )
+    seen = {"projected_by": None}
+    monkeypatch.setattr(
+        inference_scoring,
+        "_eval_snapshot_outputs",
+        lambda adapter_arg, snap_arg, actor_arg: (
+            seen.__setitem__("projected_by", snap_arg.get("projected_by")),
+            (0.3, ModelAuxOutputs()),
+        )[1],
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "tsumo", "actor": 0, "pai": "5s"},
+        runtime_snap={
+            "hand": ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+            "tsumo_pai": "5s",
+            "last_tsumo": ["5s", None, None, None],
+            "last_tsumo_raw": ["5s", None, None, None],
+            "reached": [False, False, False, False],
+            "pending_reach": [False, False, False, False],
+        },
+        model_snap={"hand": [], "tsumo_pai": None},
+        legal_actions=[
+            {"type": "reach", "actor": 0},
+            {"type": "dahai", "actor": 0, "pai": "1p", "tsumogiri": False},
+        ],
+    )
+
+    result = scorer.score(ctx)
+
+    assert result.chosen["type"] == "reach"
+    assert seen["projected_by"] == "rust"
 
 
 def test_runtime_review_exporter_builds_decision_entry():

@@ -10,12 +10,14 @@ from xmodel1.model import Xmodel1Model
 def _write_fixture(path: Path) -> None:
     n = 4
     k = 14
-    d = 21
+    d = 35
     f = 10
     mask = np.zeros((n, k), dtype=np.uint8)
     mask[:, :4] = 1
     np.savez(
         path,
+        schema_name=np.array("xmodel1_discard_v2", dtype=np.str_),
+        schema_version=np.array(2, dtype=np.int32),
         state_tile_feat=np.zeros((n, 57, 34), dtype=np.float16),
         state_scalar=np.zeros((n, 56), dtype=np.float16),
         candidate_feat=np.zeros((n, k, d), dtype=np.float16),
@@ -23,14 +25,24 @@ def _write_fixture(path: Path) -> None:
         candidate_mask=mask,
         candidate_flags=np.zeros((n, k, f), dtype=np.uint8),
         chosen_candidate_idx=np.zeros((n,), dtype=np.int16),
+        action_idx_target=np.zeros((n,), dtype=np.int16),
         candidate_quality_score=np.zeros((n, k), dtype=np.float32),
         candidate_rank_bucket=np.zeros((n, k), dtype=np.int8),
         candidate_hard_bad_flag=np.zeros((n, k), dtype=np.uint8),
-        global_value_target=np.zeros((n,), dtype=np.float32),
+        special_candidate_feat=np.zeros((n, 12, 25), dtype=np.float16),
+        special_candidate_type_id=np.full((n, 12), -1, dtype=np.int16),
+        special_candidate_mask=np.zeros((n, 12), dtype=np.uint8),
+        special_candidate_quality_score=np.zeros((n, 12), dtype=np.float32),
+        special_candidate_rank_bucket=np.zeros((n, 12), dtype=np.int8),
+        special_candidate_hard_bad_flag=np.zeros((n, 12), dtype=np.uint8),
+        chosen_special_candidate_idx=np.full((n,), -1, dtype=np.int16),
         score_delta_target=np.zeros((n,), dtype=np.float32),
         win_target=np.zeros((n,), dtype=np.float32),
         dealin_target=np.zeros((n,), dtype=np.float32),
-        offense_quality_target=np.zeros((n,), dtype=np.float32),
+        pts_given_win_target=np.zeros((n,), dtype=np.float32),
+        pts_given_dealin_target=np.zeros((n,), dtype=np.float32),
+        opp_tenpai_target=np.zeros((n, 3), dtype=np.float32),
+        event_history=np.zeros((n, 48, 5), dtype=np.int16),
         sample_type=np.zeros((n,), dtype=np.int8),
         actor=np.zeros((n,), dtype=np.int8),
         event_index=np.arange(n, dtype=np.int32),
@@ -60,8 +72,14 @@ def test_xmodel1_model_forward_smoke(tmp_path: Path):
         batch["candidate_mask"],
     )
     assert out.discard_logits.shape == (4, 14)
-    assert out.global_value.shape == (4, 1)
+    assert out.win_logit.shape == (4, 1)
+    assert out.dealin_logit.shape == (4, 1)
+    assert out.pts_given_win.shape == (4, 1)
+    assert out.pts_given_dealin.shape == (4, 1)
+    assert out.opp_tenpai_logits.shape == (4, 3)
     assert torch.isfinite(out.discard_logits).all()
+    assert torch.isfinite(out.pts_given_win).all()
+    assert torch.isfinite(out.pts_given_dealin).all()
 
 
 def test_xmodel1_model_backward_smoke(tmp_path: Path):
