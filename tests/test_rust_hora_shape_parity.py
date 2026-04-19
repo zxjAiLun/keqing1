@@ -125,6 +125,7 @@ def test_score_hora_keeps_same_ron_result_with_rust_delta_rules():
     assert actual.fu == expected.fu
     assert actual.cost == expected.cost
     assert actual.deltas == expected.deltas
+    assert actual.yaku_details == expected.yaku_details
 
 
 def test_score_hora_keeps_same_tsumo_result_with_rust_delta_rules():
@@ -153,6 +154,7 @@ def test_score_hora_keeps_same_tsumo_result_with_rust_delta_rules():
     assert actual.fu == expected.fu
     assert actual.cost == expected.cost
     assert actual.deltas == expected.deltas
+    assert actual.yaku_details == expected.yaku_details
 
 
 def test_can_hora_state_keeps_behavior_with_rust_state_prep_enabled():
@@ -218,6 +220,7 @@ def test_score_hora_keeps_same_haitei_tsumo_result_with_rust_truth():
     assert actual.cost == expected.cost
     assert actual.deltas == expected.deltas
     assert actual.yaku == expected.yaku
+    assert actual.yaku_details == expected.yaku_details
 
 
 def test_score_hora_keeps_same_houtei_ron_result_with_rust_truth():
@@ -255,6 +258,7 @@ def test_score_hora_keeps_same_houtei_ron_result_with_rust_truth():
     assert actual.cost == expected.cost
     assert actual.deltas == expected.deltas
     assert actual.yaku == expected.yaku
+    assert actual.yaku_details == expected.yaku_details
 
 
 def test_score_hora_keeps_same_chankan_result_with_rust_truth():
@@ -291,6 +295,7 @@ def test_score_hora_keeps_same_chankan_result_with_rust_truth():
     assert actual.cost == expected.cost
     assert actual.deltas == expected.deltas
     assert actual.yaku == expected.yaku
+    assert actual.yaku_details == expected.yaku_details
 
 
 def test_score_hora_keeps_same_kokushi_13_wait_result_with_rust_truth():
@@ -324,3 +329,4 @@ def test_score_hora_keeps_same_kokushi_13_wait_result_with_rust_truth():
     assert actual.cost == expected.cost
     assert actual.deltas == expected.deltas
     assert actual.yaku == expected.yaku
+    assert actual.yaku_details == expected.yaku_details

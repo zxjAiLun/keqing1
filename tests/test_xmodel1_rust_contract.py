@@ -10,6 +10,7 @@ from training.cache_schema import (
     XMODEL1_SCHEMA_NAME,
     XMODEL1_SCHEMA_VERSION,
 )
+from xmodel1.schema import XMODEL1_SAMPLE_TYPE_HORA, XMODEL1_SPECIAL_TYPE_HORA
 
 
 def _export_rust_arrays(tmp_path, events):
@@ -34,6 +35,18 @@ def _export_rust_arrays(tmp_path, events):
     return np.load(tmp_path / "out" / "ds1" / "sample.npz", allow_pickle=True)
 
 
+def _candidate_feat_diff_message(rust_candidate_feat, py_candidate_feat, candidate_tile_id) -> str:
+    diff = np.argwhere(rust_candidate_feat != py_candidate_feat)
+    lines = [f"candidate_feat drift_count={len(diff)}"]
+    for row, cand, slot in diff[:20]:
+        lines.append(
+            f"row={int(row)} cand={int(cand)} tile={int(candidate_tile_id[row, cand])} "
+            f"slot={int(slot)} rust={float(rust_candidate_feat[row, cand, slot]):.6f} "
+            f"py={float(py_candidate_feat[row, cand, slot]):.6f}"
+        )
+    return "\n".join(lines)
+
+
 def _assert_rust_matches_python_oracle(tmp_path, events, *, replay_id="fixture.mjson", compare_targets=False):
     from xmodel1.preprocess import events_to_xmodel1_arrays
 
@@ -42,6 +55,7 @@ def _assert_rust_matches_python_oracle(tmp_path, events, *, replay_id="fixture.m
     with _export_rust_arrays(tmp_path, events) as rust_arrays:
         py_discard_mask = py_arrays["sample_type"] == 0
         rust_discard_mask = rust_arrays["sample_type"] == 0
+        rust_tile_ids = rust_arrays["candidate_tile_id"][rust_discard_mask]
         exact_fields = [
             "state_tile_feat",
             "state_scalar",
@@ -59,6 +73,14 @@ def _assert_rust_matches_python_oracle(tmp_path, events, *, replay_id="fixture.m
             "special_candidate_hard_bad_flag",
         ]
         for field in exact_fields:
+            if field == "candidate_feat":
+                rust_field = rust_arrays[field][rust_discard_mask]
+                py_field = py_arrays[field][py_discard_mask]
+                assert np.array_equal(
+                    rust_field,
+                    py_field,
+                ), _candidate_feat_diff_message(rust_field, py_field, rust_tile_ids)
+                continue
             assert np.array_equal(rust_arrays[field][rust_discard_mask], py_arrays[field][py_discard_mask]), field
         assert np.allclose(
             rust_arrays["special_candidate_feat"][rust_discard_mask],
@@ -107,6 +129,23 @@ def _assert_rust_matches_python_oracle(tmp_path, events, *, replay_id="fixture.m
                 f"opp_tenpai_target shape mismatch: rust={rust_opp.shape} py={py_opp.shape}"
             )
             assert np.array_equal(rust_opp, py_opp), "opp_tenpai_target"
+
+
+def _assert_candidate_feat_matches_python_oracle(tmp_path, events, *, replay_id: str) -> None:
+    from xmodel1.preprocess import events_to_xmodel1_arrays
+
+    py_arrays = events_to_xmodel1_arrays(events, replay_id=replay_id)
+    assert py_arrays is not None
+    with _export_rust_arrays(tmp_path, events) as rust_arrays:
+        py_discard_mask = py_arrays["sample_type"] == 0
+        rust_discard_mask = rust_arrays["sample_type"] == 0
+        rust_field = rust_arrays["candidate_feat"][rust_discard_mask]
+        py_field = py_arrays["candidate_feat"][py_discard_mask]
+        rust_tile_ids = rust_arrays["candidate_tile_id"][rust_discard_mask]
+        assert np.array_equal(
+            rust_field,
+            py_field,
+        ), _candidate_feat_diff_message(rust_field, py_field, rust_tile_ids)
 
 
 def test_xmodel1_schema_contract_matches_python_constants():
@@ -164,13 +203,17 @@ def test_xmodel1_rust_export_surface_writes_manifest(tmp_path):
     assert "skipped_existing_file_count" in manifest
     assert "ds1" in manifest["shard_file_counts"] or manifest["shard_file_counts"] == {}
     if produced_npz:
-        assert (tmp_path / "out" / "ds1" / "sample.npz").exists()
+        npz_path = tmp_path / "out" / "ds1" / "sample.npz"
+        assert npz_path.exists()
         assert manifest["exported_file_count"] == 1
         assert manifest["exported_sample_count"] >= 1
         assert manifest["processed_file_count"] == 1
         assert manifest["skipped_existing_file_count"] == 0
         assert manifest["shard_file_counts"]["ds1"] == 1
         assert manifest["shard_sample_counts"]["ds1"] >= 1
+        with np.load(npz_path, allow_pickle=False) as data:
+            assert data["schema_name"].item() == XMODEL1_SCHEMA_NAME
+            assert int(data["schema_version"].item()) == XMODEL1_SCHEMA_VERSION
 
 
 def test_xmodel1_rust_export_produces_multiple_candidates_for_real_smoke_record(tmp_path):
@@ -203,6 +246,8 @@ def test_xmodel1_rust_export_produces_multiple_candidates_for_real_smoke_record(
     npz_path = tmp_path / "out" / "ds1" / "sample.npz"
     assert npz_path.exists()
     with np.load(npz_path, allow_pickle=True) as data:
+        assert data["schema_name"].item() == XMODEL1_SCHEMA_NAME
+        assert int(data["schema_version"].item()) == XMODEL1_SCHEMA_VERSION
         mask = data["candidate_mask"][0]
         tile_ids = data["candidate_tile_id"][0]
         qualities = data["candidate_quality_score"][0]
@@ -245,6 +290,135 @@ def test_xmodel1_rust_export_matches_python_oracle_on_simple_discard_fixture(tmp
         {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
     ]
     _assert_rust_matches_python_oracle(tmp_path, events)
+
+
+def test_xmodel1_rust_export_keeps_hora_as_dedicated_special_sample(tmp_path):
+    events = [
+        {"type": "start_game", "names": ["A", "B", "C", "D"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "1p", "2p", "3p", "1s", "2s", "3s", "4m", "5m", "9s", "9s"],
+                ["1s"] * 13,
+                ["2s"] * 13,
+                ["3s"] * 13,
+            ],
+        },
+        {"type": "tsumo", "actor": 0, "pai": "6m"},
+        {"type": "hora", "actor": 0, "target": 0, "pai": "6m", "deltas": [1000, -500, -500, 0], "ura_markers": []},
+    ]
+
+    from xmodel1.preprocess import events_to_xmodel1_arrays
+
+    py_arrays = events_to_xmodel1_arrays(events, replay_id="hora_fixture.mjson")
+    assert py_arrays is not None
+    with _export_rust_arrays(tmp_path, events) as rust_arrays:
+        py_rows = np.where(py_arrays["sample_type"] == XMODEL1_SAMPLE_TYPE_HORA)[0]
+        rust_rows = np.where(rust_arrays["sample_type"] == XMODEL1_SAMPLE_TYPE_HORA)[0]
+        assert py_rows.tolist() == [0]
+        assert rust_rows.tolist() == [0]
+        py_row = int(py_rows[0])
+        rust_row = int(rust_rows[0])
+        assert int(py_arrays["action_idx_target"][py_row]) == 42
+        assert int(rust_arrays["action_idx_target"][rust_row]) == 42
+        py_chosen = int(py_arrays["chosen_special_candidate_idx"][py_row])
+        rust_chosen = int(rust_arrays["chosen_special_candidate_idx"][rust_row])
+        assert py_chosen >= 0
+        assert rust_chosen >= 0
+        assert int(py_arrays["special_candidate_type_id"][py_row, py_chosen]) == XMODEL1_SPECIAL_TYPE_HORA
+        assert int(rust_arrays["special_candidate_type_id"][rust_row, rust_chosen]) == XMODEL1_SPECIAL_TYPE_HORA
+
+
+@pytest.mark.parametrize(
+    ("name", "events"),
+    [
+        (
+            "simple_discard",
+            [
+                {"type": "start_game", "names": ["A", "B", "C", "D"]},
+                {
+                    "type": "start_kyoku",
+                    "bakaze": "E",
+                    "kyoku": 1,
+                    "honba": 0,
+                    "kyotaku": 0,
+                    "oya": 0,
+                    "scores": [25000, 25000, 25000, 25000],
+                    "dora_marker": "1m",
+                    "tehais": [
+                        ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+                        ["1s"] * 13,
+                        ["2s"] * 13,
+                        ["3s"] * 13,
+                    ],
+                },
+                {"type": "tsumo", "actor": 0, "pai": "4p"},
+                {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
+            ],
+        ),
+        (
+            "riichi",
+            [
+                {"type": "start_game", "names": ["A", "B", "C", "D"]},
+                {
+                    "type": "start_kyoku",
+                    "bakaze": "E",
+                    "kyoku": 1,
+                    "honba": 0,
+                    "kyotaku": 0,
+                    "oya": 0,
+                    "scores": [25000, 25000, 25000, 25000],
+                    "dora_marker": "1m",
+                    "tehais": [
+                        ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+                        ["1s"] * 13,
+                        ["2s"] * 13,
+                        ["3s"] * 13,
+                    ],
+                },
+                {"type": "tsumo", "actor": 0, "pai": "4p"},
+                {"type": "reach", "actor": 0},
+                {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
+                {"type": "reach_accepted", "actor": 0, "scores": [24000, 25000, 25000, 25000], "kyotaku": 1},
+            ],
+        ),
+        (
+            "pon_call",
+            [
+                {"type": "start_game", "names": ["A", "B", "C", "D"]},
+                {
+                    "type": "start_kyoku",
+                    "bakaze": "E",
+                    "kyoku": 1,
+                    "honba": 0,
+                    "kyotaku": 0,
+                    "oya": 0,
+                    "scores": [25000, 25000, 25000, 25000],
+                    "dora_marker": "1m",
+                    "tehais": [
+                        ["2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p", "4p"],
+                        ["5p", "5p", "7s", "7s", "8s", "8s", "9s", "9s", "E", "E", "S", "S", "W"],
+                        ["2s"] * 13,
+                        ["3s"] * 13,
+                    ],
+                },
+                {"type": "tsumo", "actor": 0, "pai": "5p"},
+                {"type": "dahai", "actor": 0, "pai": "5p", "tsumogiri": True},
+                {"type": "pon", "actor": 1, "target": 0, "pai": "5p", "consumed": ["5p", "5p"]},
+                {"type": "dahai", "actor": 1, "pai": "W", "tsumogiri": False},
+            ],
+        ),
+    ],
+)
+def test_xmodel1_rust_export_candidate_feat_minimal_regressions(tmp_path, name, events):
+    _assert_candidate_feat_matches_python_oracle(tmp_path, events, replay_id=f"{name}.mjson")
 
 
 @pytest.mark.parametrize(
@@ -693,11 +867,19 @@ def test_xmodel1_rust_export_emits_dealin_target(tmp_path):
         {"type": "end_kyoku"},
     ]
     with _export_rust_arrays(tmp_path, events) as data:
-        assert np.allclose(data["score_delta_target"], np.array([-8000 / 30000], dtype=np.float32))
-        assert np.allclose(data["win_target"], np.array([0.0], dtype=np.float32))
-        assert np.allclose(data["dealin_target"], np.array([1.0], dtype=np.float32))
-        assert np.allclose(data["pts_given_win_target"], np.array([0.0], dtype=np.float32))
-        assert np.allclose(data["pts_given_dealin_target"], np.array([8000 / 30000], dtype=np.float32))
+        discard_rows = data["sample_type"] == 0
+        hora_rows = data["sample_type"] == XMODEL1_SAMPLE_TYPE_HORA
+        assert int(discard_rows.sum()) == 1
+        assert int(hora_rows.sum()) == 1
+        assert np.allclose(data["score_delta_target"][discard_rows], np.array([-8000 / 30000], dtype=np.float32))
+        assert np.allclose(data["win_target"][discard_rows], np.array([0.0], dtype=np.float32))
+        assert np.allclose(data["dealin_target"][discard_rows], np.array([1.0], dtype=np.float32))
+        assert np.allclose(data["pts_given_win_target"][discard_rows], np.array([0.0], dtype=np.float32))
+        assert np.allclose(
+            data["pts_given_dealin_target"][discard_rows],
+            np.array([8000 / 30000], dtype=np.float32),
+        )
+        assert np.allclose(data["win_target"][hora_rows], np.array([1.0], dtype=np.float32))
 
 
 def test_xmodel1_rust_export_emits_opp_tenpai_target_with_correct_shape(tmp_path):

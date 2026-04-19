@@ -23,9 +23,24 @@
 import pytest
 from collections import Counter
 
+import keqing_core
 from mahjong_env.legal_actions import enumerate_legal_actions, _chi_patterns, _can_pon, _can_daiminkan, _hand_has_tile, _pick_chi_tile, _pick_consumed, _ankan_candidates, _can_declare_reach
 from mahjong_env.state import GameState, PlayerState
 from mahjong_env.types import Action
+
+
+def _force_python_legal_fallback(monkeypatch, *, disable_structural: bool = False):
+    monkeypatch.setattr(
+        keqing_core,
+        "enumerate_public_legal_action_specs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Rust public legal action capability is not available")),
+    )
+    if disable_structural:
+        monkeypatch.setattr(
+            keqing_core,
+            "enumerate_legal_action_specs_structural",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Rust legal action structural capability is not available")),
+        )
 
 
 # =============================================================================
@@ -249,6 +264,7 @@ class TestKakanResponseWindow:
         gs.players = [player, PlayerState(), PlayerState(), PlayerState()]
         gs.last_kakan = {"actor": 1, "pai": "5mr", "pai_raw": "5mr"}
         snap = gs.snapshot(actor=0)
+        _force_python_legal_fallback(monkeypatch)
         monkeypatch.setattr("mahjong_env.legal_actions.can_hora_from_snapshot", lambda *args, **kwargs: True)
 
         legal = enumerate_legal_actions(snap, actor=0)
@@ -331,6 +347,7 @@ class TestDiscardReactionWindow:
 
     def test_discard_reaction_hora_absent_not_tenpai(self, monkeypatch):
         snap = self._make_reaction_state()
+        _force_python_legal_fallback(monkeypatch)
         monkeypatch.setattr("mahjong_env.legal_actions.can_hora_from_snapshot", lambda *args, **kwargs: False)
         legal = enumerate_legal_actions(snap, actor=0)
         assert not any(a.type == "hora" for a in legal)
@@ -476,6 +493,7 @@ class TestOwnTurnBranch:
     # ------ C1: 自摸阶段 ------
     def test_own_turn_tsumo_hora_present(self, monkeypatch):
         snap = self._make_own_turn_state(last_tsumo="5mr", last_tsumo_raw="5mr")
+        _force_python_legal_fallback(monkeypatch)
         monkeypatch.setattr("mahjong_env.legal_actions.can_hora_from_snapshot", lambda *args, **kwargs: True)
         legal = enumerate_legal_actions(snap, actor=0)
         assert any(a.type == "hora" and a.target == 0 and a.pai == "5mr" for a in legal)
@@ -505,6 +523,7 @@ class TestOwnTurnBranch:
         assert not any(a.type == "reach" for a in legal)
 
     def test_reached_ankan_still_present_when_wait_shape_guard_passes(self, monkeypatch):
+        _force_python_legal_fallback(monkeypatch, disable_structural=True)
         monkeypatch.setattr("mahjong_env.legal_actions._ankan_allowed_after_reach", lambda *args, **kwargs: True)
         snap = self._make_own_turn_state(reached=True, last_tsumo="5mr", last_tsumo_raw="5mr",
                                           hand_tiles=["1m", "1m", "1m", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "5mr"])
@@ -696,6 +715,7 @@ class TestCrossCuttingEdgeCases:
         def mock_hora(snap, actor, target, pai, is_tsumo, is_chankan=False):
             return is_tsumo  # tsumo allowed, ron blocked
 
+        _force_python_legal_fallback(monkeypatch)
         monkeypatch.setattr("mahjong_env.legal_actions.can_hora_from_snapshot", mock_hora)
         legal = enumerate_legal_actions(snap, actor=0)
         # furiten only affects ron, tsumo hora should still appear

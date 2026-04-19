@@ -6,8 +6,13 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList};
 
+use crate::continuation_scenarios::build_keqingv4_continuation_scenarios;
+use crate::continuation_scoring::{aggregate_continuation_scores, score_continuation_scenario};
 use crate::counts::TILE_COUNT;
 use crate::event_apply::replay_state_snapshot;
+use crate::hora_truth::{
+    evaluate_hora_truth_from_prepared, legacy_error_payload, legacy_payload_from_truth,
+};
 use crate::keqingv4_export::build_keqingv4_cached_records_with_options;
 use crate::keqingv4_summary::{
     build_keqingv4_call_summary, build_keqingv4_discard_summary, build_keqingv4_special_summary,
@@ -18,14 +23,15 @@ use crate::keqingv4_summary::{
 };
 use crate::legal_actions::{
     can_hora_shape_from_snapshot, enumerate_hora_candidates,
-    enumerate_legal_action_specs_structural, prepare_hora_evaluation_from_snapshot,
+    enumerate_legal_action_specs_structural, enumerate_public_legal_action_specs,
+    prepare_hora_evaluation_from_snapshot,
 };
-use crate::native_scoring::evaluate_hora_from_prepared;
 use crate::progress_batch::{
     summarize_3n2_candidates_py_impl, summarize_best_3n2_candidate_py_impl,
 };
 use crate::progress_delta::{calc_discard_deltas, calc_draw_deltas, calc_required_tiles};
 use crate::progress_summary::summarize_3n1;
+use crate::replay_samples::build_replay_decision_records_mc_return;
 use crate::score_rules::{
     build_hora_result_payload, compute_hora_deltas, prepare_hora_tile_allocation,
 };
@@ -227,6 +233,15 @@ fn build_keqingv4_cached_records_py(
 }
 
 #[pyfunction]
+fn build_replay_decision_records_mc_return_json_py(events_json: &str) -> PyResult<String> {
+    let events: Vec<serde_json::Value> = serde_json::from_str(events_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let records =
+        build_replay_decision_records_mc_return(&events).map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&records).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
 fn build_keqingv4_discard_summary_json_py(
     snapshot_json: &str,
     actor: usize,
@@ -292,6 +307,88 @@ fn build_keqingv4_typed_summaries_json_py(
         build_keqingv4_call_summary(&snapshot, actor, &legal_actions),
         build_keqingv4_special_summary(&snapshot, actor, &legal_actions),
     ))
+}
+
+#[pyfunction]
+fn build_keqingv4_continuation_scenarios_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    action_json: &str,
+) -> PyResult<String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let action: serde_json::Value = serde_json::from_str(action_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let scenarios = build_keqingv4_continuation_scenarios(&snapshot, actor, &action);
+    serde_json::to_string(&scenarios).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    continuation_kind,
+    policy_logits_json,
+    legal_actions_json,
+    value,
+    score_delta,
+    win_prob,
+    dealin_prob,
+    beam_lambda,
+    score_delta_lambda,
+    win_prob_lambda,
+    dealin_prob_lambda
+))]
+fn score_keqingv4_continuation_scenario_json_py(
+    continuation_kind: &str,
+    policy_logits_json: &str,
+    legal_actions_json: &str,
+    value: f32,
+    score_delta: f32,
+    win_prob: f32,
+    dealin_prob: f32,
+    beam_lambda: f32,
+    score_delta_lambda: f32,
+    win_prob_lambda: f32,
+    dealin_prob_lambda: f32,
+) -> PyResult<String> {
+    let policy_logits: Vec<f32> = serde_json::from_str(policy_logits_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let legal_actions: Vec<serde_json::Value> = serde_json::from_str(legal_actions_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let payload = score_continuation_scenario(
+        continuation_kind,
+        &policy_logits,
+        &legal_actions,
+        value,
+        score_delta,
+        win_prob,
+        dealin_prob,
+        beam_lambda,
+        score_delta_lambda,
+        win_prob_lambda,
+        dealin_prob_lambda,
+    );
+    serde_json::to_string(&payload).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn aggregate_keqingv4_continuation_scores_json_py(
+    root_policy_logits_json: &str,
+    action_json: &str,
+    scenario_scores_json: &str,
+) -> PyResult<String> {
+    let root_policy_logits: Vec<f32> = serde_json::from_str(root_policy_logits_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let action: serde_json::Value = serde_json::from_str(action_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let scenario_scores: Vec<serde_json::Value> = serde_json::from_str(scenario_scores_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let parsed = scenario_scores
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let payload = aggregate_continuation_scores(&root_policy_logits, &action, &parsed);
+    serde_json::to_string(&payload).map_err(|err| PyRuntimeError::new_err(err.to_string()))
 }
 
 #[pyfunction]
@@ -421,6 +518,18 @@ fn enumerate_legal_action_specs_structural_json_py(
 }
 
 #[pyfunction]
+fn enumerate_public_legal_action_specs_json_py(
+    snapshot_json: &str,
+    actor: usize,
+) -> PyResult<String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let actions =
+        enumerate_public_legal_action_specs(&snapshot, actor).map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&actions).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
 fn enumerate_hora_candidates_json_py(snapshot_json: &str, actor: usize) -> PyResult<String> {
     let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
         .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
@@ -525,8 +634,20 @@ fn build_hora_result_payload_json_py(
 fn evaluate_hora_from_prepared_json_py(prepared_json: &str) -> PyResult<String> {
     let prepared: serde_json::Value = serde_json::from_str(prepared_json)
         .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
-    let payload = evaluate_hora_from_prepared(&prepared).map_err(PyRuntimeError::new_err)?;
+    let payload = match evaluate_hora_truth_from_prepared(&prepared) {
+        Ok(truth) => legacy_payload_from_truth(&truth),
+        Err(err) if err == "no cost" => legacy_error_payload(&err),
+        Err(err) => return Err(PyRuntimeError::new_err(err)),
+    };
     serde_json::to_string(&payload).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn evaluate_hora_truth_from_prepared_json_py(prepared_json: &str) -> PyResult<String> {
+    let prepared: serde_json::Value = serde_json::from_str(prepared_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let truth = evaluate_hora_truth_from_prepared(&prepared).map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&truth).map_err(|err| PyRuntimeError::new_err(err.to_string()))
 }
 
 #[pymodule]
@@ -545,10 +666,26 @@ pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(summarize_best_3n2_candidate_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_xmodel1_discard_records_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_keqingv4_cached_records_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        build_replay_decision_records_mc_return_json_py,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(build_keqingv4_discard_summary_json_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_keqingv4_call_summary_json_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_keqingv4_special_summary_json_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_keqingv4_typed_summaries_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        build_keqingv4_continuation_scenarios_json_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        score_keqingv4_continuation_scenario_json_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        aggregate_keqingv4_continuation_scores_json_py,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(project_keqingv4_call_snapshot_json_py, m)?)?;
     m.add_function(wrap_pyfunction!(
         project_keqingv4_discard_snapshot_json_py,
@@ -581,6 +718,10 @@ pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         enumerate_legal_action_specs_structural_json_py,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        enumerate_public_legal_action_specs_json_py,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(enumerate_hora_candidates_json_py, m)?)?;
     m.add_function(wrap_pyfunction!(can_hora_shape_from_snapshot_json_py, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -591,6 +732,10 @@ pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(prepare_hora_tile_allocation_json_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_hora_result_payload_json_py, m)?)?;
     m.add_function(wrap_pyfunction!(evaluate_hora_from_prepared_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        evaluate_hora_truth_from_prepared_json_py,
+        m
+    )?)?;
     m.add("TILE_COUNT", TILE_COUNT)?;
     m.add("XMODEL1_SCHEMA_NAME", XMODEL1_SCHEMA_NAME)?;
     m.add("XMODEL1_SCHEMA_VERSION", XMODEL1_SCHEMA_VERSION)?;

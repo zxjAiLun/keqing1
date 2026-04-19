@@ -2,6 +2,7 @@
 data_dirs:
   - processed_xmodel1_v1b/ds1
   - processed_xmodel1_v1b/ds2
+  - processed_xmodel1_v1b/ds3
 
 output_dir: artifacts/xmodel1_runs/v1b_align
 device: cuda
@@ -16,22 +17,27 @@ hidden_dim: 256
 num_res_blocks: 4
 dropout: 0.1
 
-num_epochs: 8
-batch_size: 256
+num_epochs: 20
+batch_size: 512
 learning_rate: 0.0003
 weight_decay: 0.0001
 warmup_steps: 1000
-steps_per_epoch: 1000
+
+# <= 0 时按本轮随机采样样本数与 batch_size 自动推导。
+steps_per_epoch: 0
+
 val_steps_per_epoch: 100
-files_per_epoch_ratio: 0.0
-files_per_epoch_count: 350
+# Rust full export 后训练集规模已显著扩大；默认按比例随机抽样，
+# 不再固定每个 epoch 只取 350 个文件。
+files_per_epoch_ratio: 0.1
+files_per_epoch_count: 0
 
 val_ratio: 0.05
-num_workers: 0
+num_workers: 8
 pin_memory: false
 persistent_workers: false
 buffer_size: 128
-log_interval: 100
+log_interval: 2000
 
 ce_loss_weight: 1.0
 action_ce_loss_weight: 0.25

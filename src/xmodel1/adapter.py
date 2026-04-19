@@ -7,7 +7,6 @@ from pathlib import Path
 
 import torch
 
-from evals.xmodel1.review_export import ReviewCandidate, tile34_to_action_label, topk_candidates_from_row
 from xmodel1.candidate_quality import build_special_candidate_arrays
 from xmodel1.features import (
     EVENT_HISTORY_FEATURE_DIM,
@@ -17,7 +16,18 @@ from xmodel1.features import (
     resolve_runtime_event_history,
 )
 from xmodel1.model import Xmodel1Model
-from xmodel1.schema import XMODEL1_MAX_CANDIDATES, XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM
+from xmodel1.review_export import (
+    ReviewCandidate,
+    special_type_to_action_label,
+    tile34_to_action_label,
+    topk_candidates_from_row,
+    topk_special_candidates_from_row,
+)
+from xmodel1.schema import (
+    XMODEL1_MAX_CANDIDATES,
+    XMODEL1_SAMPLE_TYPE_DISCARD,
+    XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+)
 
 
 @dataclass(frozen=True)
@@ -114,10 +124,16 @@ class Xmodel1Adapter:
             "candidate_quality_score": batch["candidate_quality_score"].detach().cpu(),
             "candidate_rank_bucket": batch["candidate_rank_bucket"].detach().cpu(),
             "candidate_hard_bad_flag": batch["candidate_hard_bad_flag"].detach().cpu(),
+            "sample_type": batch["sample_type"].detach().cpu(),
             "special_candidate_type_id": batch["special_candidate_type_id"].detach().cpu(),
             "special_candidate_mask": batch["special_candidate_mask"].detach().cpu(),
+            "special_candidate_quality_score": batch["special_candidate_quality_score"].detach().cpu(),
+            "special_candidate_rank_bucket": batch["special_candidate_rank_bucket"].detach().cpu(),
+            "special_candidate_hard_bad_flag": batch["special_candidate_hard_bad_flag"].detach().cpu(),
             "chosen_special_candidate_idx": batch["chosen_special_candidate_idx"].detach().cpu(),
             "event_history": batch["event_history"].detach().cpu(),
+            "replay_id": list(batch.get("replay_id", [])),
+            "sample_id": list(batch.get("sample_id", [])),
         }
 
     def build_runtime_batch(
@@ -179,23 +195,51 @@ class Xmodel1Adapter:
         }
 
     def scored_row_to_review(self, scored: dict[str, torch.Tensor], row_index: int, *, k: int = 3) -> Xmodel1ScoredRow:
-        logits = scored["discard_logits"][row_index].tolist()
-        tile_ids = scored["candidate_tile_id"][row_index].tolist()
-        mask = scored["candidate_mask"][row_index].tolist()
-        quality = scored["candidate_quality_score"][row_index].tolist()
-        rank = scored["candidate_rank_bucket"][row_index].tolist()
-        hard_bad = scored["candidate_hard_bad_flag"][row_index].tolist()
-        top_k = topk_candidates_from_row(
-            scores=logits,
-            candidate_tile_ids=tile_ids,
-            candidate_mask=mask,
-            quality_scores=quality,
-            rank_buckets=rank,
-            hard_bad_flags=hard_bad,
-            k=k,
-        )
-        chosen_idx = int(scored["chosen_candidate_idx"][row_index].item())
-        chosen_action = tile34_to_action_label(int(tile_ids[chosen_idx]))
+        sample_type = int(scored["sample_type"][row_index].item()) if "sample_type" in scored else XMODEL1_SAMPLE_TYPE_DISCARD
+        if sample_type == XMODEL1_SAMPLE_TYPE_DISCARD:
+            logits = scored["discard_logits"][row_index].tolist()
+            tile_ids = scored["candidate_tile_id"][row_index].tolist()
+            mask = scored["candidate_mask"][row_index].tolist()
+            quality = scored["candidate_quality_score"][row_index].tolist()
+            rank = scored["candidate_rank_bucket"][row_index].tolist()
+            hard_bad = scored["candidate_hard_bad_flag"][row_index].tolist()
+            top_k = topk_candidates_from_row(
+                scores=logits,
+                candidate_tile_ids=tile_ids,
+                candidate_mask=mask,
+                quality_scores=quality,
+                rank_buckets=rank,
+                hard_bad_flags=hard_bad,
+                k=k,
+            )
+            chosen_idx = int(scored["chosen_candidate_idx"][row_index].item())
+            chosen_action = (
+                tile34_to_action_label(int(tile_ids[chosen_idx]))
+                if 0 <= chosen_idx < len(tile_ids)
+                else "padding"
+            )
+        else:
+            special_logits = scored["special_logits"][row_index].tolist()
+            special_type_ids = scored["special_candidate_type_id"][row_index].tolist()
+            special_mask = scored["special_candidate_mask"][row_index].tolist()
+            special_quality = scored["special_candidate_quality_score"][row_index].tolist()
+            special_rank = scored["special_candidate_rank_bucket"][row_index].tolist()
+            special_hard_bad = scored["special_candidate_hard_bad_flag"][row_index].tolist()
+            top_k = topk_special_candidates_from_row(
+                scores=special_logits,
+                special_type_ids=special_type_ids,
+                special_mask=special_mask,
+                quality_scores=special_quality,
+                rank_buckets=special_rank,
+                hard_bad_flags=special_hard_bad,
+                k=k,
+            )
+            chosen_idx = int(scored["chosen_special_candidate_idx"][row_index].item())
+            chosen_action = (
+                special_type_to_action_label(int(special_type_ids[chosen_idx]))
+                if 0 <= chosen_idx < len(special_type_ids)
+                else "padding"
+            )
         win_prob = float(torch.sigmoid(scored["win_logit"][row_index]).item())
         dealin_prob = float(torch.sigmoid(scored["dealin_logit"][row_index]).item())
         pts_win = float(scored["pts_given_win"][row_index].item())

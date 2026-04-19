@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 BASE_CACHE_FIELDS = ("tile_feat", "scalar", "mask", "action_idx", "value")
-MELD_RANK_EXTRA_FIELDS = ("snap_json",)
-V3_AUX_EXTRA_FIELDS = ("score_delta_target", "win_target", "dealin_target")
 
 KEQINGV4_SUMMARY_DIM = 28
 KEQINGV4_CALL_SUMMARY_SLOTS = 8
@@ -79,8 +77,6 @@ XMODEL1_SPECIAL_FIELDS = (
 
 __all__ = [
     "BASE_CACHE_FIELDS",
-    "MELD_RANK_EXTRA_FIELDS",
-    "V3_AUX_EXTRA_FIELDS",
     "KEQINGV4_SUMMARY_DIM",
     "KEQINGV4_CALL_SUMMARY_SLOTS",
     "KEQINGV4_SPECIAL_SUMMARY_SLOTS",

@@ -28,26 +28,20 @@ for _dir in (str(_SRC_DIR), str(_SCRIPTS_DIR), str(_PROJECT_ROOT)):
     if _dir not in _sys.path:
         _sys.path.insert(0, _dir)
 
+from inference.rulebase_bot import RulebaseBot
 from inference.runtime_bot import RuntimeBot
 
 # bot 类型 → run_replay_from_source 内部创建 Bot 时用
 _BOT_CLASSES = {
-    "keqingv1": RuntimeBot,
-    "keqingv2": RuntimeBot,
-    "keqingv3": RuntimeBot,
-    "keqingv31": RuntimeBot,
     "keqingv4": RuntimeBot,
     "xmodel1": RuntimeBot,
+    "rulebase": RulebaseBot,
 }
 
 PLAYER_NAMES = ["East", "South", "West", "North"]
 
 # 默认 checkpoint 路径（按 bot 类型，相对于 PROJECT_ROOT）
 _DEFAULT_CHECKPOINTS = {
-    "keqingv1": _PROJECT_ROOT / "artifacts/models/keqingv1/latest.pth",
-    "keqingv2": _PROJECT_ROOT / "artifacts/models/keqingv2/best.pth",
-    "keqingv3": _PROJECT_ROOT / "artifacts/models/keqingv3/best.pth",
-    "keqingv31": _PROJECT_ROOT / "artifacts/models/keqingv31/best.pth",
     "keqingv4": _PROJECT_ROOT / "artifacts/models/keqingv4/best.pth",
     "xmodel1": _PROJECT_ROOT / "artifacts/models/xmodel1/best.pth",
 }
@@ -161,7 +155,7 @@ def run_replay_from_source(
     player_id: int,
     checkpoint: Union[str, Path] | None = None,
     input_type: str = "auto",
-    bot_type: str = "keqingv1",
+    bot_type: str = "xmodel1",
 ) -> tuple:
     """运行跑谱并返回 (Bot实例, HTML报告字符串)。
 
@@ -181,15 +175,17 @@ def run_replay_from_source(
         输入内容类型："auto"（自动检测）、"tenhou6"（tenhou6 JSON）、"mjai"（mjai JSONL）。
         "url" 模式下 source 已是 mjai 事件列表。
     bot_type : str
-        Bot 类型："keqingv1" / "keqingv2" / "keqingv3"。
-        checkpoint 为 None 时使用对应的默认路径。
+        Bot 类型：`xmodel1` / `keqingv4` / `rulebase`。
+        `rulebase` 不加载 checkpoint；其余模型在 checkpoint 为 None 时使用默认路径。
 
     Returns
     -------
     tuple
         (跑谱完毕的 Bot, HTML 报告字符串)
     """
-    if checkpoint is None:
+    if bot_type == "rulebase":
+        checkpoint = None
+    elif checkpoint is None:
         checkpoint = _DEFAULT_CHECKPOINTS[bot_type]
     else:
         checkpoint = Path(checkpoint)
@@ -198,12 +194,15 @@ def run_replay_from_source(
             candidate = _PROJECT_ROOT / checkpoint
             if candidate.exists():
                 checkpoint = candidate
-    if not checkpoint.exists():
+    if checkpoint is not None and not checkpoint.exists():
         raise FileNotFoundError(f"Checkpoint 未找到：{checkpoint}")
 
     events = _load_events_from_source(source, input_type=input_type)
     bot_cls = _BOT_CLASSES[bot_type]
-    bot = bot_cls(player_id=player_id, model_path=checkpoint, model_version=bot_type)
+    if bot_type == "rulebase":
+        bot = bot_cls(player_id=player_id)
+    else:
+        bot = bot_cls(player_id=player_id, model_path=checkpoint, model_version=bot_type)
     setattr(bot, "player_names", [])
 
     _MELD_TYPES = {"chi", "pon", "daiminkan", "ankan", "kakan"}
@@ -560,9 +559,9 @@ def main():
     )
     parser.add_argument(
         "--bot-type",
-        default="keqingv1",
-        choices=["keqingv1", "keqingv2", "keqingv3", "keqingv31", "keqingv4", "xmodel1"],
-        help="Bot 类型：keqingv1 / keqingv2 / keqingv3 / keqingv31 / keqingv4 / xmodel1",
+        default="xmodel1",
+        choices=["xmodel1", "keqingv4", "rulebase"],
+        help="Bot 类型：xmodel1 / keqingv4 / rulebase",
     )
     parser.add_argument("--output", default=None, help="HTML 输出路径")
     parser.add_argument(

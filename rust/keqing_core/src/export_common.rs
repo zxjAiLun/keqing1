@@ -236,6 +236,24 @@ pub fn write_npy_u8<W: Write + Seek>(
     Ok(())
 }
 
+pub fn write_npy_unicode_scalar<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
+    name: &str,
+    value: &str,
+) -> Result<(), String> {
+    let options = FileOptions::default().compression_method(CompressionMethod::Stored);
+    zip.start_file(name, options)
+        .map_err(|err| format!("failed to start {name}: {err}"))?;
+    let char_len = value.chars().count();
+    zip.write_all(&npy_header(&format!("<U{char_len}"), &[]))
+        .map_err(|err| format!("failed to write header {name}: {err}"))?;
+    for ch in value.chars() {
+        zip.write_all(&(ch as u32).to_le_bytes())
+            .map_err(|err| format!("failed to write data {name}: {err}"))?;
+    }
+    Ok(())
+}
+
 pub fn read_npy_first_dim_from_zip(
     path: &Path,
     member_name: &str,

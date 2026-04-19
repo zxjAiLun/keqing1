@@ -93,7 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--log-path", required=True, help="Path to mjai jsonl or jsonl.gz")
     parser.add_argument("--event-idx", type=int, required=True, help="Target event index to inspect")
-    parser.add_argument("--bot-name", default="keqingv31", help="Bot/model family name")
+    parser.add_argument("--bot-name", default="xmodel1", help="Bot/model family name")
     parser.add_argument("--model-version", default="", help="Optional model-version override")
     parser.add_argument("--model-path", default="", help="Explicit checkpoint path")
     parser.add_argument("--project-root", default=".", help="Project root for default checkpoint resolution")

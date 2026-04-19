@@ -7,7 +7,7 @@ import subprocess
 import keqingv4.preprocess_features as v4_pf
 import numpy as np
 import pytest
-from keqingv1.action_space import ANKAN_IDX, CHI_LOW_IDX, action_to_idx
+from mahjong_env.action_space import ANKAN_IDX, CHI_LOW_IDX, action_to_idx
 from keqing_core import (
     build_keqingv4_call_summary,
     build_keqingv4_discard_summary,
@@ -87,6 +87,72 @@ def test_build_typed_action_summaries_smoke():
     _, call_summary, _ = build_typed_action_summaries(call_state, 1, call_legal)
     assert float(call_summary[:3].sum()) > 0.0
     assert float(call_summary[7].sum()) > 0.0
+
+
+def test_build_typed_action_summaries_falls_back_only_for_missing_rust_capability(monkeypatch):
+    state = {
+        "hand": ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+        "tsumo_pai": "4p",
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "dora_markers": ["1m"],
+        "reached": [False, False, False, False],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "kyoku": 1,
+        "honba": 0,
+        "kyotaku": 0,
+        "oya": 0,
+    }
+    legal = [
+        {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
+        {"type": "dahai", "actor": 0, "pai": "1p", "tsumogiri": False},
+        {"type": "reach", "actor": 0},
+    ]
+    monkeypatch.setattr(
+        v4_pf,
+        "_rust_build_keqingv4_typed_summaries",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("Rust keqingv4 typed summaries capability is not available")
+        ),
+    )
+
+    discard_summary, call_summary, special_summary = build_typed_action_summaries(state, 0, legal)
+
+    assert discard_summary.shape == (34, KEQINGV4_SUMMARY_DIM)
+    assert call_summary.shape == (8, KEQINGV4_SUMMARY_DIM)
+    assert special_summary.shape == (3, KEQINGV4_SUMMARY_DIM)
+    assert float(discard_summary[12].sum()) > 0.0
+    assert float(special_summary[0].sum()) > 0.0
+
+
+def test_build_typed_action_summaries_propagates_unexpected_rust_bridge_errors(monkeypatch):
+    state = {
+        "hand": ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+        "tsumo_pai": "4p",
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "dora_markers": ["1m"],
+        "reached": [False, False, False, False],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "kyoku": 1,
+        "honba": 0,
+        "kyotaku": 0,
+        "oya": 0,
+    }
+    legal = [
+        {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
+        {"type": "reach", "actor": 0},
+    ]
+    monkeypatch.setattr(
+        v4_pf,
+        "_rust_build_keqingv4_typed_summaries",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("typed summary bridge drift")),
+    )
+
+    with pytest.raises(RuntimeError, match="typed summary bridge drift"):
+        build_typed_action_summaries(state, 0, legal)
 
 
 def test_call_none_summary_matches_current_vector():
@@ -320,6 +386,407 @@ def test_discard_summary_yaku_break_detects_iipeiko_path_break():
     np.testing.assert_allclose(rust_summary[27], keep_vec, rtol=1e-6, atol=1e-6)
 
 
+def test_summary_vector_one_shanten_shape_slots_can_be_nonzero():
+    state = {
+        "hand": ["1m", "2m", "3p", "3p", "3s", "4m", "4p", "4s", "5p", "5p", "5s", "7s", "7s"],
+        "tsumo_pai": None,
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "dora_markers": ["1m"],
+        "reached": [False, False, False, False],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "kyoku": 1,
+        "honba": 0,
+        "kyotaku": 0,
+        "oya": 0,
+    }
+    visible = _visible_counts34_from_state(state)
+    current_hand = list(state["hand"])
+    current_progress = _replay_calc_normal_progress(current_hand, [], list(visible))
+    assert current_progress.shanten == 1
+    current_guards = v4_pf._current_yaku_guards(state, 0, current_hand, [])
+    vec = v4_pf._summary_vector(
+        hand_tiles=current_hand,
+        melds=[],
+        visible_counts34=visible,
+        state=state,
+        actor=0,
+        current_shanten=current_progress.shanten,
+        open_hand_flag=0.0,
+        current_tanyao_keep=current_guards[0],
+        current_yakuhai_pair=current_guards[1],
+        current_chiitoi_path=current_guards[2],
+        current_iipeiko_path=current_guards[3],
+        current_pinfu_like_path=current_guards[4],
+    )
+    assert float(vec[5]) > 0.0 or float(vec[6]) > 0.0
+
+
+def test_discard_summary_one_shanten_closed_value_proxies_can_be_positive():
+    state = {
+        "hand": ["1m", "1m", "2m", "2m", "3p", "3p", "4p", "4p", "5s", "5s", "E", "E", "7m"],
+        "tsumo_pai": "8m",
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "dora_markers": ["1m"],
+        "reached": [False, False, False, False],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "kyoku": 1,
+        "honba": 0,
+        "kyotaku": 0,
+        "oya": 0,
+    }
+    legal = [
+        {"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False},
+    ]
+    rust_summary = build_keqingv4_discard_summary(state, 0, legal)
+    visible = _visible_counts34_from_state(state)
+    current_hand = [*state["hand"], state["tsumo_pai"]]
+    current_progress = _replay_calc_normal_progress(current_hand, [], list(visible))
+    current_guards = v4_pf._current_yaku_guards(state, 0, current_hand, [])
+    vec = v4_pf._summary_vector(
+        hand_tiles=v4_pf._remove_tiles_once(current_hand, ["1m"]),
+        melds=[],
+        visible_counts34=visible,
+        state=state,
+        actor=0,
+        current_shanten=current_progress.shanten,
+        open_hand_flag=0.0,
+        current_tanyao_keep=current_guards[0],
+        current_yakuhai_pair=current_guards[1],
+        current_chiitoi_path=current_guards[2],
+        current_iipeiko_path=current_guards[3],
+        current_pinfu_like_path=current_guards[4],
+    )
+    assert float(vec[21]) > 0.0
+    assert float(vec[23]) > 0.0
+    np.testing.assert_allclose(rust_summary[0], vec, rtol=1e-6, atol=1e-6)
+
+
+def test_discard_summary_one_shanten_future_truth_beats_old_shape_only_proxy():
+    state = {
+        "hand": ["1m", "1m", "2m", "2m", "3p", "3p", "4p", "4p", "5s", "5s", "E", "E", "7m"],
+        "tsumo_pai": "8m",
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "dora_markers": ["1m"],
+        "reached": [False, False, False, False],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "kyoku": 1,
+        "honba": 0,
+        "kyotaku": 0,
+        "oya": 0,
+        "last_tsumo": ["8m", None, None, None],
+        "last_tsumo_raw": ["8m", None, None, None],
+    }
+    legal = [
+        {"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False},
+    ]
+    rust_summary = build_keqingv4_discard_summary(state, 0, legal)
+    visible = _visible_counts34_from_state(state)
+    current_hand = [*state["hand"], state["tsumo_pai"]]
+    current_progress = _replay_calc_normal_progress(current_hand, [], list(visible))
+    current_guards = v4_pf._current_yaku_guards(state, 0, current_hand, [])
+    after_hand = v4_pf._remove_tiles_once(current_hand, ["1m"])
+    vec = v4_pf._summary_vector(
+        hand_tiles=after_hand,
+        melds=[],
+        visible_counts34=visible,
+        state=state,
+        actor=0,
+        current_shanten=current_progress.shanten,
+        open_hand_flag=0.0,
+        current_tanyao_keep=current_guards[0],
+        current_yakuhai_pair=current_guards[1],
+        current_chiitoi_path=current_guards[2],
+        current_iipeiko_path=current_guards[3],
+        current_pinfu_like_path=current_guards[4],
+    )
+    progress = _replay_calc_normal_progress(after_hand, [], list(visible))
+    assert progress.shanten == 1
+    good_shape_live, improvement_live, tenpai_live, best_tenpai_waits_live = v4_pf._one_shanten_draw_analysis(
+        after_hand,
+        [],
+        visible,
+    )
+    old_shape_bonus = min(
+        1.0,
+        0.6 * (good_shape_live / 34.0)
+        + 0.4 * (improvement_live / 34.0)
+        + 0.35 * (min(best_tenpai_waits_live, 12.0) / 12.0),
+    )
+    old_shape_only_proxy = min(1.0, tenpai_live / 34.0) * min(1.0, 0.35 * old_shape_bonus)
+    assert float(vec[20]) > old_shape_only_proxy
+    assert float(vec[21]) > 0.0
+    assert float(vec[23]) > old_shape_only_proxy
+    np.testing.assert_allclose(rust_summary[0], vec, rtol=1e-6, atol=1e-6)
+
+
+def test_discard_summary_open_one_shanten_future_truth_can_lift_value_and_yakuhai_proxy():
+    state = {
+        "hand": ["1m", "2m", "3m", "4m", "5m", "6m", "2p", "2p", "3p", "5s"],
+        "tsumo_pai": "8s",
+        "melds": [[{"type": "pon", "pai": "E", "consumed": ["E", "E"], "target": 1}], [], [], []],
+        "discards": [[], [], [], []],
+        "dora_markers": ["1m"],
+        "reached": [False, False, False, False],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "kyoku": 1,
+        "honba": 0,
+        "kyotaku": 0,
+        "oya": 0,
+        "last_tsumo": ["8s", None, None, None],
+        "last_tsumo_raw": ["8s", None, None, None],
+    }
+    legal = [
+        {"type": "dahai", "actor": 0, "pai": "8s", "tsumogiri": True},
+    ]
+    rust_summary = build_keqingv4_discard_summary(state, 0, legal)
+    visible = _visible_counts34_from_state(state)
+    current_hand = [*state["hand"], state["tsumo_pai"]]
+    current_progress = _replay_calc_normal_progress(current_hand, state["melds"][0], list(visible))
+    current_guards = v4_pf._current_yaku_guards(state, 0, current_hand, state["melds"][0])
+    after_hand = list(state["hand"])
+    after_progress = _replay_calc_normal_progress(after_hand, state["melds"][0], list(visible))
+    assert after_progress.shanten == 1
+    exact_metrics = v4_pf._exact_one_shanten_truth_metrics(
+        state=state,
+        actor=0,
+        after_hand=after_hand,
+        progress=after_progress,
+        visible_counts34=visible,
+        open_hand_flag=1.0,
+    )
+    vec = v4_pf._summary_vector(
+        hand_tiles=after_hand,
+        melds=state["melds"][0],
+        visible_counts34=visible,
+        state=state,
+        actor=0,
+        current_shanten=current_progress.shanten,
+        open_hand_flag=1.0,
+        current_tanyao_keep=current_guards[0],
+        current_yakuhai_pair=current_guards[1],
+        current_chiitoi_path=current_guards[2],
+        current_iipeiko_path=current_guards[3],
+        current_pinfu_like_path=current_guards[4],
+    )
+    assert exact_metrics[0] > 0.0
+    assert exact_metrics[1] == 0.0
+    assert exact_metrics[3] > 0.0
+    assert float(vec[20]) > 0.0
+    assert float(vec[21]) >= float(exact_metrics[1])
+    assert float(vec[23]) == 0.0
+    assert float(vec[27]) > 0.0
+    np.testing.assert_allclose(rust_summary[25], vec, rtol=1e-6, atol=1e-6)
+
+
+def test_discard_summary_closed_two_shanten_future_truth_can_lift_value_proxies():
+    state = {
+        "hand": ["2m", "2m", "3m", "4m", "5m", "6m", "2p", "2p", "3p", "5s", "7s", "8s", "9s"],
+        "tsumo_pai": "9p",
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "dora_markers": ["1m"],
+        "reached": [False, False, False, False],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "kyoku": 1,
+        "honba": 0,
+        "kyotaku": 0,
+        "oya": 0,
+        "last_tsumo": ["9p", None, None, None],
+        "last_tsumo_raw": ["9p", None, None, None],
+    }
+    legal = [
+        {"type": "dahai", "actor": 0, "pai": "9p", "tsumogiri": True},
+    ]
+    rust_summary = build_keqingv4_discard_summary(state, 0, legal)
+    visible = _visible_counts34_from_state(state)
+    current_hand = [*state["hand"], state["tsumo_pai"]]
+    current_progress = _replay_calc_normal_progress(current_hand, [], list(visible))
+    current_guards = v4_pf._current_yaku_guards(state, 0, current_hand, [])
+    after_hand = list(state["hand"])
+    after_progress = _replay_calc_normal_progress(after_hand, [], list(visible))
+    assert after_progress.shanten == 2
+    future_metrics = v4_pf._future_truth_metrics(
+        state=state,
+        actor=0,
+        after_hand=after_hand,
+        progress=after_progress,
+        visible_counts34=visible,
+        open_hand_flag=0.0,
+    )
+    vec = v4_pf._summary_vector(
+        hand_tiles=after_hand,
+        melds=[],
+        visible_counts34=visible,
+        state=state,
+        actor=0,
+        current_shanten=current_progress.shanten,
+        open_hand_flag=0.0,
+        current_tanyao_keep=current_guards[0],
+        current_yakuhai_pair=current_guards[1],
+        current_chiitoi_path=current_guards[2],
+        current_iipeiko_path=current_guards[3],
+        current_pinfu_like_path=current_guards[4],
+    )
+    assert future_metrics[0] > 0.0
+    assert future_metrics[1] > 0.0
+    assert float(vec[20]) > 0.0
+    assert float(vec[21]) > 0.0
+    assert float(vec[23]) > 0.0
+    np.testing.assert_allclose(rust_summary[17], vec, rtol=1e-6, atol=1e-6)
+
+
+def test_discard_summary_open_two_shanten_future_truth_can_lift_yakuhai_route():
+    state = {
+        "hand": ["2m", "2m", "3m", "4m", "5m", "6m", "2p", "2p", "3p", "5s"],
+        "tsumo_pai": "8s",
+        "melds": [[{"type": "pon", "pai": "E", "consumed": ["E", "E"], "target": 1}], [], [], []],
+        "discards": [[], [], [], []],
+        "dora_markers": ["1m"],
+        "reached": [False, False, False, False],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "kyoku": 1,
+        "honba": 0,
+        "kyotaku": 0,
+        "oya": 0,
+        "last_tsumo": ["8s", None, None, None],
+        "last_tsumo_raw": ["8s", None, None, None],
+    }
+    legal = [
+        {"type": "dahai", "actor": 0, "pai": "8s", "tsumogiri": True},
+    ]
+    rust_summary = build_keqingv4_discard_summary(state, 0, legal)
+    visible = _visible_counts34_from_state(state)
+    current_hand = [*state["hand"], state["tsumo_pai"]]
+    current_progress = _replay_calc_normal_progress(current_hand, state["melds"][0], list(visible))
+    current_guards = v4_pf._current_yaku_guards(state, 0, current_hand, state["melds"][0])
+    after_hand = list(state["hand"])
+    after_progress = _replay_calc_normal_progress(after_hand, state["melds"][0], list(visible))
+    assert after_progress.shanten == 2
+    future_metrics = v4_pf._future_truth_metrics(
+        state=state,
+        actor=0,
+        after_hand=after_hand,
+        progress=after_progress,
+        visible_counts34=visible,
+        open_hand_flag=1.0,
+    )
+    vec = v4_pf._summary_vector(
+        hand_tiles=after_hand,
+        melds=state["melds"][0],
+        visible_counts34=visible,
+        state=state,
+        actor=0,
+        current_shanten=current_progress.shanten,
+        open_hand_flag=1.0,
+        current_tanyao_keep=current_guards[0],
+        current_yakuhai_pair=current_guards[1],
+        current_chiitoi_path=current_guards[2],
+        current_iipeiko_path=current_guards[3],
+        current_pinfu_like_path=current_guards[4],
+    )
+    assert future_metrics[0] > 0.0
+    assert future_metrics[1] == 0.0
+    assert future_metrics[3] > 0.0
+    assert float(vec[20]) > 0.0
+    assert float(vec[23]) == 0.0
+    assert float(vec[27]) > 0.0
+    np.testing.assert_allclose(rust_summary[25], vec, rtol=1e-6, atol=1e-6)
+
+
+def test_future_truth_stays_non_recursive_above_train_ready_depth():
+    state = {
+        "hand": ["7s", "9s", "3m", "9m", "8p", "7p", "4p", "8s", "1p", "S", "3p", "1s", "7m"],
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "dora_markers": ["1m"],
+        "reached": [False, False, False, False],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "kyoku": 1,
+        "honba": 0,
+        "kyotaku": 0,
+        "oya": 0,
+    }
+    visible = _visible_counts34_from_state(state)
+    progress = _replay_calc_normal_progress(state["hand"], [], list(visible))
+    assert progress.shanten == 3
+
+    metrics_closed = v4_pf._future_truth_metrics(
+        state=state,
+        actor=0,
+        after_hand=state["hand"],
+        progress=progress,
+        visible_counts34=visible,
+        open_hand_flag=0.0,
+    )
+    metrics_open = v4_pf._future_truth_metrics(
+        state=state,
+        actor=0,
+        after_hand=state["hand"],
+        progress=progress,
+        visible_counts34=visible,
+        open_hand_flag=1.0,
+    )
+
+    assert metrics_closed == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    assert metrics_open == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+
+def test_discard_summary_closed_tenpai_without_floor_still_gets_truth_backed_value_proxy():
+    state = {
+        "hand": ["1m", "1m", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "7s", "8s", "5p", "5p"],
+        "tsumo_pai": "9s",
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "dora_markers": ["2p"],
+        "reached": [False, False, False, False],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "kyoku": 1,
+        "honba": 0,
+        "kyotaku": 0,
+        "oya": 0,
+        "last_tsumo": ["9s", None, None, None],
+        "last_tsumo_raw": ["9s", None, None, None],
+    }
+    legal = [
+        {"type": "dahai", "actor": 0, "pai": "9s", "tsumogiri": True},
+    ]
+    rust_summary = build_keqingv4_discard_summary(state, 0, legal)
+    visible = _visible_counts34_from_state(state)
+    current_hand = [*state["hand"], state["tsumo_pai"]]
+    current_progress = _replay_calc_normal_progress(current_hand, [], list(visible))
+    current_guards = v4_pf._current_yaku_guards(state, 0, current_hand, [])
+    vec = v4_pf._summary_vector(
+        hand_tiles=v4_pf._remove_tiles_once(current_hand, ["9s"]),
+        melds=[],
+        visible_counts34=visible,
+        state=state,
+        actor=0,
+        current_shanten=current_progress.shanten,
+        open_hand_flag=0.0,
+        current_tanyao_keep=current_guards[0],
+        current_yakuhai_pair=current_guards[1],
+        current_chiitoi_path=current_guards[2],
+        current_iipeiko_path=current_guards[3],
+        current_pinfu_like_path=current_guards[4],
+    )
+    assert float(vec[1]) == 1.0
+    assert float(vec[20]) > 0.0
+    assert float(vec[21]) >= float(vec[20])
+    assert float(vec[23]) > 0.0
+    np.testing.assert_allclose(rust_summary[26], vec, rtol=1e-6, atol=1e-6)
+
+
 def test_keqingv4_events_to_arrays_and_cached_dataset_smoke(tmp_path: Path):
     events = [
         {"type": "start_game", "names": ["A", "B", "C", "D"]},
@@ -347,7 +814,7 @@ def test_keqingv4_events_to_arrays_and_cached_dataset_smoke(tmp_path: Path):
         events,
         adapter=KeqingV4PreprocessAdapter(),
         value_strategy="mc_return",
-        encode_module="keqingv3.features",
+        encode_module="training.state_features",
     )
     assert arrays is not None
     assert "pts_given_win_target" in arrays
@@ -791,6 +1258,13 @@ def test_reach_special_summary_uses_best_declaration_discard(monkeypatch):
         "kyotaku": 0,
         "oya": 0,
     }
+    monkeypatch.setattr(
+        v4_pf,
+        "_rust_build_keqingv4_typed_summaries",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("Rust keqingv4 typed summary capability is not available")
+        ),
+    )
     monkeypatch.setattr(v4_pf, "_reach_discard_candidates", lambda hand, last_tsumo, last_tsumo_raw: [("1p", False), ("5s", True)])
 
     _discard_summary, _call_summary, special_summary = build_typed_action_summaries(
@@ -854,47 +1328,42 @@ def test_rust_special_summary_bridge_matches_python_reach_core_fields(monkeypatc
         "kyotaku": 0,
         "oya": 0,
     }
-    monkeypatch.setattr(v4_pf, "_reach_discard_candidates", lambda hand, last_tsumo, last_tsumo_raw: [("1p", False), ("5s", True)])
     legal = [{"type": "reach", "actor": 0}]
     try:
         rust_summary = build_keqingv4_special_summary(state, 0, legal)
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+    try:
+        rust_discards = enumerate_keqingv4_reach_discards(state, 0)
     except RuntimeError as exc:
         pytest.skip(str(exc))
     visible = _visible_counts34_from_state(state)
     current_hand = [*state["hand"], state["tsumo_pai"]]
     current_progress = _replay_calc_normal_progress(current_hand, [], list(visible))
     current_guards = v4_pf._current_yaku_guards(state, 0, current_hand, [])
-    after_1p = v4_pf._remove_tiles_once(current_hand, ["1p"])
-    after_5s = v4_pf._remove_tiles_once(current_hand, ["5s"])
-    vec_1p = v4_pf._summary_vector(
-        hand_tiles=after_1p,
-        melds=[],
-        visible_counts34=visible,
-        state=state,
-        actor=0,
-        current_shanten=current_progress.shanten,
-        open_hand_flag=0.0,
-        current_tanyao_keep=current_guards[0],
-        current_yakuhai_pair=current_guards[1],
-        current_chiitoi_path=current_guards[2],
-        current_iipeiko_path=current_guards[3],
-        current_pinfu_like_path=current_guards[4],
-    )
-    vec_5s = v4_pf._summary_vector(
-        hand_tiles=after_5s,
-        melds=[],
-        visible_counts34=visible,
-        state=state,
-        actor=0,
-        current_shanten=current_progress.shanten,
-        open_hand_flag=0.0,
-        current_tanyao_keep=current_guards[0],
-        current_yakuhai_pair=current_guards[1],
-        current_chiitoi_path=current_guards[2],
-        current_iipeiko_path=current_guards[3],
-        current_pinfu_like_path=current_guards[4],
-    )
-    expected = vec_1p if v4_pf._summary_score(vec_1p) >= v4_pf._summary_score(vec_5s) else vec_5s
+    best_score = -1e18
+    expected = None
+    for pai_out, _tsumogiri in rust_discards:
+        after_hand = v4_pf._remove_tiles_once(current_hand, [pai_out])
+        vec = v4_pf._summary_vector(
+            hand_tiles=after_hand,
+            melds=[],
+            visible_counts34=visible,
+            state=state,
+            actor=0,
+            current_shanten=current_progress.shanten,
+            open_hand_flag=0.0,
+            current_tanyao_keep=current_guards[0],
+            current_yakuhai_pair=current_guards[1],
+            current_chiitoi_path=current_guards[2],
+            current_iipeiko_path=current_guards[3],
+            current_pinfu_like_path=current_guards[4],
+        )
+        score = v4_pf._summary_score(vec)
+        if score > best_score:
+            best_score = score
+            expected = vec
+    assert expected is not None
     np.testing.assert_allclose(rust_summary[0], expected, rtol=1e-6, atol=1e-6)
 
 
@@ -1005,7 +1474,7 @@ def test_preprocess_keqingv4_script_runs(tmp_path: Path):
             "--progress-every",
             "1",
         ],
-        cwd="/media/bailan/DISK1/AUbuntuProject/project/keqing1",
+        cwd=str(Path(__file__).resolve().parents[1]),
         check=True,
         capture_output=True,
         text=True,

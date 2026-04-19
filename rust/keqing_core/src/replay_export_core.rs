@@ -733,7 +733,7 @@ pub fn is_structural_actor_decision_event(et: &str) -> bool {
 pub fn is_special_sampling_event(et: &str) -> bool {
     matches!(
         et,
-        "reach" | "chi" | "pon" | "daiminkan" | "ankan" | "kakan"
+        "reach" | "chi" | "pon" | "daiminkan" | "ankan" | "kakan" | "hora"
     )
 }
 
@@ -1030,6 +1030,7 @@ pub struct RoundTargetUpdate {
     pub dealin_target: f32,
     pub pts_given_win_target: f32,
     pub pts_given_dealin_target: f32,
+    pub ryukyoku_tenpai_target: f32,
 }
 
 pub fn finalize_round_targets(
@@ -1045,6 +1046,7 @@ pub fn finalize_round_targets(
     let mut score_deltas: Option<[f32; 4]> = None;
     let mut hora_actor: Option<i8> = None;
     let mut hora_target: Option<i8> = None;
+    let mut ryukyoku_tenpai_players = [false; 4];
     if let Some(event) = terminal_event {
         if let Some(deltas) = event
             .get("deltas")
@@ -1068,6 +1070,16 @@ pub fn finalize_round_targets(
                 .get("target")
                 .and_then(Value::as_i64)
                 .map(|value| value as i8);
+        } else if event.get("type").and_then(Value::as_str) == Some("ryukyoku") {
+            if let Some(players) = event.get("tenpai_players").and_then(Value::as_array) {
+                for player in players {
+                    if let Some(idx) = player.as_u64().map(|value| value as usize) {
+                        if idx < 4 {
+                            ryukyoku_tenpai_players[idx] = true;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1102,6 +1114,11 @@ pub fn finalize_round_targets(
             },
             pts_given_dealin_target: if dealin_target > 0.0 {
                 (-score_delta_target).max(0.0)
+            } else {
+                0.0
+            },
+            ryukyoku_tenpai_target: if ryukyoku_tenpai_players[actor] {
+                1.0
             } else {
                 0.0
             },

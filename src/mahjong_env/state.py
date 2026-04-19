@@ -4,7 +4,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
-from keqingv3.feature_tracker import RoundFeatureTracker
+from mahjong_env.feature_tracker import RoundFeatureTracker
 from mahjong_env.tiles import normalize_tile, AKA_DORA_TILES
 from mahjong_env.types import MjaiEvent
 

@@ -29,8 +29,8 @@ def inject_shanten_waits(
     from mahjong_env.tiles import tile_to_34 as _tile_to_34
 
     shanten, waits_cnt, waits_tiles, _ = _calc_shanten_waits(hand_list, melds_list)
-    if model_version in {"keqingv3", "keqingv31", "keqingv4"}:
-        from keqingv3.progress_oracle import calc_standard_shanten_from_counts
+    if model_version == "keqingv4":
+        from mahjong_env.progress_oracle import calc_standard_shanten_from_counts
 
         counts34 = [0] * 34
         for tile in hand_list:

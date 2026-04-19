@@ -1,9 +1,40 @@
 use riichienv_core::hand_evaluator::HandEvaluator;
 use riichienv_core::types::{Conditions, Meld as RiichiMeld, MeldType, Wind};
 use riichienv_core::yaku::{get_yaku_by_id, ID_AKADORA, ID_DORA, ID_URADORA};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::score_rules::prepare_hora_tile_allocation;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YakuDetail {
+    pub key: String,
+    pub name: String,
+    pub han: i32,
+}
+
+impl YakuDetail {
+    pub fn new(name: &str, han: i32) -> Self {
+        Self {
+            key: name.to_string(),
+            name: name.to_string(),
+            han,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeHoraOutcome {
+    pub han: i32,
+    pub fu: i32,
+    pub yaku: Vec<String>,
+    pub base_yaku_details: Vec<YakuDetail>,
+    pub is_open_hand: bool,
+    pub cost: Value,
+    pub dora_count: i32,
+    pub ura_count: i32,
+    pub aka_count: i32,
+}
 
 fn parse_wind(value: &str) -> Wind {
     match value {
@@ -165,18 +196,18 @@ fn display_name(id: u32, fallback: String) -> String {
     }
 }
 
-fn base_yaku_details(yaku_ids: &[u32], is_open_hand: bool) -> Vec<Value> {
+fn base_yaku_details(yaku_ids: &[u32], is_open_hand: bool) -> Vec<YakuDetail> {
     yaku_ids
         .iter()
         .filter(|id| !matches!(**id, ID_DORA | ID_AKADORA | ID_URADORA))
         .filter_map(|id| {
             let yaku = get_yaku_by_id(*id)?;
             let name = display_name(*id, yaku.name_en);
-            Some(json!({
-                "key": name,
-                "name": name,
-                "han": yaku_han(*id, is_open_hand),
-            }))
+            Some(YakuDetail {
+                key: name.clone(),
+                name,
+                han: yaku_han(*id, is_open_hand),
+            })
         })
         .collect()
 }
@@ -255,7 +286,7 @@ fn build_cost(
     }
 }
 
-pub fn evaluate_hora_from_prepared(prepared: &Value) -> Result<Value, String> {
+pub fn evaluate_native_hora(prepared: &Value) -> Result<Option<NativeHoraOutcome>, String> {
     let allocation = prepare_hora_tile_allocation(prepared)?;
     let closed_tile_ids = tile_ids_from_value(&allocation, "closed_tile_ids")?;
     let win_tile = allocation
@@ -268,10 +299,11 @@ pub fn evaluate_hora_from_prepared(prepared: &Value) -> Result<Value, String> {
     let ura_ids = tile_ids_from_value(&allocation, "ura_ids")?;
 
     let actor = prepared
-        .get("target")
+        .get("actor")
+        .or_else(|| prepared.get("target"))
         .and_then(Value::as_u64)
-        .ok_or_else(|| "missing target".to_string())
-        .and_then(|raw| usize::try_from(raw).map_err(|_| format!("target out of range: {raw}")))?;
+        .ok_or_else(|| "missing actor".to_string())
+        .and_then(|raw| usize::try_from(raw).map_err(|_| format!("actor out of range: {raw}")))?;
     let oya = prepared
         .get("oya")
         .and_then(Value::as_u64)
@@ -336,10 +368,7 @@ pub fn evaluate_hora_from_prepared(prepared: &Value) -> Result<Value, String> {
     let evaluator = HandEvaluator::new(closed_tile_ids, melds.clone());
     let result = evaluator.calc(win_tile, dora_ids, ura_ids, Some(conditions));
     if !result.is_win {
-        return Ok(json!({
-            "error": "no cost",
-            "cost": Value::Null,
-        }));
+        return Ok(None);
     }
 
     let is_open_hand = melds.iter().any(|meld| meld.opened);
@@ -351,16 +380,15 @@ pub fn evaluate_hora_from_prepared(prepared: &Value) -> Result<Value, String> {
         result.fu
     };
 
-    Ok(json!({
-        "error": Value::Null,
-        "han": result.han,
-        "fu": fu,
-        "yaku": yaku_names(&yaku_ids),
-        "base_yaku_details": base_yaku_details(&yaku_ids, is_open_hand),
-        "is_open_hand": is_open_hand,
-        "cost": cost,
-        "dora_count": dora_count_value,
-        "ura_count": ura_count_value,
-        "aka_count": aka_count_value,
+    Ok(Some(NativeHoraOutcome {
+        han: i32::try_from(result.han).unwrap_or(i32::MAX),
+        fu: i32::try_from(fu).unwrap_or(i32::MAX),
+        yaku: yaku_names(&yaku_ids),
+        base_yaku_details: base_yaku_details(&yaku_ids, is_open_hand),
+        is_open_hand,
+        cost,
+        dora_count: i32::from(dora_count_value),
+        ura_count: i32::from(ura_count_value),
+        aka_count: i32::from(aka_count_value),
     }))
 }

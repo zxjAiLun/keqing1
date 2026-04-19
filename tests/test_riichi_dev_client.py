@@ -216,33 +216,29 @@ def test_resolve_ws_url_accepts_https_base_url() -> None:
     )
 
 
-def test_resolve_default_token_prefers_mochakey_for_keqingv31(monkeypatch) -> None:
+def test_resolve_default_token_prefers_lattekey(monkeypatch) -> None:
     monkeypatch.setenv("LATTEKEY", "latte-token")
-    monkeypatch.setenv("MOCHAKEY", "mocha-token")
 
-    assert rdc._resolve_default_token("keqingv31") == "mocha-token"
+    assert rdc._resolve_default_token("xmodel1") == "latte-token"
 
 
 def test_resolve_default_token_uses_lattekey_for_other_bots(monkeypatch) -> None:
     monkeypatch.setenv("LATTEKEY", "latte-token")
-    monkeypatch.setenv("MOCHAKEY", "mocha-token")
-
-    assert rdc._resolve_default_token("keqingv3") == "latte-token"
+    assert rdc._resolve_default_token("keqingv4") == "latte-token"
 
 
-def test_resolve_default_token_with_source_prefers_mochakey(monkeypatch) -> None:
+def test_resolve_default_token_with_source_prefers_lattekey(monkeypatch) -> None:
     monkeypatch.setenv("LATTEKEY", "latte-token")
-    monkeypatch.setenv("MOCHAKEY", "mocha-token")
 
-    assert rdc._resolve_default_token_with_source("keqingv31") == ("mocha-token", "MOCHAKEY")
+    assert rdc._resolve_default_token_with_source("xmodel1") == ("latte-token", "LATTEKEY")
 
 
 def test_resolve_model_path_uses_default_checkpoint() -> None:
     assert rdc._resolve_model_path(
-        bot_name="keqingv31",
+        bot_name="keqingv4",
         project_root=Path("/tmp/project"),
         model_path=None,
-    ) == Path("/tmp/project/artifacts/models/keqingv31/best.pth")
+    ) == Path("/tmp/project/artifacts/models/keqingv4/best.pth")
 
 
 def test_decode_jwt_payload_unverified_reads_name_and_bot_id() -> None:
@@ -257,7 +253,7 @@ def test_decode_jwt_payload_unverified_reads_name_and_bot_id() -> None:
     assert payload == {"name": "mocha", "type": "bot", "bot_id": "bot-123"}
 
 
-def test_create_agent_supports_non_keqingv3_model_path(monkeypatch) -> None:
+def test_create_agent_supports_xmodel1_spec(monkeypatch) -> None:
     created = {}
 
     class FakeObservationAgent:
@@ -266,7 +262,7 @@ def test_create_agent_supports_non_keqingv3_model_path(monkeypatch) -> None:
 
     monkeypatch.setattr(rdc, "ObservationScoringAgent", FakeObservationAgent)
     agent = rdc.create_riichi_dev_agent(
-        bot_name="keqingv31",
+        bot_name="xmodel1",
         project_root=Path("."),
         model_path=None,
         device="cpu",
@@ -274,9 +270,9 @@ def test_create_agent_supports_non_keqingv3_model_path(monkeypatch) -> None:
     )
 
     assert isinstance(agent, FakeObservationAgent)
-    assert created["model_version"] == "keqingv31"
-    assert created["hidden_dim"] == 320
-    assert created["num_res_blocks"] == 6
+    assert created["model_version"] == "xmodel1"
+    assert created["hidden_dim"] == rdc.DEFAULT_DECISION_AGENT_SPEC.hidden_dim
+    assert created["num_res_blocks"] == rdc.DEFAULT_DECISION_AGENT_SPEC.num_res_blocks
 
 
 def test_create_agent_supports_keqingv4_spec(monkeypatch) -> None:
@@ -473,7 +469,7 @@ def test_audit_logger_logs_send_result(tmp_path: Path) -> None:
 
     logger.log_send_result(
         queue="ranked",
-        bot_name="keqingv31",
+        bot_name="keqingv4",
         model_version=None,
         seat=0,
         request_seq=11,
@@ -494,7 +490,7 @@ def test_audit_logger_logs_protocol_action(tmp_path: Path) -> None:
 
     logger.log_protocol_action(
         queue="ranked",
-        bot_name="keqingv3",
+        bot_name="xmodel1",
         model_version=None,
         seat=0,
         trigger_message={"type": "reach", "actor": 0},
@@ -627,14 +623,14 @@ def test_log_startup_self_check_rejects_missing_model_path(caplog) -> None:
     try:
         rdc._log_startup_self_check(
             queue="validate",
-            bot_name="keqingv31",
+            bot_name="keqingv4",
             model_version=None,
             token=(
                 "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
                 "eyJuYW1lIjoibW9jaGEiLCJ0eXBlIjoiYm90IiwiYm90X2lkIjoiYm90LTEyMyJ9."
                 "sig"
             ),
-            token_source="MOCHAKEY",
+            token_source="LATTEKEY",
             project_root=Path("/tmp/project"),
             model_path=Path("/tmp/project/missing.pth"),
             validation_safe=False,
@@ -648,14 +644,14 @@ def test_log_startup_self_check_rejects_missing_model_path(caplog) -> None:
 def test_log_startup_self_check_is_silent_without_debug(caplog) -> None:
     rdc._log_startup_self_check(
         queue="validate",
-        bot_name="keqingv31",
+        bot_name="keqingv4",
         model_version=None,
         token=(
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
             "eyJuYW1lIjoibW9jaGEiLCJ0eXBlIjoiYm90IiwiYm90X2lkIjoiYm90LTEyMyJ9."
             "sig"
         ),
-        token_source="MOCHAKEY",
+        token_source="LATTEKEY",
         project_root=Path("."),
         model_path=None,
         validation_safe=True,

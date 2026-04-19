@@ -20,13 +20,18 @@ use zip::ZipWriter;
 use crate::export_common::{
     collect_mjson_files, finalize_temp_npz, output_npz_path, print_export_progress,
     read_npy_first_dim_from_zip, temp_npz_path, write_json_manifest, write_npy_f16, write_npy_f32,
-    write_npy_i16, write_npy_i32, write_npy_i8, write_npy_u8,
+    write_npy_i16, write_npy_i32, write_npy_i8, write_npy_u8, write_npy_unicode_scalar,
 };
 use crate::progress_summary::{summarize_3n1, summarize_like_python, Summary3n1};
 use crate::replay_export_core as replay_core;
 use crate::replay_export_core::{normalize_tile_repr, strip_aka, tile34_from_pai};
+use crate::replay_samples::public_legal_actions_for_snapshot;
 use crate::shanten_table::ensure_init;
+use crate::snapshot::snapshot_for_actor;
 use crate::state_core::GameStateCore;
+use crate::value_proxy::{
+    confirmed_han_floor as shared_confirmed_han_floor, tenpai_value_proxy_norm,
+};
 use crate::xmodel1_schema::{
     validate_candidate_mask_and_choice, XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_MAX_CANDIDATES, XMODEL1_MAX_SPECIAL_CANDIDATES, XMODEL1_SCHEMA_NAME,
@@ -40,6 +45,9 @@ use crate::xmodel1_schema::{
 const XMODEL1_STATE_TILE_CHANNELS: usize = 57;
 const XMODEL1_STATE_SCALAR_DIM: usize = 56;
 const XMODEL1_SAMPLE_TYPE_DISCARD: i8 = 0;
+const XMODEL1_SAMPLE_TYPE_RIICHI: i8 = 1;
+const XMODEL1_SAMPLE_TYPE_CALL: i8 = 2;
+const XMODEL1_SAMPLE_TYPE_HORA: i8 = 3;
 const MC_RETURN_GAMMA: f32 = 0.99;
 const SCORE_NORM: f32 = 30000.0;
 const TILE_KIND_COUNT: usize = 34;
@@ -153,6 +161,24 @@ struct SpecialCandidateArrays {
     chosen_idx: i16,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SpecialHandSummary {
+    shanten: i8,
+    tenpai: f32,
+    waits_count: u8,
+    waits_live_norm: f32,
+    round_progress: f32,
+    score_gap: f32,
+    threat_proxy_any_reached: f32,
+    threat_by_opponent: [f32; 3],
+    is_open: f32,
+    best_discard_quality_norm: f32,
+    current_han_floor_norm: f32,
+    current_dora_count_norm: f32,
+    current_max_value_norm: f32,
+    current_hand_value_survives: f32,
+}
+
 pub(crate) fn action_idx_from_action(action: &Value) -> i16 {
     let et = action.get("type").and_then(Value::as_str).unwrap_or("none");
     match et {
@@ -241,6 +267,85 @@ fn pair_taatsu_metrics_from_counts(counts: &[u8; TILE_KIND_COUNT]) -> (usize, us
     (pair_count, taatsu_count)
 }
 
+fn tanyao_path_from_counts(counts: &[u8; TILE_KIND_COUNT]) -> f32 {
+    f32::from(counts.iter().enumerate().all(|(idx, count)| {
+        *count == 0
+            || !matches!(
+                idx,
+                0 | 8 | 9 | 17 | 18 | 26 | 27 | 28 | 29 | 30 | 31 | 32 | 33
+            )
+    }))
+}
+
+fn flush_path_from_counts(counts: &[u8; TILE_KIND_COUNT]) -> f32 {
+    let suit_presence = [
+        counts[0..9].iter().sum::<u8>() > 0,
+        counts[9..18].iter().sum::<u8>() > 0,
+        counts[18..27].iter().sum::<u8>() > 0,
+    ];
+    f32::from(suit_presence.iter().filter(|flag| **flag).count() <= 1)
+}
+
+fn pinfu_like_path_from_counts(
+    counts: &[u8; TILE_KIND_COUNT],
+    yakuhai: &[bool; TILE_KIND_COUNT],
+    is_open_hand: bool,
+) -> f32 {
+    if is_open_hand || counts.iter().any(|count| *count >= 3) {
+        return 0.0;
+    }
+    let pair_tiles: Vec<usize> = counts
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, count)| (*count >= 2).then_some(idx))
+        .collect();
+    f32::from(pair_tiles.len() == 1 && !yakuhai[pair_tiles[0]])
+}
+
+fn iipeikou_like_path_from_counts(counts: &[u8; TILE_KIND_COUNT], is_open_hand: bool) -> f32 {
+    if is_open_hand {
+        return 0.0;
+    }
+    for base in [0usize, 9, 18] {
+        let suit = &counts[base..base + 9];
+        for idx in 0..7 {
+            if suit[idx].min(suit[idx + 1]).min(suit[idx + 2]) >= 2 {
+                return 1.0;
+            }
+        }
+    }
+    0.0
+}
+
+fn per_opponent_dealin_risks(
+    round_state: &RoundState,
+    actor: usize,
+    tile34: usize,
+    visible_counts34: &[u8; TILE_KIND_COUNT],
+) -> [f32; 3] {
+    let live_factor = ((4.0 - visible_counts34[tile34] as f32) / 4.0).clamp(0.0, 1.0);
+    let mut risks = [0.0; 3];
+    for rel in 1..=3 {
+        let opp = (actor + rel) % 4;
+        let open_pressure = f32::from(
+            round_state.players[opp]
+                .melds
+                .iter()
+                .any(|meld| meld.kind != "ankan"),
+        );
+        let mut base = if round_state.players[opp].reached {
+            1.0
+        } else {
+            0.2 + 0.15 * open_pressure
+        };
+        if tile34 >= 27 {
+            base *= 0.9;
+        }
+        risks[rel - 1] = (live_factor * base).clamp(0.0, 1.0);
+    }
+    risks
+}
+
 fn pair_taatsu_ankoutsu_metrics_from_counts(
     counts: &[u8; TILE_KIND_COUNT],
 ) -> (usize, usize, usize) {
@@ -258,17 +363,7 @@ fn analyze_progress_like_python(
 }
 
 fn visible_counts_for_decision(round_state: &RoundState, actor: usize) -> [u8; TILE_KIND_COUNT] {
-    let mut visible = round_state.feature_tracker.players[actor].visible_counts34;
-    if let Some(tsumo_tile) = round_state
-        .last_tsumo
-        .get(actor)
-        .and_then(|value| value.as_ref())
-    {
-        if let Some(idx) = tile34_from_pai(tsumo_tile).map(|value| value as usize) {
-            visible[idx] = visible[idx].saturating_add(1);
-        }
-    }
-    visible
+    round_state.feature_tracker.players[actor].visible_counts34
 }
 
 fn chiitoi_shanten(counts: &[u8; TILE_KIND_COUNT]) -> i32 {
@@ -495,42 +590,23 @@ fn sorted_candidate_tiles(hand_tiles: &[String]) -> Vec<String> {
 }
 
 fn candidate_metrics(
-    before_shanten: i8,
-    _before_waits_live: usize,
     after_shanten: i8,
-    after_ukeire_live: u8,
-    after_waits_live: usize,
-    drop_open_yakuhai_pair: u8,
-    drop_dual_pon_value: u8,
-    confirmed_han_floor: f32,
-    after_dora_count: f32,
-    tanyao_path: f32,
-    flush_path: f32,
+    after_max_hand_value_norm: f32,
+    confirmed_han_floor_norm: f32,
+    break_tenpai: u8,
+    break_meld_structure: u8,
+    yaku_break_any: bool,
+    mean_risk: f32,
     discard_dead: f32,
 ) -> CandidateMetrics {
-    let break_tenpai = u8::from(before_shanten == 0 && after_shanten > 0);
-    let break_meld_structure = u8::from(before_shanten <= 1 && after_shanten > before_shanten);
-    let hard_bad =
-        u8::from(break_tenpai == 1 || drop_open_yakuhai_pair == 1 || break_meld_structure == 1);
     let quality = 1.5 * f32::from(after_shanten == 0) - 0.8 * f32::from(after_shanten)
-        + 0.04 * (after_ukeire_live as f32)
-        + 0.06 * (after_waits_live as f32)
-        + 0.25 * confirmed_han_floor
-        + 0.15 * after_dora_count
-        + 0.1 * tanyao_path
-        + 0.08 * flush_path
-        - 2.0 * (break_tenpai as f32)
-        - 1.0 * (break_meld_structure as f32)
-        - 1.2 * (drop_open_yakuhai_pair as f32)
-        - 0.7 * (drop_dual_pon_value as f32)
+        + 0.5 * after_max_hand_value_norm
+        + 0.15 * confirmed_han_floor_norm
+        - 1.2 * f32::from(break_tenpai)
+        - 0.5 * f32::from(yaku_break_any)
+        - 0.7 * mean_risk
         - 0.15 * discard_dead;
-    let quality = if quality.abs() < 1e-6 {
-        0.0
-    } else if (quality - 1.0).abs() < 1e-6 {
-        1.0
-    } else {
-        quality
-    };
+    let hard_bad = u8::from(break_tenpai == 1 || break_meld_structure == 1 || mean_risk > 0.75);
     let rank_bucket = if hard_bad == 1 {
         0
     } else if quality >= 1.0 {
@@ -568,7 +644,7 @@ fn after_state_path_metrics(
     dora_flags: &[bool; TILE_KIND_COUNT],
     after_aka_total: usize,
     is_open_hand: bool,
-) -> (f32, f32, f32, f32, f32, f32, f32, f32) {
+) -> (f32, f32, f32, f32, f32, f32, f32, f32, f32, f32) {
     let yakuhai_pair_preserved = f32::from(
         yakuhai
             .iter()
@@ -583,35 +659,29 @@ fn after_state_path_metrics(
             .count()
             >= 2,
     );
-    let tanyao_path = f32::from(
-        after_counts34.iter().sum::<u8>() > 0
-            && after_counts34.iter().enumerate().all(|(idx, count)| {
-                *count == 0
-                    || !matches!(
-                        idx,
-                        0 | 8 | 9 | 17 | 18 | 26 | 27 | 28 | 29 | 30 | 31 | 32 | 33
-                    )
-            }),
-    );
-    let suit_presence = [
-        after_counts34[0..9].iter().sum::<u8>() > 0,
-        after_counts34[9..18].iter().sum::<u8>() > 0,
-        after_counts34[18..27].iter().sum::<u8>() > 0,
-    ];
-    let flush_path = f32::from(suit_presence.iter().filter(|flag| **flag).count() <= 1);
+    let tanyao_path = tanyao_path_from_counts(after_counts34);
+    let flush_path = flush_path_from_counts(after_counts34);
+    let after_aka_count = after_aka_total as f32;
     let after_dora_count = after_counts34
         .iter()
         .enumerate()
         .filter(|(idx, _)| dora_flags[*idx])
         .map(|(_, count)| *count as usize)
         .sum::<usize>() as f32
-        + after_aka_total as f32;
+        + after_aka_count;
     let yakuhai_triplet_count = yakuhai
         .iter()
         .enumerate()
         .filter(|(idx, flag)| **flag && after_counts34[*idx] >= 3)
         .count() as f32;
-    let confirmed_han_floor = (yakuhai_triplet_count + tanyao_path + after_dora_count).min(8.0);
+    let confirmed_han_floor =
+        shared_confirmed_han_floor(yakuhai_triplet_count, tanyao_path, after_dora_count);
+    let after_max_hand_value_norm = tenpai_value_proxy_norm(
+        confirmed_han_floor + 0.5 * after_dora_count + 0.35 * after_aka_count,
+        0,
+        0,
+        false,
+    );
     let hand_value_survives = f32::from(!is_open_hand || confirmed_han_floor > 0.0);
     (
         yakuhai_pair_preserved,
@@ -619,10 +689,19 @@ fn after_state_path_metrics(
         tanyao_path,
         flush_path,
         after_dora_count,
+        after_aka_count,
         yakuhai_triplet_count,
         confirmed_han_floor,
+        after_max_hand_value_norm,
         hand_value_survives,
     )
+}
+
+fn hand_aka_count(hand_tiles: &[String]) -> usize {
+    hand_tiles
+        .iter()
+        .filter(|tile| replay_core::tile_is_aka(tile))
+        .count()
 }
 
 fn candidate_quality_for_discard(
@@ -636,18 +715,18 @@ fn candidate_quality_for_discard(
     let before_tile_count: u8 = before_counts34.iter().sum();
     let before_shanten_raw =
         crate::shanten_table::calc_shanten_all(&before_counts34, before_tile_count / 3);
-    let (_before_decision_shanten, _before_decision_waits_count, before_decision_waits_tiles) =
-        calc_shanten_waits_like_python(
-            &before_counts34,
-            !round_state.players[actor].melds.is_empty(),
-        );
-    let before_waits_live: usize = before_decision_waits_tiles
-        .iter()
-        .enumerate()
-        .filter(|(_, flag)| **flag)
-        .map(|(tile34, _)| usize::from(4u8.saturating_sub(before_visible34[tile34])))
-        .sum();
     let yakuhai = yakuhai_tiles(&round_state.bakaze, actor as i8, round_state.oya);
+    let before_tanyao = tanyao_path_from_counts(&before_counts34);
+    let before_pinfu = pinfu_like_path_from_counts(
+        &before_counts34,
+        &yakuhai,
+        !round_state.players[actor].melds.is_empty(),
+    );
+    let before_iipeikou = iipeikou_like_path_from_counts(
+        &before_counts34,
+        !round_state.players[actor].melds.is_empty(),
+    );
+    let dora_flags = dora_target_flags(round_state);
     let tile34 = tile34_from_pai(discard_tile)?;
     let discard_idx = tile34 as usize;
     let mut after_counts34 = before_counts34;
@@ -656,8 +735,7 @@ fn candidate_quality_for_discard(
     }
     after_counts34[discard_idx] -= 1;
     let after_visible34 = before_visible34;
-    let after_progress = summarize_after_discard(&after_counts34, &after_visible34);
-    let (after_shanten_raw, _after_waits_count_raw, after_waits_tiles_raw) =
+    let (after_shanten_raw, after_waits_count_raw, after_waits_tiles_raw) =
         calc_shanten_waits_like_python(
             &after_counts34,
             !round_state.players[actor].melds.is_empty(),
@@ -668,28 +746,60 @@ fn candidate_quality_for_discard(
         .filter(|(_, flag)| **flag)
         .map(|(tile34, _)| usize::from(4u8.saturating_sub(after_visible34[tile34])))
         .sum();
-    let before_same_tile_count = before_counts34[discard_idx];
-    let after_same_tile_count = after_counts34[discard_idx];
-    let drop_open_yakuhai_pair = u8::from(
-        !round_state.players[actor].melds.is_empty()
-            && yakuhai[discard_idx]
-            && before_same_tile_count >= 2
-            && after_same_tile_count < 2,
+    let break_tenpai = u8::from(before_shanten_raw == 0 && after_shanten_raw > 0);
+    let break_meld_structure =
+        u8::from(before_shanten_raw <= 1 && after_shanten_raw > before_shanten_raw);
+    let is_aka = u8::from(replay_core::tile_is_aka(discard_tile));
+    let after_aka_total =
+        hand_aka_count(&round_state.feature_tracker.players[actor].hand_tiles)
+            .saturating_sub(is_aka as usize);
+    let (
+        _yakuhai_pair_preserved,
+        _dual_yakuhai_pair_value,
+        tanyao_path,
+        _flush_path,
+        after_dora_count,
+        after_aka_count,
+        _yakuhai_triplet_count,
+        confirmed_han_floor,
+        _after_max_hand_value_norm,
+        _hand_value_survives,
+    ) = after_state_path_metrics(
+        &after_counts34,
+        &yakuhai,
+        &dora_flags,
+        after_aka_total,
+        !round_state.players[actor].melds.is_empty(),
     );
-    let drop_dual_pon_value = u8::from(before_same_tile_count >= 2 && after_same_tile_count < 2);
-    Some(candidate_metrics(
-        before_shanten_raw,
-        before_waits_live,
-        after_shanten_raw,
-        after_progress.ukeire_live_count,
+    let after_max_hand_value_norm = tenpai_value_proxy_norm(
+        confirmed_han_floor + 0.5 * after_dora_count + 0.35 * after_aka_count,
+        after_waits_count_raw,
         after_waits_live,
-        drop_open_yakuhai_pair,
-        drop_dual_pon_value,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
+        after_waits_count_raw > 0,
+    );
+    let after_pinfu = pinfu_like_path_from_counts(
+        &after_counts34,
+        &yakuhai,
+        !round_state.players[actor].melds.is_empty(),
+    );
+    let after_iipeikou = iipeikou_like_path_from_counts(
+        &after_counts34,
+        !round_state.players[actor].melds.is_empty(),
+    );
+    let yaku_break_tanyao = before_tanyao > 0.5 && tanyao_path < 0.5;
+    let yaku_break_pinfu = before_pinfu > 0.5 && after_pinfu < 0.5;
+    let yaku_break_iipeikou = before_iipeikou > 0.5 && after_iipeikou < 0.5;
+    let after_risks = per_opponent_dealin_risks(round_state, actor, discard_idx, &before_visible34);
+    let discard_dead = f32::from(after_visible34[discard_idx] >= 3);
+    Some(candidate_metrics(
+        after_shanten_raw,
+        after_max_hand_value_norm,
+        (confirmed_han_floor / 8.0).min(1.0),
+        break_tenpai,
+        break_meld_structure,
+        yaku_break_tanyao || yaku_break_pinfu || yaku_break_iipeikou,
+        (after_risks[0] + after_risks[1] + after_risks[2]) / 3.0,
+        discard_dead,
     ))
 }
 
@@ -699,11 +809,12 @@ fn special_call_family_score(action: &Value) -> f32 {
         .and_then(Value::as_array)
         .map(|items| items.len())
         .unwrap_or(0) as f32;
-    match action.get("type").and_then(Value::as_str).unwrap_or("none") {
-        "pon" => 1.25 + 0.1 * consumed_len,
-        "chi" => 1.0 + 0.05 * consumed_len,
-        _ => 1.15 + 0.08 * consumed_len,
-    }
+    let bonus = match action.get("type").and_then(Value::as_str).unwrap_or("none") {
+        "pon" => 0.2,
+        "daiminkan" | "ankan" | "kakan" => 0.1,
+        _ => 0.0,
+    };
+    consumed_len + bonus
 }
 
 fn chi_special_type(action: &Value) -> i16 {
@@ -801,21 +912,38 @@ fn special_action_bonus_metrics(
     )
 }
 
-#[allow(unused_assignments)]
-fn encode_special_candidate_arrays_with_legal_actions(
+fn special_exposure_factor(special_type: i16, ankan_preserves_tenpai: f32) -> f32 {
+    match special_type {
+        XMODEL1_SPECIAL_TYPE_CHI_LOW
+        | XMODEL1_SPECIAL_TYPE_CHI_MID
+        | XMODEL1_SPECIAL_TYPE_CHI_HIGH => 0.65,
+        XMODEL1_SPECIAL_TYPE_PON => 0.55,
+        XMODEL1_SPECIAL_TYPE_DAIMINKAN => 0.8,
+        XMODEL1_SPECIAL_TYPE_KAKAN => 0.7,
+        XMODEL1_SPECIAL_TYPE_ANKAN => {
+            if ankan_preserves_tenpai > 0.5 {
+                0.2
+            } else {
+                0.4
+            }
+        }
+        XMODEL1_SPECIAL_TYPE_REACH | XMODEL1_SPECIAL_TYPE_DAMA => 0.35,
+        _ => 0.0,
+    }
+}
+
+fn build_special_hand_summary(
     round_state: &RoundState,
     actor: usize,
     legal_actions: &[Value],
-    chosen_action: &Value,
-) -> SpecialCandidateArrays {
+) -> SpecialHandSummary {
     let tracker = &round_state.feature_tracker.players[actor];
     let before_visible34 = visible_counts_for_decision(round_state, actor);
-    let (before_decision_shanten, before_waits_count, before_waits_tiles) =
-        calc_shanten_waits_like_python(
-            &tracker.hand_counts34,
-            !round_state.players[actor].melds.is_empty(),
-        );
-    let before_waits_live: usize = before_waits_tiles
+    let (shanten, waits_count, waits_tiles) = calc_shanten_waits_like_python(
+        &tracker.hand_counts34,
+        !round_state.players[actor].melds.is_empty(),
+    );
+    let waits_live: usize = waits_tiles
         .iter()
         .enumerate()
         .filter(|(_, flag)| **flag)
@@ -829,20 +957,7 @@ fn encode_special_candidate_arrays_with_legal_actions(
         .sum::<f32>()
         / 4.0;
     let score_gap = ((actor_score - mean_score) / SCORE_NORM).clamp(-1.0, 1.0);
-    let threat_proxy = f32::from(
-        round_state
-            .players
-            .iter()
-            .enumerate()
-            .any(|(pid, player)| pid != actor && player.reached),
-    );
-    let total_discards: usize = round_state
-        .players
-        .iter()
-        .map(|player| player.discards.len())
-        .sum();
-    let round_progress = (total_discards as f32 / 60.0).min(1.0);
-    let is_open = f32::from(!round_state.players[actor].melds.is_empty());
+    let threat_by_opponent = per_opponent_dealin_risks(round_state, actor, 27, &before_visible34);
     let yakuhai = yakuhai_tiles(&round_state.bakaze, actor as i8, round_state.oya);
     let dora_flags = dora_target_flags(round_state);
     let (
@@ -851,17 +966,18 @@ fn encode_special_candidate_arrays_with_legal_actions(
         _current_tanyao,
         _current_flush,
         current_dora_count,
-        current_yakuhai_triplet_count,
+        _current_aka_count,
+        _current_yakuhai_triplet_count,
         current_han_floor,
-        _current_hand_value_survives,
+        current_max_value_norm,
+        current_hand_value_survives,
     ) = after_state_path_metrics(
         &tracker.hand_counts34,
         &yakuhai,
         &dora_flags,
-        round_state.feature_tracker.players[actor].aka_counts[0],
+        hand_aka_count(&tracker.hand_tiles),
         !round_state.players[actor].melds.is_empty(),
     );
-
     let mut best_discard_quality = 0.0f32;
     for action in legal_actions {
         if action.get("type").and_then(Value::as_str) != Some("dahai") {
@@ -873,6 +989,80 @@ fn encode_special_candidate_arrays_with_legal_actions(
             }
         }
     }
+    let total_discards: usize = round_state
+        .players
+        .iter()
+        .map(|player| player.discards.len())
+        .sum();
+    SpecialHandSummary {
+        shanten,
+        tenpai: f32::from(shanten == 0),
+        waits_count,
+        waits_live_norm: (waits_live as f32 / 136.0).min(1.0),
+        round_progress: (total_discards as f32 / 60.0).min(1.0),
+        score_gap,
+        threat_proxy_any_reached: f32::from(
+            round_state
+                .players
+                .iter()
+                .enumerate()
+                .any(|(pid, player)| pid != actor && player.reached),
+        ),
+        threat_by_opponent,
+        is_open: f32::from(!round_state.players[actor].melds.is_empty()),
+        best_discard_quality_norm: (best_discard_quality / 3.0).min(1.0),
+        current_han_floor_norm: (current_han_floor / 8.0).min(1.0),
+        current_dora_count_norm: (current_dora_count / 4.0).min(1.0),
+        current_max_value_norm,
+        current_hand_value_survives,
+    }
+}
+
+fn special_action_after_value(
+    summary: &SpecialHandSummary,
+    special_type: i16,
+    action: &Value,
+    yakuhai: &[bool; TILE_KIND_COUNT],
+    dora_flags: &[bool; TILE_KIND_COUNT],
+) -> f32 {
+    let (action_dora_bonus, action_yakuhai_bonus, _call_breaks_closed, _kan_rinshan_bonus) =
+        special_action_bonus_metrics(action, yakuhai, dora_flags);
+    match special_type {
+        XMODEL1_SPECIAL_TYPE_REACH | XMODEL1_SPECIAL_TYPE_DAMA => {
+            let reach_bonus = if special_type == XMODEL1_SPECIAL_TYPE_REACH {
+                0.15
+            } else {
+                0.0
+            };
+            (summary.current_max_value_norm + reach_bonus + 0.2 * action_dora_bonus).min(1.0)
+        }
+        XMODEL1_SPECIAL_TYPE_CHI_LOW
+        | XMODEL1_SPECIAL_TYPE_CHI_MID
+        | XMODEL1_SPECIAL_TYPE_CHI_HIGH
+        | XMODEL1_SPECIAL_TYPE_PON
+        | XMODEL1_SPECIAL_TYPE_DAIMINKAN
+        | XMODEL1_SPECIAL_TYPE_ANKAN
+        | XMODEL1_SPECIAL_TYPE_KAKAN => {
+            (0.6 * summary.best_discard_quality_norm
+                + 0.25 * action_dora_bonus
+                + 0.25 * action_yakuhai_bonus)
+                .min(1.0)
+        }
+        XMODEL1_SPECIAL_TYPE_HORA => summary.current_max_value_norm.max(0.8),
+        _ => 0.0,
+    }
+}
+
+#[allow(unused_assignments)]
+fn encode_special_candidate_arrays_with_legal_actions(
+    round_state: &RoundState,
+    actor: usize,
+    legal_actions: &[Value],
+    chosen_action: &Value,
+) -> SpecialCandidateArrays {
+    let summary = build_special_hand_summary(round_state, actor, legal_actions);
+    let yakuhai = yakuhai_tiles(&round_state.bakaze, actor as i8, round_state.oya);
+    let dora_flags = dora_target_flags(round_state);
 
     let mut feat =
         vec![0u16; XMODEL1_MAX_SPECIAL_CANDIDATES * XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM];
@@ -886,7 +1076,7 @@ fn encode_special_candidate_arrays_with_legal_actions(
     let mut grouped: Vec<Option<Value>> = vec![None; XMODEL1_MAX_SPECIAL_CANDIDATES];
     if legal_actions
         .iter()
-        .any(|a| a.get("type").and_then(Value::as_str) == Some("reach"))
+        .any(|action| action.get("type").and_then(Value::as_str) == Some("reach"))
     {
         grouped[XMODEL1_SPECIAL_TYPE_REACH as usize] = Some(json!({"type":"reach"}));
         grouped[XMODEL1_SPECIAL_TYPE_DAMA as usize] = Some(json!({"type":"dama"}));
@@ -895,10 +1085,7 @@ fn encode_special_candidate_arrays_with_legal_actions(
         let Some(special_type) = special_type_from_action(action, true) else {
             continue;
         };
-        if matches!(
-            special_type,
-            XMODEL1_SPECIAL_TYPE_REACH | XMODEL1_SPECIAL_TYPE_DAMA
-        ) {
+        if matches!(special_type, XMODEL1_SPECIAL_TYPE_REACH | XMODEL1_SPECIAL_TYPE_DAMA) {
             continue;
         }
         let replace = grouped[special_type as usize]
@@ -907,6 +1094,15 @@ fn encode_special_candidate_arrays_with_legal_actions(
             .unwrap_or(true);
         if replace {
             grouped[special_type as usize] = Some(action.clone());
+        }
+    }
+    if let Some(chosen_special_type) = special_type_from_action(chosen_action, true) {
+        if !matches!(
+            chosen_special_type,
+            XMODEL1_SPECIAL_TYPE_REACH | XMODEL1_SPECIAL_TYPE_DAMA
+        ) && grouped[chosen_special_type as usize].is_none()
+        {
+            grouped[chosen_special_type as usize] = Some(chosen_action.clone());
         }
     }
     let has_call_special = [
@@ -921,11 +1117,13 @@ fn encode_special_candidate_arrays_with_legal_actions(
     .iter()
     .any(|special_type| grouped[*special_type as usize].is_some());
     if has_call_special {
-        grouped[XMODEL1_SPECIAL_TYPE_NONE as usize] = Some(json!({"type":"none"}));
+        grouped[XMODEL1_SPECIAL_TYPE_NONE as usize] =
+            grouped[XMODEL1_SPECIAL_TYPE_NONE as usize]
+                .clone()
+                .or_else(|| Some(json!({"type":"none"})));
     }
 
-    let mut slot = 0usize;
-    for special_type in [
+    let order = [
         XMODEL1_SPECIAL_TYPE_REACH,
         XMODEL1_SPECIAL_TYPE_DAMA,
         XMODEL1_SPECIAL_TYPE_HORA,
@@ -938,241 +1136,107 @@ fn encode_special_candidate_arrays_with_legal_actions(
         XMODEL1_SPECIAL_TYPE_KAKAN,
         XMODEL1_SPECIAL_TYPE_RYUKYOKU,
         XMODEL1_SPECIAL_TYPE_NONE,
-    ] {
-        if slot >= XMODEL1_MAX_SPECIAL_CANDIDATES {
-            break;
-        }
-        let Some(action) = grouped[special_type as usize].as_ref() else {
+    ];
+    for (slot, special_type) in order.iter().take(XMODEL1_MAX_SPECIAL_CANDIDATES).enumerate() {
+        let Some(action) = grouped[*special_type as usize].as_ref() else {
             continue;
         };
+        let special_type = *special_type;
         type_id[slot] = special_type;
         mask[slot] = 1;
-        let (
-            speed_gain,
-            retain_value,
-            value_loss,
-            han_floor,
-            action_dora_bonus,
-            action_yakuhai_bonus,
-            context_bonus,
-            hand_value_survives,
-            candidate_quality,
-        ) = if special_type == XMODEL1_SPECIAL_TYPE_REACH {
-            let speed_gain = 0.5;
-            let retain_value = before_waits_live as f32 / 20.0;
-            let value_loss = -0.2;
-            let han_floor = 0.0;
-            let action_dora_bonus = ((current_han_floor + current_dora_count) / 8.0).min(1.0);
-            let action_yakuhai_bonus = (current_yakuhai_triplet_count / 3.0).min(1.0);
-            let context_bonus = (best_discard_quality / 3.0).clamp(0.0, 1.0);
-            let hand_value_survives = 1.0;
-            let candidate_quality = 1.2 * f32::from(before_decision_shanten == 0)
-                + 0.15 * before_waits_live as f32
-                + 0.5 * score_gap
-                - 0.6 * threat_proxy
-                + 0.3 * (1.0 - round_progress)
-                + 0.15 * action_dora_bonus;
-            (
-                speed_gain,
-                retain_value,
-                value_loss,
-                han_floor,
-                action_dora_bonus,
-                action_yakuhai_bonus,
-                context_bonus,
-                hand_value_survives,
-                candidate_quality,
-            )
-        } else if special_type == XMODEL1_SPECIAL_TYPE_DAMA {
-            let speed_gain = 0.0;
-            let retain_value = best_discard_quality;
-            let value_loss = 0.0;
-            let han_floor = 0.0;
-            let action_dora_bonus = (current_dora_count / 10.0).min(1.0);
-            let action_yakuhai_bonus = (current_han_floor / 8.0).min(1.0);
-            let context_bonus = (best_discard_quality / 3.0).clamp(0.0, 1.0);
-            let hand_value_survives = 1.0;
-            let candidate_quality = 0.8 * f32::from(before_decision_shanten == 0)
-                + 0.35 * retain_value
-                + 0.25 * score_gap
-                + 0.15 * threat_proxy
-                + 0.1 * action_yakuhai_bonus;
-            (
-                speed_gain,
-                retain_value,
-                value_loss,
-                han_floor,
-                action_dora_bonus,
-                action_yakuhai_bonus,
-                context_bonus,
-                hand_value_survives,
-                candidate_quality,
-            )
-        } else if matches!(
+
+        let (action_dora_bonus, action_yakuhai_bonus, _call_breaks_closed, _kan_rinshan_bonus) =
+            special_action_bonus_metrics(action, &yakuhai, &dora_flags);
+        let ankan_preserves_tenpai = f32::from(
+            special_type == XMODEL1_SPECIAL_TYPE_ANKAN && summary.tenpai > 0.5,
+        );
+        let chi_low = f32::from(special_type == XMODEL1_SPECIAL_TYPE_CHI_LOW);
+        let chi_mid = f32::from(special_type == XMODEL1_SPECIAL_TYPE_CHI_MID);
+        let chi_high = f32::from(special_type == XMODEL1_SPECIAL_TYPE_CHI_HIGH);
+        let rinshan_bonus = if matches!(
             special_type,
-            XMODEL1_SPECIAL_TYPE_CHI_LOW
-                | XMODEL1_SPECIAL_TYPE_CHI_MID
-                | XMODEL1_SPECIAL_TYPE_CHI_HIGH
-                | XMODEL1_SPECIAL_TYPE_PON
-                | XMODEL1_SPECIAL_TYPE_DAIMINKAN
+            XMODEL1_SPECIAL_TYPE_DAIMINKAN
                 | XMODEL1_SPECIAL_TYPE_ANKAN
                 | XMODEL1_SPECIAL_TYPE_KAKAN
         ) {
-            let is_chi = matches!(
-                special_type,
-                XMODEL1_SPECIAL_TYPE_CHI_LOW
-                    | XMODEL1_SPECIAL_TYPE_CHI_MID
-                    | XMODEL1_SPECIAL_TYPE_CHI_HIGH
-            );
-            let is_kan = matches!(
-                special_type,
-                XMODEL1_SPECIAL_TYPE_DAIMINKAN
-                    | XMODEL1_SPECIAL_TYPE_ANKAN
-                    | XMODEL1_SPECIAL_TYPE_KAKAN
-            );
-            let speed_gain = if is_chi {
-                0.35
-            } else if special_type == XMODEL1_SPECIAL_TYPE_PON {
-                0.5
-            } else {
-                0.4
-            };
-            let retain_value = best_discard_quality;
-            let value_loss = if is_chi {
-                0.35
-            } else if special_type == XMODEL1_SPECIAL_TYPE_PON {
-                0.2
-            } else {
-                0.45
-            };
-            let (dora_bonus, yakuhai_bonus, call_breaks_closed, kan_rinshan_bonus) =
-                special_action_bonus_metrics(action, &yakuhai, &dora_flags);
-            let han_floor = (dora_bonus + yakuhai_bonus).min(1.0);
-            let hand_value_survives =
-                f32::from(is_open > 0.0 || current_han_floor > 0.0 || han_floor > 0.0);
-            let context_bonus = if is_kan {
-                kan_rinshan_bonus
-            } else {
-                call_breaks_closed
-            };
-            let action_dora_bonus = dora_bonus;
-            let action_yakuhai_bonus = yakuhai_bonus;
-            let candidate_quality = 0.7 * speed_gain
-                + 0.25 * best_discard_quality
-                + 0.4 * han_floor
-                + 0.2 * action_dora_bonus
-                + 0.25 * action_yakuhai_bonus
-                + 0.15 * f32::from(is_kan)
-                - 0.6 * value_loss
-                - 0.4 * threat_proxy
-                - 0.2 * context_bonus * (1.0 - is_open);
-            (
-                speed_gain,
-                retain_value,
-                value_loss,
-                han_floor,
-                action_dora_bonus,
-                action_yakuhai_bonus,
-                context_bonus,
-                hand_value_survives,
-                candidate_quality,
-            )
-        } else if special_type == XMODEL1_SPECIAL_TYPE_HORA {
-            let speed_gain = 1.0;
-            let retain_value = ((current_han_floor + current_dora_count) / 8.0).min(1.0);
-            let value_loss = 0.0;
-            let han_floor = 0.0;
-            let action_dora_bonus = (current_dora_count / 10.0).min(1.0);
-            let action_yakuhai_bonus = (current_han_floor / 8.0).min(1.0);
-            let context_bonus = 1.0;
-            let hand_value_survives = 1.0;
-            let candidate_quality =
-                3.0 + retain_value + 0.25 * action_dora_bonus + 0.15 * action_yakuhai_bonus;
-            (
-                speed_gain,
-                retain_value,
-                value_loss,
-                han_floor,
-                action_dora_bonus,
-                action_yakuhai_bonus,
-                context_bonus,
-                hand_value_survives,
-                candidate_quality,
-            )
-        } else if special_type == XMODEL1_SPECIAL_TYPE_RYUKYOKU {
-            let speed_gain = 0.1;
-            let retain_value = (before_decision_shanten as f32 / 8.0).min(1.0);
-            let value_loss = 0.0;
-            let han_floor = 0.0;
-            let action_dora_bonus = 0.0;
-            let action_yakuhai_bonus = 0.0;
-            let context_bonus = (1.0 - round_progress).clamp(0.0, 1.0);
-            let hand_value_survives = 1.0;
-            let candidate_quality = 0.15 + 0.25 * context_bonus + 0.2 * threat_proxy;
-            (
-                speed_gain,
-                retain_value,
-                value_loss,
-                han_floor,
-                action_dora_bonus,
-                action_yakuhai_bonus,
-                context_bonus,
-                hand_value_survives,
-                candidate_quality,
-            )
+            0.25
         } else {
-            let speed_gain = 0.0;
-            let retain_value = best_discard_quality;
-            let value_loss = 0.0;
-            let han_floor = 0.0;
-            let action_dora_bonus = threat_proxy;
-            let action_yakuhai_bonus = (current_han_floor / 8.0).min(1.0);
-            let context_bonus = threat_proxy;
-            let hand_value_survives = 1.0;
-            let candidate_quality = 0.55 * retain_value
-                + 0.4 * (1.0 - is_open)
-                + 0.2 * threat_proxy
-                + 0.1 * action_yakuhai_bonus;
-            (
-                speed_gain,
-                retain_value,
-                value_loss,
-                han_floor,
-                action_dora_bonus,
-                action_yakuhai_bonus,
-                context_bonus,
-                hand_value_survives,
-                candidate_quality,
+            0.0
+        };
+        let after_value_norm =
+            special_action_after_value(&summary, special_type, action, &yakuhai, &dora_flags);
+        let (speed_gain_norm, value_loss_norm) = match special_type {
+            XMODEL1_SPECIAL_TYPE_REACH => (0.4, 0.05),
+            XMODEL1_SPECIAL_TYPE_DAMA => (0.0, 0.0),
+            XMODEL1_SPECIAL_TYPE_CHI_LOW
+            | XMODEL1_SPECIAL_TYPE_CHI_MID
+            | XMODEL1_SPECIAL_TYPE_CHI_HIGH => (0.35, 0.35),
+            XMODEL1_SPECIAL_TYPE_PON => (0.45, 0.2),
+            XMODEL1_SPECIAL_TYPE_DAIMINKAN | XMODEL1_SPECIAL_TYPE_KAKAN => (0.3, 0.45),
+            XMODEL1_SPECIAL_TYPE_ANKAN => (0.3, 0.2),
+            XMODEL1_SPECIAL_TYPE_HORA => (1.0, 0.0),
+            _ => (0.0, 0.0),
+        };
+        let hand_value_survives = if matches!(
+            special_type,
+            XMODEL1_SPECIAL_TYPE_HORA | XMODEL1_SPECIAL_TYPE_NONE | XMODEL1_SPECIAL_TYPE_RYUKYOKU
+        ) {
+            1.0
+        } else {
+            f32::from(
+                summary.current_hand_value_survives > 0.0
+                    || after_value_norm > 0.0
+                    || summary.current_han_floor_norm > 0.0,
             )
         };
-
+        let exposure = special_exposure_factor(special_type, ankan_preserves_tenpai);
+        let risk_proxy = summary
+            .threat_by_opponent
+            .map(|value| (exposure * value).min(1.0));
         let feature_values = [
-            before_decision_shanten as f32 / 8.0,
-            f32::from(before_decision_shanten == 0),
-            before_waits_count as f32 / 34.0,
-            (before_waits_live as f32 / 20.0).min(1.0),
-            round_progress,
-            score_gap.clamp(-1.0, 1.0),
-            threat_proxy,
-            is_open,
-            speed_gain.clamp(0.0, 1.0),
-            (retain_value / 3.0).clamp(-1.0, 1.0),
-            value_loss.clamp(0.0, 1.0),
-            han_floor.clamp(0.0, 1.0),
-            action_dora_bonus.clamp(0.0, 1.0),
-            action_yakuhai_bonus.clamp(0.0, 1.0),
-            context_bonus.clamp(0.0, 1.0),
+            summary.shanten as f32 / 8.0,
+            summary.tenpai,
+            summary.waits_count as f32 / 34.0,
+            summary.waits_live_norm,
+            summary.round_progress,
+            summary.score_gap.clamp(-1.0, 1.0),
+            summary.threat_proxy_any_reached,
+            summary.is_open,
+            after_value_norm,
+            speed_gain_norm,
+            value_loss_norm,
+            summary.current_han_floor_norm,
+            action_dora_bonus,
+            action_yakuhai_bonus,
+            risk_proxy[0],
+            risk_proxy[1],
+            risk_proxy[2],
             hand_value_survives,
+            ankan_preserves_tenpai,
+            chi_low,
+            chi_mid,
+            chi_high,
+            rinshan_bonus,
+            summary.current_han_floor_norm,
+            summary.current_dora_count_norm,
         ];
         let feat_offset = slot * XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM;
         for (idx, value) in feature_values.iter().enumerate() {
             feat[feat_offset + idx] = f16::from_f32(*value).to_bits();
         }
+
+        let candidate_quality = 0.6 * after_value_norm
+            + 0.35 * speed_gain_norm
+            - 0.4 * value_loss_norm
+            - 0.35 * ((risk_proxy[0] + risk_proxy[1] + risk_proxy[2]) / 3.0)
+            + 0.15 * action_dora_bonus
+            + 0.15 * action_yakuhai_bonus
+            + f32::from(special_type == XMODEL1_SPECIAL_TYPE_HORA);
         quality[slot] = candidate_quality;
         let candidate_hard_bad = u8::from(
             (special_type == XMODEL1_SPECIAL_TYPE_REACH
-                && threat_proxy > 0.5
-                && before_waits_live < 4)
+                && summary.threat_proxy_any_reached > 0.5
+                && summary.waits_live_norm < 0.03)
                 || (matches!(
                     special_type,
                     XMODEL1_SPECIAL_TYPE_CHI_LOW
@@ -1181,8 +1245,8 @@ fn encode_special_candidate_arrays_with_legal_actions(
                         | XMODEL1_SPECIAL_TYPE_DAIMINKAN
                         | XMODEL1_SPECIAL_TYPE_ANKAN
                         | XMODEL1_SPECIAL_TYPE_KAKAN
-                ) && value_loss >= 0.4
-                    && han_floor <= 0.0),
+                ) && value_loss_norm >= 0.35
+                    && summary.current_han_floor_norm <= 0.0),
         );
         hard_bad[slot] = candidate_hard_bad;
         rank[slot] = if candidate_hard_bad == 1 {
@@ -1200,22 +1264,21 @@ fn encode_special_candidate_arrays_with_legal_actions(
             .and_then(Value::as_str)
             .unwrap_or("none");
         if (chosen_type == "reach" && special_type == XMODEL1_SPECIAL_TYPE_REACH)
-            || (chosen_type == "hora" && special_type == XMODEL1_SPECIAL_TYPE_HORA)
-            || (chosen_type == "ryukyoku" && special_type == XMODEL1_SPECIAL_TYPE_RYUKYOKU)
-            || (chosen_type == "none" && special_type == XMODEL1_SPECIAL_TYPE_NONE)
-            || (chosen_type == "chi"
-                && special_type == special_type_from_action(chosen_action, true).unwrap_or(-1))
-            || (chosen_type == "pon" && special_type == XMODEL1_SPECIAL_TYPE_PON)
-            || (chosen_type == "daiminkan" && special_type == XMODEL1_SPECIAL_TYPE_DAIMINKAN)
-            || (chosen_type == "ankan" && special_type == XMODEL1_SPECIAL_TYPE_ANKAN)
-            || (chosen_type == "kakan" && special_type == XMODEL1_SPECIAL_TYPE_KAKAN)
             || (chosen_type == "dahai"
                 && special_type == XMODEL1_SPECIAL_TYPE_DAMA
                 && grouped[XMODEL1_SPECIAL_TYPE_REACH as usize].is_some())
+            || (chosen_type == "hora" && special_type == XMODEL1_SPECIAL_TYPE_HORA)
+            || (chosen_type == "ryukyoku" && special_type == XMODEL1_SPECIAL_TYPE_RYUKYOKU)
+            || (chosen_type == "pon" && special_type == XMODEL1_SPECIAL_TYPE_PON)
+            || (chosen_type == "chi"
+                && special_type == special_type_from_action(chosen_action, true).unwrap_or(-1))
+            || (chosen_type == "daiminkan" && special_type == XMODEL1_SPECIAL_TYPE_DAIMINKAN)
+            || (chosen_type == "ankan" && special_type == XMODEL1_SPECIAL_TYPE_ANKAN)
+            || (chosen_type == "kakan" && special_type == XMODEL1_SPECIAL_TYPE_KAKAN)
+            || (chosen_type == "none" && special_type == XMODEL1_SPECIAL_TYPE_NONE)
         {
             chosen_idx = slot as i16;
         }
-        slot += 1;
     }
 
     SpecialCandidateArrays {
@@ -1283,8 +1346,10 @@ fn encode_special_candidate_arrays(
         _current_tanyao,
         _current_flush,
         current_dora_count,
+        _current_aka_count,
         current_yakuhai_triplet_count,
         current_han_floor,
+        _current_max_value_norm,
         _current_hand_value_survives,
     ) = after_state_path_metrics(
         &tracker.hand_counts34,
@@ -1604,6 +1669,17 @@ fn encode_candidate_features(
         .filter(|(_, flag)| **flag)
         .map(|(tile34, _)| usize::from(4u8.saturating_sub(before_visible34[tile34])))
         .sum();
+    let yakuhai = yakuhai_tiles(&round_state.bakaze, actor as i8, round_state.oya);
+    let before_tanyao = tanyao_path_from_counts(&before_counts34);
+    let before_pinfu = pinfu_like_path_from_counts(
+        &before_counts34,
+        &yakuhai,
+        !round_state.players[actor].melds.is_empty(),
+    );
+    let before_iipeikou = iipeikou_like_path_from_counts(
+        &before_counts34,
+        !round_state.players[actor].melds.is_empty(),
+    );
     let state_tile_feat =
         encode_state_tile_features(round_state, actor, &before_progress, &before_visible34)?;
     let state_scalar =
@@ -1619,7 +1695,6 @@ fn encode_candidate_features(
     let mut candidate_hard_bad = vec![0u8; XMODEL1_MAX_CANDIDATES];
     let mut chosen_candidate_idx: Option<i16> = None;
 
-    let yakuhai = yakuhai_tiles(&round_state.bakaze, actor as i8, round_state.oya);
     let dora_flags = dora_target_flags(round_state);
     let any_other_reached = round_state
         .players
@@ -1655,16 +1730,6 @@ fn encode_candidate_features(
             .map(|(tile34, _)| usize::from(4u8.saturating_sub(after_visible34[tile34])))
             .sum();
         let (pair_count, taatsu_count) = pair_taatsu_metrics_from_counts(&after_counts34);
-        let before_same_tile_count = before_counts34[discard_idx];
-        let after_same_tile_count = after_counts34[discard_idx];
-        let drop_open_yakuhai_pair = u8::from(
-            !round_state.players[actor].melds.is_empty()
-                && yakuhai[discard_idx]
-                && before_same_tile_count >= 2
-                && after_same_tile_count < 2,
-        );
-        let drop_dual_pon_value =
-            u8::from(before_same_tile_count >= 2 && after_same_tile_count < 2);
         let break_tenpai = u8::from(before_shanten_raw == 0 && after_shanten_raw > 0);
         let break_best_wait =
             u8::from(before_shanten_raw == 0 && after_waits_live < before_waits_live);
@@ -1673,7 +1738,7 @@ fn encode_candidate_features(
         let is_honor = u8::from(tile34 >= 27);
         let is_terminal = u8::from(matches!(tile34, 0 | 8 | 9 | 17 | 18 | 26));
         let is_aka = u8::from(replay_core::tile_is_aka(discard_tile));
-        let after_aka_total = round_state.feature_tracker.players[actor].aka_counts[0]
+        let after_aka_total = hand_aka_count(&round_state.feature_tracker.players[actor].hand_tiles)
             .saturating_sub(is_aka as usize);
         let (
             yakuhai_pair_preserved,
@@ -1681,8 +1746,10 @@ fn encode_candidate_features(
             tanyao_path,
             flush_path,
             after_dora_count,
+            after_aka_count,
             yakuhai_triplet_count,
             confirmed_han_floor,
+            _after_max_hand_value_norm,
             hand_value_survives,
         ) = after_state_path_metrics(
             &after_counts34,
@@ -1691,6 +1758,26 @@ fn encode_candidate_features(
             after_aka_total,
             !round_state.players[actor].melds.is_empty(),
         );
+        let after_max_hand_value_norm = tenpai_value_proxy_norm(
+            confirmed_han_floor + 0.5 * after_dora_count + 0.35 * after_aka_count,
+            after_waits_count_raw,
+            after_waits_live,
+            after_waits_count_raw > 0,
+        );
+        let after_pinfu = pinfu_like_path_from_counts(
+            &after_counts34,
+            &yakuhai,
+            !round_state.players[actor].melds.is_empty(),
+        );
+        let after_iipeikou = iipeikou_like_path_from_counts(
+            &after_counts34,
+            !round_state.players[actor].melds.is_empty(),
+        );
+        let yaku_break_tanyao = u8::from(before_tanyao > 0.5 && tanyao_path < 0.5);
+        let yaku_break_pinfu = u8::from(before_pinfu > 0.5 && after_pinfu < 0.5);
+        let yaku_break_iipeikou = u8::from(before_iipeikou > 0.5 && after_iipeikou < 0.5);
+        let after_risks =
+            per_opponent_dealin_risks(round_state, actor, discard_idx, &before_visible34);
         let wait_density = if after_waits_count_raw > 0 {
             (after_waits_live as f32 / (4.0 * after_waits_count_raw as f32).max(1.0)).min(1.0)
         } else {
@@ -1701,17 +1788,13 @@ fn encode_candidate_features(
         let is_yakuhai = u8::from(yakuhai[discard_idx]);
         let discard_dead = f32::from(after_visible34[discard_idx] >= 3);
         let metrics = candidate_metrics(
-            before_shanten_raw,
-            before_waits_live,
             after_shanten_raw,
-            after_progress.ukeire_live_count,
-            after_waits_live,
-            drop_open_yakuhai_pair,
-            drop_dual_pon_value,
-            confirmed_han_floor,
-            after_dora_count,
-            tanyao_path,
-            flush_path,
+            after_max_hand_value_norm,
+            (confirmed_han_floor / 8.0).min(1.0),
+            break_tenpai,
+            break_meld_structure,
+            yaku_break_tanyao == 1 || yaku_break_pinfu == 1 || yaku_break_iipeikou == 1,
+            (after_risks[0] + after_risks[1] + after_risks[2]) / 3.0,
             discard_dead,
         );
 
@@ -1719,35 +1802,35 @@ fn encode_candidate_features(
             f32::from(after_shanten_raw) / 8.0,
             f32::from(after_shanten_raw == 0),
             after_waits_count_raw as f32 / 34.0,
-            (after_waits_live as f32 / 20.0).min(1.0),
-            (after_progress.ukeire_type_count as f32 / 34.0).min(1.0),
-            (after_progress.ukeire_live_count as f32 / 34.0).min(1.0),
-            0.0,
+            (after_progress.ukeire_live_count as f32 / 136.0).min(1.0),
+            after_max_hand_value_norm,
+            (((after_shanten_raw - before_shanten_raw) as f32) / 4.0).clamp(-1.0, 1.0),
+            (after_dora_count / 4.0).min(1.0),
+            (after_aka_count / 2.0).min(1.0),
+            f32::from(yaku_break_tanyao),
+            f32::from(yaku_break_pinfu),
+            f32::from(yaku_break_iipeikou),
+            after_risks[0],
+            after_risks[1],
+            after_risks[2],
             wait_density,
             pair_count as f32 / 7.0,
             taatsu_count as f32 / 6.0,
             structure_density,
-            (confirmed_han_floor / 8.0).min(1.0),
             hand_value_survives,
             yakuhai_pair_preserved,
             dual_yakuhai_pair_value,
             tanyao_path,
             flush_path,
             f32::from(any_other_reached),
-            (after_dora_count / 10.0).min(1.0),
-            (yakuhai_triplet_count / 3.0).min(1.0),
             discard_dead,
-            (((after_shanten_raw - before_shanten_raw) as f32) / 4.0).clamp(-1.0, 1.0),
-            (after_waits_live as f32 / 136.0).min(1.0),
-            (after_progress.ukeire_live_count as f32 / 136.0).min(1.0),
             0.0,
             0.0,
-            (after_dora_count / 4.0).min(1.0),
-            (yakuhai_triplet_count / 2.0).min(1.0),
+            (confirmed_han_floor / 8.0).min(1.0),
+            (yakuhai_triplet_count / 3.0).min(1.0),
             f32::from(break_tenpai),
             f32::from(break_best_wait),
             f32::from(break_meld_structure),
-            hand_value_survives,
             f32::from(is_dora),
             f32::from(is_yakuhai),
             f32::from(before_waits_live > after_waits_live),
@@ -1756,11 +1839,11 @@ fn encode_candidate_features(
             break_tenpai,
             break_best_wait,
             break_meld_structure,
-            drop_open_yakuhai_pair,
-            drop_dual_pon_value,
+            yaku_break_tanyao,
+            yaku_break_pinfu,
+            yaku_break_iipeikou,
             is_honor,
             is_terminal,
-            is_aka,
             is_dora,
             is_yakuhai,
         ];
@@ -1801,14 +1884,15 @@ fn encode_candidate_features(
     } else {
         0.0
     };
-    let special = encode_special_candidate_arrays(
+    let snapshot = snapshot_for_actor(core_state, actor);
+    let snapshot_value = serde_json::to_value(&snapshot)
+        .map_err(|err| format!("failed to serialize discard snapshot for actor {actor}: {err}"))?;
+    let legal_actions = public_legal_actions_for_snapshot(&snapshot_value, actor)?;
+    let special = encode_special_candidate_arrays_with_legal_actions(
         round_state,
         actor,
-        &replay_core::enumerate_actor_legal_actions(core_state, actor)?,
-        before_decision_shanten,
-        before_decision_waits_count,
-        before_waits_live,
-        best_discard_quality,
+        &legal_actions,
+        &json!({"type":"dahai", "pai": chosen_tile}),
     );
 
     Ok(FullRecord {
@@ -2234,7 +2318,23 @@ fn encode_state_scalar_features(
 }
 
 fn existing_export_sample_count(path: &Path) -> Result<Option<usize>, String> {
-    read_npy_first_dim_from_zip(path, "state_tile_feat.npy")
+    let sample_count = read_npy_first_dim_from_zip(path, "state_tile_feat.npy")?;
+    let Some(sample_count) = sample_count else {
+        return Ok(None);
+    };
+    let file = fs::File::open(path)
+        .map_err(|err| format!("failed to open npz {}: {err}", path.display()))?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|err| format!("failed to open npz {}: {err}", path.display()))?;
+    for required_member in ["schema_name.npy", "schema_version.npy"] {
+        if zip.by_name(required_member).is_err() {
+            return Err(format!(
+                "existing export missing required member {required_member} in {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(Some(sample_count))
 }
 
 #[derive(Debug)]
@@ -2374,10 +2474,10 @@ fn collect_records_from_mjson(path: &str) -> Result<Vec<FullRecord>, String> {
             else {
                 return Ok(None);
             };
-            let sample_type = if decision.decision.event.et == "reach" {
-                1
-            } else {
-                2
+            let sample_type = match decision.decision.event.et {
+                "reach" => XMODEL1_SAMPLE_TYPE_RIICHI,
+                "hora" => XMODEL1_SAMPLE_TYPE_HORA,
+                _ => XMODEL1_SAMPLE_TYPE_CALL,
             };
             let event_history = replay_core::compute_event_history(
                 events_slice,
@@ -2516,6 +2616,13 @@ fn write_full_npz(path: &Path, records: &[FullRecord]) -> Result<(), String> {
         is_open_hand.push(record.is_open_hand);
     }
 
+    write_npy_unicode_scalar(&mut zip, "schema_name.npy", XMODEL1_SCHEMA_NAME)?;
+    write_npy_i32(
+        &mut zip,
+        "schema_version.npy",
+        &[],
+        &[XMODEL1_SCHEMA_VERSION as i32],
+    )?;
     write_npy_f16(
         &mut zip,
         "state_tile_feat.npy",

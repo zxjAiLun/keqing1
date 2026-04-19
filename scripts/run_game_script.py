@@ -1,4 +1,4 @@
-"""运行 KeqingV1 对局的脚本"""
+"""运行当前主线模型的本地镜像对局脚本"""
 import sys, json
 sys.path.insert(0, 'src')
 
@@ -7,7 +7,7 @@ from riichienv import RiichiEnv
 from inference.runtime_bot import RuntimeBot
 
 # 加载模型
-MODEL_PATH = "artifacts/models/keqingv1/best.pth"
+MODEL_PATH = "artifacts/models/xmodel1/best.pth"
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Using device: {DEVICE}")
 

@@ -6,13 +6,40 @@ from xmodel1.candidate_quality import build_candidate_features
 from xmodel1.candidate_quality import build_special_candidate_arrays
 from xmodel1.preprocess import events_to_xmodel1_arrays
 from xmodel1.schema import (
+    XMODEL1_SAMPLE_TYPE_CALL,
+    XMODEL1_SAMPLE_TYPE_HORA,
     XMODEL1_SPECIAL_TYPE_CHI_HIGH,
     XMODEL1_SPECIAL_TYPE_CHI_LOW,
     XMODEL1_SPECIAL_TYPE_CHI_MID,
+    XMODEL1_SPECIAL_TYPE_HORA,
     XMODEL1_SPECIAL_TYPE_NONE,
     XMODEL1_SPECIAL_TYPE_PON,
     XMODEL1_SPECIAL_TYPE_REACH,
 )
+
+
+def _tsumo_hora_events() -> list[dict]:
+    return [
+        {"type": "start_game", "names": ["A", "B", "C", "D"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "1p", "2p", "3p", "1s", "2s", "3s", "4m", "5m", "9s", "9s"],
+                ["1s"] * 13,
+                ["2s"] * 13,
+                ["3s"] * 13,
+            ],
+        },
+        {"type": "tsumo", "actor": 0, "pai": "6m"},
+        {"type": "hora", "actor": 0, "target": 0, "pai": "6m", "deltas": [1000, -500, -500, 0], "ura_markers": []},
+    ]
 
 
 def test_xmodel1_events_to_arrays_smoke():
@@ -248,10 +275,23 @@ def test_xmodel1_events_to_arrays_exports_none_special_only_sample():
     ]
     arrays = events_to_xmodel1_arrays(events, replay_id="none_fixture.mjson")
     assert arrays is not None
-    special_rows = np.where(arrays["sample_type"] == 2)[0]
+    special_rows = np.where(arrays["sample_type"] == XMODEL1_SAMPLE_TYPE_CALL)[0]
     assert len(special_rows) >= 1
     row = special_rows[0]
     assert int(arrays["chosen_candidate_idx"][row]) == -1
     assert int(arrays["action_idx_target"][row]) == 44
     active = arrays["special_candidate_type_id"][row][arrays["special_candidate_mask"][row] > 0]
     assert XMODEL1_SPECIAL_TYPE_NONE in active
+
+
+def test_xmodel1_events_to_arrays_keeps_hora_as_dedicated_special_sample():
+    arrays = events_to_xmodel1_arrays(_tsumo_hora_events(), replay_id="hora_fixture.mjson")
+    assert arrays is not None
+    hora_rows = np.where(arrays["sample_type"] == XMODEL1_SAMPLE_TYPE_HORA)[0]
+    assert len(hora_rows) == 1
+    row = int(hora_rows[0])
+    assert int(arrays["chosen_candidate_idx"][row]) == -1
+    assert int(arrays["action_idx_target"][row]) == 42
+    chosen_special_idx = int(arrays["chosen_special_candidate_idx"][row])
+    assert chosen_special_idx >= 0
+    assert int(arrays["special_candidate_type_id"][row, chosen_special_idx]) == XMODEL1_SPECIAL_TYPE_HORA

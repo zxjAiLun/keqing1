@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from keqingv1.action_space import ACTION_SPACE
+from mahjong_env.action_space import ACTION_SPACE
 from xmodel1.cached_dataset import (
     EVENT_HISTORY_LEN,
     EVENT_TYPE_PAD,

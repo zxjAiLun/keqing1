@@ -36,7 +36,7 @@ def test_keqingv4_training_smoke(tmp_path: Path):
         events,
         adapter=KeqingV4PreprocessAdapter(),
         value_strategy="mc_return",
-        encode_module="keqingv3.features",
+        encode_module="training.state_features",
     )
     assert arrays is not None
     data_root = tmp_path / "processed_v4" / "ds1"

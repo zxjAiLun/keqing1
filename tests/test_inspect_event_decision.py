@@ -70,7 +70,7 @@ def test_inspect_event_decision_replays_until_target_and_returns_prediction(tmp_
     result = inspect_mod.inspect_event_decision(
         log_path=path,
         event_idx=2,
-        bot_name="keqingv31",
+        bot_name="keqingv4",
         model_path=None,
         project_root=tmp_path,
         device="cpu",
@@ -81,4 +81,4 @@ def test_inspect_event_decision_replays_until_target_and_returns_prediction(tmp_
     assert result["actual_followup_event"] == rows[3]
     assert result["context"][0]["idx"] == 0
     assert result["context"][-1]["idx"] == 3
-    assert result["model_path"] == str(tmp_path / "artifacts" / "models" / "keqingv31" / "best.pth")
+    assert result["model_path"] == str(tmp_path / "artifacts" / "models" / "keqingv4" / "best.pth")

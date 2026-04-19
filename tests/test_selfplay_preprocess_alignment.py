@@ -3,9 +3,11 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 def _load_selfplay_module():
+    pytest.importorskip("torch")
     module_path = Path(__file__).resolve().parents[1] / "scripts" / "selfplay.py"
     spec = importlib.util.spec_from_file_location("test_selfplay_module", module_path)
     module = importlib.util.module_from_spec(spec)
@@ -30,8 +32,8 @@ def test_selfplay_events_to_npz_delegates_to_training_preprocess(monkeypatch):
         *,
         actor_name_filter=None,
         adapter=None,
-        value_strategy="heuristic",
-        encode_module="keqingv1.features",
+        value_strategy="mc_return",
+        encode_module="training.state_features",
     ):
         captured["events"] = events
         captured["actor_name_filter"] = actor_name_filter
@@ -58,19 +60,19 @@ def test_selfplay_events_to_npz_delegates_to_training_preprocess(monkeypatch):
     events = [{"type": "start_game", "names": ["p0", "p1", "p2", "p3"]}]
     result = selfplay._events_to_npz(
         events,
-        adapter_name="meld_rank",
+        adapter_name="keqingv4_aux",
         value_strategy="mc_return",
-        encode_module="keqingv3.features",
+        encode_module="training.state_features",
     )
 
     assert result is fake_arrays
     assert captured == {
         "events": events,
         "actor_name_filter": None,
-        "requested_adapter_name": "meld_rank",
+        "requested_adapter_name": "keqingv4_aux",
         "adapter_type": "FakeAdapter",
         "value_strategy": "mc_return",
-        "encode_module": "keqingv3.features",
+        "encode_module": "training.state_features",
     }
 
 
@@ -87,8 +89,8 @@ def test_selfplay_save_npz_delegates_to_preprocess_writer(tmp_path, monkeypatch)
         actor_name_filter=None,
         adapter=None,
         adapter_name="base",
-        value_strategy="heuristic",
-        encode_module="keqingv1.features",
+        value_strategy="mc_return",
+        encode_module="training.state_features",
     ):
         captured["out_path"] = out_path
         captured["events"] = event_stream
@@ -107,9 +109,9 @@ def test_selfplay_save_npz_delegates_to_preprocess_writer(tmp_path, monkeypatch)
     ok = selfplay._save_npz(
         path,
         events,
-        adapter_name="v3_aux",
+        adapter_name="keqingv4_aux",
         value_strategy="mc_return",
-        encode_module="keqingv3.features",
+        encode_module="training.state_features",
     )
 
     assert ok is True
@@ -118,9 +120,9 @@ def test_selfplay_save_npz_delegates_to_preprocess_writer(tmp_path, monkeypatch)
         "events": events,
         "actor_name_filter": None,
         "adapter": None,
-        "adapter_name": "v3_aux",
+        "adapter_name": "keqingv4_aux",
         "value_strategy": "mc_return",
-        "encode_module": "keqingv3.features",
+        "encode_module": "training.state_features",
     }
 
 
@@ -129,9 +131,9 @@ def test_build_cache_export_metadata_marks_legacy_wrapper(tmp_path):
     npz_dir = tmp_path / "benchmark" / "npz"
 
     metadata = selfplay._build_cache_export_metadata(
-        adapter_name="v3_aux",
+        adapter_name="keqingv4_aux",
         value_strategy="mc_return",
-        encode_module="keqingv3.features",
+        encode_module="training.state_features",
         saved_games=7,
         output_dir=npz_dir,
     )
@@ -139,27 +141,27 @@ def test_build_cache_export_metadata_marks_legacy_wrapper(tmp_path):
     assert metadata["format"] == "preprocess_cache_wrapper"
     assert metadata["owner"] == "training.preprocess"
     assert metadata["status"] == "legacy_convenience_export"
-    assert metadata["adapter_name"] == "v3_aux"
+    assert metadata["adapter_name"] == "keqingv4_aux"
     assert metadata["value_strategy"] == "mc_return"
-    assert metadata["encode_module"] == "keqingv3.features"
+    assert metadata["encode_module"] == "training.state_features"
     assert metadata["saved_games"] == 7
     assert metadata["recommended_flow"][0] == "运行 selfplay 保存 .mjson"
     assert metadata["recommended_replays_dir"] == str(tmp_path / "benchmark" / "replays")
     assert metadata["recommended_preprocess_output_dir"] == str(
-        tmp_path / "benchmark" / "preprocessed_v3_aux"
+        tmp_path / "benchmark" / "processed_cache_keqingv4_aux"
     )
     assert "--data_dirs" in metadata["recommended_preprocess_command"]
-    assert "create_preprocess_adapter('v3_aux')" in metadata["recommended_preprocess_command"]
+    assert "create_preprocess_adapter('keqingv4_aux')" in metadata["recommended_preprocess_command"]
     assert str(tmp_path / "benchmark" / "replays") in metadata["recommended_preprocess_command"]
 
 
 def test_build_recommended_preprocess_command_uses_replays_dir_and_adapter(tmp_path):
     selfplay = _load_selfplay_module()
 
-    command = selfplay._build_recommended_preprocess_command(tmp_path / "bench_001", "meld_rank")
+    command = selfplay._build_recommended_preprocess_command(tmp_path / "bench_001", "keqingv4_aux")
 
     assert "run_preprocess" in command
-    assert "create_preprocess_adapter('meld_rank')" in command
+    assert "create_preprocess_adapter('keqingv4_aux')" in command
     assert f"--data_dirs {tmp_path / 'bench_001' / 'replays'}" in command
 
 

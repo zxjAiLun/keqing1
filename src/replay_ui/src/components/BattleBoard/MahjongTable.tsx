@@ -1129,7 +1129,7 @@ export function MahjongTable({
 
   useEffect(() => {
     const applyPreference = () => {
-      const stored = window.localStorage.getItem("keqing.tablecloth");
+      const stored = window.localStorage.getItem("keqing1.tablecloth") ?? window.localStorage.getItem("keqing.tablecloth");
       if (stored && TABLECLOTH_OPTIONS.some((opt) => opt.id === stored)) {
         setTablecloth(stored as typeof tablecloth);
       } else {
@@ -1138,7 +1138,7 @@ export function MahjongTable({
     };
     applyPreference();
     const onStorage = (event: StorageEvent) => {
-      if (event.key === "keqing.tablecloth") applyPreference();
+      if (event.key === "keqing1.tablecloth" || event.key === "keqing.tablecloth") applyPreference();
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);

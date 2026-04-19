@@ -56,8 +56,8 @@ def test_normalize_replay_decisions_fills_response_gt_action_from_chosen():
         ],
     }
 
-    normalized = normalize_replay_decisions(decisions, meta={"bot_type": "keqingv2"})
+    normalized = normalize_replay_decisions(decisions, meta={"bot_type": "xmodel1"})
 
     assert normalized["log"][0]["gt_action"]["type"] == "chi"
-    assert normalized["bot_type"] == "keqingv2"
+    assert normalized["bot_type"] == "xmodel1"
     assert normalized["match_count"] == 1

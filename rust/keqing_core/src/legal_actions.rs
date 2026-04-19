@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use crate::counts::TILE_COUNT;
+use crate::hora_truth::evaluate_hora_truth_from_prepared;
 use crate::shanten_table::{calc_shanten_all, ensure_init};
 
 fn normalize_tile(tile: &str) -> String {
@@ -502,7 +503,7 @@ fn ankan_allowed_after_reach(
     after_shanten == 0 && before_waits == after_waits
 }
 
-fn reach_discard_candidates(
+pub(crate) fn reach_discard_candidates(
     hand: &BTreeMap<String, u8>,
     last_tsumo: Option<&str>,
     last_tsumo_raw: Option<&str>,
@@ -931,6 +932,88 @@ pub fn enumerate_hora_candidates(
     Ok(Vec::new())
 }
 
+fn candidate_flag_bool(candidate: &Value, key: &str) -> Option<bool> {
+    candidate.get(key).and_then(Value::as_bool)
+}
+
+fn can_hora_from_snapshot_candidate(
+    state_snapshot: &Value,
+    actor: usize,
+    target: usize,
+    pai: &str,
+    is_tsumo: bool,
+    candidate: &Value,
+) -> Result<bool, String> {
+    if !can_hora_shape_from_snapshot(state_snapshot, actor, pai, is_tsumo)? {
+        return Ok(false);
+    }
+    let prepared = prepare_hora_evaluation_from_snapshot(
+        state_snapshot,
+        actor,
+        pai,
+        is_tsumo,
+        candidate_flag_bool(candidate, "is_chankan").unwrap_or(false),
+        candidate_flag_bool(candidate, "is_rinshan"),
+        candidate_flag_bool(candidate, "is_haitei"),
+        candidate_flag_bool(candidate, "is_houtei"),
+    )?;
+    match evaluate_hora_truth_from_prepared(&prepared) {
+        Ok(_) => Ok(true),
+        Err(message) if message == "no cost" => Ok(false),
+        Err(message)
+            if message.contains("failed to allocate tile id")
+                || message.contains("failed to find win tile id") =>
+        {
+            Ok(false)
+        }
+        Err(message) => Err(format!(
+            "failed to evaluate hora truth for actor={actor} target={target} pai={pai}: {message}"
+        )),
+    }
+}
+
+pub fn enumerate_public_legal_action_specs(
+    state_snapshot: &Value,
+    actor: usize,
+) -> Result<Vec<Value>, String> {
+    let mut legal = Vec::new();
+    for candidate in enumerate_hora_candidates(state_snapshot, actor)? {
+        let target = candidate
+            .get("target")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .ok_or_else(|| "invalid hora candidate target".to_string())?;
+        let pai = candidate
+            .get("pai")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "invalid hora candidate pai".to_string())?;
+        let is_tsumo = candidate
+            .get("is_tsumo")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if can_hora_from_snapshot_candidate(
+            state_snapshot,
+            actor,
+            target,
+            pai,
+            is_tsumo,
+            &candidate,
+        )? {
+            legal.push(json!({
+                "type": "hora",
+                "actor": actor,
+                "target": target,
+                "pai": pai,
+            }));
+        }
+    }
+    legal.extend(enumerate_legal_action_specs_structural(
+        state_snapshot,
+        actor,
+    )?);
+    Ok(legal)
+}
+
 pub fn can_hora_shape_from_snapshot(
     state_snapshot: &Value,
     actor: usize,
@@ -996,6 +1079,29 @@ pub fn prepare_hora_evaluation_from_snapshot(
     } else {
         Vec::new()
     };
+    let target = if is_tsumo {
+        actor
+    } else if is_chankan {
+        state_snapshot
+            .get("last_kakan")
+            .and_then(Value::as_object)
+            .and_then(|payload| payload.get("actor"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "missing last_kakan.actor for chankan".to_string())
+            .and_then(|raw| {
+                usize::try_from(raw).map_err(|_| format!("last_kakan.actor out of range: {raw}"))
+            })?
+    } else {
+        state_snapshot
+            .get("last_discard")
+            .and_then(Value::as_object)
+            .and_then(|payload| payload.get("actor"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "missing last_discard.actor for ron".to_string())
+            .and_then(|raw| {
+                usize::try_from(raw).map_err(|_| format!("last_discard.actor out of range: {raw}"))
+            })?
+    };
 
     let mut closed_tiles = hand_tiles;
     if !is_tsumo {
@@ -1030,6 +1136,7 @@ pub fn prepare_hora_evaluation_from_snapshot(
         "resolved_is_haitei": resolved_is_haitei,
         "resolved_is_houtei": resolved_is_houtei,
         "pai": pai,
-        "target": actor,
+        "actor": actor,
+        "target": target,
     }))
 }

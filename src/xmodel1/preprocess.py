@@ -1,22 +1,20 @@
-"""Python fallback preprocess for Xmodel1.
+"""Legacy Python parity oracle for Xmodel1 candidate arrays.
 
-Long-term ownership belongs to Rust (`keqing_core`). This module exists so the
-candidate-centric schema can be exercised end-to-end before the Rust export path
-is fully implemented.
+Production preprocess ownership belongs to Rust (`keqing_core` /
+`scripts/preprocess_xmodel1.py`). This module is kept only so tests can compare
+Rust export output against a Python reference implementation of the candidate
+array schema.
 """
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import numpy as np
 
-from keqingv1.action_space import action_to_idx
+from mahjong_env.action_space import action_to_idx
 from keqing_core import validate_xmodel1_discard_record, xmodel1_schema_info
-from mahjong_env.replay import build_supervised_samples, read_mjai_jsonl
+from mahjong_env.replay import build_replay_samples_mc_return
 from mahjong_env.tiles import tile_to_34
 from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
@@ -33,43 +31,13 @@ from xmodel1.features import compute_event_history, encode
 from xmodel1.schema import (
     XMODEL1_SAMPLE_TYPE_CALL,
     XMODEL1_SAMPLE_TYPE_DISCARD,
+    XMODEL1_SAMPLE_TYPE_HORA,
     XMODEL1_SAMPLE_TYPE_RIICHI,
 )
 
 
-def _write_python_export_manifest(
-    output_dir: Path,
-    *,
-    files: List[str],
-    exported_file_count: int,
-    exported_sample_count: int,
-    shard_file_counts: Dict[str, int],
-    shard_sample_counts: Dict[str, int],
-) -> None:
-    schema_name, schema_version, max_candidates, candidate_dim, flag_dim = xmodel1_schema_info()
-    manifest: Dict[str, Any] = {
-        "schema_name": schema_name,
-        "schema_version": int(schema_version),
-        "max_candidates": int(max_candidates),
-        "candidate_feature_dim": int(candidate_dim),
-        "candidate_flag_dim": int(flag_dim),
-        "file_count": len(files),
-        "exported_file_count": int(exported_file_count),
-        "exported_sample_count": int(exported_sample_count),
-        "processed_file_count": len(files),
-        "skipped_existing_file_count": 0,
-        "shard_file_counts": shard_file_counts,
-        "shard_sample_counts": shard_sample_counts,
-        "used_fallback": True,
-        "export_mode": "python_full_export",
-        "files": files,
-    }
-    manifest_path = output_dir / "xmodel1_export_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
 def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np.ndarray]]:
-    samples = build_supervised_samples(events, value_strategy="mc_return", strict_legal_labels=False)
+    samples = build_replay_samples_mc_return(events, strict_legal_labels=False)
     rows: dict[str, list] = {
         "state_tile_feat": [],
         "state_scalar": [],
@@ -165,6 +133,11 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
             chosen_idx = -1
             if chosen_special_idx < 0:
                 continue
+        elif label_type == "hora":
+            sample_type = XMODEL1_SAMPLE_TYPE_HORA
+            chosen_idx = -1
+            if chosen_special_idx < 0:
+                continue
         elif label_type in {"chi", "pon", "daiminkan", "ankan", "kakan", "none"}:
             sample_type = XMODEL1_SAMPLE_TYPE_CALL
             chosen_idx = -1
@@ -244,57 +217,4 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
     return out
 
 
-def preprocess_files(
-    *,
-    data_dirs: List[Path],
-    output_dir: Path,
-    overwrite: bool = False,
-    limit_files: int | None = None,
-) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    processed_files: List[str] = []
-    exported_file_count = 0
-    exported_sample_count = 0
-    shard_file_counts: Dict[str, int] = {}
-    shard_sample_counts: Dict[str, int] = {}
-    remaining = None if limit_files is None or int(limit_files) <= 0 else int(limit_files)
-    for data_dir in data_dirs:
-        out_ds = output_dir / data_dir.name
-        out_ds.mkdir(parents=True, exist_ok=True)
-        for replay_path in sorted(data_dir.glob("*.mjson")):
-            if remaining is not None and remaining <= 0:
-                break
-            processed_files.append(str(replay_path))
-            out_path = out_ds / f"{replay_path.stem}.npz"
-            if out_path.exists() and not overwrite:
-                if remaining is not None:
-                    remaining -= 1
-                continue
-            events = read_mjai_jsonl(replay_path)
-            arrays = events_to_xmodel1_arrays(events, replay_id=str(replay_path))
-            if arrays is None:
-                if remaining is not None:
-                    remaining -= 1
-                continue
-            np.savez(out_path, **arrays)
-            exported_file_count += 1
-            sample_count = int(arrays["state_tile_feat"].shape[0])
-            exported_sample_count += sample_count
-            shard = data_dir.name
-            shard_file_counts[shard] = shard_file_counts.get(shard, 0) + 1
-            shard_sample_counts[shard] = shard_sample_counts.get(shard, 0) + sample_count
-            if remaining is not None:
-                remaining -= 1
-        if remaining is not None and remaining <= 0:
-            break
-    _write_python_export_manifest(
-        output_dir,
-        files=processed_files,
-        exported_file_count=exported_file_count,
-        exported_sample_count=exported_sample_count,
-        shard_file_counts=shard_file_counts,
-        shard_sample_counts=shard_sample_counts,
-    )
-
-
-__all__ = ["events_to_xmodel1_arrays", "preprocess_files"]
+__all__ = ["events_to_xmodel1_arrays"]

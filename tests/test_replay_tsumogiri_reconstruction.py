@@ -104,7 +104,7 @@ class TestTsumogiriReconstructionLogic:
 
 
 class TestTsumogiriVsLabelMismatch:
-    """preprocess_v3.py 真实 crash 场景：hand reconstruction 不一致。
+    """legacy preprocess 真实 crash 场景：hand reconstruction 不一致。
 
     真实 crash 中 hand 只有 11 tiles 而不是 12，导致 dahai 3p 完全不在 legal set 中。
     这说明在 event 79 之前某处 tile 被错误消耗了。
@@ -144,7 +144,7 @@ class TestTsumogiriVsLabelMismatch:
     def test_hand_tile_count_mismatch_causes_missing_dahai(self):
         """当 hand tile 数量不对时，dahai 可能完全不出现在 legal set。
 
-        这是 preprocess_v3.py event_index=79 crash 的真实原因：
+        这是 legacy preprocess event_index=79 crash 的真实原因：
         hand reconstruction 出错（11 tiles 而非 12），
         导致 dahai 3p 根本不在 legal set 中。
         """

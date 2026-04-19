@@ -30,7 +30,7 @@ def main() -> None:
 
     from inference.review import candidate_to_log_dict
     from inference.scoring import _special_action_calibration_bonus, _special_meta_from_summary
-    from keqingv1.action_space import action_to_idx
+    from mahjong_env.action_space import action_to_idx
     from keqingv4.preprocess_features import build_typed_action_summaries
 
     args = _parse_args()
@@ -159,4 +159,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

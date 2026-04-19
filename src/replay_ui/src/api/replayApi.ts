@@ -1,5 +1,7 @@
 // src/replay_ui/src/api/replayApi.ts
 import type { ReplayData, ReplayMeta, SelfplayAnomalyReplayGroup } from '../types/replay';
+import type { BotType } from '../types/bot';
+import { DEFAULT_BOT_TYPE } from '../utils/botCatalog';
 
 const API_BASE = '/api';
 
@@ -36,7 +38,7 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 export const replayApi = {
   /** 提交新回放（使用已有端点，FormData 方式） */
-  submit: async (content: string, inputType: string, playerId = 0, botType = 'keqingv1'): Promise<ReplayData> => {
+  submit: async (content: string, inputType: string, playerId = 0, botType: BotType = DEFAULT_BOT_TYPE): Promise<ReplayData> => {
     const formData = new FormData();
     formData.append('json_text', content);
     formData.append('input_type', inputType);

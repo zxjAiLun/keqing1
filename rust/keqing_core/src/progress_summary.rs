@@ -24,6 +24,33 @@ fn candidate_progress_key(summary: &Summary3n1) -> (i32, i32, i32, i32) {
     )
 }
 
+fn best_after_draw_summary(
+    counts14: &[u8; TILE_COUNT],
+    visible_counts34: &[u8; TILE_COUNT],
+) -> Option<Summary3n1> {
+    let mut best_summary: Option<Summary3n1> = None;
+    let mut best_key: Option<(i32, i32, i32, i32)> = None;
+    for discard34 in select_candidate_discards_3n2(counts14) {
+        let mut after_counts = *counts14;
+        after_counts[discard34] = after_counts[discard34].saturating_sub(1);
+        let summary = summarize_3n1(&after_counts, visible_counts34);
+        let key = candidate_progress_key(&summary);
+        if best_key.as_ref().is_none_or(|current| key > *current) {
+            best_key = Some(key);
+            best_summary = Some(summary);
+        }
+    }
+    best_summary
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct OneShantenDrawAnalysis {
+    good_shape_live: u8,
+    improvement_live: u8,
+    tenpai_live: u8,
+    best_tenpai_waits_live: u8,
+}
+
 fn tile_in_obvious_meld(counts34: &[u8; TILE_COUNT], tile34: usize) -> bool {
     let cnt = counts34[tile34];
     if cnt == 0 {
@@ -287,6 +314,68 @@ pub fn summarize_like_python(
     }
 }
 
+fn analyze_one_shanten_draw_metrics(
+    counts34: &[u8; TILE_COUNT],
+    visible_counts34: &[u8; TILE_COUNT],
+) -> OneShantenDrawAnalysis {
+    let current = summarize_3n1(counts34, visible_counts34);
+    if current.shanten != 1 {
+        return OneShantenDrawAnalysis::default();
+    }
+
+    let len_div3 = counts34.iter().sum::<u8>() / 3;
+    let current_key = candidate_progress_key(&current);
+    let mut analysis = OneShantenDrawAnalysis::default();
+
+    for draw in calc_draw_deltas(counts34, visible_counts34, len_div3) {
+        if draw.live_count == 0 {
+            continue;
+        }
+        let tile34 = draw.tile34 as usize;
+        if counts34[tile34] >= 4 {
+            continue;
+        }
+        let mut counts14 = *counts34;
+        counts14[tile34] = counts14[tile34].saturating_add(1);
+        let Some(after_best) = best_after_draw_summary(&counts14, visible_counts34) else {
+            continue;
+        };
+        if after_best.shanten == 0 {
+            analysis.tenpai_live = analysis.tenpai_live.saturating_add(draw.live_count);
+            analysis.best_tenpai_waits_live = analysis
+                .best_tenpai_waits_live
+                .max(after_best.ukeire_live_count);
+        }
+        if after_best.shanten == 0 && after_best.ukeire_live_count > 4 {
+            analysis.good_shape_live = analysis.good_shape_live.saturating_add(draw.live_count);
+            continue;
+        }
+        if after_best.shanten == current.shanten
+            && candidate_progress_key(&after_best) > current_key
+        {
+            analysis.improvement_live = analysis.improvement_live.saturating_add(draw.live_count);
+        }
+    }
+
+    analysis
+}
+
+pub fn summarize_one_shanten_draw_metrics(
+    counts34: &[u8; TILE_COUNT],
+    visible_counts34: &[u8; TILE_COUNT],
+) -> (u8, u8) {
+    let analysis = analyze_one_shanten_draw_metrics(counts34, visible_counts34);
+    (analysis.good_shape_live, analysis.improvement_live)
+}
+
+pub fn summarize_one_shanten_tenpai_pressure(
+    counts34: &[u8; TILE_COUNT],
+    visible_counts34: &[u8; TILE_COUNT],
+) -> (u8, u8) {
+    let analysis = analyze_one_shanten_draw_metrics(counts34, visible_counts34);
+    (analysis.tenpai_live, analysis.best_tenpai_waits_live)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,5 +447,48 @@ mod tests {
         let summary = summarize_like_python(&counts, &counts);
         assert_eq!(summary.tehai_count, 13);
         assert!(summary.shanten >= 0);
+    }
+
+    #[test]
+    fn summarize_one_shanten_draw_metrics_detects_positive_shape_or_improvement() {
+        let counts = hand(&[
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (5, 1),
+            (6, 1),
+            (7, 1),
+            (9, 1),
+            (10, 1),
+            (15, 1),
+            (24, 2),
+        ]);
+        let visible = counts;
+        let (good_shape_live, improvement_live) =
+            summarize_one_shanten_draw_metrics(&counts, &visible);
+        assert!(good_shape_live > 0 || improvement_live > 0);
+    }
+
+    #[test]
+    fn summarize_one_shanten_tenpai_pressure_detects_tenpai_draws() {
+        let counts = hand(&[
+            (0, 1),
+            (1, 1),
+            (3, 1),
+            (11, 2),
+            (12, 1),
+            (13, 2),
+            (20, 1),
+            (21, 1),
+            (22, 1),
+            (24, 2),
+        ]);
+        let visible = counts;
+        let (tenpai_live, best_tenpai_waits_live) =
+            summarize_one_shanten_tenpai_pressure(&counts, &visible);
+        assert!(tenpai_live > 0);
+        assert!(best_tenpai_waits_live <= 34);
     }
 }

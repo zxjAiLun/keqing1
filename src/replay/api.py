@@ -14,7 +14,7 @@ def run_replay_single_raw(
     player_id: int,
     checkpoint: Union[str, Path] | None = None,
     input_type: str = "auto",
-    bot_type: str = "keqingv1",
+    bot_type: str = "xmodel1",
 ):
     """对单个输入源运行跑谱，返回 bot 对象（内部有 decision_log）。"""
     bot, _ = run_replay_from_source(
@@ -32,7 +32,7 @@ def run_replay_single(
     player_id: int,
     checkpoint: Union[str, Path] | None = None,
     input_type: str = "auto",
-    bot_type: str = "keqingv1",
+    bot_type: str = "xmodel1",
 ) -> str:
     """对单个输入源运行跑谱，返回 HTML 报告字符串（兼容旧接口）。"""
     from replay.bot import render_html
@@ -52,7 +52,7 @@ def run_replay_multi(
     checkpoint: Union[str, Path] | None = None,
     file_names: Optional[list[str]] = None,
     input_type: str = "auto",
-    bot_type: str = "keqingv1",
+    bot_type: str = "xmodel1",
 ) -> str:
     """对多个输入源依次运行跑谱，返回带 tab 导航的多 iframe HTML 报告。
 

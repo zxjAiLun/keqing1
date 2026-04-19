@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from mahjong_env import scoring as scoring_mod
 from mahjong_env.state import GameState, PlayerState
 
@@ -92,23 +94,29 @@ def test_score_hora_prefers_native_hora_truth(monkeypatch):
     monkeypatch.setattr(
         scoring_mod,
         "_evaluate_hora_truth_from_prepared_payload",
-        lambda prepared: scoring_mod._HoraTruth(
-            han=3,
-            fu=30,
-            yaku=["Riichi", "Tanyao"],
-            base_yaku_details=[{"key": "Riichi", "name": "Riichi", "han": 1}],
-            is_open_hand=False,
-            cost={
-                "main": 3900,
-                "main_bonus": 0,
-                "additional": 0,
-                "additional_bonus": 0,
-                "kyoutaku_bonus": 0,
-                "total": 3900,
-            },
-            dora_count=0,
-            ura_count=0,
-            aka_count=0,
+        lambda prepared: (
+            "truth",
+            scoring_mod._HoraTruth(
+                han=3,
+                fu=30,
+                yaku=["Riichi", "Tanyao"],
+                yaku_details=[{"key": "Riichi", "name": "Riichi", "han": 1}],
+                is_open_hand=False,
+                cost={
+                    "main": 3900,
+                    "main_bonus": 0,
+                    "additional": 0,
+                    "additional_bonus": 0,
+                    "kyoutaku_bonus": 0,
+                    "total": 3900,
+                },
+                deltas=[3900, -3900, 0, 0],
+                dora_count=0,
+                ura_count=0,
+                aka_count=0,
+                backend_name="riichienv-core",
+                truth_source="riichienv-core-adapter",
+            ),
         ),
     )
     backend = _CountingBackend(scoring_mod._PythonMahjongBackend())
@@ -118,6 +126,7 @@ def test_score_hora_prefers_native_hora_truth(monkeypatch):
 
     assert backend.calls == 0
     assert result.han == 3
+    assert result.deltas == [3900, -3900, 0, 0]
 
 
 def test_can_hora_prefers_native_hora_truth(monkeypatch):
@@ -133,23 +142,29 @@ def test_can_hora_prefers_native_hora_truth(monkeypatch):
     monkeypatch.setattr(
         scoring_mod,
         "_evaluate_hora_truth_from_prepared_payload",
-        lambda prepared: scoring_mod._HoraTruth(
-            han=1,
-            fu=30,
-            yaku=["Riichi"],
-            base_yaku_details=[{"key": "Riichi", "name": "Riichi", "han": 1}],
-            is_open_hand=False,
-            cost={
-                "main": 1000,
-                "main_bonus": 0,
-                "additional": 0,
-                "additional_bonus": 0,
-                "kyoutaku_bonus": 0,
-                "total": 1000,
-            },
-            dora_count=0,
-            ura_count=0,
-            aka_count=0,
+        lambda prepared: (
+            "truth",
+            scoring_mod._HoraTruth(
+                han=1,
+                fu=30,
+                yaku=["Riichi"],
+                yaku_details=[{"key": "Riichi", "name": "Riichi", "han": 1}],
+                is_open_hand=False,
+                cost={
+                    "main": 1000,
+                    "main_bonus": 0,
+                    "additional": 0,
+                    "additional_bonus": 0,
+                    "kyoutaku_bonus": 0,
+                    "total": 1000,
+                },
+                deltas=[1000, -1000, 0, 0],
+                dora_count=0,
+                ura_count=0,
+                aka_count=0,
+                backend_name="riichienv-core",
+                truth_source="riichienv-core-adapter",
+            ),
         ),
     )
     backend = _CountingBackend(scoring_mod._PythonMahjongBackend())
@@ -159,3 +174,149 @@ def test_can_hora_prefers_native_hora_truth(monkeypatch):
 
     assert backend.calls == 0
     assert ok is True
+
+
+def test_can_hora_from_snapshot_prefers_native_hora_truth(monkeypatch):
+    monkeypatch.setattr(
+        scoring_mod,
+        "_prepared_hora_payload_from_snapshot",
+        lambda *args, **kwargs: {
+            "is_tsumo": False,
+            "resolved_is_rinshan": False,
+            "resolved_is_haitei": False,
+        },
+    )
+    monkeypatch.setattr(
+        scoring_mod,
+        "_evaluate_hora_truth_from_prepared_payload",
+        lambda prepared: (
+            "truth",
+            scoring_mod._HoraTruth(
+                han=1,
+                fu=30,
+                yaku=["Riichi"],
+                yaku_details=[{"key": "Riichi", "name": "Riichi", "han": 1}],
+                is_open_hand=False,
+                cost={"main": 1000, "main_bonus": 0, "additional": 0, "additional_bonus": 0, "kyoutaku_bonus": 0, "total": 1000},
+                deltas=[1000, -1000, 0, 0],
+                dora_count=0,
+                ura_count=0,
+                aka_count=0,
+                backend_name="riichienv-core",
+                truth_source="riichienv-core-adapter",
+            ),
+        ),
+    )
+    backend = _CountingBackend(scoring_mod._PythonMahjongBackend())
+    monkeypatch.setattr(scoring_mod, "_SCORE_BACKEND", backend)
+
+    ok = scoring_mod.can_hora_from_snapshot({}, actor=0, target=1, pai="8m", is_tsumo=False)
+
+    assert backend.calls == 0
+    assert ok is True
+
+
+def test_score_hora_falls_back_only_for_missing_native_capability(monkeypatch):
+    monkeypatch.setattr(
+        scoring_mod,
+        "_prepared_hora_payload_from_state",
+        lambda *args, **kwargs: {
+            "closed_tiles": ["2p", "2p", "3s", "4s", "5sr", "8m", "8m", "8m"],
+            "melds": [
+                {"type": "chi", "opened": True, "tiles": ["2m", "3m", "4m"]},
+                {"type": "pon", "opened": True, "tiles": ["4p", "4p", "4p"]},
+            ],
+            "bakaze": "E",
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "dora_markers": [],
+            "active_ura_markers": [],
+            "reached": False,
+            "ippatsu_eligible": False,
+            "is_tsumo": False,
+            "is_chankan": False,
+            "resolved_is_rinshan": False,
+            "resolved_is_haitei": False,
+            "resolved_is_houtei": False,
+            "pai": "8m",
+            "actor": 0,
+            "target": 1,
+        },
+    )
+    monkeypatch.setattr(scoring_mod.keqing_core, "is_enabled", lambda: True)
+    monkeypatch.setattr(
+        scoring_mod,
+        "_evaluate_hora_truth_from_prepared_payload",
+        lambda prepared: ("missing_capability", None),
+    )
+    backend = _CountingBackend(scoring_mod._PythonMahjongBackend())
+    monkeypatch.setattr(scoring_mod, "_SCORE_BACKEND", backend)
+
+    result = scoring_mod.score_hora(_build_open_ron_state(), actor=0, target=1, pai="8m", is_tsumo=False)
+
+    assert backend.calls >= 1
+    assert result.han >= 0
+
+
+def test_score_hora_propagates_unexpected_native_truth_errors(monkeypatch):
+    monkeypatch.setattr(
+        scoring_mod,
+        "_prepared_hora_payload_from_state",
+        lambda *args, **kwargs: {"is_tsumo": False, "resolved_is_rinshan": False, "resolved_is_haitei": False},
+    )
+    monkeypatch.setattr(
+        scoring_mod,
+        "_evaluate_hora_truth_from_prepared_payload",
+        lambda prepared: (_ for _ in ()).throw(RuntimeError("native truth drift")),
+    )
+    monkeypatch.setattr(
+        scoring_mod,
+        "_estimate_hand_value_from_prepared_payload",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python fallback should stay unused")),
+    )
+
+    with pytest.raises(RuntimeError, match="native truth drift"):
+        scoring_mod.score_hora(_build_open_ron_state(), actor=0, target=1, pai="8m", is_tsumo=False)
+
+
+def test_can_hora_propagates_unexpected_native_truth_errors(monkeypatch):
+    monkeypatch.setattr(
+        scoring_mod,
+        "_prepared_hora_payload_from_state",
+        lambda *args, **kwargs: {"is_tsumo": False, "resolved_is_rinshan": False, "resolved_is_haitei": False},
+    )
+    monkeypatch.setattr(
+        scoring_mod,
+        "_evaluate_hora_truth_from_prepared_payload",
+        lambda prepared: (_ for _ in ()).throw(RuntimeError("native truth drift")),
+    )
+    monkeypatch.setattr(
+        scoring_mod,
+        "_estimate_hand_value_from_prepared_payload",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python fallback should stay unused")),
+    )
+
+    with pytest.raises(RuntimeError, match="native truth drift"):
+        scoring_mod.can_hora(_build_open_ron_state(), actor=0, target=1, pai="8m", is_tsumo=False)
+
+
+def test_can_hora_from_snapshot_propagates_unexpected_native_truth_errors(monkeypatch):
+    monkeypatch.setattr(
+        scoring_mod,
+        "_prepared_hora_payload_from_snapshot",
+        lambda *args, **kwargs: {"is_tsumo": False, "resolved_is_rinshan": False, "resolved_is_haitei": False},
+    )
+    monkeypatch.setattr(
+        scoring_mod,
+        "_evaluate_hora_truth_from_prepared_payload",
+        lambda prepared: (_ for _ in ()).throw(RuntimeError("native truth drift")),
+    )
+    monkeypatch.setattr(
+        scoring_mod,
+        "_estimate_hand_value_from_prepared_payload",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python fallback should stay unused")),
+    )
+
+    with pytest.raises(RuntimeError, match="native truth drift"):
+        scoring_mod.can_hora_from_snapshot({}, actor=0, target=1, pai="8m", is_tsumo=False)

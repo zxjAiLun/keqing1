@@ -1,5 +1,10 @@
 import inference.scoring as inference_scoring
 import numpy as np
+import pytest
+from keqing_core import (
+    aggregate_keqingv4_continuation_scores,
+    score_keqingv4_continuation_scenario,
+)
 from training.cache_schema import KEQINGV4_SUMMARY_DIM
 from inference import (
     DecisionContext,
@@ -17,7 +22,7 @@ from inference import (
     candidate_to_log_dict,
     Xmodel1RuntimeOutputs,
 )
-from keqingv1.action_space import action_to_idx
+from mahjong_env.action_space import action_to_idx
 
 
 def test_inference_contract_dataclasses_roundtrip():
@@ -94,6 +99,296 @@ def _empty_policy():
     import numpy as np
 
     return np.full((45,), -1e9, dtype=np.float32)
+
+
+def test_rust_continuation_scenario_scorer_matches_followup_formula():
+    logits = _empty_policy()
+    legal_actions = [
+        {"type": "dahai", "actor": 0, "pai": "5m", "tsumogiri": False},
+        {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": False},
+    ]
+    logits[action_to_idx(legal_actions[0])] = -0.5
+    logits[action_to_idx(legal_actions[1])] = 1.25
+
+    payload = score_keqingv4_continuation_scenario(
+        "post_meld_followup",
+        logits,
+        legal_actions,
+        value=0.0,
+        score_delta=0.4,
+        win_prob=0.2,
+        dealin_prob=0.1,
+        beam_lambda=1.0,
+        score_delta_lambda=0.5,
+        win_prob_lambda=0.25,
+        dealin_prob_lambda=0.75,
+    )
+
+    expected = 1.25 + 0.5 * 0.4 + 0.25 * 0.2 - 0.75 * 0.1
+    assert payload["best_action"]["pai"] == "9m"
+    assert float(payload["score"]) == pytest.approx(expected)
+
+
+def test_rust_continuation_aggregation_matches_reach_and_weighted_paths():
+    logits = _empty_policy()
+    logits[action_to_idx({"type": "reach", "actor": 0})] = 0.8
+    logits[action_to_idx({"type": "dahai", "actor": 0, "pai": "4m", "tsumogiri": False})] = 0.1
+    logits[action_to_idx({"type": "daiminkan", "actor": 0, "pai": "5m", "consumed": ["5m", "5m", "5m"]})] = 0.2
+
+    reach_payload = aggregate_keqingv4_continuation_scores(
+        logits,
+        {"type": "reach", "actor": 0},
+        [
+            {
+                "weight": 1.0,
+                "score": 0.4,
+                "continuation_kind": "reach_declaration",
+                "declaration_action": {"type": "dahai", "actor": 0, "pai": "4m", "tsumogiri": False},
+            }
+        ],
+    )
+    assert float(reach_payload["final_score"]) == pytest.approx(1.3)
+    assert reach_payload["meta"]["reach_discard"]["pai"] == "4m"
+
+    weighted_payload = aggregate_keqingv4_continuation_scores(
+        logits,
+        {"type": "daiminkan", "actor": 0, "pai": "5m", "consumed": ["5m", "5m", "5m"]},
+        [
+            {"weight": 2.0, "score": 1.0, "continuation_kind": "rinshan_followup", "declaration_action": None},
+            {"weight": 1.0, "score": -0.5, "continuation_kind": "rinshan_followup", "declaration_action": None},
+        ],
+    )
+    expected = 0.2 + (2.0 * 1.0 + 1.0 * -0.5) / 3.0
+    assert float(weighted_payload["final_score"]) == pytest.approx(expected)
+
+
+def test_default_action_scorer_post_meld_propagates_rust_continuation_scenario_schema_drift(monkeypatch):
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_resolve_keqingv4_continuation_scenarios",
+        lambda snap, actor, action: [
+            {
+                "projected_snapshot": [],
+                "legal_actions": [
+                    {"type": "dahai", "actor": actor, "pai": "9m", "tsumogiri": False},
+                ],
+                "weight": 1.0,
+                "continuation_kind": "post_meld_followup",
+                "declaration_action": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_build_python_continuation_scenarios",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python fallback should stay unused")),
+    )
+
+    primary_logits = _empty_policy()
+    primary_logits[action_to_idx({"type": "chi", "actor": 0, "target": 3, "pai": "5m", "consumed": ["6m", "7m"]})] = 0.2
+    adapter = _FakeAdapter(
+        [
+            ModelForwardResult(
+                policy_logits=primary_logits,
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "dahai", "actor": 3, "pai": "5m", "tsumogiri": False},
+        runtime_snap={
+            "marker": "runtime",
+            "hand": ["5mr", "6m", "7m", "9m"],
+            "discards": [[], [], [], []],
+            "melds": [[], [], [], []],
+            "last_discard": {"actor": 3, "pai": "5m"},
+        },
+        model_snap={"marker": "model"},
+        legal_actions=[
+            {"type": "chi", "actor": 0, "target": 3, "pai": "5m", "consumed": ["6m", "7m"]},
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="projected_snapshot must be a dict"):
+        scorer.score(ctx)
+
+
+def test_default_action_scorer_post_meld_propagates_rust_continuation_scoring_schema_drift(monkeypatch):
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_resolve_keqingv4_continuation_scenarios",
+        lambda snap, actor, action: [
+            {
+                "projected_snapshot": {
+                    **snap,
+                    "projected_by": "rust",
+                    "actor_to_move": actor,
+                    "last_discard": None,
+                },
+                "legal_actions": [
+                    {"type": "dahai", "actor": actor, "pai": "9m", "tsumogiri": False},
+                ],
+                "weight": 1.0,
+                "continuation_kind": "post_meld_followup",
+                "declaration_action": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_build_python_continuation_scenarios",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python fallback should stay unused")),
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_find_best_legal",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python continuation scoring fallback should stay unused")),
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_score_keqingv4_continuation_scenario",
+        lambda *args, **kwargs: {"best_action": None},
+    )
+
+    primary_logits = _empty_policy()
+    primary_logits[action_to_idx({"type": "chi", "actor": 0, "target": 3, "pai": "5m", "consumed": ["6m", "7m"]})] = 0.2
+    adapter = _FakeAdapter(
+        [
+            ModelForwardResult(
+                policy_logits=primary_logits,
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({("dahai", "9m"): 0.8}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "dahai", "actor": 3, "pai": "5m", "tsumogiri": False},
+        runtime_snap={
+            "marker": "runtime",
+            "hand": ["5mr", "6m", "7m", "9m"],
+            "discards": [[], [], [], []],
+            "melds": [[], [], [], []],
+            "last_discard": {"actor": 3, "pai": "5m"},
+        },
+        model_snap={"marker": "model"},
+        legal_actions=[
+            {"type": "chi", "actor": 0, "target": 3, "pai": "5m", "consumed": ["6m", "7m"]},
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="continuation scoring contract drift"):
+        scorer.score(ctx)
+
+
+def test_default_action_scorer_post_meld_propagates_rust_continuation_aggregation_schema_drift(monkeypatch):
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_resolve_keqingv4_continuation_scenarios",
+        lambda snap, actor, action: [
+            {
+                "projected_snapshot": {
+                    **snap,
+                    "projected_by": "rust",
+                    "actor_to_move": actor,
+                    "last_discard": None,
+                },
+                "legal_actions": [
+                    {"type": "dahai", "actor": actor, "pai": "9m", "tsumogiri": False},
+                ],
+                "weight": 1.0,
+                "continuation_kind": "post_meld_followup",
+                "declaration_action": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_build_python_continuation_scenarios",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python fallback should stay unused")),
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_score_keqingv4_continuation_scenario",
+        lambda *args, **kwargs: {
+            "best_action": {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": False},
+            "score": 0.8,
+        },
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_aggregate_keqingv4_continuation_scores",
+        lambda *args, **kwargs: {"meta": {}},
+    )
+
+    primary_logits = _empty_policy()
+    primary_logits[action_to_idx({"type": "chi", "actor": 0, "target": 3, "pai": "5m", "consumed": ["6m", "7m"]})] = 0.2
+    adapter = _FakeAdapter(
+        [
+            ModelForwardResult(
+                policy_logits=primary_logits,
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({("dahai", "9m"): 0.8}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "dahai", "actor": 3, "pai": "5m", "tsumogiri": False},
+        runtime_snap={
+            "marker": "runtime",
+            "hand": ["5mr", "6m", "7m", "9m"],
+            "discards": [[], [], [], []],
+            "melds": [[], [], [], []],
+            "last_discard": {"actor": 3, "pai": "5m"},
+        },
+        model_snap={"marker": "model"},
+        legal_actions=[
+            {"type": "chi", "actor": 0, "target": 3, "pai": "5m", "consumed": ["6m", "7m"]},
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="continuation aggregation contract drift"):
+        scorer.score(ctx)
 
 
 def test_default_action_scorer_uses_model_snap_for_primary_forward():
@@ -308,9 +603,198 @@ def test_default_action_scorer_meld_beam_uses_post_meld_best_discard_value():
     assert result.chosen["type"] == "chi"
     assert adapter.calls[2][0]["last_discard"] is None
     assert adapter.calls[2][0]["actor_to_move"] == 0
+    assert adapter.calls[2][0]["legal_actions"] == [
+        {"type": "dahai", "actor": 0, "pai": "5mr", "tsumogiri": False},
+        {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": False},
+    ]
     chi_candidate = next(c for c in result.candidates if c.action["type"] == "chi")
     none_candidate = next(c for c in result.candidates if c.action["type"] == "none")
     assert chi_candidate.final_score > none_candidate.final_score
+
+
+def test_default_action_scorer_post_meld_eval_prefers_rust_followup_bridge(monkeypatch):
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_resolve_keqingv4_continuation_scenarios",
+        lambda snap, actor, action: [
+            {
+                "projected_snapshot": {
+                    **snap,
+                    "projected_by": "rust",
+                    "actor_to_move": actor,
+                    "last_discard": None,
+                },
+                "legal_actions": [
+                    {"type": "dahai", "actor": actor, "pai": "5mr", "tsumogiri": False},
+                    {"type": "dahai", "actor": actor, "pai": "9m", "tsumogiri": False},
+                ],
+                "weight": 1.0,
+                "continuation_kind": "post_meld_followup",
+                "declaration_action": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_build_python_continuation_scenarios",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python continuation scenario fallback should not be used")),
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_resolve_post_meld_followup_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy post-meld followup helper should not be used")),
+    )
+
+    primary_logits = _empty_policy()
+    primary_logits[action_to_idx({"type": "chi", "pai": "5m", "consumed": ["6m", "7m"]})] = 0.2
+    primary_logits[action_to_idx({"type": "none"})] = 0.1
+    followup_logits = _empty_policy()
+    followup_logits[action_to_idx({"type": "dahai", "pai": "9m", "tsumogiri": False})] = 1.2
+    followup_logits[action_to_idx({"type": "dahai", "pai": "5mr", "tsumogiri": False})] = -2.0
+    adapter = _FakeAdapter(
+        [
+            ModelForwardResult(
+                policy_logits=primary_logits,
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=followup_logits,
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=3,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "dahai", "actor": 3, "pai": "5m", "tsumogiri": False},
+        runtime_snap={
+            "marker": "runtime",
+            "hand": ["5mr", "6m", "7m", "9m"],
+            "discards": [[], [], [], []],
+            "melds": [[], [], [], []],
+            "last_discard": {"actor": 3, "pai": "5m"},
+        },
+        model_snap={"marker": "model"},
+        legal_actions=[
+            {"type": "chi", "actor": 0, "target": 3, "pai": "5m", "consumed": ["6m", "7m"]},
+            {"type": "none"},
+        ],
+    )
+
+    result = scorer.score(ctx)
+
+    assert result.chosen["type"] == "chi"
+    assert adapter.calls[2][0]["projected_by"] == "rust"
+    assert adapter.calls[2][0]["legal_actions"] == [
+        {"type": "dahai", "actor": 0, "pai": "5mr", "tsumogiri": False},
+        {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": False},
+    ]
+
+
+def test_default_action_scorer_post_meld_bridge_falls_back_on_missing_capability(monkeypatch):
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_resolve_keqingv4_continuation_scenarios",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("Rust keqingv4 continuation scenario capability is not available")
+        ),
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_build_python_continuation_scenarios",
+        lambda snap, actor, action: [
+            {
+                "projected_snapshot": {
+                    **snap,
+                    "projected_by": "python",
+                    "actor_to_move": actor,
+                    "last_discard": None,
+                },
+                "legal_actions": [
+                    {"type": "dahai", "actor": actor, "pai": "5mr", "tsumogiri": False},
+                    {"type": "dahai", "actor": actor, "pai": "9m", "tsumogiri": False},
+                ],
+                "weight": 1.0,
+                "continuation_kind": "post_meld_followup",
+                "declaration_action": None,
+            }
+        ],
+    )
+
+    primary_logits = _empty_policy()
+    primary_logits[action_to_idx({"type": "chi", "pai": "5m", "consumed": ["6m", "7m"]})] = 0.2
+    primary_logits[action_to_idx({"type": "none"})] = 0.1
+    followup_logits = _empty_policy()
+    followup_logits[action_to_idx({"type": "dahai", "pai": "9m", "tsumogiri": False})] = 1.2
+    followup_logits[action_to_idx({"type": "dahai", "pai": "5mr", "tsumogiri": False})] = -2.0
+    adapter = _FakeAdapter(
+        [
+            ModelForwardResult(
+                policy_logits=primary_logits,
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=followup_logits,
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=3,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "dahai", "actor": 3, "pai": "5m", "tsumogiri": False},
+        runtime_snap={
+            "marker": "runtime",
+            "hand": ["5mr", "6m", "7m", "9m"],
+            "discards": [[], [], [], []],
+            "melds": [[], [], [], []],
+            "last_discard": {"actor": 3, "pai": "5m"},
+        },
+        model_snap={"marker": "model"},
+        legal_actions=[
+            {"type": "chi", "actor": 0, "target": 3, "pai": "5m", "consumed": ["6m", "7m"]},
+            {"type": "none"},
+        ],
+    )
+
+    result = scorer.score(ctx)
+
+    assert result.chosen["type"] == "chi"
+    assert adapter.calls[2][0]["projected_by"] == "python"
+    assert adapter.calls[2][0]["legal_actions"] == [
+        {"type": "dahai", "actor": 0, "pai": "5mr", "tsumogiri": False},
+        {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": False},
+    ]
 
 
 def test_default_action_scorer_kan_beam_uses_rinshan_weighted_followups(monkeypatch):
@@ -318,6 +802,13 @@ def test_default_action_scorer_kan_beam_uses_rinshan_weighted_followups(monkeypa
         inference_scoring,
         "_live_draw_tile_weights",
         lambda snap: [("4m", 2), ("5m", 1)],
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_resolve_keqingv4_continuation_scenarios",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("Rust keqingv4 continuation scenario capability is not available")
+        ),
     )
 
     primary_logits = _empty_policy()
@@ -382,23 +873,28 @@ def test_default_action_scorer_kan_beam_uses_rinshan_weighted_followups(monkeypa
     assert kan_candidate.final_score > none_candidate.final_score
     assert adapter.calls[2][0]["tsumo_pai"] == "4m"
     assert adapter.calls[3][0]["tsumo_pai"] == "5m"
+    assert "legal_actions" in adapter.calls[2][0]
+    assert "legal_actions" in adapter.calls[3][0]
 
 
 def test_default_action_scorer_kan_beam_allows_rinshan_hora_followup(monkeypatch):
     monkeypatch.setattr(
         inference_scoring,
-        "_live_draw_tile_weights",
-        lambda snap: [("4p", 1)],
-    )
-    monkeypatch.setattr(
-        inference_scoring,
-        "_rust_enumerate_legal_action_specs_structural",
-        lambda snap, actor: [{"type": "hora", "pai": "4p"}, {"type": "dahai", "actor": actor, "pai": "9m", "tsumogiri": False}],
-    )
-    monkeypatch.setattr(
-        inference_scoring,
-        "enumerate_legal_actions",
-        lambda snap, actor: (_ for _ in ()).throw(AssertionError("python legal action enumeration should not be used")),
+        "_rust_resolve_keqingv4_continuation_scenarios",
+        lambda snap, actor, action: [
+            {
+                "projected_snapshot": {
+                    **snap,
+                    "tsumo_pai": "4p",
+                    "actor_to_move": actor,
+                    "projected_by": "rust",
+                },
+                "legal_actions": [{"type": "hora", "pai": "4p"}, {"type": "dahai", "actor": actor, "pai": "9m", "tsumogiri": False}],
+                "weight": 1.0,
+                "continuation_kind": "rinshan_followup",
+                "declaration_action": None,
+            }
+        ],
     )
 
     primary_logits = _empty_policy()
@@ -454,28 +950,39 @@ def test_default_action_scorer_kan_beam_allows_rinshan_hora_followup(monkeypatch
         ],
     )
 
-    monkeypatch.setattr(
-        inference_scoring,
-        "enumerate_legal_actions",
-        lambda snap, actor: [{"type": "hora", "actor": actor, "target": actor, "pai": "4p"}] if snap.get("tsumo_pai") == "4p" else [],
-    )
-
     result = scorer.score(ctx)
 
     assert result.chosen["type"] == "daiminkan"
     assert adapter.calls[2][0]["tsumo_pai"] == "4p"
+    assert adapter.calls[2][0]["projected_by"] == "rust"
+    assert adapter.calls[2][0]["legal_actions"] == [
+        {"type": "hora", "pai": "4p"},
+        {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": False},
+    ]
 
 
 def test_default_action_scorer_keqingv4_reach_candidate_carries_special_meta(monkeypatch):
     monkeypatch.setattr(
         inference_scoring,
-        "_reach_discard_candidates",
-        lambda hand, last_tsumo, last_tsumo_raw: [("4m", False)],
-    )
-    monkeypatch.setattr(
-        inference_scoring,
-        "_rust_enumerate_keqingv4_reach_discards",
-        lambda snap, actor: (_ for _ in ()).throw(RuntimeError("force python reach helper")),
+        "_rust_resolve_keqingv4_continuation_scenarios",
+        lambda snap, actor, action: [
+            {
+                "projected_snapshot": {
+                    **snap,
+                    "projected_by": "rust",
+                    "reached": [True, False, False, False],
+                },
+                "legal_actions": [{"type": "none"}],
+                "weight": 1.0,
+                "continuation_kind": "reach_declaration",
+                "declaration_action": {
+                    "type": "dahai",
+                    "actor": actor,
+                    "pai": "4m",
+                    "tsumogiri": False,
+                },
+            }
+        ],
     )
 
     class _FakeV4Adapter(_FakeAdapter):
@@ -747,36 +1254,38 @@ def test_default_action_scorer_meld_fallback_compares_final_beam_score(monkeypat
 def test_default_action_scorer_reach_eval_prefers_rust_reach_projection(monkeypatch):
     monkeypatch.setattr(
         inference_scoring,
-        "_rust_enumerate_keqingv4_reach_discards",
-        lambda snap, actor: [("1p", False)],
+        "_build_python_continuation_scenarios",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python continuation scenario fallback should not be used")),
     )
     monkeypatch.setattr(
         inference_scoring,
-        "_reach_discard_candidates",
-        lambda hand, last_tsumo, last_tsumo_raw: (_ for _ in ()).throw(AssertionError("python reach discard helper should not be used")),
-    )
-    monkeypatch.setattr(
-        inference_scoring,
-        "_rust_project_keqingv4_reach_snapshot",
-        lambda snap, actor, pai: {**snap, "projected_by": "rust", "reached": [True, False, False, False], "pending_reach": [False, False, False, False]},
+        "_rust_resolve_keqingv4_continuation_scenarios",
+        lambda snap, actor, action: [
+            {
+                "projected_snapshot": {
+                    **snap,
+                    "projected_by": "rust",
+                    "reached": [True, False, False, False],
+                    "pending_reach": [False, False, False, False],
+                },
+                "legal_actions": [{"type": "none"}],
+                "weight": 1.0,
+                "continuation_kind": "reach_declaration",
+                "declaration_action": {"type": "dahai", "actor": actor, "pai": "1p", "tsumogiri": False},
+            }
+        ],
     )
 
     primary_logits = _empty_policy()
     primary_logits[action_to_idx({"type": "reach"})] = 0.5
     primary_logits[action_to_idx({"type": "dahai", "pai": "1p", "tsumogiri": False})] = 0.2
+    followup_logits = _empty_policy()
+    followup_logits[action_to_idx({"type": "none"})] = 0.0
     adapter = _FakeAdapter(
         [
             ModelForwardResult(policy_logits=primary_logits, value=0.0, aux=ModelAuxOutputs()),
+            ModelForwardResult(policy_logits=followup_logits, value=0.3, aux=ModelAuxOutputs()),
         ]
-    )
-    seen = {"projected_by": None}
-    monkeypatch.setattr(
-        inference_scoring,
-        "_eval_snapshot_outputs",
-        lambda adapter_arg, snap_arg, actor_arg: (
-            seen.__setitem__("projected_by", snap_arg.get("projected_by")),
-            (0.3, ModelAuxOutputs()),
-        )[1],
     )
     scorer = DefaultActionScorer(
         adapter=adapter,
@@ -808,7 +1317,129 @@ def test_default_action_scorer_reach_eval_prefers_rust_reach_projection(monkeypa
     result = scorer.score(ctx)
 
     assert result.chosen["type"] == "reach"
-    assert seen["projected_by"] == "rust"
+    assert adapter.calls[1][0]["projected_by"] == "rust"
+    assert adapter.calls[1][0]["legal_actions"] == [{"type": "none"}]
+
+
+def test_default_action_scorer_reach_eval_injects_structural_legal_actions_into_followup(monkeypatch):
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_resolve_keqingv4_continuation_scenarios",
+        lambda snap, actor, action: [
+            {
+                "projected_snapshot": {
+                    **snap,
+                    "projected_by": "rust",
+                    "reached": [True, False, False, False],
+                    "pending_reach": [False, False, False, False],
+                },
+                "legal_actions": [{"type": "none"}, {"type": "hora", "actor": actor, "pai": "1p"}],
+                "weight": 1.0,
+                "continuation_kind": "reach_declaration",
+                "declaration_action": {"type": "dahai", "actor": actor, "pai": "1p", "tsumogiri": False},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_build_python_continuation_scenarios",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python continuation scenario fallback should not be used")),
+    )
+
+    primary_logits = _empty_policy()
+    primary_logits[action_to_idx({"type": "reach"})] = 0.5
+    primary_logits[action_to_idx({"type": "dahai", "pai": "1p", "tsumogiri": False})] = 0.2
+    adapter = _FakeAdapter(
+        [
+            ModelForwardResult(policy_logits=primary_logits, value=0.0, aux=ModelAuxOutputs()),
+            ModelForwardResult(policy_logits=_empty_policy(), value=0.3, aux=ModelAuxOutputs()),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "tsumo", "actor": 0, "pai": "5s"},
+        runtime_snap={
+            "hand": ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+            "tsumo_pai": "5s",
+            "last_tsumo": ["5s", None, None, None],
+            "last_tsumo_raw": ["5s", None, None, None],
+            "reached": [False, False, False, False],
+            "pending_reach": [False, False, False, False],
+        },
+        model_snap={"hand": [], "tsumo_pai": None},
+        legal_actions=[
+            {"type": "reach", "actor": 0},
+            {"type": "dahai", "actor": 0, "pai": "1p", "tsumogiri": False},
+        ],
+    )
+
+    result = scorer.score(ctx)
+
+    assert result.chosen["type"] == "reach"
+    assert adapter.calls[1][0]["legal_actions"] == [
+        {"type": "none"},
+        {"type": "hora", "actor": 0, "pai": "1p"},
+    ]
+
+
+def test_default_action_scorer_reach_eval_propagates_rust_projection_errors(monkeypatch):
+    monkeypatch.setattr(
+        inference_scoring,
+        "_rust_resolve_keqingv4_continuation_scenarios",
+        lambda snap, actor, action: (_ for _ in ()).throw(RuntimeError("reach projection drift")),
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_build_python_continuation_scenarios",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python fallback should stay unused")),
+    )
+
+    primary_logits = _empty_policy()
+    primary_logits[action_to_idx({"type": "reach"})] = 0.5
+    primary_logits[action_to_idx({"type": "dahai", "pai": "1p", "tsumogiri": False})] = 0.2
+    adapter = _FakeAdapter(
+        [
+            ModelForwardResult(policy_logits=primary_logits, value=0.0, aux=ModelAuxOutputs()),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "tsumo", "actor": 0, "pai": "5s"},
+        runtime_snap={
+            "hand": ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+            "tsumo_pai": "5s",
+            "last_tsumo": ["5s", None, None, None],
+            "last_tsumo_raw": ["5s", None, None, None],
+            "reached": [False, False, False, False],
+            "pending_reach": [False, False, False, False],
+        },
+        model_snap={"hand": [], "tsumo_pai": None},
+        legal_actions=[
+            {"type": "reach", "actor": 0},
+            {"type": "dahai", "actor": 0, "pai": "1p", "tsumogiri": False},
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="reach projection drift"):
+        scorer.score(ctx)
 
 
 def test_runtime_review_exporter_builds_decision_entry():

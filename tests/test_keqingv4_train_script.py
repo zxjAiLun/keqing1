@@ -5,8 +5,8 @@ import subprocess
 
 import numpy as np
 
-from keqingv1.action_space import ACTION_SPACE
-from keqingv3.features import C_TILE, N_SCALAR
+from mahjong_env.action_space import ACTION_SPACE
+from training.state_features import C_TILE, N_SCALAR
 from training.cache_schema import (
     KEQINGV4_CALL_SUMMARY_SLOTS,
     KEQINGV4_EVENT_HISTORY_DIM,
@@ -60,7 +60,7 @@ def _write_keqingv4_contract_npz(path: Path) -> None:
 
 
 def test_train_keqingv4_script_accepts_cli_data_dir_and_output_dir_overrides(tmp_path: Path):
-    data_root = tmp_path / "processed_v3"
+    data_root = tmp_path / "processed_v4"
     ds1 = data_root / "ds1"
     ds2 = data_root / "ds2"
     ds1.mkdir(parents=True)
@@ -102,7 +102,7 @@ def test_train_keqingv4_script_accepts_cli_data_dir_and_output_dir_overrides(tmp
 
 
 def test_train_keqingv4_script_rejects_stale_cache_without_smoke(tmp_path: Path):
-    data_root = tmp_path / "processed_v3"
+    data_root = tmp_path / "processed_v4"
     ds1 = data_root / "ds1"
     ds2 = data_root / "ds2"
     ds1.mkdir(parents=True)

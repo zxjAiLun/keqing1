@@ -472,10 +472,10 @@ def _timed_react(bot: object, event: dict) -> Tuple[Optional[dict], float]:
 
 def _default_model_label(model_path: str) -> str:
     lower = model_path.lower()
-    if "keqingv1" in lower:
-        return "keqingv1"
-    if "keqingv2" in lower:
-        return "keqingv2"
+    if "xmodel1" in lower or "v1a" in lower or "baseline" in lower:
+        return "xmodel1"
+    if "keqingv4" in lower or "v4" in lower:
+        return "keqingv4"
     return Path(model_path).stem
 
 
@@ -540,9 +540,9 @@ def _resolve_seat_bots(
         labels: List[str] = []
         kinds: List[str] = []
         for bot_spec in seat_bots:
-            if bot_spec not in {"keqingv1", "keqingv2", "keqingv3", "keqingv31", "rulebase"}:
+            if bot_spec not in {"xmodel1", "keqingv4", "rulebase"}:
                 raise ValueError(
-                    "--seat-bots 仅支持 keqingv1/keqingv2/keqingv3/keqingv31/rulebase"
+                    "--seat-bots 仅支持 xmodel1/keqingv4/rulebase"
                 )
             source, default_label = _resolve_bot_source(bot_spec)
             sources.append(source)
@@ -1080,8 +1080,8 @@ def _events_to_npz(
     events: list,
     *,
     adapter_name: str = "base",
-    value_strategy: str = "heuristic",
-    encode_module: str = "keqingv1.features",
+    value_strategy: str = "mc_return",
+    encode_module: str = "training.state_features",
 ) -> Optional[Dict[str, np.ndarray]]:
     """从 events 生成 preprocess-owned cache arrays."""
     try:
@@ -1102,8 +1102,8 @@ def _save_npz(
     events: list,
     *,
     adapter_name: str = "base",
-    value_strategy: str = "heuristic",
-    encode_module: str = "keqingv1.features",
+    value_strategy: str = "mc_return",
+    encode_module: str = "training.state_features",
 ) -> bool:
     try:
         from training.preprocess import save_events_to_cache_file
@@ -1157,7 +1157,7 @@ def _write_cache_export_metadata(npz_dir: Path, metadata: dict) -> None:
 
 
 def _recommended_preprocess_output_dir(output_dir: Path, adapter_name: str) -> Path:
-    return output_dir / f"preprocessed_{adapter_name}"
+    return output_dir / f"processed_cache_{adapter_name}"
 
 
 def _build_recommended_preprocess_command(output_dir: Path, adapter_name: str) -> str:
@@ -1201,15 +1201,11 @@ def _infer_replay_bot_type(model_path: str) -> str:
     lower = model_path.lower()
     if "xmodel" in lower or "v1a" in lower or "baseline" in lower:
         return "xmodel1"
-    if "keqingv1" in lower:
-        return "keqingv1"
-    if "keqingv31" in lower or "v4" in lower:
-        return "keqingv31"
-    if "keqingv3" in lower:
-        return "keqingv3"
+    if "keqingv4" in lower or "v4" in lower:
+        return "keqingv4"
     if "v5" in lower:
         return "v5"
-    return "keqingv2"
+    return "xmodel1"
 
 
 def _persist_replay_ui_artifact(
@@ -1698,7 +1694,7 @@ def parse_args():
     p.add_argument(
         "--model",
         required=True,
-        help="模型名或模型权重路径；如 keqingv2 将自动解析到 artifacts/models/keqingv2/best.pth",
+        help="模型名或模型权重路径；如 xmodel1 将自动解析到 artifacts/models/xmodel1/best.pth",
     )
     p.add_argument(
         "--seat-models",
@@ -1712,7 +1708,7 @@ def parse_args():
         nargs=4,
         default=None,
         metavar=("B0", "B1", "B2", "B3"),
-        help="按座位指定 4 个 bot；可混用 keqingv1/keqingv2/keqingv3/keqingv31/rulebase。提供后优先于 --seat-models",
+        help="按座位指定 4 个 bot；可混用 xmodel1/keqingv4/rulebase。提供后优先于 --seat-models",
     )
     p.add_argument(
         "--seat-labels",
@@ -1745,19 +1741,19 @@ def parse_args():
     )
     p.add_argument(
         "--cache-adapter",
-        choices=["base", "meld_rank", "v3_aux"],
+        choices=["base", "keqingv4_aux"],
         default="base",
         help="保存 .npz 时使用的 preprocess adapter",
     )
     p.add_argument(
         "--cache-value-strategy",
-        choices=["heuristic", "mc_return"],
-        default="heuristic",
+        choices=["mc_return"],
+        default="mc_return",
         help="保存 .npz 时使用的 value strategy",
     )
     p.add_argument(
         "--cache-encode-module",
-        default="keqingv1.features",
+        default="training.state_features",
         help="保存 .npz 时使用的 encode module",
     )
     p.add_argument(

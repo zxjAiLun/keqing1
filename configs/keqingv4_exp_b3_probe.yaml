@@ -6,8 +6,9 @@
 # - keep cost small enough for fast iteration
 
 data_dirs:
-  - processed_v3/ds1
-  - processed_v3/ds2
+  - processed_v4/ds1
+  - processed_v4/ds2
+  - processed_v4/ds3
 
 output_dir: artifacts/models/keqingv4_b3_probe
 device: cuda

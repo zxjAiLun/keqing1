@@ -1,7 +1,7 @@
 """Xmodel1 opp_tenpai × 3 label 回填与 v2 cache 合同验证.
 
 该测试覆盖以下链路:
-  1. build_supervised_samples 在决策时刻计算 opp_tenpai 并写入 ReplaySample
+  1. build_replay_samples_mc_return 在决策时刻计算 opp_tenpai 并写入 ReplaySample
   2. events_to_xmodel1_arrays 输出 opp_tenpai_target 数组到 cache
   3. Xmodel1DiscardDataset 严格拒绝缺少 v2 必填字段的旧 cache
   4. trainer 用 opp_tenpai_loss_weight>0 配合新 cache 时 loss 贡献生效且可 backward
@@ -12,9 +12,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-import torch
+import pytest
 
-from mahjong_env.replay import _compute_opp_tenpai_target, build_supervised_samples
+torch = pytest.importorskip("torch")
+
+from mahjong_env.replay import _compute_opp_tenpai_target, build_replay_samples_mc_return
 from mahjong_env.state import GameState, apply_event
 from xmodel1.cached_dataset import Xmodel1DiscardDataset
 from xmodel1.preprocess import events_to_xmodel1_arrays
@@ -73,7 +75,7 @@ def test_compute_opp_tenpai_target_detects_tenpai_opponent():
     assert opp[2] == 0.0, f"expected opp3 not tenpai, got {opp}"
 
 
-def test_build_supervised_samples_fills_opp_tenpai_target():
+def test_build_replay_samples_mc_return_fills_opp_tenpai_target():
     events = [
         {"type": "start_game", "names": ["A", "B", "C", "D"]},
         {
@@ -90,7 +92,7 @@ def test_build_supervised_samples_fills_opp_tenpai_target():
         {"type": "tsumo", "actor": 0, "pai": "4p"},
         {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
     ]
-    samples = build_supervised_samples(events, strict_legal_labels=False)
+    samples = build_replay_samples_mc_return(events, strict_legal_labels=False)
     assert samples, "fixture should yield at least one sample"
     # 找到 actor=0 的那个 dahai 样本,验证 opp_tenpai_target
     dahai_samples = [s for s in samples if s.actor == 0 and s.label_action.get("type") == "dahai"]

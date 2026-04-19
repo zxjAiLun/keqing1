@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import random
-import re
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -12,7 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 
-from training.cache_schema import BASE_CACHE_FIELDS, MELD_RANK_EXTRA_FIELDS, V3_AUX_EXTRA_FIELDS
+from training.cache_schema import BASE_CACHE_FIELDS
 
 DEFAULT_BUFFER_SIZE = 2000
 
@@ -24,14 +22,8 @@ _SUIT_PERMS = [
     (2, 0, 1),
     (2, 1, 0),
 ]
-_SUITS = ("m", "p", "s")
-_PAI_RE = re.compile(r'"([1-9])([mps])r?"')
-
-_MELD_ACTION_IDXS = frozenset([35, 36, 37, 38, 39, 40, 41])
 _TF_SHAPE = (54, 34)
 _SC_SHAPE = (48,)
-_ZERO_TF = np.zeros(_TF_SHAPE, dtype=np.float32)
-_ZERO_SC = np.zeros(_SC_SHAPE, dtype=np.float32)
 
 
 def apply_suit_perm(tile_feat: np.ndarray, mask: np.ndarray, action_idx: int, perm: tuple) -> Tuple[np.ndarray, np.ndarray, int]:
@@ -110,203 +102,6 @@ class BaseCacheAdapter:
             torch.from_numpy(np.stack(masks)),
             torch.tensor(action_idxs, dtype=torch.long),
             torch.tensor(values, dtype=torch.float32),
-        )
-
-
-class MeldRankAdapter(BaseCacheAdapter):
-    extra_fields = MELD_RANK_EXTRA_FIELDS
-
-    @staticmethod
-    def _permute_snap_json(snap_json_str: str, perm: tuple) -> str:
-        if not snap_json_str:
-            return snap_json_str
-        src_to_dst = {_SUITS[src]: _SUITS[dst] for dst, src in enumerate(perm)}
-
-        def replace_pai(m: re.Match) -> str:
-            num, suit = m.group(1), m.group(2)
-            new_suit = src_to_dst[suit]
-            full = m.group(0)
-            if full.endswith('r"'):
-                return f'"{num}{new_suit}r"'
-            return f'"{num}{new_suit}"'
-
-        return _PAI_RE.sub(replace_pai, snap_json_str)
-
-    @staticmethod
-    def _make_fake_meld_snap(snap: dict, actor: int, meld_action: dict) -> dict:
-        from mahjong_env.tiles import normalize_tile
-
-        meld_type = meld_action.get("type", "")
-        consumed = meld_action.get("consumed", [])
-        pai = meld_action.get("pai", "")
-
-        fake = dict(snap)
-        hand = list(snap.get("hand", []))
-        new_hand = list(hand)
-        for c in consumed:
-            norm_c = normalize_tile(c)
-            for i, t in enumerate(new_hand):
-                if normalize_tile(t) == norm_c:
-                    new_hand.pop(i)
-                    break
-        fake["hand"] = new_hand
-
-        melds = [list(m) for m in snap.get("melds", [[], [], [], []])]
-        melds[actor] = melds[actor] + [{
-            "type": meld_type,
-            "pai": normalize_tile(pai) if pai else "",
-            "consumed": [normalize_tile(c) for c in consumed],
-        }]
-        fake["melds"] = melds
-        fake.pop("shanten", None)
-        fake.pop("waits_count", None)
-        fake.pop("waits_tiles", None)
-        return fake
-
-    @staticmethod
-    def _encode_rank_pair(snap_json_str: str, action_idx: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.float32]:
-        from keqingv1.features import encode
-
-        if not snap_json_str:
-            return _ZERO_TF, _ZERO_SC, _ZERO_TF, _ZERO_SC, np.float32(0.0)
-
-        try:
-            snap = json.loads(snap_json_str)
-        except Exception:
-            return _ZERO_TF, _ZERO_SC, _ZERO_TF, _ZERO_SC, np.float32(0.0)
-
-        actor = snap.get("actor", 0)
-        gt_is_meld = action_idx in _MELD_ACTION_IDXS
-        meld_action = snap.get("label_action") if gt_is_meld else snap.get("meld_candidate")
-        if meld_action is None:
-            return _ZERO_TF, _ZERO_SC, _ZERO_TF, _ZERO_SC, np.float32(0.0)
-
-        try:
-            tf_none, sc_none = encode(snap, actor)
-            fake_snap = MeldRankAdapter._make_fake_meld_snap(snap, actor, meld_action)
-            tf_meld, sc_meld = encode(fake_snap, actor)
-        except Exception:
-            return _ZERO_TF, _ZERO_SC, _ZERO_TF, _ZERO_SC, np.float32(0.0)
-
-        sign = np.float32(1.0) if gt_is_meld else np.float32(-1.0)
-        return (
-            tf_none.astype(np.float32),
-            sc_none.astype(np.float32),
-            tf_meld.astype(np.float32),
-            sc_meld.astype(np.float32),
-            sign,
-        )
-
-    def load_optional_arrays(self, data, sample_count: int, *, path: Path | None = None) -> Dict[str, np.ndarray]:
-        del path
-        if "snap_json" in data:
-            snap_json = data["snap_json"]
-        else:
-            snap_json = np.array([""] * sample_count, dtype=object)
-        return {"snap_json": snap_json}
-
-    def permute_row_extra(self, row_extra: Dict[str, object], perm: tuple, action_idx: int) -> Dict[str, object]:
-        del action_idx
-        snap_json = str(row_extra.get("snap_json") or "")
-        return {"snap_json": self._permute_snap_json(snap_json, perm)}
-
-    def build_sample(
-        self,
-        tile_feat: np.ndarray,
-        scalar: np.ndarray,
-        mask: np.ndarray,
-        action_idx: int,
-        value: float,
-        row_extra: Dict[str, object],
-    ) -> Tuple:
-        snap_json = str(row_extra.get("snap_json") or "")
-        tf_none, sc_none, tf_meld, sc_meld, rank_sign = self._encode_rank_pair(snap_json, action_idx)
-        return (
-            tile_feat,
-            scalar,
-            mask,
-            action_idx,
-            value,
-            tf_none,
-            sc_none,
-            tf_meld,
-            sc_meld,
-            rank_sign,
-        )
-
-    @staticmethod
-    def collate(batch: List[Tuple]) -> Tuple:
-        tile_feats, scalars, masks, action_idxs, values, tf_nones, sc_nones, tf_melds, sc_melds, rank_signs = zip(*batch)
-        return (
-            torch.from_numpy(np.stack(tile_feats)),
-            torch.from_numpy(np.stack(scalars)),
-            torch.from_numpy(np.stack(masks)),
-            torch.tensor(action_idxs, dtype=torch.long),
-            torch.tensor(values, dtype=torch.float32),
-            torch.from_numpy(np.stack(tf_nones)),
-            torch.from_numpy(np.stack(sc_nones)),
-            torch.from_numpy(np.stack(tf_melds)),
-            torch.from_numpy(np.stack(sc_melds)),
-            torch.tensor(rank_signs, dtype=torch.float32),
-        )
-
-
-class V3AuxAdapter(BaseCacheAdapter):
-    extra_fields = V3_AUX_EXTRA_FIELDS
-
-    def load_optional_arrays(self, data, sample_count: int, *, path: Path | None = None) -> Dict[str, np.ndarray]:
-        del path
-        score_delta = data["score_delta_target"] if "score_delta_target" in data else np.zeros(sample_count, dtype=np.float32)
-        win = data["win_target"] if "win_target" in data else np.zeros(sample_count, dtype=np.float32)
-        dealin = data["dealin_target"] if "dealin_target" in data else np.zeros(sample_count, dtype=np.float32)
-        return {
-            "score_delta_target": np.asarray(score_delta, dtype=np.float32),
-            "win_target": np.asarray(win, dtype=np.float32),
-            "dealin_target": np.asarray(dealin, dtype=np.float32),
-        }
-
-    def build_sample(
-        self,
-        tile_feat: np.ndarray,
-        scalar: np.ndarray,
-        mask: np.ndarray,
-        action_idx: int,
-        value: float,
-        row_extra: Dict[str, object],
-    ) -> Tuple:
-        return (
-            tile_feat,
-            scalar,
-            mask,
-            action_idx,
-            value,
-            np.float32(row_extra.get("score_delta_target", 0.0)),
-            np.float32(row_extra.get("win_target", 0.0)),
-            np.float32(row_extra.get("dealin_target", 0.0)),
-        )
-
-    def permute_scalar(self, scalar: np.ndarray, perm: tuple) -> np.ndarray:
-        # Keep suit-dependent scalar semantics aligned with tile/action permutation:
-        # [18:21] = aka_m / aka_p / aka_s flags
-        # [30:33] = man / pin / sou tile ratios
-        new_scalar = scalar.copy()
-        for dst, src in enumerate(perm):
-            new_scalar[18 + dst] = scalar[18 + src]
-            new_scalar[30 + dst] = scalar[30 + src]
-        return new_scalar
-
-    @staticmethod
-    def collate(batch: List[Tuple]) -> Tuple:
-        tile_feats, scalars, masks, action_idxs, values, score_targets, win_targets, dealin_targets = zip(*batch)
-        return (
-            torch.from_numpy(np.stack(tile_feats)),
-            torch.from_numpy(np.stack(scalars)),
-            torch.from_numpy(np.stack(masks)),
-            torch.tensor(action_idxs, dtype=torch.long),
-            torch.tensor(values, dtype=torch.float32),
-            torch.tensor(score_targets, dtype=torch.float32),
-            torch.tensor(win_targets, dtype=torch.float32),
-            torch.tensor(dealin_targets, dtype=torch.float32),
         )
 
 
@@ -404,8 +199,6 @@ class GenericCachedMjaiDataset(IterableDataset):
 __all__ = [
     "DEFAULT_BUFFER_SIZE",
     "BaseCacheAdapter",
-    "MeldRankAdapter",
-    "V3AuxAdapter",
     "GenericCachedMjaiDataset",
     "apply_suit_perm",
     "split_cached_files",

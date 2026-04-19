@@ -4,10 +4,13 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
+
+torch = pytest.importorskip("torch")
 
 from xmodel1.cached_dataset import split_cached_files
 from xmodel1.model import Xmodel1Model
-from xmodel1.trainer import build_dataloaders, train
+from xmodel1.trainer import _autocast_enabled, _unpack_batch, build_dataloaders, train
 
 
 def _write_fixture(path: Path, n: int = 16) -> None:
@@ -152,3 +155,38 @@ def test_xmodel1_training_supports_epoch_file_sampling(tmp_path: Path):
     )
     assert len(chosen_subsets) == 2
     assert chosen_subsets[0] != chosen_subsets[1]
+
+
+def test_xmodel1_unpack_batch_promotes_fp16_on_cpu():
+    batch = {
+        "candidate_feat": torch.ones((2, 3), dtype=torch.float16),
+        "chosen_candidate_idx": torch.tensor([0, 1], dtype=torch.int16),
+    }
+    out = _unpack_batch(batch, torch.device("cpu"))
+    assert out["candidate_feat"].dtype == torch.float32
+    assert out["chosen_candidate_idx"].dtype == torch.long
+
+
+def test_xmodel1_unpack_batch_keeps_fp16_for_cuda_amp_path(monkeypatch):
+    batch = {
+        "candidate_feat": torch.ones((2, 3), dtype=torch.float16),
+        "chosen_candidate_idx": torch.tensor([0, 1], dtype=torch.int16),
+    }
+
+    def _fake_to(self, device, non_blocking=True):
+        return self
+
+    monkeypatch.setattr(torch.Tensor, "to", _fake_to, raising=False)
+    out = _unpack_batch(batch, torch.device("cuda"))
+    assert out["candidate_feat"].dtype == torch.float16
+    assert out["chosen_candidate_idx"].dtype == torch.long
+
+
+def test_xmodel1_autocast_enabled_uses_cuda_for_val_without_scaler():
+    class _DisabledScaler:
+        def is_enabled(self):
+            return False
+
+    assert _autocast_enabled(device=torch.device("cpu"), is_train=False, scaler=None) is False
+    assert _autocast_enabled(device=torch.device("cuda"), is_train=False, scaler=None) is True
+    assert _autocast_enabled(device=torch.device("cuda"), is_train=True, scaler=_DisabledScaler()) is False

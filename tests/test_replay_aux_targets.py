@@ -1,86 +1,40 @@
 from pathlib import Path
 
+import pytest
+
 from mahjong_env.replay import (
-    PendingValueSample,
-    ReplaySample,
-    _finalize_aux_targets,
-    _label_matches_legal,
-    build_supervised_samples,
+    build_replay_samples_mc_return,
     read_mjai_jsonl,
 )
-from mahjong_env.replay_normalizer import (
-    normalize_replay_events,
-)
+from mahjong_env.replay_normalizer import normalize_replay_events, replay_label_matches_legal
 
 
-# =============================================================================
-# 辅助目标回填
-# =============================================================================
-
-def _sample(actor: int) -> PendingValueSample:
-    return PendingValueSample(
-        sample=ReplaySample(
-            state={},
-            actor=actor,
-            actor_name=f"p{actor}",
-            label_action={"type": "dahai", "actor": actor},
-            legal_actions=[],
-            value_target=0.0,
-        ),
-        round_step_index=0,
-    )
-
-
-def test_finalize_aux_targets_hora_round():
-    pending = [_sample(i) for i in range(4)]
-    terminal = {"type": "hora", "actor": 1, "target": 2, "deltas": [-1000, 7700, -7700, 1000]}
-
-    _finalize_aux_targets(pending, terminal)
-
-    assert pending[1].sample.win_target == 1.0
-    assert pending[2].sample.dealin_target == 1.0
-    assert pending[0].sample.win_target == 0.0
-    assert pending[0].sample.dealin_target == 0.0
-    assert pending[1].sample.score_delta_target == 7700 / 30000.0
-    assert pending[1].sample.pts_given_win_target == 7700 / 30000.0
-    assert pending[2].sample.pts_given_dealin_target == 7700 / 30000.0
-
-
-def test_finalize_aux_targets_no_terminal():
-    pending = [_sample(i) for i in range(2)]
-
-    _finalize_aux_targets(pending, None)
-
-    for p in pending:
-        assert p.sample.score_delta_target == 0.0
-        assert p.sample.win_target == 0.0
-        assert p.sample.dealin_target == 0.0
-        assert p.sample.pts_given_win_target == 0.0
-        assert p.sample.pts_given_dealin_target == 0.0
-        assert p.sample.ryukyoku_tenpai_target == 0.0
-
-
-def test_finalize_aux_targets_ryukyoku_tracks_tenpai_players():
-    pending = [_sample(i) for i in range(4)]
-    terminal = {"type": "ryukyoku", "deltas": [0, 0, 0, 0], "tenpai_players": [1, 3]}
-
-    _finalize_aux_targets(pending, terminal)
-
-    assert pending[0].sample.ryukyoku_tenpai_target == 0.0
-    assert pending[1].sample.ryukyoku_tenpai_target == 1.0
-    assert pending[2].sample.ryukyoku_tenpai_target == 0.0
-    assert pending[3].sample.ryukyoku_tenpai_target == 1.0
-
-
-def test_build_supervised_samples_preserves_aux_targets_after_end_kyoku():
+def test_build_replay_samples_mc_return_preserves_aux_targets_after_end_kyoku():
     path = Path("artifacts/converted_mjai/closehand&atk/2017122802gm-00a9-0000-90c30e7e.mjson")
     events = list(read_mjai_jsonl(path))
 
-    samples = build_supervised_samples(events, strict_legal_labels=True)
+    samples = build_replay_samples_mc_return(events, strict_legal_labels=True)
 
     assert any(sample.win_target > 0.0 for sample in samples)
     assert any(sample.dealin_target > 0.0 for sample in samples)
     assert any(abs(sample.score_delta_target) > 0.0 for sample in samples)
+
+
+def test_build_replay_samples_mc_return_native_produces_samples():
+    pytest.importorskip("keqing_core")
+    import keqing_core
+
+    if not keqing_core.is_available():
+        pytest.skip("Rust extension not available")
+
+    path = Path("artifacts/converted_mjai/closehand&atk/2017122802gm-00a9-0000-90c30e7e.mjson")
+    events = list(read_mjai_jsonl(path))
+    keqing_core.enable_rust(True)
+    native_samples = build_replay_samples_mc_return(
+        events,
+        strict_legal_labels=True,
+    )
+    assert native_samples
 
 
 # =============================================================================
@@ -103,7 +57,7 @@ def test_label_matches_legal_allows_ankan_label_without_pai_field():
         }
     ]
 
-    assert _label_matches_legal(label, legal_actions) is True
+    assert replay_label_matches_legal(label, legal_actions) is True
 
 
 def test_label_matches_legal_allows_hora_label_without_pai_field():
@@ -123,7 +77,7 @@ def test_label_matches_legal_allows_hora_label_without_pai_field():
         }
     ]
 
-    assert _label_matches_legal(label, legal_actions) is True
+    assert replay_label_matches_legal(label, legal_actions) is True
 
 
 def test_label_matches_legal_hora_pai_mismatch_allowed():
@@ -142,7 +96,7 @@ def test_label_matches_legal_hora_pai_mismatch_allowed():
         }
     ]
 
-    assert _label_matches_legal(label, legal_actions) is True
+    assert replay_label_matches_legal(label, legal_actions) is True
 
 
 def test_label_matches_legal_chi_consumed_aka_family_equivalent():
@@ -163,7 +117,7 @@ def test_label_matches_legal_chi_consumed_aka_family_equivalent():
         }
     ]
 
-    assert _label_matches_legal(label, legal_actions) is True
+    assert replay_label_matches_legal(label, legal_actions) is True
 
 
 def test_label_matches_legal_dahai_tsumogiri_mismatch_allowed():
@@ -182,7 +136,7 @@ def test_label_matches_legal_dahai_tsumogiri_mismatch_allowed():
         }
     ]
 
-    assert _label_matches_legal(label, legal_actions) is True
+    assert replay_label_matches_legal(label, legal_actions) is True
 
 
 def test_label_matches_legal_ankan_pai_aka_family_equivalent():
@@ -200,7 +154,7 @@ def test_label_matches_legal_ankan_pai_aka_family_equivalent():
         }
     ]
 
-    assert _label_matches_legal(label, legal_actions) is True
+    assert replay_label_matches_legal(label, legal_actions) is True
 
 
 def test_label_matches_legal_kakan_pai_aka_family_equivalent():
@@ -219,7 +173,7 @@ def test_label_matches_legal_kakan_pai_aka_family_equivalent():
         }
     ]
 
-    assert _label_matches_legal(label, legal_actions) is True
+    assert replay_label_matches_legal(label, legal_actions) is True
 
 
 def test_label_matches_legal_reach_requires_explicit_reach_action():
@@ -232,7 +186,7 @@ def test_label_matches_legal_reach_requires_explicit_reach_action():
         {"type": "dahai", "actor": 2, "pai": "6s", "tsumogiri": True},
     ]
 
-    assert _label_matches_legal(label, legal_actions) is True
+    assert replay_label_matches_legal(label, legal_actions) is True
 
 
 def test_label_matches_legal_reach_does_not_match_plain_discard_set():
@@ -246,7 +200,7 @@ def test_label_matches_legal_reach_does_not_match_plain_discard_set():
         {"type": "dahai", "actor": 2, "pai": "9p", "tsumogiri": False},
     ]
 
-    assert _label_matches_legal(label, legal_actions) is False
+    assert replay_label_matches_legal(label, legal_actions) is False
 
 
 def test_normalize_replay_events_enriches_self_hora_with_haitei_flag_and_pai(monkeypatch):

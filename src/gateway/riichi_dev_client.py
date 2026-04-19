@@ -22,7 +22,7 @@ from riichienv import Observation, Observation3P, RiichiEnv
 from inference.contracts import DecisionContext, DecisionResult
 from inference.keqing_adapter import KeqingModelAdapter
 from inference.scoring import DefaultActionScorer
-from keqingv1.action_space import IDX_TO_TILE_NAME
+from mahjong_env.action_space import IDX_TO_TILE_NAME
 from mahjong.tile import FIVE_RED_MAN, FIVE_RED_PIN, FIVE_RED_SOU
 
 logger = logging.getLogger(__name__)
@@ -55,14 +55,10 @@ def _resolve_ws_url(base_url: str, queue: str) -> str:
 
 
 def _resolve_default_token(bot_name: str) -> str:
-    if bot_name == "keqingv31":
-        return os.getenv("MOCHAKEY", "")
     return os.getenv("LATTEKEY", os.getenv("RIICHI_BOT_TOKEN", ""))
 
 
 def _resolve_default_token_with_source(bot_name: str) -> tuple[str, str]:
-    if bot_name == "keqingv31":
-        return os.getenv("MOCHAKEY", ""), "MOCHAKEY"
     if os.getenv("LATTEKEY"):
         return os.getenv("LATTEKEY", ""), "LATTEKEY"
     return os.getenv("RIICHI_BOT_TOKEN", ""), "RIICHI_BOT_TOKEN"
@@ -553,12 +549,8 @@ class DecisionAgentSpec:
     dealin_prob_lambda: float = 0.25
 
 
-DEFAULT_DECISION_AGENT_SPEC = DecisionAgentSpec(model_version="keqingv3")
+DEFAULT_DECISION_AGENT_SPEC = DecisionAgentSpec(model_version="xmodel1")
 DECISION_AGENT_SPECS: dict[str, DecisionAgentSpec] = {
-    "keqingv1": DecisionAgentSpec(model_version="keqingv1"),
-    "keqingv2": DecisionAgentSpec(model_version="keqingv2"),
-    "keqingv3": DecisionAgentSpec(model_version="keqingv3"),
-    "keqingv31": DecisionAgentSpec(model_version="keqingv31", hidden_dim=320, num_res_blocks=6),
     "keqingv4": DecisionAgentSpec(model_version="keqingv4", hidden_dim=320, num_res_blocks=6),
     "xmodel1": DecisionAgentSpec(
         model_version="xmodel1",
@@ -638,7 +630,7 @@ class ObservationScoringAgent(RiichiDevDecisionAgent):
         score_delta_lambda: float = 0.20,
         win_prob_lambda: float = 0.20,
         dealin_prob_lambda: float = 0.25,
-        model_version: str | None = "keqingv3",
+        model_version: str | None = "xmodel1",
     ):
         resolved_device = torch.device(
             device if device == "cpu" or torch.cuda.is_available() else "cpu"
@@ -774,7 +766,7 @@ def create_riichi_dev_agent(
 @dataclass(slots=True)
 class RiichiDevClientConfig:
     token: str
-    bot_name: str = "keqingv3"
+    bot_name: str = "xmodel1"
     model_version: str | None = None
     queue: str = "ranked"
     base_url: str = DEFAULT_BASE_URL
@@ -1053,8 +1045,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run supported keqing bots on riichi.dev")
     parser.add_argument(
         "--bot-name",
-        default="keqingv3",
-        help="bot family / checkpoint namespace to run (e.g. keqingv3, keqingv31, xmodel1)",
+        default="xmodel1",
+        help="bot family / checkpoint namespace to run (xmodel1, keqingv4)",
     )
     parser.add_argument(
         "--model-version",
@@ -1169,7 +1161,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         args.token, token_source = _resolve_default_token_with_source(args.bot_name)
 
     if not args.token:
-        raise SystemExit("missing bot token; pass --token or set MOCHAKEY/LATTEKEY in project .env")
+        raise SystemExit("missing bot token; pass --token or set LATTEKEY/RIICHI_BOT_TOKEN in project .env")
 
     resolved_model_path = _resolve_model_path(
         bot_name=args.bot_name,

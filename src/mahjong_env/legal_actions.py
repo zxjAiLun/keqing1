@@ -237,13 +237,15 @@ def _call_can_hora(
         )
 
 
-def _rust_structural_action_specs(state_snapshot: Dict, actor: int) -> List[ActionSpec] | None:
+def _rust_public_action_specs(state_snapshot: Dict, actor: int) -> List[ActionSpec] | None:
     if not keqing_core.is_enabled():
         return None
     try:
-        raw_specs = keqing_core.enumerate_legal_action_specs_structural(state_snapshot, actor)
-    except RuntimeError:
-        return None
+        raw_specs = keqing_core.enumerate_public_legal_action_specs(state_snapshot, actor)
+    except RuntimeError as exc:
+        if keqing_core.is_missing_rust_capability_error(exc):
+            return None
+        raise
     specs: List[ActionSpec] = []
     for item in raw_specs:
         specs.append(
@@ -257,95 +259,6 @@ def _rust_structural_action_specs(state_snapshot: Dict, actor: int) -> List[Acti
             )
         )
     return specs
-
-
-def _hora_specs_for_snapshot(state_snapshot: Dict, actor: int) -> List[ActionSpec]:
-    if keqing_core.is_enabled():
-        try:
-            raw_candidates = keqing_core.enumerate_hora_candidates(state_snapshot, actor)
-        except RuntimeError:
-            raw_candidates = None
-        if raw_candidates is not None:
-            legal: List[ActionSpec] = []
-            for candidate in raw_candidates:
-                if _call_can_hora(
-                    state_snapshot,
-                    actor=actor,
-                    target=candidate["target"],
-                    pai=candidate["pai"],
-                    is_tsumo=bool(candidate["is_tsumo"]),
-                    is_haitei=candidate.get("is_haitei"),
-                    is_houtei=candidate.get("is_houtei"),
-                    is_rinshan=candidate.get("is_rinshan"),
-                    is_chankan=candidate.get("is_chankan"),
-                ):
-                    legal.append(
-                        ActionSpec(
-                            type="hora",
-                            actor=actor,
-                            target=candidate["target"],
-                            pai=candidate["pai"],
-                        )
-                    )
-            return legal
-
-    legal: List[ActionSpec] = []
-    last_discard = state_snapshot["last_discard"]
-    last_kakan = state_snapshot.get("last_kakan")
-    actor_to_move = state_snapshot["actor_to_move"]
-    last_tsumo = state_snapshot.get("last_tsumo", [None, None, None, None])[actor]
-    last_tsumo_raw = state_snapshot.get("last_tsumo_raw", [None, None, None, None])[actor]
-    hora_is_haitei = state_snapshot.get("_hora_is_haitei")
-    hora_is_houtei = state_snapshot.get("_hora_is_houtei")
-    hora_is_rinshan = state_snapshot.get("_hora_is_rinshan")
-    hora_is_chankan = state_snapshot.get("_hora_is_chankan")
-
-    if last_kakan and last_kakan.get("actor") != actor:
-        kakan_actor = last_kakan["actor"]
-        tile_raw = last_kakan.get("pai_raw", last_kakan.get("pai"))
-        furiten_list = state_snapshot.get("furiten", [False] * 4)
-        actor_furiten = furiten_list[actor] if actor < len(furiten_list) else False
-        if not actor_furiten and _call_can_hora(
-            state_snapshot,
-            actor=actor,
-            target=kakan_actor,
-            pai=tile_raw,
-            is_tsumo=False,
-            is_chankan=bool(hora_is_chankan) if hora_is_chankan is not None else True,
-        ):
-            legal.append(ActionSpec(type="hora", actor=actor, target=kakan_actor, pai=tile_raw))
-        return legal
-
-    if last_discard and last_discard.get("actor") != actor:
-        discarder = last_discard["actor"]
-        tile_norm = normalize_tile(last_discard["pai"])
-        tile_raw = last_discard.get("pai_raw", tile_norm)
-        furiten_list = state_snapshot.get("furiten", [False] * 4)
-        actor_furiten = furiten_list[actor] if actor < len(furiten_list) else False
-        if not actor_furiten and _call_can_hora(
-            state_snapshot,
-            actor=actor,
-            target=discarder,
-            pai=tile_raw,
-            is_tsumo=False,
-            is_houtei=hora_is_houtei,
-        ):
-            legal.append(ActionSpec(type="hora", actor=actor, target=discarder, pai=tile_raw))
-        return legal
-
-    if actor_to_move == actor and last_tsumo is not None:
-        tsumo_pai_out = last_tsumo_raw if last_tsumo_raw is not None else last_tsumo
-        if _call_can_hora(
-            state_snapshot,
-            actor=actor,
-            target=actor,
-            pai=tsumo_pai_out,
-            is_tsumo=True,
-            is_rinshan=hora_is_rinshan,
-            is_haitei=hora_is_haitei,
-        ):
-            legal.append(ActionSpec(type="hora", actor=actor, target=actor, pai=tsumo_pai_out))
-    return legal
 
 
 def _enumerate_legal_action_specs_python(state_snapshot: Dict, actor: int) -> List[ActionSpec]:
@@ -565,13 +478,12 @@ def _enumerate_legal_action_specs_python(state_snapshot: Dict, actor: int) -> Li
 
 
 def enumerate_legal_action_specs(state_snapshot: Dict, actor: int) -> List[ActionSpec]:
-    rust_specs = _rust_structural_action_specs(state_snapshot, actor)
-    if rust_specs is None:
-        return _enumerate_legal_action_specs_python(state_snapshot, actor)
+    rust_public_specs = _rust_public_action_specs(state_snapshot, actor)
+    if rust_public_specs is not None:
+        return rust_public_specs
 
-    # Hora branches still get injected here so flags like `is_chankan`
-    # remain explicit at the public enumerate_legal_action_specs surface.
-    return [*_hora_specs_for_snapshot(state_snapshot, actor), *rust_specs]
+    # Keep Python legal assembly only as the missing-capability fallback.
+    return _enumerate_legal_action_specs_python(state_snapshot, actor)
 
 
 def enumerate_legal_actions(state_snapshot: Dict, actor: int) -> List[Action]:

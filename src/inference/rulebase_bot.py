@@ -41,7 +41,7 @@ class RulebaseBot:
         self.decision_log: list[dict] = []
         self.game_state = GameState()
         self._context_builder = DefaultDecisionContextBuilder(
-            model_version="keqingv1",
+            model_version="rulebase",
             riichi_state=None,
             inject_shanten_waits=inject_shanten_waits,
             enumerate_legal_actions_fn=lambda snap, seat: enumerate_legal_actions(
@@ -337,4 +337,3 @@ class RulebaseBot:
                 == Counter(normalize_tile(x) for x in b.get("consumed", []))
             )
         return True
-

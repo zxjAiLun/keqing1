@@ -68,6 +68,8 @@ def test_preprocess_xmodel1_script_runs_native_v2_export(tmp_path: Path):
 
     exported = output_dir / "ds1" / "sample.npz"
     assert exported.exists()
+    assert "xmodel1 preprocess preflight selection:" in result.stdout
+    assert "xmodel1 preprocess preflight gate:" in result.stdout
     assert "xmodel1 preprocess launcher -> native-v2-export" in result.stdout
     assert "xmodel1 preprocess complete:" in result.stdout
     with np.load(exported, allow_pickle=False) as data:
@@ -97,6 +99,19 @@ def test_preprocess_xmodel1_script_resumes_and_skips_existing_outputs(tmp_path: 
     assert "xmodel1 preprocess complete:" in second.stdout
 
 
+def test_preprocess_xmodel1_script_can_skip_preflight(tmp_path: Path):
+    input_dir = tmp_path / "converted" / "ds1"
+    input_dir.mkdir(parents=True)
+    _write_mjson(input_dir / "sample.mjson")
+    output_dir = tmp_path / "processed"
+
+    result = _run_preprocess_script(input_dir, output_dir, "--skip-preflight")
+
+    assert "xmodel1 preprocess preflight selection:" not in result.stdout
+    assert "xmodel1 preprocess preflight gate:" not in result.stdout
+    assert "xmodel1 preprocess complete:" in result.stdout
+
+
 def test_preprocess_xmodel1_script_rebuilds_corrupt_existing_output(tmp_path: Path):
     input_dir = tmp_path / "converted" / "ds1"
     input_dir.mkdir(parents=True)
@@ -113,6 +128,30 @@ def test_preprocess_xmodel1_script_rebuilds_corrupt_existing_output(tmp_path: Pa
     assert manifest["skipped_existing_file_count"] == 0
     assert "xmodel1 preprocess complete:" in result.stdout
     with np.load(corrupt_output, allow_pickle=False) as data:
+        assert data["state_tile_feat"].shape[0] >= 1
+
+
+def test_preprocess_xmodel1_script_rebuilds_existing_output_missing_schema_metadata(tmp_path: Path):
+    input_dir = tmp_path / "converted" / "ds1"
+    input_dir.mkdir(parents=True)
+    _write_mjson(input_dir / "sample.mjson")
+    output_dir = tmp_path / "processed"
+    stale_output = output_dir / "ds1" / "sample.npz"
+    stale_output.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        stale_output,
+        state_tile_feat=np.zeros((1, 57, 34), dtype=np.float16),
+    )
+
+    result = _run_preprocess_script(input_dir, output_dir, "--progress-every", "1")
+
+    manifest = json.loads((output_dir / "xmodel1_export_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["processed_file_count"] == 1
+    assert manifest["skipped_existing_file_count"] == 0
+    assert "xmodel1 preprocess complete:" in result.stdout
+    with np.load(stale_output, allow_pickle=False) as data:
+        assert data["schema_name"].item() == "xmodel1_discard_v2"
+        assert int(data["schema_version"].item()) == 2
         assert data["state_tile_feat"].shape[0] >= 1
 
 

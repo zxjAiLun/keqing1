@@ -99,7 +99,7 @@ class KeqingModelAdapter:
         c_tile = state_dict["input_proj.0.weight"].shape[1]
         n_scalar = state_dict["scalar_proj.0.weight"].shape[1]
         if inferred_version == "keqingv4":
-            features_mod = importlib.import_module("keqingv3.features")
+            features_mod = importlib.import_module("training.state_features")
             model_mod = importlib.import_module("keqingv4.model")
             preprocess_mod = importlib.import_module("keqingv4.preprocess_features")
             core_mod = importlib.import_module("keqing_core")
@@ -125,53 +125,18 @@ class KeqingModelAdapter:
             def _build_runtime_v4_summaries(snapshot: dict, actor: int, legal_actions: list[dict]):
                 try:
                     return core_mod.build_keqingv4_typed_summaries(snapshot, actor, legal_actions)
-                except Exception:
+                except RuntimeError as exc:
+                    if not core_mod.is_missing_rust_capability_error(exc):
+                        raise
+                    # Keep the Python path as an emergency mirror only when the
+                    # Rust typed-summary bridge is unavailable.
                     return preprocess_mod.build_typed_action_summaries(snapshot, actor, legal_actions)
             inst._runtime_v4_summary_builder = _build_runtime_v4_summaries
             return inst
 
-        inferred_version = inferred_version or (
-            "keqingv3" if (c_tile == 57 and n_scalar == 56) else "keqingv1"
-        )
-        if inferred_version == "keqingv31":
-            features_mod = importlib.import_module("keqingv3.features")
-            model_mod = importlib.import_module("keqingv31.model")
-            model = model_mod.KeqingV31Model(
-                hidden_dim=int(cfg.get("hidden_dim", 256)),
-                num_res_blocks=int(cfg.get("num_res_blocks", 5)),
-                c_tile=c_tile,
-                n_scalar=n_scalar,
-                action_embed_dim=int(cfg.get("action_embed_dim", 48)),
-                dropout=float(cfg.get("dropout", 0.1)),
-            )
-        elif inferred_version == "keqingv3":
-            features_mod = importlib.import_module("keqingv3.features")
-            model_mod = importlib.import_module("keqingv3.model")
-            model_cls = model_mod.MahjongModel
-            model = model_cls(
-                hidden_dim=hidden_dim,
-                num_res_blocks=num_res_blocks,
-                c_tile=c_tile,
-                n_scalar=n_scalar,
-            )
-        else:
-            features_mod = importlib.import_module("keqingv1.features")
-            model_mod = importlib.import_module("keqingv1.model")
-            model_cls = model_mod.MahjongModel
-            model = model_cls(
-                hidden_dim=hidden_dim,
-                num_res_blocks=num_res_blocks,
-                c_tile=c_tile,
-                n_scalar=n_scalar,
-            )
-        model.load_state_dict(state_dict)
-        model.to(device)
-        model.eval()
-        return cls(
-            model_version=inferred_version,
-            model=model,
-            encode_fn=features_mod.encode,
-            device=device,
+        raise ValueError(
+            f"Unsupported checkpoint model_version={inferred_version!r}; "
+            "only xmodel1 and keqingv4 are supported."
         )
 
     def encode(self, snap: dict, actor: int) -> tuple[np.ndarray, np.ndarray]:
@@ -213,6 +178,19 @@ class KeqingModelAdapter:
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
+    @staticmethod
+    def _validate_v4_summary_shape(
+        name: str,
+        value,
+        expected_shape: tuple[int, ...],
+    ) -> np.ndarray:
+        arr = np.asarray(value, dtype=np.float32)
+        if arr.shape != expected_shape:
+            raise RuntimeError(
+                f"keqingv4 {name} contract drift: expected shape {expected_shape}, got {arr.shape}"
+            )
+        return arr
+
     def _resolve_v4_runtime_summaries(
         self,
         snap: dict,
@@ -225,9 +203,21 @@ class KeqingModelAdapter:
             and "v4_special_summary" in snap
         ):
             return (
-                np.asarray(snap["v4_discard_summary"], dtype=np.float32),
-                np.asarray(snap["v4_call_summary"], dtype=np.float32),
-                np.asarray(snap["v4_special_summary"], dtype=np.float32),
+                self._validate_v4_summary_shape(
+                    "discard summary",
+                    snap["v4_discard_summary"],
+                    (34, KEQINGV4_SUMMARY_DIM),
+                ),
+                self._validate_v4_summary_shape(
+                    "call summary",
+                    snap["v4_call_summary"],
+                    (8, KEQINGV4_SUMMARY_DIM),
+                ),
+                self._validate_v4_summary_shape(
+                    "special summary",
+                    snap["v4_special_summary"],
+                    (3, KEQINGV4_SUMMARY_DIM),
+                ),
             )
 
         cache_key = self._build_v4_summary_cache_key(snap, actor, legal_actions)
@@ -235,9 +225,27 @@ class KeqingModelAdapter:
         if cached is not None:
             return cached
 
-        summaries = tuple(
-            np.asarray(arr, dtype=np.float32)
-            for arr in self._runtime_v4_summary_builder(snap, actor, legal_actions)
+        discard_summary, call_summary, special_summary = self._runtime_v4_summary_builder(
+            snap,
+            actor,
+            legal_actions,
+        )
+        summaries = (
+            self._validate_v4_summary_shape(
+                "discard summary",
+                discard_summary,
+                (34, KEQINGV4_SUMMARY_DIM),
+            ),
+            self._validate_v4_summary_shape(
+                "call summary",
+                call_summary,
+                (8, KEQINGV4_SUMMARY_DIM),
+            ),
+            self._validate_v4_summary_shape(
+                "special summary",
+                special_summary,
+                (3, KEQINGV4_SUMMARY_DIM),
+            ),
         )
         self._runtime_v4_summary_cache[cache_key] = summaries
         return summaries  # type: ignore[return-value]

@@ -14,12 +14,12 @@ _resolve_seat_bots = _MODULE._resolve_seat_bots
 
 def test_resolve_seat_bots_supports_rulebase_mix():
     sources, labels, kinds = _resolve_seat_bots(
-        "keqingv2",
-        ["keqingv2", "rulebase", "rulebase", "keqingv1"],
+        "xmodel1",
+        ["xmodel1", "rulebase", "rulebase", "keqingv4"],
         None,
         None,
     )
 
     assert sources[1] == "rulebase"
     assert labels[1] == "rulebase"
-    assert kinds == ["keqingv2", "rulebase", "rulebase", "keqingv1"]
+    assert kinds == ["xmodel1", "rulebase", "rulebase", "keqingv4"]

@@ -6,7 +6,7 @@ from typing import Any
 from inference.rulebase_bot import RulebaseBot
 from inference.runtime_bot import RuntimeBot
 
-SUPPORTED_BOT_NAMES = {"keqingv1", "keqingv2", "keqingv3", "keqingv31", "keqingv4", "xmodel1", "rulebase"}
+SUPPORTED_BOT_NAMES = {"keqingv4", "xmodel1", "rulebase"}
 
 
 def create_runtime_bot(

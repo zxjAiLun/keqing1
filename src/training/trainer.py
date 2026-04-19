@@ -14,7 +14,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from keqingv1.model import MahjongModel
 from training.specs import TaskSpec
 
 # action index → 类型名（dahai 合并为一个大类，chi_*/kan 系列合并显示）
@@ -40,7 +39,7 @@ def _action_type_name(idx: int) -> str:
     return f"unknown_{idx}"
 
 
-def save_checkpoint(path: Path, model: MahjongModel, optimizer, scheduler, epoch: int, step: int, best_val_loss: float):
+def save_checkpoint(path: Path, model: nn.Module, optimizer, scheduler, epoch: int, step: int, best_val_loss: float):
     torch.save({
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -51,7 +50,7 @@ def save_checkpoint(path: Path, model: MahjongModel, optimizer, scheduler, epoch
     }, path)
 
 
-def load_checkpoint(path: Path, model: MahjongModel, optimizer, scheduler):
+def load_checkpoint(path: Path, model: nn.Module, optimizer, scheduler):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt["model"], strict=False)
     optimizer.load_state_dict(ckpt["optimizer"])
@@ -102,7 +101,7 @@ def _format_nonfinite_debug(
 
 
 def _run_epoch(
-    model: MahjongModel,
+    model: nn.Module,
     loader: DataLoader,
     optimizer,
     scheduler,
@@ -303,7 +302,7 @@ def _meld_metric_from_stats(stats: Dict) -> float | None:
 
 
 def train_model(
-    model: MahjongModel,
+    model: nn.Module,
     *,
     train_loader: Optional[DataLoader],
     train_loader_factory: Optional[Callable[[int], DataLoader]],
@@ -314,7 +313,7 @@ def train_model(
     resume_path: Optional[Path] = None,
     weights_only: bool = False,
     device_str: str = "cuda",
-) -> MahjongModel:
+) -> nn.Module:
     if train_loader is None and train_loader_factory is None:
         raise ValueError("train_loader or train_loader_factory is required")
 

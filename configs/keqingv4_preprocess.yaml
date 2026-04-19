@@ -9,7 +9,7 @@ data_dirs:
 
 output_dir: processed_v4
 
-workers: 18
+jobs: 18
 maxtasksperchild: 24
 progress_every: 20
 

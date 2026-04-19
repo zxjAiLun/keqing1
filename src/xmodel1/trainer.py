@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import gc
+import json
 import math
 import time
 from pathlib import Path
@@ -16,8 +16,8 @@ from xmodel1.cached_dataset import Xmodel1DiscardDataset
 from xmodel1.model import Xmodel1Model
 from xmodel1.schema import (
     XMODEL1_CHI_SPECIAL_TYPES,
-    XMODEL1_SPECIAL_TYPE_DAMA,
     XMODEL1_KAN_SPECIAL_TYPES,
+    XMODEL1_SPECIAL_TYPE_DAMA,
     XMODEL1_SPECIAL_TYPE_NONE,
     XMODEL1_SPECIAL_TYPE_PON,
     XMODEL1_SPECIAL_TYPE_REACH,
@@ -41,6 +41,26 @@ def _build_scheduler(optimizer, warmup_steps: int, total_steps: int):
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def _build_grad_scaler(device: torch.device):
+    enabled = device.type == "cuda"
+    try:
+        return torch.amp.GradScaler(device="cuda", enabled=enabled)
+    except TypeError:
+        try:
+            return torch.amp.GradScaler("cuda", enabled=enabled)
+        except TypeError:
+            return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def _autocast_enabled(*, device: torch.device, is_train: bool, scaler) -> bool:
+    if device.type != "cuda":
+        return False
+    if not is_train:
+        return True
+    return bool(scaler is not None and scaler.is_enabled())
+
 
 def build_dataloaders(
     *,
@@ -74,6 +94,7 @@ def build_dataloaders(
     )
     return DataLoader(train_ds, **common), DataLoader(val_ds, **common)
 
+
 def _unpack_batch(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
     out = {}
     for key, value in batch.items():
@@ -81,7 +102,7 @@ def _unpack_batch(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[
             out[key] = value
             continue
         moved = value.to(device, non_blocking=True)
-        if moved.dtype == torch.float16:
+        if moved.dtype == torch.float16 and device.type != "cuda":
             moved = moved.float()
         if key in {
             "candidate_tile_id",
@@ -94,6 +115,7 @@ def _unpack_batch(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[
             moved = moved.long()
         out[key] = moved
     return out
+
 
 def _chosen_action_targets(
     candidate_tile_id: torch.Tensor,
@@ -115,12 +137,12 @@ def _masked_mean(loss_values: torch.Tensor, valid_mask: torch.Tensor) -> torch.T
 
 
 def _resolve_pts_given_targets(batch: Dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
-    """Xmodel1 v2 requires true conditional point labels."""
     pts_given_win_target = batch.get("pts_given_win_target")
     pts_given_dealin_target = batch.get("pts_given_dealin_target")
     if pts_given_win_target is None or pts_given_dealin_target is None:
         raise ValueError("Xmodel1 v2 batches require pts_given_win_target and pts_given_dealin_target")
     return pts_given_win_target.float(), pts_given_dealin_target.float()
+
 
 def _candidate_ranking_loss(
     logits: torch.Tensor,
@@ -132,6 +154,7 @@ def _candidate_ranking_loss(
     teacher_probs = torch.softmax(teacher, dim=-1)
     model_log_probs = F.log_softmax(masked_logits, dim=-1)
     return -(teacher_probs * model_log_probs).sum(dim=-1).mean()
+
 
 def _hard_bad_penalty(
     logits: torch.Tensor,
@@ -242,7 +265,6 @@ def _special_comparison_losses(
                 call_scores = special_logits[row].masked_fill(~call_family_mask[row], -1e4)
                 best_call_idx = int(call_scores.argmax().item())
                 best_call_hard_bad = float(special_hard_bad_flag[row, best_call_idx].item())
-                # Focus the "none beats bad chi/call" relation on clearly bad call candidates.
                 if best_call_hard_bad > 0.5:
                     call_losses.append(
                         _pairwise_margin_loss(
@@ -256,12 +278,14 @@ def _special_comparison_losses(
     call_loss = torch.stack(call_losses).mean() if call_losses else zero
     return reach_loss, call_loss
 
+
 def _run_epoch(
     model: Xmodel1Model,
     loader,
     *,
     optimizer,
     scheduler,
+    scaler,
     device: torch.device,
     is_train: bool,
     loss_weights: Dict[str, float],
@@ -301,6 +325,7 @@ def _run_epoch(
         total_batches = max_batches if total_batches is None else min(total_batches, max_batches)
     tag = "train" if is_train else "val"
     ctx = torch.enable_grad() if is_train else torch.no_grad()
+    amp_enabled = _autocast_enabled(device=device, is_train=is_train, scaler=scaler)
     with ctx:
         for batch in loader:
             if max_batches is not None and max_batches > 0 and n_batches >= max_batches:
@@ -309,131 +334,127 @@ def _run_epoch(
             if is_train:
                 optimizer.zero_grad(set_to_none=True)
 
-            out = model(
-                batch["state_tile_feat"],
-                batch["state_scalar"],
-                batch["candidate_feat"],
-                batch["candidate_tile_id"],
-                batch["candidate_flags"],
-                batch["candidate_mask"],
-                batch.get("special_candidate_feat"),
-                batch.get("special_candidate_type_id"),
-                batch.get("special_candidate_mask"),
-                event_history=batch.get("event_history"),
-            )
-            action_targets = batch["action_idx_target"].long()
-            sample_type = batch.get("sample_type")
-            if sample_type is None:
-                sample_type = torch.zeros_like(action_targets)
-            sample_type = sample_type.long()
-            discard_rows = sample_type == 0
-            discard_target = batch["chosen_candidate_idx"].clamp_min(0)
-            ce_raw = F.cross_entropy(
-                out.discard_logits.float(),
-                discard_target,
-                reduction="none",
-            )
-            ce_loss = _masked_mean(ce_raw, discard_rows)
-            action_ce_loss = F.cross_entropy(out.action_logits.float(), action_targets)
-            special_ce_loss = _special_candidate_ce_loss(
-                out.special_logits,
-                batch["chosen_special_candidate_idx"],
-                batch["special_candidate_mask"],
-            )
-            rank_loss = (
-                _candidate_ranking_loss(
-                    out.discard_logits[discard_rows],
-                    batch["candidate_quality_score"][discard_rows],
-                    batch["candidate_mask"][discard_rows],
+            with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
+                out = model(
+                    batch["state_tile_feat"],
+                    batch["state_scalar"],
+                    batch["candidate_feat"],
+                    batch["candidate_tile_id"],
+                    batch["candidate_flags"],
+                    batch["candidate_mask"],
+                    batch.get("special_candidate_feat"),
+                    batch.get("special_candidate_type_id"),
+                    batch.get("special_candidate_mask"),
+                    event_history=batch.get("event_history"),
                 )
-                if torch.any(discard_rows)
-                else out.discard_logits.new_tensor(0.0)
-            )
-            special_rank_loss = _candidate_ranking_loss(
-                out.special_logits,
-                batch["special_candidate_quality_score"],
-                batch["special_candidate_mask"],
-            )
-            reach_pair_loss, call_pair_loss = _special_comparison_losses(
-                out.special_logits.float(),
-                batch["special_candidate_type_id"],
-                batch["special_candidate_mask"],
-                batch["chosen_special_candidate_idx"],
-                batch["special_candidate_hard_bad_flag"].float(),
-                margin=float(loss_weights["special_margin"]),
-            )
-            hard_bad_loss = (
-                _hard_bad_penalty(
-                    out.discard_logits[discard_rows].float(),
-                    batch["candidate_hard_bad_flag"][discard_rows].float(),
-                    batch["chosen_candidate_idx"][discard_rows].clamp_min(0),
-                    batch["candidate_mask"][discard_rows],
+                action_targets = batch["action_idx_target"].long()
+                sample_type = batch.get("sample_type")
+                if sample_type is None:
+                    sample_type = torch.zeros_like(action_targets)
+                sample_type = sample_type.long()
+                discard_rows = sample_type == 0
+                discard_target = batch["chosen_candidate_idx"].clamp_min(0)
+                ce_raw = F.cross_entropy(out.discard_logits.float(), discard_target, reduction="none")
+                ce_loss = _masked_mean(ce_raw, discard_rows)
+                action_ce_loss = F.cross_entropy(out.action_logits.float(), action_targets)
+                special_ce_loss = _special_candidate_ce_loss(
+                    out.special_logits,
+                    batch["chosen_special_candidate_idx"],
+                    batch["special_candidate_mask"],
                 )
-                if torch.any(discard_rows)
-                else out.discard_logits.new_tensor(0.0)
-            )
-            win_target = batch["win_target"].float()
-            dealin_target = batch["dealin_target"].float()
-            win_loss = F.binary_cross_entropy_with_logits(
-                out.win_logit.squeeze(-1).float(),
-                win_target,
-            )
-            dealin_loss = F.binary_cross_entropy_with_logits(
-                out.dealin_logit.squeeze(-1).float(),
-                dealin_target,
-            )
-            # 分解 EV 条件回归:
-            # 优先消费 preprocess 输出的真标签 pts_given_win_target /
-            # pts_given_dealin_target。老 cache 不含该字段时回退到旧近似
-            # (|score_delta_target| × win/dealin mask),保证向后兼容。
-            pts_win_target, pts_dealin_target = _resolve_pts_given_targets(batch)
-            win_mask = win_target > 0.5
-            dealin_mask = dealin_target > 0.5
-            pts_given_win_raw = F.smooth_l1_loss(
-                out.pts_given_win.squeeze(-1).float(),
-                pts_win_target,
-                reduction="none",
-            )
-            pts_given_dealin_raw = F.smooth_l1_loss(
-                out.pts_given_dealin.squeeze(-1).float(),
-                pts_dealin_target,
-                reduction="none",
-            )
-            pts_win_loss = _masked_mean(pts_given_win_raw, win_mask)
-            pts_dealin_loss = _masked_mean(pts_given_dealin_raw, dealin_mask)
-            # xmodel1_discard_v2 requires opp_tenpai_target in cache; this guard is only
-            # for synthetic/unit-test batches that bypass the dataset contract.
-            opp_tenpai_target = batch.get("opp_tenpai_target")
-            if opp_tenpai_target is None:
-                opp_tenpai_loss = out.opp_tenpai_logits.new_tensor(0.0)
-            else:
-                opp_tenpai_loss = F.binary_cross_entropy_with_logits(
-                    out.opp_tenpai_logits.float(),
-                    opp_tenpai_target.float(),
+                rank_loss = (
+                    _candidate_ranking_loss(
+                        out.discard_logits[discard_rows],
+                        batch["candidate_quality_score"][discard_rows],
+                        batch["candidate_mask"][discard_rows],
+                    )
+                    if torch.any(discard_rows)
+                    else out.discard_logits.new_tensor(0.0)
                 )
-            loss = (
-                loss_weights["ce"] * ce_loss
-                + loss_weights["action_ce"] * action_ce_loss
-                + loss_weights["special_ce"] * special_ce_loss
-                + loss_weights["special_rank"] * special_rank_loss
-                + loss_weights["reach_pair"] * reach_pair_loss
-                + loss_weights["call_pair"] * call_pair_loss
-                + loss_weights["rank"] * rank_loss
-                + loss_weights["hard_bad"] * hard_bad_loss
-                + loss_weights["win"] * win_loss
-                + loss_weights["dealin"] * dealin_loss
-                + loss_weights["pts_win"] * pts_win_loss
-                + loss_weights["pts_dealin"] * pts_dealin_loss
-                + loss_weights["opp_tenpai"] * opp_tenpai_loss
-            )
+                special_rank_loss = _candidate_ranking_loss(
+                    out.special_logits,
+                    batch["special_candidate_quality_score"],
+                    batch["special_candidate_mask"],
+                )
+                reach_pair_loss, call_pair_loss = _special_comparison_losses(
+                    out.special_logits.float(),
+                    batch["special_candidate_type_id"],
+                    batch["special_candidate_mask"],
+                    batch["chosen_special_candidate_idx"],
+                    batch["special_candidate_hard_bad_flag"].float(),
+                    margin=float(loss_weights["special_margin"]),
+                )
+                hard_bad_loss = (
+                    _hard_bad_penalty(
+                        out.discard_logits[discard_rows].float(),
+                        batch["candidate_hard_bad_flag"][discard_rows].float(),
+                        batch["chosen_candidate_idx"][discard_rows].clamp_min(0),
+                        batch["candidate_mask"][discard_rows],
+                    )
+                    if torch.any(discard_rows)
+                    else out.discard_logits.new_tensor(0.0)
+                )
+                win_target = batch["win_target"].float()
+                dealin_target = batch["dealin_target"].float()
+                win_loss = F.binary_cross_entropy_with_logits(out.win_logit.squeeze(-1).float(), win_target)
+                dealin_loss = F.binary_cross_entropy_with_logits(out.dealin_logit.squeeze(-1).float(), dealin_target)
+                pts_win_target, pts_dealin_target = _resolve_pts_given_targets(batch)
+                win_mask = win_target > 0.5
+                dealin_mask = dealin_target > 0.5
+                pts_given_win_raw = F.smooth_l1_loss(
+                    out.pts_given_win.squeeze(-1).float(),
+                    pts_win_target,
+                    reduction="none",
+                )
+                pts_given_dealin_raw = F.smooth_l1_loss(
+                    out.pts_given_dealin.squeeze(-1).float(),
+                    pts_dealin_target,
+                    reduction="none",
+                )
+                pts_win_loss = _masked_mean(pts_given_win_raw, win_mask)
+                pts_dealin_loss = _masked_mean(pts_given_dealin_raw, dealin_mask)
+                opp_tenpai_target = batch.get("opp_tenpai_target")
+                if opp_tenpai_target is None:
+                    opp_tenpai_loss = out.opp_tenpai_logits.new_tensor(0.0)
+                else:
+                    opp_tenpai_loss = F.binary_cross_entropy_with_logits(
+                        out.opp_tenpai_logits.float(),
+                        opp_tenpai_target.float(),
+                    )
+                loss = (
+                    loss_weights["ce"] * ce_loss
+                    + loss_weights["action_ce"] * action_ce_loss
+                    + loss_weights["special_ce"] * special_ce_loss
+                    + loss_weights["special_rank"] * special_rank_loss
+                    + loss_weights["reach_pair"] * reach_pair_loss
+                    + loss_weights["call_pair"] * call_pair_loss
+                    + loss_weights["rank"] * rank_loss
+                    + loss_weights["hard_bad"] * hard_bad_loss
+                    + loss_weights["win"] * win_loss
+                    + loss_weights["dealin"] * dealin_loss
+                    + loss_weights["pts_win"] * pts_win_loss
+                    + loss_weights["pts_dealin"] * pts_dealin_loss
+                    + loss_weights["opp_tenpai"] * opp_tenpai_loss
+                )
 
             if is_train:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                if scheduler is not None:
+                if amp_enabled:
+                    prev_scale = float(scaler.get_scale())
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    step_skipped = float(scaler.get_scale()) < prev_scale
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    step_skipped = False
+                if scheduler is not None and not step_skipped:
                     scheduler.step()
-                global_step += 1
+                if not step_skipped:
+                    global_step += 1
 
             pred = out.discard_logits.argmax(dim=-1)
             action_pred = out.action_logits.argmax(dim=-1)
@@ -474,15 +495,15 @@ def _run_epoch(
                 lr_str = f" lr={optimizer.param_groups[0]['lr']:.2e}" if is_train else ""
                 print(
                     f"  [{tag}] batch={batch_progress} "
-                    f"loss={total['loss']/n_batches:.4f} "
-                    f"ce={total['ce']/n_batches:.4f} "
-                    f"action_ce={total['action_ce']/n_batches:.4f} "
-                    f"special_ce={total['special_ce']/n_batches:.4f} "
-                    f"special_rank={total['special_rank']/n_batches:.4f} "
-                    f"reach_pair={total['reach_pair']/n_batches:.4f} "
-                    f"call_pair={total['call_pair']/n_batches:.4f} "
-                    f"acc={total['acc']/n_batches:.3f} "
-                    f"action_acc={total['action_acc']/n_batches:.3f} "
+                    f"loss={total['loss'] / n_batches:.4f} "
+                    f"ce={total['ce'] / n_batches:.4f} "
+                    f"action_ce={total['action_ce'] / n_batches:.4f} "
+                    f"special_ce={total['special_ce'] / n_batches:.4f} "
+                    f"special_rank={total['special_rank'] / n_batches:.4f} "
+                    f"reach_pair={total['reach_pair'] / n_batches:.4f} "
+                    f"call_pair={total['call_pair'] / n_batches:.4f} "
+                    f"acc={total['acc'] / n_batches:.3f} "
+                    f"action_acc={total['action_acc'] / n_batches:.3f} "
                     f"| elapsed={_format_duration(elapsed_s)} eta={_format_duration(eta_s)}"
                     f"{lr_str}",
                     flush=True,
@@ -490,10 +511,11 @@ def _run_epoch(
 
     if n_batches == 0:
         raise RuntimeError("no batches were produced by the Xmodel1 loader")
-    stats = {k: v / n_batches for k, v in total.items()}
+    stats = {key: value / n_batches for key, value in total.items()}
     stats["step"] = global_step
     stats["num_batches"] = n_batches
     return stats
+
 
 def _load_checkpoint(path: Path) -> Dict:
     try:
@@ -573,6 +595,7 @@ def train(
     warmup_steps = int(cfg.get("warmup_steps", 1000))
     total_steps = max(1, effective_train_steps * num_epochs)
     scheduler = _build_scheduler(optimizer, warmup_steps, total_steps)
+    scaler = _build_grad_scaler(device)
     loss_weights = {
         "ce": float(cfg.get("ce_loss_weight", 1.0)),
         "action_ce": float(cfg.get("action_ce_loss_weight", 0.25)),
@@ -583,11 +606,6 @@ def train(
         "special_margin": float(cfg.get("special_pair_margin", 0.25)),
         "rank": float(cfg.get("rank_loss_weight", 0.5)),
         "hard_bad": float(cfg.get("hard_bad_loss_weight", 0.25)),
-        # 分解 EV 权重(Stage 1):
-        #   win / dealin BCE:0.5
-        #   pts_given_{win,dealin} SmoothL1:0.3 (仅对应样本监督)
-        # 已弃用的 value/score_delta/offense_quality 权重仍接受读取
-        # 但不再参与 loss,便于旧 checkpoint 的 cfg 元数据兼容。
         "win": float(cfg.get("win_loss_weight", 0.5)),
         "dealin": float(cfg.get("dealin_loss_weight", 0.5)),
         "pts_win": float(cfg.get("pts_win_loss_weight", 0.3)),
@@ -640,17 +658,17 @@ def train(
 
     for epoch in range(start_epoch, num_epochs):
         t0 = time.time()
-        print(f"\n[Epoch {epoch+1}/{num_epochs}]", flush=True)
+        print(f"\n[Epoch {epoch + 1}/{num_epochs}]", flush=True)
         total_train_steps_plan = effective_train_steps * num_epochs
         if train_loader_summary_factory is not None:
             summary = train_loader_summary_factory(epoch)
             if summary:
                 sampled_files = summary.get("sampled_files")
                 sampled_samples = summary.get("sampled_samples")
-                sampled_ratio = summary.get("sampled_ratio")
+                sampled_ratio = float(summary.get("sampled_ratio", 0.0) or 0.0)
                 print(
                     f"  [epoch-plan] sampled_files={sampled_files} "
-                    f"sampled_samples≈{sampled_samples} sampled_ratio≈{sampled_ratio:.3f} "
+                    f"sampled_samples={sampled_samples} sampled_ratio={sampled_ratio:.3f} "
                     f"global_step={global_step}/{total_train_steps_plan}",
                     flush=True,
                 )
@@ -671,6 +689,7 @@ def train(
             current_train_loader,
             optimizer=optimizer,
             scheduler=scheduler,
+            scaler=scaler,
             device=device,
             is_train=True,
             loss_weights=loss_weights,
@@ -685,6 +704,7 @@ def train(
             val_loader,
             optimizer=optimizer,
             scheduler=None,
+            scaler=None,
             device=device,
             is_train=False,
             loss_weights=loss_weights,
@@ -723,7 +743,7 @@ def train(
         if is_best:
             torch.save(checkpoint, output_dir / "best.pth")
         print(
-            f"[Epoch {epoch+1}/{num_epochs}] "
+            f"[Epoch {epoch + 1}/{num_epochs}] "
             f"train loss={train_stats['loss']:.4f} acc={train_stats['acc']:.3f} action_acc={train_stats['action_acc']:.3f} "
             f"| val loss={val_stats['loss']:.4f} acc={val_stats['acc']:.3f} action_acc={val_stats['action_acc']:.3f} "
             f"| {elapsed:.0f}s",
@@ -755,4 +775,5 @@ def train(
         torch.cuda.empty_cache()
     return model
 
-__all__ = ["build_dataloaders", "train", "_chosen_action_targets"]
+
+__all__ = ["build_dataloaders", "train", "_chosen_action_targets", "_unpack_batch", "_autocast_enabled"]

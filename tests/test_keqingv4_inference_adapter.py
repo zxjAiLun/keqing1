@@ -3,10 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from inference.keqing_adapter import KeqingModelAdapter
-from mahjong_env.replay import build_supervised_samples
+from mahjong_env.replay import build_replay_samples_mc_return
 from keqingv4.model import KeqingV4Model
 from training.cache_schema import KEQINGV4_SUMMARY_DIM
 
@@ -33,7 +34,7 @@ def _sample_discard_state():
         {"type": "tsumo", "actor": 0, "pai": "5s"},
         {"type": "dahai", "actor": 0, "pai": "5s", "tsumogiri": True},
     ]
-    samples = build_supervised_samples(events, value_strategy="mc_return", strict_legal_labels=True)
+    samples = build_replay_samples_mc_return(events, strict_legal_labels=True)
     sample = next(s for s in samples if s.label_action.get("type") == "dahai")
     snap = dict(sample.state)
     snap["legal_actions"] = sample.legal_actions
@@ -166,3 +167,150 @@ def test_keqingv4_keqing_adapter_prefers_core_typed_summary_bridge(tmp_path: Pat
 
     assert calls["core"] == 1
     assert result.policy_logits.shape == (45,)
+
+
+def test_keqingv4_keqing_adapter_falls_back_only_for_missing_core_capability(tmp_path: Path, monkeypatch):
+    ckpt = tmp_path / "keqingv4_missing_cap_test.pth"
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "cfg": {
+                "model_name": "keqingv4",
+                "hidden_dim": 64,
+                "num_res_blocks": 2,
+                "action_embed_dim": 16,
+                "context_dim": 12,
+                "dropout": 0.0,
+            },
+            "model_version": "keqingv4",
+        },
+        ckpt,
+    )
+    snap, actor = _sample_discard_state()
+
+    import keqing_core
+    import keqingv4.preprocess_features as preprocess_features
+
+    calls = {"python": 0}
+
+    def missing_core_builder(*args, **kwargs):
+        raise RuntimeError("Rust keqingv4 typed summaries capability is not available")
+
+    def python_builder(snapshot, actor_arg, legal_actions):
+        del snapshot, actor_arg, legal_actions
+        calls["python"] += 1
+        return (
+            np.zeros((34, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+            np.zeros((8, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+            np.zeros((3, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+        )
+
+    monkeypatch.setattr(keqing_core, "build_keqingv4_typed_summaries", missing_core_builder)
+    monkeypatch.setattr(preprocess_features, "build_typed_action_summaries", python_builder)
+
+    adapter = KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
+    result = adapter.forward(snap, actor)
+
+    assert calls["python"] == 1
+    assert result.policy_logits.shape == (45,)
+
+
+def test_keqingv4_keqing_adapter_propagates_core_bridge_errors(tmp_path: Path, monkeypatch):
+    ckpt = tmp_path / "keqingv4_bridge_error_test.pth"
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "cfg": {
+                "model_name": "keqingv4",
+                "hidden_dim": 64,
+                "num_res_blocks": 2,
+                "action_embed_dim": 16,
+                "context_dim": 12,
+                "dropout": 0.0,
+            },
+            "model_version": "keqingv4",
+        },
+        ckpt,
+    )
+    snap, actor = _sample_discard_state()
+
+    import keqing_core
+    import keqingv4.preprocess_features as preprocess_features
+
+    monkeypatch.setattr(
+        keqing_core,
+        "build_keqingv4_typed_summaries",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("summary bridge drift")),
+    )
+    monkeypatch.setattr(
+        preprocess_features,
+        "build_typed_action_summaries",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python fallback should stay unused")),
+    )
+
+    adapter = KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
+    with pytest.raises(RuntimeError, match="summary bridge drift"):
+        adapter.forward(snap, actor)
+
+
+def test_keqingv4_keqing_adapter_rejects_core_typed_summary_shape_drift(tmp_path: Path, monkeypatch):
+    ckpt = tmp_path / "keqingv4_shape_drift_test.pth"
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "cfg": {
+                "model_name": "keqingv4",
+                "hidden_dim": 64,
+                "num_res_blocks": 2,
+                "action_embed_dim": 16,
+                "context_dim": 12,
+                "dropout": 0.0,
+            },
+            "model_version": "keqingv4",
+        },
+        ckpt,
+    )
+    snap, actor = _sample_discard_state()
+
+    import keqing_core
+    import keqingv4.preprocess_features as preprocess_features
+
+    monkeypatch.setattr(
+        keqing_core,
+        "build_keqingv4_typed_summaries",
+        lambda *args, **kwargs: (
+            np.zeros((33, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+            np.zeros((8, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+            np.zeros((3, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+        ),
+    )
+    monkeypatch.setattr(
+        preprocess_features,
+        "build_typed_action_summaries",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python fallback should stay unused")),
+    )
+
+    adapter = KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
+    with pytest.raises(RuntimeError, match="keqingv4 discard summary contract drift"):
+        adapter.forward(snap, actor)

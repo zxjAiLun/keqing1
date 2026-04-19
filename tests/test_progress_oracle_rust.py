@@ -3,12 +3,14 @@ from __future__ import annotations
 import random
 import subprocess
 import sys
+import os
+from pathlib import Path
 
 import pytest
 
 import keqing_core
-import keqingv3.progress_oracle as progress_oracle
-from keqingv3.progress_oracle import (
+import mahjong_env.progress_oracle as progress_oracle
+from mahjong_env.progress_oracle import (
     NormalProgressInfo,
     _candidate_discards_no_meld_break,
     _candidate_progress_key,
@@ -307,11 +309,16 @@ def test_rust_auto_enabled_when_extension_is_available():
         "import keqing_core; "
         "print(int(keqing_core.is_available()), int(keqing_core.is_enabled()), int(keqing_core._USE_RUST))"
     )
+    env = dict(os.environ)
+    src_dir = str(Path(__file__).resolve().parents[1] / "src")
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = src_dir if not existing else src_dir + os.pathsep + existing
     proc = subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,
         text=True,
         check=True,
+        env=env,
     )
     available, enabled, use_rust = [int(part) for part in proc.stdout.strip().split()]
     if available:

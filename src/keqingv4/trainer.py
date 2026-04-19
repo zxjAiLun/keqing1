@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 import torch
 import torch.nn.functional as F
 
-from keqingv1.action_space import HORA_IDX, NONE_IDX, REACH_IDX
+from mahjong_env.action_space import HORA_IDX, NONE_IDX, REACH_IDX
 from keqingv4.cached_dataset import CachedMjaiDatasetV4
 from keqingv4.model import KeqingV4Model
 from training import TaskSpec, train_model

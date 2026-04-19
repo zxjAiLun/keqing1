@@ -94,6 +94,11 @@ def test_rust_legal_actions_keeps_python_hora_injection_for_chankan(monkeypatch)
     snap = gs.snapshot(actor=1)
 
     monkeypatch.setattr("mahjong_env.legal_actions.can_hora_from_snapshot", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        keqing_core,
+        "enumerate_public_legal_action_specs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Rust public legal action capability is not available")),
+    )
 
     _compare_enabled_vs_disabled(snap, actor=1)
 
@@ -111,6 +116,11 @@ def test_rust_legal_actions_keeps_python_hora_injection_for_discard_ron(monkeypa
     snap = gs.snapshot(actor=1)
 
     monkeypatch.setattr("mahjong_env.legal_actions.can_hora_from_snapshot", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        keqing_core,
+        "enumerate_public_legal_action_specs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Rust public legal action capability is not available")),
+    )
 
     _compare_enabled_vs_disabled(snap, actor=1)
 
@@ -130,6 +140,11 @@ def test_rust_legal_actions_keeps_python_hora_injection_for_own_turn_tsumo(monke
     snap = gs.snapshot(actor=0)
 
     monkeypatch.setattr("mahjong_env.legal_actions.can_hora_from_snapshot", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        keqing_core,
+        "enumerate_public_legal_action_specs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Rust public legal action capability is not available")),
+    )
 
     _compare_enabled_vs_disabled(snap, actor=0)
 
@@ -168,3 +183,56 @@ def test_rust_legal_actions_matches_python_for_reached_ankan_guard():
     snap = gs.snapshot(actor=0)
 
     _compare_enabled_vs_disabled(snap, actor=0)
+
+
+def test_rust_public_legal_actions_fall_back_only_for_missing_capability(monkeypatch):
+    if not keqing_core.is_available():
+        pytest.skip("keqing_core native module is not available")
+
+    reactor = PlayerState()
+    reactor.hand.update(["2m", "4m", "5m", "5mr", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4p"])
+
+    gs = GameState()
+    gs.players = [PlayerState(), reactor, PlayerState(), PlayerState()]
+    gs.last_discard = {"actor": 0, "pai": "3m", "pai_raw": "3m"}
+    snap = gs.snapshot(actor=1)
+
+    _set_rust_mode(True)
+    monkeypatch.setattr(
+        keqing_core,
+        "enumerate_public_legal_action_specs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Rust public legal action capability is not available")),
+    )
+
+    actual = _specs_to_mjai(enumerate_legal_action_specs(snap, actor=1))
+
+    _set_rust_mode(False)
+    expected = _specs_to_mjai(enumerate_legal_action_specs(snap, actor=1))
+    assert actual == expected
+
+
+def test_rust_public_legal_actions_propagate_unexpected_bridge_errors(monkeypatch):
+    if not keqing_core.is_available():
+        pytest.skip("keqing_core native module is not available")
+
+    reactor = PlayerState()
+    reactor.hand.update(["2m", "4m", "5m", "5mr", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4p"])
+
+    gs = GameState()
+    gs.players = [PlayerState(), reactor, PlayerState(), PlayerState()]
+    gs.last_discard = {"actor": 0, "pai": "3m", "pai_raw": "3m"}
+    snap = gs.snapshot(actor=1)
+
+    _set_rust_mode(True)
+    monkeypatch.setattr(
+        keqing_core,
+        "enumerate_public_legal_action_specs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("public legal bridge drift")),
+    )
+    monkeypatch.setattr(
+        "mahjong_env.legal_actions._enumerate_legal_action_specs_python",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("python fallback should stay unused")),
+    )
+
+    with pytest.raises(RuntimeError, match="public legal bridge drift"):
+        enumerate_legal_action_specs(snap, actor=1)

@@ -6,9 +6,9 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
-from keqingv1.action_space import TILE_NAME_TO_IDX
-from keqingv3.feature_tracker import SnapshotFeatureTracker
-from keqingv3.progress_oracle import analyze_normal_progress_from_counts
+from mahjong_env.action_space import TILE_NAME_TO_IDX
+from mahjong_env.feature_tracker import SnapshotFeatureTracker
+from mahjong_env.progress_oracle import analyze_normal_progress_from_counts
 from mahjong_env.replay import _calc_shanten_waits
 from mahjong_env.tiles import normalize_tile, tile_is_aka, tile_to_34
 from xmodel1.schema import (

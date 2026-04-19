@@ -13,16 +13,23 @@ from inference.contracts import (
 )
 from inference.keqing_adapter import KeqingModelAdapter
 from keqing_core import (
+    aggregate_keqingv4_continuation_scores as _rust_aggregate_keqingv4_continuation_scores,
     enumerate_keqingv4_live_draw_weights as _rust_enumerate_keqingv4_live_draw_weights,
     enumerate_keqingv4_post_meld_discards as _rust_enumerate_keqingv4_post_meld_discards,
     enumerate_keqingv4_reach_discards as _rust_enumerate_keqingv4_reach_discards,
     enumerate_legal_action_specs_structural as _rust_enumerate_legal_action_specs_structural,
+    resolve_keqingv4_continuation_scenarios as _rust_resolve_keqingv4_continuation_scenarios,
+    is_missing_rust_capability_error as _is_missing_rust_capability_error,
     project_keqingv4_call_snapshot as _rust_project_keqingv4_call_snapshot,
     project_keqingv4_discard_snapshot as _rust_project_keqingv4_discard_snapshot,
+    resolve_keqingv4_post_meld_followup as _rust_resolve_keqingv4_post_meld_followup,
+    resolve_keqingv4_reach_followup as _rust_resolve_keqingv4_reach_followup,
+    resolve_keqingv4_rinshan_followup as _rust_resolve_keqingv4_rinshan_followup,
+    score_keqingv4_continuation_scenario as _rust_score_keqingv4_continuation_scenario,
     project_keqingv4_reach_snapshot as _rust_project_keqingv4_reach_snapshot,
     project_keqingv4_rinshan_draw_snapshot as _rust_project_keqingv4_rinshan_draw_snapshot,
 )
-from keqingv1.action_space import NONE_IDX, action_to_idx, build_legal_mask
+from mahjong_env.action_space import NONE_IDX, action_to_idx, build_legal_mask
 from mahjong_env.legal_actions import _reach_discard_candidates, enumerate_legal_actions
 from mahjong_env.tiles import normalize_tile, tile_to_34
 
@@ -33,6 +40,81 @@ _TILE34_STR = (
     "E", "S", "W", "N", "P", "F", "C",
 )
 _SPECIAL_ACTION_SLOT = {"reach": 0, "hora": 1, "ryukyoku": 2}
+
+
+def _validate_continuation_score_payload(
+    payload: object,
+    *,
+    continuation_kind: str,
+) -> tuple[dict | None, float]:
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"keqingv4 continuation scoring contract drift for {continuation_kind}: payload must be a dict"
+        )
+    if "score" not in payload:
+        raise RuntimeError(
+            f"keqingv4 continuation scoring contract drift for {continuation_kind}: missing score"
+        )
+    best_action = payload.get("best_action")
+    if best_action is not None and not isinstance(best_action, dict):
+        raise RuntimeError(
+            f"keqingv4 continuation scoring contract drift for {continuation_kind}: best_action must be a dict or null"
+        )
+    return best_action, float(payload["score"])
+
+
+def _validate_continuation_aggregation_payload(
+    payload: object,
+    *,
+    action: dict,
+) -> tuple[float, dict]:
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"keqingv4 continuation aggregation contract drift for action={action.get('type')}: payload must be a dict"
+        )
+    if "final_score" not in payload:
+        raise RuntimeError(
+            f"keqingv4 continuation aggregation contract drift for action={action.get('type')}: missing final_score"
+        )
+    meta = payload.get("meta", {})
+    if not isinstance(meta, dict):
+        raise RuntimeError(
+            f"keqingv4 continuation aggregation contract drift for action={action.get('type')}: meta must be a dict"
+        )
+    return float(payload["final_score"]), meta
+
+
+def _validate_continuation_scenario_payload(scenarios: object) -> list[dict]:
+    if not isinstance(scenarios, list):
+        raise RuntimeError("keqingv4 continuation scenario contract drift: payload must be a list")
+    validated: list[dict] = []
+    for idx, scenario in enumerate(scenarios):
+        if not isinstance(scenario, dict):
+            raise RuntimeError(
+                f"keqingv4 continuation scenario contract drift at index {idx}: scenario must be a dict"
+            )
+        projected_snapshot = scenario.get("projected_snapshot", {})
+        if not isinstance(projected_snapshot, dict):
+            raise RuntimeError(
+                f"keqingv4 continuation scenario contract drift at index {idx}: projected_snapshot must be a dict"
+            )
+        legal_actions = scenario.get("legal_actions", [])
+        if not isinstance(legal_actions, list):
+            raise RuntimeError(
+                f"keqingv4 continuation scenario contract drift at index {idx}: legal_actions must be a list"
+            )
+        continuation_kind = scenario.get("continuation_kind", "")
+        if not isinstance(continuation_kind, str):
+            raise RuntimeError(
+                f"keqingv4 continuation scenario contract drift at index {idx}: continuation_kind must be a string"
+            )
+        declaration_action = scenario.get("declaration_action")
+        if declaration_action is not None and not isinstance(declaration_action, dict):
+            raise RuntimeError(
+                f"keqingv4 continuation scenario contract drift at index {idx}: declaration_action must be a dict or null"
+            )
+        validated.append(scenario)
+    return validated
 
 
 def _xmodel1_special_type_for_action(action: dict) -> int | None:
@@ -288,7 +370,9 @@ def _build_v4_special_meta(
             actor,
             legal_actions,
         )
-    except Exception:
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
         return {}
     out: dict[int, dict] = {}
     for action in legal_actions:
@@ -359,9 +443,23 @@ def _eval_snapshot_outputs(
     adapter: KeqingModelAdapter,
     snap: dict,
     actor: int,
+    legal_actions: list[dict] | None = None,
 ) -> tuple[float, ModelAuxOutputs]:
-    result = adapter.forward(snap, actor)
+    resolved_snap = snap if legal_actions is None else dict(snap, legal_actions=legal_actions)
+    result = adapter.forward(resolved_snap, actor)
     return result.value, result.aux
+
+
+def _resolve_runtime_legal_actions(snap: dict, actor: int) -> list[dict]:
+    try:
+        return _rust_enumerate_legal_action_specs_structural(snap, actor)
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
+        return [
+            action.to_mjai() if hasattr(action, "to_mjai") else dict(action)
+            for action in enumerate_legal_actions(snap, actor)
+        ]
 
 
 def _simulate_discard_snapshot(
@@ -371,8 +469,9 @@ def _simulate_discard_snapshot(
 ) -> dict:
     try:
         return _rust_project_keqingv4_discard_snapshot(snap, actor, pai)
-    except Exception:
-        pass
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
 
     hand = list(snap.get("hand", []))
     removed = False
@@ -402,8 +501,9 @@ def _simulate_meld_snapshot(
         projected = _rust_project_keqingv4_call_snapshot(snap, actor, action)
         if projected is not None:
             return projected
-    except Exception:
-        pass
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
 
     meld_type = action.get("type", "")
     consumed = list(action.get("consumed", []))
@@ -476,8 +576,9 @@ def _visible_counts34_from_snap(snap: dict) -> tuple[int, ...]:
 def _live_draw_tile_weights(snap: dict) -> list[tuple[str, int]]:
     try:
         return _rust_enumerate_keqingv4_live_draw_weights(snap)
-    except Exception:
-        pass
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
 
     visible = _visible_counts34_from_snap(snap)
     result: list[tuple[str, int]] = []
@@ -495,8 +596,9 @@ def _simulate_rinshan_draw_snapshot(
 ) -> dict:
     try:
         return _rust_project_keqingv4_rinshan_draw_snapshot(snap, actor, pai)
-    except Exception:
-        pass
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
 
     fake_snap = dict(snap)
     hand = list(snap.get("hand", []))
@@ -525,8 +627,9 @@ def _post_meld_discard_actions(
 ) -> list[dict]:
     try:
         return _rust_enumerate_keqingv4_post_meld_discards(snap, actor)
-    except Exception:
-        pass
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
 
     seen: set[str] = set()
     actions: list[dict] = []
@@ -546,66 +649,202 @@ def _post_meld_discard_actions(
     return actions
 
 
-def _best_post_meld_discard_score(
+def _resolve_post_meld_followup_context(
+    snap: dict,
+    actor: int,
+    action: dict,
+) -> tuple[dict, list[dict]]:
+    try:
+        projected, legal_actions = _rust_resolve_keqingv4_post_meld_followup(snap, actor, action)
+        if projected is not None:
+            return projected, legal_actions
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
+    projected = _simulate_meld_snapshot(snap, actor, action)
+    return projected, _post_meld_discard_actions(projected, actor)
+
+
+def _resolve_rinshan_followup_context(
+    snap: dict,
+    actor: int,
+    pai: str,
+) -> tuple[dict, list[dict]]:
+    try:
+        return _rust_resolve_keqingv4_rinshan_followup(snap, actor, pai)
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
+    projected = _simulate_rinshan_draw_snapshot(snap, actor, pai)
+    return projected, _resolve_runtime_legal_actions(projected, actor)
+
+
+def _resolve_reach_followup_context(
+    snap: dict,
+    actor: int,
+    pai: str,
+) -> tuple[dict, list[dict]]:
+    try:
+        return _rust_resolve_keqingv4_reach_followup(snap, actor, pai)
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
+    fake_snap = _simulate_discard_snapshot(snap, actor, pai)
+    reached = list(snap.get("reached", [False, False, False, False]))
+    if actor < len(reached):
+        reached[actor] = True
+    fake_snap["reached"] = reached
+    pending_reach = list(snap.get("pending_reach", [False, False, False, False]))
+    if actor < len(pending_reach):
+        pending_reach[actor] = False
+    fake_snap["pending_reach"] = pending_reach
+    return fake_snap, _resolve_runtime_legal_actions(fake_snap, actor)
+
+
+def _build_python_continuation_scenarios(
+    snap: dict,
+    actor: int,
+    action: dict,
+) -> list[dict]:
+    action_type = action.get("type", "")
+    if action_type in {"chi", "pon"}:
+        projected, legal_actions = _resolve_post_meld_followup_context(snap, actor, action)
+        if projected is None:
+            return []
+        return [
+            {
+                "projected_snapshot": projected,
+                "legal_actions": legal_actions,
+                "weight": 1.0,
+                "continuation_kind": "post_meld_followup",
+                "declaration_action": None,
+            }
+        ]
+    if action_type in {"daiminkan", "ankan", "kakan"}:
+        post_meld_snapshot = _simulate_meld_snapshot(snap, actor, action)
+        scenarios: list[dict] = []
+        for draw_tile, weight in _live_draw_tile_weights(post_meld_snapshot):
+            projected, legal_actions = _resolve_rinshan_followup_context(post_meld_snapshot, actor, draw_tile)
+            scenarios.append(
+                {
+                    "projected_snapshot": projected,
+                    "legal_actions": legal_actions,
+                    "weight": float(weight),
+                    "continuation_kind": "rinshan_followup",
+                    "declaration_action": None,
+                }
+            )
+        if scenarios:
+            return scenarios
+        return [
+            {
+                "projected_snapshot": post_meld_snapshot,
+                "legal_actions": _resolve_runtime_legal_actions(post_meld_snapshot, actor),
+                "weight": 1.0,
+                "continuation_kind": "state_value",
+                "declaration_action": None,
+            }
+        ]
+    if action_type == "reach":
+        hand = Counter(snap.get("hand", []))
+        last_tsumo_all = list(snap.get("last_tsumo", [None, None, None, None]))
+        last_tsumo_raw_all = list(snap.get("last_tsumo_raw", [None, None, None, None]))
+        last_tsumo = last_tsumo_all[actor] if actor < len(last_tsumo_all) else None
+        last_tsumo_raw = last_tsumo_raw_all[actor] if actor < len(last_tsumo_raw_all) else None
+        try:
+            reach_discards = _rust_enumerate_keqingv4_reach_discards(snap, actor)
+        except RuntimeError as exc:
+            if not _is_missing_rust_capability_error(exc):
+                raise
+            reach_discards = _reach_discard_candidates(hand, last_tsumo, last_tsumo_raw)
+        scenarios = []
+        for pai_out, tsumogiri in reach_discards:
+            projected, legal_actions = _resolve_reach_followup_context(snap, actor, pai_out)
+            scenarios.append(
+                {
+                    "projected_snapshot": projected,
+                    "legal_actions": legal_actions,
+                    "weight": 1.0,
+                    "continuation_kind": "reach_declaration",
+                    "declaration_action": {
+                        "type": "dahai",
+                        "actor": actor,
+                        "pai": pai_out,
+                        "tsumogiri": tsumogiri,
+                    },
+                }
+            )
+        if scenarios:
+            return scenarios
+        reached_snapshot = dict(snap)
+        reached = list(snap.get("reached", [False, False, False, False]))
+        if actor < len(reached):
+            reached[actor] = True
+        reached_snapshot["reached"] = reached
+        return [
+            {
+                "projected_snapshot": reached_snapshot,
+                "legal_actions": _resolve_runtime_legal_actions(reached_snapshot, actor),
+                "weight": 1.0,
+                "continuation_kind": "state_value",
+                "declaration_action": None,
+            }
+        ]
+    return []
+
+
+def _resolve_continuation_scenarios(
+    snap: dict,
+    actor: int,
+    action: dict,
+) -> list[dict]:
+    try:
+        scenarios = _rust_resolve_keqingv4_continuation_scenarios(snap, actor, action)
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
+    else:
+        return _validate_continuation_scenario_payload(scenarios)
+    return _build_python_continuation_scenarios(snap, actor, action)
+
+
+def _best_followup_action_score(
     adapter: KeqingModelAdapter,
     snap: dict,
     actor: int,
+    legal_actions: list[dict],
     *,
     score_delta_lambda: float,
     win_prob_lambda: float,
     dealin_prob_lambda: float,
 ) -> tuple[dict | None, float]:
-    discard_actions = _post_meld_discard_actions(snap, actor)
-    if not discard_actions:
+    if not legal_actions:
         return None, -1e18
 
-    result = adapter.forward(snap, actor)
-    cont_logits = np.asarray(result.policy_logits, dtype=np.float32)
-    mask = np.array(build_legal_mask(discard_actions), dtype=np.float32)
-    cont_logits = np.where(mask > 0, cont_logits, -1e9)
-    cont_aux_bonus = _aux_bonus(
-        result.aux,
-        score_delta_lambda,
-        win_prob_lambda,
-        dealin_prob_lambda,
-    )
-    best_discard = _find_best_legal(
-        cont_logits,
-        discard_actions,
-        value=float(result.value),
-        style_lambda=0.0,
-        aux_bonus=cont_aux_bonus,
-    )
-    best_score = _legal_score(
-        cont_logits,
-        best_discard,
-        value=float(result.value),
-        style_lambda=0.0,
-        aux_bonus=cont_aux_bonus,
-    )
-    return best_discard, best_score
-
-
-def _best_post_draw_action_score(
-    adapter: KeqingModelAdapter,
-    snap: dict,
-    actor: int,
-    *,
-    score_delta_lambda: float,
-    win_prob_lambda: float,
-    dealin_prob_lambda: float,
-) -> float:
+    result = adapter.forward(dict(snap, legal_actions=legal_actions), actor)
     try:
-        legal_actions = _rust_enumerate_legal_action_specs_structural(snap, actor)
-    except Exception:
-        legal_actions = [
-            action.to_mjai() if hasattr(action, "to_mjai") else dict(action)
-            for action in enumerate_legal_actions(snap, actor)
-        ]
-    if not legal_actions:
-        return -1e18
+        payload = _rust_score_keqingv4_continuation_scenario(
+            "post_meld_followup",
+            np.asarray(result.policy_logits, dtype=np.float32),
+            legal_actions,
+            value=float(result.value),
+            score_delta=float(result.aux.score_delta),
+            win_prob=float(result.aux.win_prob),
+            dealin_prob=float(result.aux.dealin_prob),
+            beam_lambda=1.0,
+            score_delta_lambda=score_delta_lambda,
+            win_prob_lambda=win_prob_lambda,
+            dealin_prob_lambda=dealin_prob_lambda,
+        )
+        best_action, score = _validate_continuation_score_payload(
+            payload,
+            continuation_kind="post_meld_followup",
+        )
+        return best_action, score
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
 
-    result = adapter.forward(snap, actor)
     cont_logits = np.asarray(result.policy_logits, dtype=np.float32)
     mask = np.array(build_legal_mask(legal_actions), dtype=np.float32)
     cont_logits = np.where(mask > 0, cont_logits, -1e9)
@@ -622,43 +861,160 @@ def _best_post_draw_action_score(
         style_lambda=0.0,
         aux_bonus=cont_aux_bonus,
     )
-    return _legal_score(
+    best_score = _legal_score(
         cont_logits,
         best_action,
         value=float(result.value),
         style_lambda=0.0,
         aux_bonus=cont_aux_bonus,
     )
+    return best_action, best_score
 
 
-def _weighted_rinshan_followup_score(
-    adapter: KeqingModelAdapter,
-    snap: dict,
-    actor: int,
+def _score_continuation_result_payload(
+    continuation_kind: str,
+    result: ModelForwardResult,
+    legal_actions: list[dict],
     *,
     beam_lambda: float,
     score_delta_lambda: float,
     win_prob_lambda: float,
     dealin_prob_lambda: float,
-) -> float:
-    total_weight = 0.0
-    total_score = 0.0
-    for draw_tile, weight in _live_draw_tile_weights(snap):
-        draw_snap = _simulate_rinshan_draw_snapshot(snap, actor, draw_tile)
-        followup_score = _best_post_draw_action_score(
-            adapter,
-            draw_snap,
-            actor,
+) -> tuple[dict | None, float]:
+    try:
+        payload = _rust_score_keqingv4_continuation_scenario(
+            continuation_kind,
+            np.asarray(result.policy_logits, dtype=np.float32),
+            legal_actions,
+            value=float(result.value),
+            score_delta=float(result.aux.score_delta),
+            win_prob=float(result.aux.win_prob),
+            dealin_prob=float(result.aux.dealin_prob),
+            beam_lambda=beam_lambda,
             score_delta_lambda=score_delta_lambda,
             win_prob_lambda=win_prob_lambda,
             dealin_prob_lambda=dealin_prob_lambda,
         )
-        total_score += float(weight) * followup_score
-        total_weight += float(weight)
+        return _validate_continuation_score_payload(
+            payload,
+            continuation_kind=continuation_kind,
+        )
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
+
+    if continuation_kind in {"reach_declaration", "state_value"}:
+        continuation_score = beam_lambda * float(result.value) + _aux_bonus(
+            result.aux,
+            score_delta_lambda,
+            win_prob_lambda,
+            dealin_prob_lambda,
+        )
+        return None, continuation_score
+
+    if not legal_actions:
+        return None, -1e18
+    cont_logits = np.asarray(result.policy_logits, dtype=np.float32)
+    mask = np.array(build_legal_mask(legal_actions), dtype=np.float32)
+    cont_logits = np.where(mask > 0, cont_logits, -1e9)
+    cont_aux_bonus = _aux_bonus(
+        result.aux,
+        score_delta_lambda,
+        win_prob_lambda,
+        dealin_prob_lambda,
+    )
+    best_action = _find_best_legal(
+        cont_logits,
+        legal_actions,
+        value=float(result.value),
+        style_lambda=0.0,
+        aux_bonus=cont_aux_bonus,
+    )
+    best_score = _legal_score(
+        cont_logits,
+        best_action,
+        value=float(result.value),
+        style_lambda=0.0,
+        aux_bonus=cont_aux_bonus,
+    )
+    return best_action, best_score
+
+
+def _score_continuation_scenarios(
+    adapter: KeqingModelAdapter,
+    actor: int,
+    policy_logits: np.ndarray,
+    action: dict,
+    scenarios: list[dict],
+    *,
+    beam_lambda: float,
+    score_delta_lambda: float,
+    win_prob_lambda: float,
+    dealin_prob_lambda: float,
+) -> tuple[float, dict]:
+    if not scenarios:
+        return float(policy_logits[action_to_idx(action)]), {}
+
+    scenario_scores_payload: list[dict] = []
+    legacy_scenario_scores: list[tuple[float, float, dict]] = []
+    for scenario in scenarios:
+        projected_snapshot = dict(scenario.get("projected_snapshot", {}))
+        legal_actions = list(scenario.get("legal_actions", []))
+        continuation_kind = str(scenario.get("continuation_kind", ""))
+        declaration_action = scenario.get("declaration_action")
+        weight = float(scenario.get("weight", 1.0) or 0.0)
+        resolved_snapshot = projected_snapshot if not legal_actions else dict(projected_snapshot, legal_actions=legal_actions)
+        result = adapter.forward(resolved_snapshot, actor)
+        _best_action, continuation_score = _score_continuation_result_payload(
+            continuation_kind,
+            result,
+            legal_actions,
+            beam_lambda=beam_lambda,
+            score_delta_lambda=score_delta_lambda,
+            win_prob_lambda=win_prob_lambda,
+            dealin_prob_lambda=dealin_prob_lambda,
+        )
+        scenario_scores_payload.append(
+            {
+                "weight": weight,
+                "score": continuation_score,
+                "continuation_kind": continuation_kind,
+                "declaration_action": declaration_action if isinstance(declaration_action, dict) else None,
+            }
+        )
+        legacy_meta: dict[str, object] = {}
+        if action.get("type", "") == "reach" and isinstance(declaration_action, dict):
+            legacy_meta["reach_discard"] = declaration_action
+        legacy_scenario_scores.append((weight, continuation_score, legacy_meta))
+
+    try:
+        payload = _rust_aggregate_keqingv4_continuation_scores(
+            policy_logits,
+            action,
+            scenario_scores_payload,
+        )
+        return _validate_continuation_aggregation_payload(payload, action=action)
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
+
+    action_idx = action_to_idx(action)
+    action_type = action.get("type", "")
+    if action_type == "reach":
+        _, best_score, best_meta = max(
+            legacy_scenario_scores,
+            key=lambda item: item[1] + float(policy_logits[action_to_idx(item[2]["reach_discard"])]) if "reach_discard" in item[2] else item[1],
+        )
+        if "reach_discard" in best_meta:
+            best_score += float(policy_logits[action_to_idx(best_meta["reach_discard"])])
+        return float(policy_logits[action_idx]) + best_score, best_meta
+
+    total_weight = sum(weight for weight, _score, _meta in legacy_scenario_scores)
     if total_weight <= 0.0:
-        value, aux = _eval_snapshot_outputs(adapter, snap, actor)
-        return beam_lambda * value + _aux_bonus(aux, score_delta_lambda, win_prob_lambda, dealin_prob_lambda)
-    return total_score / total_weight
+        _, best_score, best_meta = max(legacy_scenario_scores, key=lambda item: item[1])
+        return float(policy_logits[action_idx]) + best_score, best_meta
+    weighted_score = sum(weight * score for weight, score, _meta in legacy_scenario_scores) / total_weight
+    return float(policy_logits[action_idx]) + weighted_score, {}
 
 
 def _dahai_beam_search(
@@ -730,31 +1086,21 @@ def _meld_value_eval(
                 best_action = a
 
     for a in meld_actions:
-        meld_type = a.get("type", "")
-        fake_snap = _simulate_meld_snapshot(snap, actor, a)
-
-        if meld_type in {"chi", "pon"}:
-            _best_discard, followup_score = _best_post_meld_discard_score(
+        scenarios = _resolve_continuation_scenarios(snap, actor, a)
+        if scenarios:
+            score, _meta = _score_continuation_scenarios(
                 adapter,
-                fake_snap,
                 actor,
-                score_delta_lambda=score_delta_lambda,
-                win_prob_lambda=win_prob_lambda,
-                dealin_prob_lambda=dealin_prob_lambda,
-            )
-            score = float(policy_logits[action_to_idx(a)]) + followup_score
-        elif meld_type in {"daiminkan", "ankan", "kakan"}:
-            followup_score = _weighted_rinshan_followup_score(
-                adapter,
-                fake_snap,
-                actor,
+                policy_logits,
+                a,
+                scenarios,
                 beam_lambda=beam_lambda,
                 score_delta_lambda=score_delta_lambda,
                 win_prob_lambda=win_prob_lambda,
                 dealin_prob_lambda=dealin_prob_lambda,
             )
-            score = float(policy_logits[action_to_idx(a)]) + followup_score
         else:
+            fake_snap = _simulate_meld_snapshot(snap, actor, a)
             value, aux = _eval_snapshot_outputs(adapter, fake_snap, actor)
             score = (
                 float(policy_logits[action_to_idx(a)])
@@ -783,69 +1129,24 @@ def _reach_value_eval(
     special_bonus_scores: dict[int, float] | None = None,
 ) -> tuple[dict, dict[int, float], dict[int, dict]]:
     reach_idx = action_to_idx(reach_action)
-    hand = Counter(snap.get("hand", []))
-    last_tsumo_all = list(snap.get("last_tsumo", [None, None, None, None]))
-    last_tsumo_raw_all = list(snap.get("last_tsumo_raw", [None, None, None, None]))
-    last_tsumo = last_tsumo_all[actor] if actor < len(last_tsumo_all) else None
-    last_tsumo_raw = last_tsumo_raw_all[actor] if actor < len(last_tsumo_raw_all) else None
-    try:
-        reach_discards = _rust_enumerate_keqingv4_reach_discards(snap, actor)
-    except Exception:
-        reach_discards = _reach_discard_candidates(hand, last_tsumo, last_tsumo_raw)
-
-    best_decl_action: dict | None = None
-    best_reach_score = -1e18
-    for pai_out, tsumogiri in reach_discards:
-        decl_action = {
-            "type": "dahai",
-            "actor": actor,
-            "pai": pai_out,
-            "tsumogiri": tsumogiri,
-        }
-        try:
-            fake_snap = _rust_project_keqingv4_reach_snapshot(snap, actor, pai_out)
-        except Exception:
-            fake_snap = _simulate_discard_snapshot(snap, actor, pai_out)
-            reached = list(snap.get("reached", [False, False, False, False]))
-            if actor < len(reached):
-                reached[actor] = True
-            fake_snap["reached"] = reached
-            pending_reach = list(snap.get("pending_reach", [False, False, False, False]))
-            if actor < len(pending_reach):
-                pending_reach[actor] = False
-            fake_snap["pending_reach"] = pending_reach
-
-        value, aux = _eval_snapshot_outputs(adapter, fake_snap, actor)
-        decl_idx = action_to_idx(decl_action)
-        score = (
-            float(policy_logits[reach_idx])
-            + float(policy_logits[decl_idx])
-            + beam_lambda * value
-            + _aux_bonus(aux, score_delta_lambda, win_prob_lambda, dealin_prob_lambda)
-            + (special_bonus_scores or {}).get(reach_idx, 0.0)
-        )
-        if score > best_reach_score:
-            best_reach_score = score
-            best_decl_action = decl_action
-
-    if best_decl_action is None:
-        fake_snap = dict(snap)
-        reached = list(snap.get("reached", [False, False, False, False]))
-        if actor < len(reached):
-            reached[actor] = True
-        fake_snap["reached"] = reached
-        reach_value, reach_aux = _eval_snapshot_outputs(adapter, fake_snap, actor)
-        best_reach_score = (
-            float(policy_logits[reach_idx])
-            + beam_lambda * reach_value
-            + _aux_bonus(reach_aux, score_delta_lambda, win_prob_lambda, dealin_prob_lambda)
-            + (special_bonus_scores or {}).get(reach_idx, 0.0)
-        )
+    scenarios = _resolve_continuation_scenarios(snap, actor, reach_action)
+    best_reach_score, reach_meta = _score_continuation_scenarios(
+        adapter,
+        actor,
+        policy_logits,
+        reach_action,
+        scenarios,
+        beam_lambda=beam_lambda,
+        score_delta_lambda=score_delta_lambda,
+        win_prob_lambda=win_prob_lambda,
+        dealin_prob_lambda=dealin_prob_lambda,
+    )
+    best_reach_score += (special_bonus_scores or {}).get(reach_idx, 0.0)
 
     value_scores: dict[int, float] = {reach_idx: best_reach_score}
-    reach_meta: dict[int, dict] = {}
-    if best_decl_action is not None:
-        reach_meta[reach_idx] = {"reach_discard": best_decl_action}
+    reach_meta_by_idx: dict[int, dict] = {}
+    if reach_meta:
+        reach_meta_by_idx[reach_idx] = reach_meta
 
     best_score = best_reach_score
     best_action = reach_action
@@ -857,7 +1158,7 @@ def _reach_value_eval(
             best_score = s
             best_action = a
 
-    return best_action, value_scores, reach_meta
+    return best_action, value_scores, reach_meta_by_idx
 
 
 class ActionScorer(Protocol):

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--strict-cache-scan", action="store_true")
     return parser.parse_args()
 
 
@@ -40,13 +42,6 @@ def _resolve_paths(root: Path, values: list[str] | None) -> list[Path]:
     return resolved
 
 
-def _resolve_optional_path(root: Path, raw: str | None) -> Path | None:
-    if not raw:
-        return None
-    path = Path(raw)
-    return path if path.is_absolute() else root / path
-
-
 def _resolve_resume_path(root: Path, raw: str | None, output_dir: Path) -> Path | None:
     if raw:
         if raw == "auto":
@@ -56,6 +51,52 @@ def _resolve_resume_path(root: Path, raw: str | None, output_dir: Path) -> Path 
         return path if path.is_absolute() else root / path
     candidate = output_dir / "last.pth"
     return candidate if candidate.exists() else None
+
+
+def _required_shards_from_data_dirs(data_dirs: list[Path]) -> list[str]:
+    return sorted({path.name for path in data_dirs if path.name.startswith("ds")})
+
+
+def _validate_batch_gate(batch: dict, *, inferred_dims: dict[str, int] | None) -> None:
+    required = (
+        "state_tile_feat",
+        "state_scalar",
+        "candidate_feat",
+        "candidate_mask",
+        "candidate_flags",
+        "special_candidate_feat",
+        "special_candidate_mask",
+        "event_history",
+        "opp_tenpai_target",
+        "pts_given_win_target",
+        "pts_given_dealin_target",
+    )
+    missing = [key for key in required if key not in batch]
+    if missing:
+        raise RuntimeError(f"xmodel1 train gate: batch missing required fields {missing}")
+    batch_size = int(batch["candidate_feat"].shape[0])
+    if batch_size <= 0:
+        raise RuntimeError("xmodel1 train gate: first batch is empty")
+    if inferred_dims is not None:
+        expected_candidate_dim = int(inferred_dims["candidate_feature_dim"])
+        expected_flag_dim = int(inferred_dims["candidate_flag_dim"])
+        expected_special_dim = int(inferred_dims["special_candidate_feature_dim"])
+        if int(batch["candidate_feat"].shape[-1]) != expected_candidate_dim:
+            raise RuntimeError(
+                f"xmodel1 train gate: candidate_feat last dim {batch['candidate_feat'].shape[-1]} != {expected_candidate_dim}"
+            )
+        if int(batch["candidate_flags"].shape[-1]) != expected_flag_dim:
+            raise RuntimeError(
+                f"xmodel1 train gate: candidate_flags last dim {batch['candidate_flags'].shape[-1]} != {expected_flag_dim}"
+            )
+        if int(batch["special_candidate_feat"].shape[-1]) != expected_special_dim:
+            raise RuntimeError(
+                f"xmodel1 train gate: special_candidate_feat last dim {batch['special_candidate_feat'].shape[-1]} != {expected_special_dim}"
+            )
+    if tuple(batch["event_history"].shape[1:]) != (48, 5):
+        raise RuntimeError(f"xmodel1 train gate: event_history shape {tuple(batch['event_history'].shape)} != (N, 48, 5)")
+    if int(batch["opp_tenpai_target"].shape[-1]) != 3:
+        raise RuntimeError(f"xmodel1 train gate: opp_tenpai_target shape {tuple(batch['opp_tenpai_target'].shape)} != (N, 3)")
 
 
 def _sample_train_files_for_epoch(
@@ -99,6 +140,20 @@ def _estimate_file_subset_summary(
         "sampled_samples": sampled_samples,
     }
 
+
+def _auto_steps_from_sampled_summary(
+    sampled_summary: dict[str, float | int] | None,
+    *,
+    batch_size: int,
+) -> int | None:
+    if not sampled_summary:
+        return None
+    sampled_samples = int(sampled_summary.get("sampled_samples", 0) or 0)
+    if sampled_samples <= 0:
+        return None
+    return max(1, math.ceil(sampled_samples / max(1, batch_size)))
+
+
 def _expected_manifest_summary_for_cache_files(
     manifest: dict,
     cache_files: list[Path],
@@ -131,15 +186,129 @@ def _validate_manifest_against_cache_files(
     summarize_cached_files_fn,
 ) -> None:
     for manifest_path, manifest in manifest_map.items():
-        expected = _expected_manifest_summary_for_cache_files(manifest, cache_files, data_dirs)
+        manifest_cache_files = [
+            path
+            for path in cache_files
+            if _find_manifest_for_cache_file(path, {manifest_path: manifest}) is not None
+        ]
+        expected = _expected_manifest_summary_for_cache_files(manifest, manifest_cache_files, data_dirs)
         if expected is None:
             continue
-        actual = summarize_cached_files_fn(cache_files)
+        actual = summarize_cached_files_fn(manifest_cache_files)
         if actual != expected:
             raise RuntimeError(
                 f"xmodel1 train: manifest/cache mismatch for {manifest_path}; "
                 f"expected {expected}, got {actual}"
             )
+
+
+def _find_manifest_for_cache_file(path: Path, manifest_map: dict[Path, dict]) -> tuple[Path, dict] | None:
+    resolved = path.resolve()
+    matches: list[tuple[int, Path, dict]] = []
+    for manifest_path, manifest in manifest_map.items():
+        manifest_root = manifest_path.parent.resolve()
+        try:
+            resolved.relative_to(manifest_root)
+        except ValueError:
+            continue
+        matches.append((len(manifest_root.parts), manifest_path, manifest))
+    if not matches:
+        return None
+    _, manifest_path, manifest = max(matches, key=lambda item: item[0])
+    return manifest_path, manifest
+
+
+def _summarize_files_from_manifest(
+    file_paths: list[Path],
+    *,
+    manifest_map: dict[Path, dict],
+) -> dict[str, object] | None:
+    shard_file_counts: dict[str, int] = {}
+    shard_sample_counts: dict[str, int] = {}
+    grouped: dict[Path, dict[str, int]] = {}
+    manifests_used: set[str] = set()
+    sample_count_estimated = False
+
+    for path in file_paths:
+        match = _find_manifest_for_cache_file(path, manifest_map)
+        if match is None:
+            return None
+        manifest_path, _ = match
+        shard = path.parent.name if path.parent.name else "."
+        shard_file_counts[shard] = shard_file_counts.get(shard, 0) + 1
+        grouped.setdefault(manifest_path, {})
+        grouped[manifest_path][shard] = grouped[manifest_path].get(shard, 0) + 1
+        manifests_used.add(str(manifest_path))
+
+    total_samples = 0
+    for manifest_path, per_manifest_counts in grouped.items():
+        manifest = manifest_map[manifest_path]
+        manifest_file_counts = manifest.get("shard_file_counts")
+        manifest_sample_counts = manifest.get("shard_sample_counts")
+        if not isinstance(manifest_file_counts, dict) or not isinstance(manifest_sample_counts, dict):
+            return None
+        for shard, selected_file_count in per_manifest_counts.items():
+            if shard not in manifest_file_counts or shard not in manifest_sample_counts:
+                return None
+            shard_total_files = int(manifest_file_counts[shard])
+            shard_total_samples = int(manifest_sample_counts[shard])
+            if shard_total_files <= 0:
+                return None
+            if selected_file_count > shard_total_files:
+                raise RuntimeError(
+                    f"xmodel1 train: selected files exceed manifest shard count for {manifest_path} shard={shard}"
+                )
+            estimated_samples = int(round((selected_file_count / shard_total_files) * shard_total_samples))
+            if selected_file_count != shard_total_files:
+                sample_count_estimated = True
+            shard_sample_counts[shard] = shard_sample_counts.get(shard, 0) + estimated_samples
+            total_samples += estimated_samples
+
+    return {
+        "num_files": len(file_paths),
+        "num_samples": total_samples,
+        "shard_file_counts": shard_file_counts,
+        "shard_sample_counts": shard_sample_counts,
+        "sample_count_source": "manifest_estimate" if sample_count_estimated else "manifest_exact",
+        "is_sample_count_estimated": sample_count_estimated,
+        "manifest_paths": sorted(manifests_used),
+    }
+
+
+def _build_dataset_summary(
+    *,
+    manifest_map: dict[Path, dict],
+    selected_files: list[Path],
+    train_files: list[Path],
+    val_files: list[Path],
+    summarize_cached_files_fn,
+) -> dict[str, object]:
+    selected = _summarize_files_from_manifest(selected_files, manifest_map=manifest_map)
+    train = _summarize_files_from_manifest(train_files, manifest_map=manifest_map)
+    val = _summarize_files_from_manifest(val_files, manifest_map=manifest_map)
+    if selected is None or train is None or val is None:
+        return {
+            "selected": {
+                **summarize_cached_files_fn(selected_files),
+                "sample_count_source": "cache_scan",
+                "is_sample_count_estimated": False,
+            },
+            "train": {
+                **summarize_cached_files_fn(train_files),
+                "sample_count_source": "cache_scan",
+                "is_sample_count_estimated": False,
+            },
+            "val": {
+                **summarize_cached_files_fn(val_files),
+                "sample_count_source": "cache_scan",
+                "is_sample_count_estimated": False,
+            },
+        }
+    return {
+        "selected": selected,
+        "train": train,
+        "val": val,
+    }
 
 
 def _write_training_inputs(
@@ -156,6 +325,7 @@ def _write_training_inputs(
     device: str,
     seed: int,
     resume_path: Path | None,
+    strict_cache_scan: bool,
 ) -> None:
     payload = {
         "model_version": "xmodel1",
@@ -163,6 +333,7 @@ def _write_training_inputs(
         "device": device,
         "seed": int(seed),
         "resume_path": str(resume_path) if resume_path is not None else None,
+        "strict_cache_scan": bool(strict_cache_scan),
         "data_dirs": [str(path) for path in data_dirs],
         "manifest_paths": manifest_paths,
         "train_files": [str(path) for path in train_files],
@@ -187,15 +358,15 @@ def main() -> None:
         discover_cached_files,
         find_export_manifests,
         infer_cached_dimensions,
+        probe_cached_samples,
         split_cached_files,
         summarize_cached_files,
+        validate_export_manifest,
     )
     from xmodel1.model import Xmodel1Model
     from xmodel1.schema import (
         XMODEL1_CANDIDATE_FEATURE_DIM,
         XMODEL1_CANDIDATE_FLAG_DIM,
-        XMODEL1_SCHEMA_NAME,
-        XMODEL1_SCHEMA_VERSION,
     )
     from xmodel1.trainer import train
 
@@ -222,11 +393,12 @@ def main() -> None:
 
     data_dirs = _resolve_paths(root, cfg.get("data_dirs", []))
     manifest_map = find_export_manifests(data_dirs)
-    for manifest_path, manifest in manifest_map.items():
-        if manifest.get("schema_name") != XMODEL1_SCHEMA_NAME or int(manifest.get("schema_version", -1)) != XMODEL1_SCHEMA_VERSION:
-            raise RuntimeError(
-                f"xmodel1 train: manifest schema mismatch in {manifest_path}; expected {XMODEL1_SCHEMA_NAME}@{XMODEL1_SCHEMA_VERSION}"
-            )
+    required_shards = _required_shards_from_data_dirs(data_dirs)
+    if data_dirs and not manifest_map and not args.smoke:
+        raise RuntimeError("xmodel1 train gate: no export manifest found for configured data_dirs")
+    for manifest_path in manifest_map:
+        validate_export_manifest(manifest_path, required_shards=required_shards)
+
     batch_size = int(cfg.get("batch_size", 256))
     num_workers = int(cfg.get("num_workers", 2))
     buffer_size = int(cfg.get("buffer_size", 512))
@@ -240,33 +412,57 @@ def main() -> None:
         if files_per_epoch_count_cfg is not None and int(files_per_epoch_count_cfg) > 0
         else None
     )
+
     train_loader = None
     train_loader_factory = None
     train_loader_summary_factory = None
     val_loader = None
-    train_files = []
-    val_files = []
+    train_files: list[Path] = []
+    val_files: list[Path] = []
+    inferred_dims = None
+    dataset_summary = None
+
     cache_files = discover_cached_files(data_dirs)
     if cache_files:
-        _validate_manifest_against_cache_files(
-            manifest_map,
-            cache_files=cache_files,
-            data_dirs=data_dirs,
-            summarize_cached_files_fn=summarize_cached_files,
+        probe_summary = probe_cached_samples(cache_files)
+        if args.strict_cache_scan:
+            _validate_manifest_against_cache_files(
+                manifest_map,
+                cache_files=cache_files,
+                data_dirs=data_dirs,
+                summarize_cached_files_fn=summarize_cached_files,
+            )
+        print(
+            f"xmodel1 train gate: cache_probe files={probe_summary['num_files']} "
+            f"rows={probe_summary['rows_probed']} dims={probe_summary['dims']} "
+            f"required_shards={required_shards}",
+            flush=True,
         )
+
         train_files, val_files = split_cached_files(
             data_dirs,
             val_ratio=float(cfg.get("val_ratio", 0.05)),
             seed=args.seed,
         )
         if args.smoke:
-            all_files = train_files + [p for p in val_files if p not in train_files]
+            all_files = train_files + [path for path in val_files if path not in train_files]
             if not all_files:
                 raise RuntimeError("no cached files available for Xmodel1 smoke training")
             train_files = (train_files or all_files)[:2]
             val_files = (val_files or all_files[:1])[:1]
         elif not train_files or not val_files:
             raise RuntimeError(f"insufficient cached files: train={len(train_files)} val={len(val_files)}")
+
+        selected_files = train_files + [path for path in val_files if path not in train_files]
+        inferred_dims = infer_cached_dimensions(train_files or val_files)
+        dataset_summary = _build_dataset_summary(
+            manifest_map=manifest_map,
+            selected_files=selected_files,
+            train_files=train_files,
+            val_files=val_files,
+            summarize_cached_files_fn=summarize_cached_files,
+        )
+
         def _make_train_loader(epoch: int):
             epoch_files = _sample_train_files_for_epoch(
                 train_files,
@@ -284,6 +480,7 @@ def main() -> None:
                 persistent_workers=(persistent_workers and num_workers > 0),
                 prefetch_factor=prefetch_factor if num_workers > 0 else None,
             )
+
         def _make_train_loader_summary(epoch: int):
             epoch_files = _sample_train_files_for_epoch(
                 train_files,
@@ -298,15 +495,26 @@ def main() -> None:
                 total_train_samples=int((dataset_summary or {}).get("train", {}).get("num_samples", 0) or 0),
             )
             base_samples = int((dataset_summary or {}).get("train", {}).get("num_samples", 0) or 0)
-            sampled_ratio = (
-                float(summary["sampled_samples"]) / float(base_samples)
-                if base_samples > 0
-                else 0.0
-            )
-            summary["sampled_ratio"] = sampled_ratio
+            summary["sampled_ratio"] = (float(summary["sampled_samples"]) / float(base_samples)) if base_samples > 0 else 0.0
             return summary
+
         train_loader_factory = _make_train_loader
         train_loader_summary_factory = _make_train_loader_summary
+        steps_per_epoch_cfg = cfg.get("steps_per_epoch", None)
+        if steps_per_epoch_cfg is None or int(steps_per_epoch_cfg) <= 0:
+            auto_train_summary = train_loader_summary_factory(0)
+            auto_steps_per_epoch = _auto_steps_from_sampled_summary(
+                auto_train_summary,
+                batch_size=batch_size,
+            )
+            if auto_steps_per_epoch is not None:
+                cfg["steps_per_epoch"] = auto_steps_per_epoch
+                print(
+                    "xmodel1 train: auto steps_per_epoch="
+                    f"{auto_steps_per_epoch} from sampled_files={auto_train_summary.get('sampled_files')} "
+                    f"sampled_samples={auto_train_summary.get('sampled_samples')} batch_size={batch_size}",
+                    flush=True,
+                )
         train_loader = train_loader_factory(0)
         val_loader = DataLoader(
             Xmodel1DiscardDataset(val_files, shuffle=False, buffer_size=buffer_size, seed=args.seed),
@@ -317,6 +525,10 @@ def main() -> None:
             persistent_workers=(persistent_workers and num_workers > 0),
             prefetch_factor=prefetch_factor if num_workers > 0 else None,
         )
+        first_batch = next(iter(train_loader), None)
+        if first_batch is None:
+            raise RuntimeError("xmodel1 train gate: train loader produced no batches")
+        _validate_batch_gate(first_batch, inferred_dims=inferred_dims)
     elif args.smoke:
         synthetic_smoke = True
 
@@ -366,16 +578,7 @@ def main() -> None:
     else:
         raise ValueError("config.data_dirs is required and must contain exported Xmodel1 caches unless --smoke is used")
 
-    inferred_dims = None
-    dataset_summary = None
     if train_files or val_files:
-        selected_files = train_files + [path for path in val_files if path not in train_files]
-        inferred_dims = infer_cached_dimensions(train_files or val_files)
-        dataset_summary = {
-            "selected": summarize_cached_files(selected_files),
-            "train": summarize_cached_files(train_files),
-            "val": summarize_cached_files(val_files),
-        }
         for key in (
             "state_tile_channels",
             "state_scalar_dim",
@@ -389,8 +592,7 @@ def main() -> None:
             inferred_value = inferred_dims[key]
             if cfg_value is not None and int(cfg_value) != inferred_value:
                 print(
-                    f"xmodel1 train: overriding {key} from config={cfg_value} "
-                    f"to cache={inferred_value}",
+                    f"xmodel1 train: overriding {key} from config={cfg_value} to cache={inferred_value}",
                     flush=True,
                 )
             cfg[key] = inferred_value
@@ -423,6 +625,7 @@ def main() -> None:
         device=device,
         seed=args.seed,
         resume_path=resume_path,
+        strict_cache_scan=args.strict_cache_scan,
     )
     print(
         f"xmodel1 train: synthetic_smoke={synthetic_smoke} data_dirs={[str(p) for p in data_dirs]} "
@@ -431,8 +634,10 @@ def main() -> None:
         f"steps_per_epoch={cfg.get('steps_per_epoch')} val_steps_per_epoch={cfg.get('val_steps_per_epoch')} "
         f"files_per_epoch_ratio={files_per_epoch_ratio} files_per_epoch_count={files_per_epoch_count} "
         f"buffer_size={buffer_size} num_workers={num_workers} pin_memory={pin_memory} "
-        f"device={device} output={output_dir} resume={resume_path}"
-    , flush=True)
+        f"strict_cache_scan={args.strict_cache_scan} "
+        f"device={device} output={output_dir} resume={resume_path}",
+        flush=True,
+    )
     train(
         model=model,
         train_loader=train_loader,
@@ -445,6 +650,7 @@ def main() -> None:
         device_str=device,
         dataset_summary=dataset_summary,
     )
+
 
 if __name__ == "__main__":
     main()

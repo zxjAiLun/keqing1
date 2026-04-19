@@ -15,7 +15,7 @@ from typing import Any
 from gateway.tenhou_bridge import normalize_tenhou_room
 
 logger = logging.getLogger(__name__)
-SUPPORTED_GATEWAY_BOTS = {"keqingv1", "keqingv2", "keqingv3", "keqingv31", "keqingv4", "rulebase"}
+SUPPORTED_GATEWAY_BOTS = {"keqingv4", "xmodel1", "rulebase"}
 
 
 def create_runtime_bot_for_gateway(**kwargs):
@@ -48,7 +48,7 @@ class BotClientConfig:
     port: int = 11600
     room: str = "L2147_9"
     name: str = "NoName"
-    bot_name: str = "keqingv2"
+    bot_name: str = "xmodel1"
     project_root: Path = Path.cwd()
     model_path: Path | None = None
     device: str = "cuda"

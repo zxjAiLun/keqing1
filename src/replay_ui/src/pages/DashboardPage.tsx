@@ -54,13 +54,13 @@ export function DashboardPage() {
       <PageHeader
         eyebrow="Workspace"
         title="麻将工作台"
-        description="统一管理牌谱分析、实时对战、4 Bot 对战和 selfplay 对局回放。先从高频入口开始，后续记录会逐步沉淀到这里。"
+        description="统一管理牌谱分析、实时对战、4 Bot 对战和 selfplay 对局回放。当前 GUI 以 xmodel1 主线、keqingv4 备线和 rulebase 基线为默认组织方式。"
       />
 
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 28 }}>
         <MetricCard label="核心入口" value={4} />
-        <MetricCard label="分析主线" value="Review" tone="success" />
-        <MetricCard label="实战模式" value="Battle" tone="warning" />
+        <MetricCard label="当前主线" value="xmodel1" tone="success" />
+        <MetricCard label="当前备线" value="keqingv4" tone="warning" />
       </div>
 
       <div style={{ marginBottom: 28 }}>
@@ -70,7 +70,7 @@ export function DashboardPage() {
               onClick={() => navigate('/review')}
               icon={<BarChart2 size={20} />}
               title="牌谱分析"
-              description={<>上传天凤链接或 mjai JSON。<br />分析 Bot 与玩家的决策差异。</>}
+              description={<>上传天凤链接或 mjai JSON。<br />默认按 xmodel1 主线跑谱，也可切到 keqingv4 / rulebase。</>}
               gradient="linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%)"
               glow="0 4px 12px var(--accent-shadow)"
             />
@@ -78,7 +78,7 @@ export function DashboardPage() {
               onClick={() => navigate('/battle')}
               icon={<Users size={20} />}
               title="人机对战"
-              description={<>与 AI Bot 进行实战练习。<br />支持立直、吃碰杠等实时操作。</>}
+              description={<>与 AI Bot 进行实战练习。<br />默认对手为 xmodel1，兼容支持 keqingv4 / rulebase。</>}
               gradient="linear-gradient(135deg, var(--success) 0%, #219a52 100%)"
               glow="0 4px 12px rgba(39,174,96,0.3)"
             />
@@ -86,7 +86,7 @@ export function DashboardPage() {
               onClick={() => navigate('/bot-battle')}
               icon={<Bot size={20} />}
               title="4 Bot 对战"
-              description={<>观看 4 个 AI 自动对战。<br />支持导出 Mjai / Tenhou6 牌谱。</>}
+              description={<>观看 4 个 AI 自动对战。<br />适合比较主线、备线和规则基线的兼容表现。</>}
               gradient="linear-gradient(135deg, #8e44ad 0%, #7d3c9e 100%)"
               glow="0 4px 12px rgba(142,68,173,0.3)"
             />

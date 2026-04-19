@@ -34,7 +34,7 @@ router = APIRouter(prefix="/api/battle")
 # NOTE: router 在文件末尾 include 到 app（需在所有路由定义之后）
 
 bots: Dict[int, Any] = {}
-BOT_TYPE = os.environ.get("BOT_TYPE", "keqingv1")
+BOT_TYPE = os.environ.get("BOT_TYPE", "xmodel1")
 SUPPORTED_BOT_MODELS = set(SUPPORTED_BOT_NAMES)
 
 
@@ -56,7 +56,7 @@ def _cleanup_all_bots() -> None:
 
 
 # 当前选用的 bot 模型名称（由 start_battle 设置）
-current_bot_model: str = "keqingv1"
+current_bot_model: str = "xmodel1"
 
 
 def _build_bot_names(bot_model: str, count: int) -> List[str]:
@@ -125,12 +125,12 @@ class StartBattleRequest(BaseModel):
     player_name: str = "Player"
     bot_count: int = 3
     seed: Optional[int] = None
-    bot_model: str = "keqingv1"
+    bot_model: str = "xmodel1"
 
 
 class Start4BotRequest(BaseModel):
     seed: Optional[int] = None
-    bot_model: str = "keqingv1"
+    bot_model: str = "xmodel1"
 
 
 class StartBattleResponse(BaseModel):

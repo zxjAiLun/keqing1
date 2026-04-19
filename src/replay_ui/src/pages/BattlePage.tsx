@@ -6,6 +6,8 @@ import { useAutoActions } from "../hooks/useAutoActions";
 import { useBattlePolling } from "../hooks/useBattlePolling";
 import { useConnectionManager } from "../hooks/useConnectionManager";
 import type { BattleState, Action, StartBattleRequest } from "../types/battle";
+import type { BotType } from "../types/bot";
+import { BOT_CATALOG, DEFAULT_BOT_TYPE, getBotCatalogEntry } from "../utils/botCatalog";
 
 export function BattlePage() {
   const [gameId, setGameId] = useState<string | null>(null);
@@ -15,7 +17,7 @@ export function BattlePage() {
   const [selectedTile, setSelectedTile] = useState<string | null>(null);
   const [selectedTileIdx, setSelectedTileIdx] = useState<number | null>(null);
   const [playerName, setPlayerName] = useState("玩家");
-  const [botModel, setBotModel] = useState("keqingv1");
+  const [botModel, setBotModel] = useState<BotType>(DEFAULT_BOT_TYPE);
   const [autoHora, setAutoHora] = useState(true);       // 自动胡牌，默认开
   const [noMeld, setNoMeld] = useState(false);           // 不响应附露，默认关
   const [autoTsumogiri, setAutoTsumogiri] = useState(false); // 自动摸切，默认关
@@ -135,6 +137,8 @@ export function BattlePage() {
     onGiveUp: () => { setGameId(null); setState(null); },
   });
 
+  const selectedBot = getBotCatalogEntry(botModel);
+
   if (!state) {
     return (
       <div
@@ -165,7 +169,7 @@ export function BattlePage() {
         >
           <span style={{ color: '#fff', fontWeight: 700, fontSize: 24 }}>麻</span>
         </div>
-        <h1 style={{ fontSize: 28, fontWeight: 700, color: '#1f2937' }}>立直麻将对战</h1>
+        <h1 style={{ fontSize: 28, fontWeight: 700, color: '#1f2937' }}>Keqing1 人机对战</h1>
 
         <div
           style={{
@@ -199,20 +203,33 @@ export function BattlePage() {
             />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <label style={{ fontSize: 12, color: '#6b7280', fontWeight: 500 }}>对手模型</label>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {['keqingv1', 'keqingv2', 'keqingv3', 'keqingv31', 'rulebase'].map(m => (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {BOT_CATALOG.map((bot) => (
                   <button
-                    key={m}
-                    onClick={() => setBotModel(m)}
+                    key={bot.value}
+                    onClick={() => setBotModel(bot.value)}
                     style={{
-                      padding: '5px 12px', borderRadius: 6, fontSize: 13, fontWeight: 500,
-                      border: `2px solid ${botModel === m ? '#1e4a7a' : '#d1d5db'}`,
-                      background: botModel === m ? '#1e4a7a' : '#f9fafb',
-                      color: botModel === m ? '#fff' : '#374151',
+                      padding: '10px 12px',
+                      borderRadius: 8,
+                      fontSize: 13,
+                      fontWeight: 500,
+                      border: `2px solid ${botModel === bot.value ? '#1e4a7a' : '#d1d5db'}`,
+                      background: botModel === bot.value ? '#eff6ff' : '#f9fafb',
+                      color: '#374151',
                       cursor: 'pointer', transition: 'all 0.15s',
+                      textAlign: 'left',
                     }}
-                  >{m}</button>
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center' }}>
+                      <span style={{ fontWeight: 700 }}>{bot.label}</span>
+                      <span style={{ fontSize: 11, color: botModel === bot.value ? '#1e4a7a' : '#6b7280' }}>{bot.badge}</span>
+                    </div>
+                    <div style={{ marginTop: 3, fontSize: 12, color: '#6b7280' }}>{bot.description}</div>
+                  </button>
                 ))}
+              </div>
+              <div style={{ fontSize: 12, color: '#6b7280' }}>
+                当前选择：{selectedBot.label}，{selectedBot.description}
               </div>
             </div>
             <button
@@ -252,7 +269,7 @@ export function BattlePage() {
           </div>
         </div>
 
-        <p style={{ fontSize: 13, color: '#9ca3af' }}>你将与 3 个 Bot 对战</p>
+        <p style={{ fontSize: 13, color: '#9ca3af' }}>默认主线为 xmodel1；需要兼容对照时再切到 keqingv4 或 rulebase。</p>
 
         <style>{`
           @keyframes spinIcon { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }

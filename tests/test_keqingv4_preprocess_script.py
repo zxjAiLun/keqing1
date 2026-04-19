@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 
 import numpy as np
+import pytest
 from training.cache_schema import KEQINGV4_SUMMARY_DIM
 
 
-REPO_ROOT = "/media/bailan/DISK1/AUbuntuProject/project/keqing1"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _write_mjson(path: Path) -> None:
@@ -39,6 +43,8 @@ def _write_mjson(path: Path) -> None:
 
 
 def test_preprocess_keqingv4_script_runs_rust_orchestrator(tmp_path: Path):
+    if shutil.which("uv") is None:
+        pytest.skip("uv is not available in this environment")
     input_dir = tmp_path / "converted" / "ds1"
     input_dir.mkdir(parents=True)
     _write_mjson(input_dir / "sample.mjson")
@@ -58,10 +64,12 @@ def test_preprocess_keqingv4_script_runs_rust_orchestrator(tmp_path: Path):
             "--jobs",
             "1",
         ],
-        cwd=REPO_ROOT,
+        cwd=str(REPO_ROOT),
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     exported = output_dir / "ds1" / "sample.npz"
     assert exported.exists()
@@ -86,6 +94,8 @@ def test_preprocess_keqingv4_script_runs_rust_orchestrator(tmp_path: Path):
 
 
 def test_rust_keqingv4_export_cli_runs_directly(tmp_path: Path):
+    if shutil.which("cargo") is None:
+        pytest.skip("cargo is not available in this environment")
     input_dir = tmp_path / "converted" / "ds1"
     input_dir.mkdir(parents=True)
     _write_mjson(input_dir / "sample.mjson")
@@ -96,7 +106,7 @@ def test_rust_keqingv4_export_cli_runs_directly(tmp_path: Path):
             "run",
             "--quiet",
             "--manifest-path",
-            str(Path(REPO_ROOT) / "rust/keqing_core/Cargo.toml"),
+                str(REPO_ROOT / "rust/keqing_core/Cargo.toml"),
             "--bin",
             "keqingv4_export",
             "--",
@@ -107,10 +117,175 @@ def test_rust_keqingv4_export_cli_runs_directly(tmp_path: Path):
             "--jobs",
             "1",
         ],
-        cwd=REPO_ROOT,
+        cwd=str(REPO_ROOT),
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     assert (output_dir / "ds1" / "sample.npz").exists()
     assert "Rust keqingv4 export completed:" in result.stdout
+
+
+def test_preprocess_keqingv4_script_accepts_legacy_workers_config(tmp_path: Path, monkeypatch):
+    input_dir = tmp_path / "converted" / "ds1"
+    input_dir.mkdir(parents=True)
+    output_dir = tmp_path / "processed"
+    config_path = tmp_path / "keqingv4_preprocess.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "data_dirs:",
+                f"  - {input_dir.as_posix()}",
+                f"output_dir: {output_dir.as_posix()}",
+                "workers: 7",
+                "progress_every: 11",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_run(cmd, cwd, check):
+        captured["cmd"] = list(cmd)
+        captured["cwd"] = cwd
+        captured["check"] = check
+        out_index = cmd.index("--output-dir") + 1
+        current_output = Path(cmd[out_index])
+        current_output.mkdir(parents=True, exist_ok=True)
+        (current_output / "ds1").mkdir(parents=True, exist_ok=True)
+        _write_contract_npz(current_output / "ds1" / "sample.npz")
+        (current_output / "keqingv4_export_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_name": "keqingv4_cached_v1",
+                    "schema_version": 5,
+                    "summary_dim": KEQINGV4_SUMMARY_DIM,
+                    "call_summary_slots": 8,
+                    "special_summary_slots": 3,
+                    "export_mode": "rust_semantic_core",
+                    "used_python_semantics": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0)
+
+    script_path = REPO_ROOT / "scripts" / "preprocess_keqingv4.py"
+    spec = importlib.util.spec_from_file_location("preprocess_keqingv4_testmod", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "preprocess_keqingv4.py",
+            "--config",
+            str(config_path),
+            "--skip-preflight",
+        ],
+    )
+
+    module.main()
+
+    cmd = captured["cmd"]
+    assert "--jobs" in cmd
+    assert cmd[cmd.index("--jobs") + 1] == "7"
+    assert cmd[cmd.index("--progress-every") + 1] == "11"
+
+
+def test_preprocess_keqingv4_script_runs_preflight_before_full_export(tmp_path: Path, monkeypatch):
+    input_dir = tmp_path / "converted" / "ds1"
+    input_dir.mkdir(parents=True)
+    _write_mjson(input_dir / "a.mjson")
+    _write_mjson(input_dir / "b.mjson")
+    output_dir = tmp_path / "processed"
+    config_path = tmp_path / "keqingv4_preprocess.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "data_dirs:",
+                f"  - {input_dir.as_posix()}",
+                f"output_dir: {output_dir.as_posix()}",
+                "jobs: 3",
+                "progress_every: 9",
+                "preflight_files_per_shard: 1",
+                "preflight_seed: 20260419",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, cwd, check):
+        calls.append(list(cmd))
+        out_index = cmd.index("--output-dir") + 1
+        current_output = Path(cmd[out_index])
+        current_output.mkdir(parents=True, exist_ok=True)
+        (current_output / "ds1").mkdir(parents=True, exist_ok=True)
+        _write_contract_npz(current_output / "ds1" / "sample.npz")
+        (current_output / "keqingv4_export_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_name": "keqingv4_cached_v1",
+                    "schema_version": 5,
+                    "summary_dim": KEQINGV4_SUMMARY_DIM,
+                    "call_summary_slots": 8,
+                    "special_summary_slots": 3,
+                    "export_mode": "rust_semantic_core",
+                    "used_python_semantics": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0)
+
+    script_path = REPO_ROOT / "scripts" / "preprocess_keqingv4.py"
+    spec = importlib.util.spec_from_file_location("preprocess_keqingv4_preflight_testmod", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "preprocess_keqingv4.py",
+            "--config",
+            str(config_path),
+        ],
+    )
+
+    module.main()
+
+    assert len(calls) == 2
+    preflight_cmd, full_cmd = calls
+    assert "--force" in preflight_cmd
+    assert "--force" not in full_cmd
+
+
+def _write_contract_npz(path: Path) -> None:
+    n = 1
+    np.savez(
+        path,
+        tile_feat=np.zeros((n, 57, 34), dtype=np.float16),
+        scalar=np.zeros((n, 56), dtype=np.float16),
+        mask=np.zeros((n, 45), dtype=np.uint8),
+        action_idx=np.zeros((n,), dtype=np.int16),
+        value=np.zeros((n,), dtype=np.float32),
+        score_delta_target=np.zeros((n,), dtype=np.float32),
+        win_target=np.zeros((n,), dtype=np.float32),
+        dealin_target=np.zeros((n,), dtype=np.float32),
+        pts_given_win_target=np.zeros((n,), dtype=np.float32),
+        pts_given_dealin_target=np.zeros((n,), dtype=np.float32),
+        opp_tenpai_target=np.zeros((n, 3), dtype=np.float32),
+        event_history=np.zeros((n, 48, 5), dtype=np.int16),
+        v4_discard_summary=np.zeros((n, 34, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
+        v4_call_summary=np.zeros((n, 8, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
+        v4_special_summary=np.zeros((n, 3, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
+    )

@@ -35,10 +35,17 @@ export function Sidebar() {
   const [isMobile, setIsMobile] = useState(false);
   const [open, setOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(
-    () => window.localStorage.getItem('keqing.sidebar.collapsed') === 'true',
+    () => {
+      const stored =
+        window.localStorage.getItem('keqing1.sidebar.collapsed')
+        ?? window.localStorage.getItem('keqing.sidebar.collapsed');
+      return stored === 'true';
+    },
   );
   const [tablecloth, setTablecloth] = useState<TableclothId>(() => {
-    const stored = window.localStorage.getItem('keqing.tablecloth');
+    const stored =
+      window.localStorage.getItem('keqing1.tablecloth')
+      ?? window.localStorage.getItem('keqing.tablecloth');
     if (stored && TABLECLOTH_OPTIONS.some((o) => o.id === stored)) {
       return stored as TableclothId;
     }
@@ -46,6 +53,7 @@ export function Sidebar() {
   });
 
   useEffect(() => {
+    window.localStorage.setItem('keqing1.sidebar.collapsed', String(collapsed));
     window.localStorage.setItem('keqing.sidebar.collapsed', String(collapsed));
   }, [collapsed]);
 
@@ -63,7 +71,9 @@ export function Sidebar() {
 
   const updateTablecloth = (next: TableclothId) => {
     setTablecloth(next);
+    window.localStorage.setItem('keqing1.tablecloth', next);
     window.localStorage.setItem('keqing.tablecloth', next);
+    window.dispatchEvent(new StorageEvent('storage', { key: 'keqing1.tablecloth', newValue: next }));
     window.dispatchEvent(new StorageEvent('storage', { key: 'keqing.tablecloth', newValue: next }));
   };
 
@@ -224,8 +234,8 @@ export function Sidebar() {
               {open ? <X size={18} /> : <Menu size={18} />}
             </Button>
             <div>
-              <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--text-primary)' }}>Keqing</div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>立直麻将工作台</div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--text-primary)' }}>Keqing1</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>xmodel1 主线工作台</div>
             </div>
           </div>
           <ThemeToggle />
@@ -275,8 +285,8 @@ export function Sidebar() {
           >
             {logo}
             <div>
-              <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--sidebar-text)' }}>Keqing</div>
-              <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>立直麻将工作台</div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--sidebar-text)' }}>Keqing1</div>
+              <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>xmodel1 主线工作台</div>
             </div>
           </div>
 
@@ -336,8 +346,8 @@ export function Sidebar() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
             {logo}
             <div>
-              <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--sidebar-text)' }}>Keqing</div>
-              <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>立直麻将工作台</div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--sidebar-text)' }}>Keqing1</div>
+              <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>xmodel1 主线工作台</div>
             </div>
           </div>
         )}

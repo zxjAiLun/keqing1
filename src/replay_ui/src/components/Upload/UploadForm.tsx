@@ -1,5 +1,7 @@
 // src/replay_ui/src/components/Upload/UploadForm.tsx
 import { useState, useRef } from 'react';
+import type { BotType } from '../../types/bot';
+import { BOT_CATALOG, DEFAULT_BOT_TYPE, getBotCatalogEntry } from '../../utils/botCatalog';
 
 interface UploadFormProps {
   onDataLoaded: (data: unknown) => void;
@@ -7,15 +9,6 @@ interface UploadFormProps {
 }
 
 type InputType = 'tenhou_url' | 'mjai_json';
-
-// 模型列表：从新到旧，第一个为「最新」
-const MODEL_LIST: { value: string; label: string }[] = [
-  { value: 'keqingv31', label: 'KeqingV3.1' },
-  { value: 'keqingv3', label: 'KeqingV3' },
-  { value: 'keqingv2', label: 'KeqingV2' },
-  { value: 'keqingv1', label: 'KeqingV1' },
-];
-const LATEST_MODEL = MODEL_LIST[0].value;
 
 const DEFAULT_TENHOU_URL = 'https://tenhou.net/3/?log=2021021820gm-00a9-0000-0b6677ca&tw=2';
 const DEFAULT_MJAI_JSON = '[{"type":"start_game","names":["遊走","武田舞彩","九紋龍史進","Nemo"],"kyoku_first":0,"aka_flag":true},{"type":"start_kyoku","bakaze":"E","dora_marker":"9p","kyoku":1,"honba":0,"kyotaku":0,"oya":0,"scores":[25000,25000,25000,25000],"tehais":[["1m","3m","6m","7m","1p","3p","6p","1s","1s","1s","2s","3s","5s"],["1m","3m","5m","6m","9p","2s","2s","2s","8s","9s","E","N","P"],["4m","5m","5pr","6p","8p","4s","6s","7s","7s","8s","9s","9s","S"],["2m","5mr","7m","8m","8m","2p","3p","8p","9p","8s","E","W","W"]]}]';
@@ -151,7 +144,7 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
   const [mjaiText, setMjaiText]   = useState(DEFAULT_MJAI_JSON);
   const [files, setFiles]         = useState<File[]>([]);
   const [playerId, setPlayerId]   = useState<string>('auto');
-  const [botModel, setBotModel]   = useState<string>(LATEST_MODEL);
+  const [botModel, setBotModel]   = useState<BotType>(DEFAULT_BOT_TYPE);
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState<string | null>(null);
   const [success, setSuccess]     = useState<string | null>(null);
@@ -242,6 +235,8 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
     color: 'var(--text-primary)',
   };
 
+  const selectedBot = getBotCatalogEntry(botModel);
+
   return (
     <form onSubmit={handleSubmit}>
       {/* 输入类型 Tab */}
@@ -276,12 +271,16 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
         {/* 模型类型 */}
         <div style={{ flex: 1, minWidth: 130 }}>
           <label style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, display: 'block' }}>模型类型</label>
-          <select value={botModel} onChange={e => setBotModel(e.target.value)} style={selectStyle}>
-            <option value={LATEST_MODEL}>最新（{MODEL_LIST[0].label}）</option>
-            {MODEL_LIST.slice(1).map(m => (
-              <option key={m.value} value={m.value}>{m.label}</option>
+          <select value={botModel} onChange={e => setBotModel(e.target.value as BotType)} style={selectStyle}>
+            {BOT_CATALOG.map((bot, idx) => (
+              <option key={bot.value} value={bot.value}>
+                {idx === 0 ? `${bot.label} · 当前主线` : `${bot.label} · ${bot.shortLabel}`}
+              </option>
             ))}
           </select>
+          <div style={{ marginTop: 4, fontSize: 12, color: 'var(--text-muted)' }}>
+            {selectedBot.description}
+          </div>
         </div>
 
         {/* 提交按钮 */}

@@ -18,7 +18,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from keqingv1.action_space import (
+from mahjong_env.action_space import (
     ACTION_SPACE,
     ANKAN_IDX,
     CHI_HIGH_IDX,
@@ -32,7 +32,7 @@ from keqingv1.action_space import (
     REACH_IDX,
     RYUKYOKU_IDX,
 )
-from keqingv3.features import C_TILE, N_SCALAR
+from training.state_features import C_TILE, N_SCALAR
 from training.cache_schema import (
     KEQINGV4_CALL_SUMMARY_SLOTS,
     KEQINGV4_EVENT_HISTORY_LEN,

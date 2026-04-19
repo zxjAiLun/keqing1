@@ -147,22 +147,18 @@ def _merge_terminal_event_details(decisions: dict, events: list[dict] | None) ->
 
 def _infer_player_bot_type(player_name: str | None, fallback: str | None = None) -> str:
     raw = (player_name or "").lower()
-    if "keqingv1" in raw:
-        return "keqingv1"
     if "xmodel1" in raw:
         return "xmodel1"
-    if "keqingv3" in raw:
-        return "keqingv3"
-    if "keqingv2" in raw:
-        return "keqingv2"
-    return fallback or "keqingv1"
+    if "keqingv4" in raw:
+        return "keqingv4"
+    if "rulebase" in raw:
+        return "rulebase"
+    return fallback or "xmodel1"
 
 
 def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
     mapping = {
-        "keqingv1": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv1" / "best.pth",
-        "keqingv2": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv2" / "best.pth",
-        "keqingv3": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv3" / "best.pth",
+        "keqingv4": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv4" / "best.pth",
         "xmodel1": BASE_DIR.parent.parent / "artifacts" / "models" / "xmodel1" / "best.pth",
     }
     return mapping[bot_type]
@@ -174,7 +170,7 @@ def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
 async def replay(
     player_id: Annotated[int, Form()] = 0,
     checkpoint: Annotated[str, Form()] = "",
-    bot_type: Annotated[str, Form()] = "keqingv1",
+    bot_type: Annotated[str, Form()] = "xmodel1",
     files: Annotated[list[UploadFile], File()] = [],
     json_text: Annotated[str, Form()] = "",
     input_type: Annotated[str, Form()] = "url",
@@ -285,7 +281,7 @@ async def replay(
 async def save_replay(
     events: list[dict] = Form(...),
     decisions: dict = Form(...),
-    bot_type: str = Form("keqingv1"),
+    bot_type: str = Form("xmodel1"),
     player_names: str = Form(""),
 ):
     """手动保存回放到存储（内部使用或高级用户）。"""
@@ -328,7 +324,7 @@ async def get_replay(replay_id: str, player_id: int | None = None):
         if not events:
             return JSONResponse(status_code=404, content={"error": f"回放 {replay_id} 事件不存在"})
         player_names = meta.get("player_names") or decisions.get("player_names") or []
-        fallback_bot_type = meta.get("bot_type") or decisions.get("bot_type") or "keqingv1"
+        fallback_bot_type = meta.get("bot_type") or decisions.get("bot_type") or "xmodel1"
         player_name = player_names[player_id] if 0 <= player_id < len(player_names) else None
         bot_type = _infer_player_bot_type(player_name, fallback=fallback_bot_type)
         checkpoint = _default_checkpoint_for_bot_type(bot_type)

@@ -1,4 +1,4 @@
-"""测试重现 preprocess_v3.py 的 IllegalLabelActionError crash。
+"""测试重现 legacy preprocess 的 IllegalLabelActionError crash。
 
 真实 crash: event_index=608 actor=2
 - label: hora target=0 (荣和 actor 0 丢的 7s)

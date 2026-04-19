@@ -23,7 +23,12 @@ class DummyBot:
 
 def test_handle_hello_returns_gateway_handshake() -> None:
     client = tbc.GatewayBotClient(
-        tbc.BotClientConfig(name="NoName", room="L2147", project_root=Path('.'))
+        tbc.BotClientConfig(
+            name="NoName",
+            room="L2147",
+            bot_name="rulebase",
+            project_root=Path('.'),
+        )
     )
 
     assert client.handle_message({"type": "hello"}) == {
@@ -49,7 +54,7 @@ def test_start_game_creates_runtime_bot_and_defaults_to_none(monkeypatch, tmp_pa
         tbc.BotClientConfig(
             name="bot-b",
             room="2147_0",
-            bot_name="keqingv2",
+            bot_name="xmodel1",
             project_root=Path('/tmp/project'),
             model_path=fake_ckpt,
         )
@@ -58,19 +63,26 @@ def test_start_game_creates_runtime_bot_and_defaults_to_none(monkeypatch, tmp_pa
     response = client.handle_message({"type": "start_game", "id": 2, "names": []})
 
     assert created["player_id"] == 2
-    assert created["bot_name"] == "keqingv2"
+    assert created["bot_name"] == "xmodel1"
     assert response == {"type": "none", "actor": 2}
 
 
-def test_same_seat_start_game_resets_existing_bot(monkeypatch) -> None:
+def test_same_seat_start_game_resets_existing_bot(monkeypatch, tmp_path) -> None:
     bot = DummyBot(1)
+    fake_ckpt = tmp_path / "best.pth"
+    fake_ckpt.write_bytes(b"")
 
     def fake_create_runtime_bot(**kwargs):
         return bot
 
     monkeypatch.setattr(tbc, "create_runtime_bot_for_gateway", fake_create_runtime_bot)
     client = tbc.GatewayBotClient(
-        tbc.BotClientConfig(name="bot-c", room="2147_0", project_root=Path('.'))
+        tbc.BotClientConfig(
+            name="bot-c",
+            room="2147_0",
+            project_root=Path('.'),
+            model_path=fake_ckpt,
+        )
     )
 
     client.handle_message({"type": "start_game", "id": 1, "names": []})

@@ -1,4 +1,4 @@
-"""keqingv3 特征编码器。"""
+"""Shared tile/scalar state feature encoder used by active model lines."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import numpy as np
 from mahjong.shanten import Shanten
 
 from mahjong_env.tiles import tile_to_34 as _to_34, tile_is_aka as _is_aka
-from keqingv3.feature_tracker import SnapshotFeatureTracker
-from keqingv3.progress_oracle import (
+from mahjong_env.feature_tracker import SnapshotFeatureTracker
+from mahjong_env.progress_oracle import (
     analyze_normal_progress_from_counts,
     analyze_normal_progress_with_timings,
 )

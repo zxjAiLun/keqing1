@@ -6,7 +6,7 @@ from collections import Counter
 
 import numpy as np
 
-from keqingv1.action_space import (
+from mahjong_env.action_space import (
     ANKAN_IDX,
     CHI_HIGH_IDX,
     CHI_LOW_IDX,
@@ -22,8 +22,15 @@ from keqingv1.action_space import (
 )
 from mahjong_env.replay import _calc_normal_progress as _replay_calc_normal_progress
 from mahjong_env.legal_actions import _reach_discard_candidates
+from mahjong_env.scoring import (
+    _evaluate_hora_truth_from_prepared_payload as _scoring_evaluate_hora_truth_from_prepared_payload,
+    _estimate_hand_value_from_prepared_payload as _scoring_estimate_hand_value_from_prepared_payload,
+    _extract_hora_truth as _scoring_extract_hora_truth,
+    _prepared_hora_payload_from_snapshot as _scoring_prepared_hora_payload_from_snapshot,
+)
 from keqing_core import (
     build_keqingv4_typed_summaries as _rust_build_keqingv4_typed_summaries,
+    is_missing_rust_capability_error as _is_missing_rust_capability_error,
 )
 from training.cache_schema import (
     KEQINGV4_CALL_SUMMARY_SLOTS,
@@ -268,6 +275,79 @@ def _common_yaku_path_metrics(
     return tanyao_keep, yakuhai_pair, chiitoi_path, iipeiko_path, pinfu_like_path
 
 
+def _progress_key(progress) -> tuple[int, int, int, int]:
+    return (
+        -int(progress.shanten),
+        int(progress.ukeire_live_count),
+        int(progress.ukeire_type_count),
+        int(progress.waits_count),
+    )
+
+
+def _one_shanten_draw_analysis(
+    hand_tiles: list[str],
+    melds: list[dict],
+    visible_counts34: tuple[int, ...],
+) -> tuple[float, float, float, float]:
+    current_progress = _replay_calc_normal_progress(hand_tiles, melds, list(visible_counts34))
+    if int(current_progress.shanten) != 1:
+        return 0.0, 0.0, 0.0, 0.0
+
+    counts34 = _counts34(hand_tiles)
+    current_key = _progress_key(current_progress)
+    good_shape_live = 0
+    improvement_live = 0
+    tenpai_live = 0
+    best_tenpai_waits_live = 0
+    for tile34, seen in enumerate(visible_counts34):
+        live = max(0, 4 - int(seen))
+        if live <= 0 or counts34[tile34] >= 4:
+            continue
+        hand14 = [*hand_tiles, _TILE34_STR[tile34]]
+        seen_discards: set[str] = set()
+        best_progress = None
+        best_key = None
+        for discard_tile in hand14:
+            discard_key = normalize_tile(discard_tile)
+            if discard_key in seen_discards:
+                continue
+            seen_discards.add(discard_key)
+            after_hand = _remove_tiles_once(hand14, [discard_tile])
+            after_progress = _replay_calc_normal_progress(after_hand, melds, list(visible_counts34))
+            after_key = _progress_key(after_progress)
+            if best_key is None or after_key > best_key:
+                best_key = after_key
+                best_progress = after_progress
+        if best_progress is None or best_key is None:
+            continue
+        if int(best_progress.shanten) == 0:
+            tenpai_live += live
+            best_tenpai_waits_live = max(best_tenpai_waits_live, int(best_progress.ukeire_live_count))
+        if int(best_progress.shanten) == 0 and int(best_progress.ukeire_live_count) > 4:
+            good_shape_live += live
+        elif int(best_progress.shanten) == int(current_progress.shanten) and best_key > current_key:
+            improvement_live += live
+    return (
+        float(good_shape_live),
+        float(improvement_live),
+        float(tenpai_live),
+        float(best_tenpai_waits_live),
+    )
+
+
+def _one_shanten_draw_metrics(
+    hand_tiles: list[str],
+    melds: list[dict],
+    visible_counts34: tuple[int, ...],
+) -> tuple[float, float]:
+    good_shape_live, improvement_live, _tenpai_live, _best_tenpai_waits_live = _one_shanten_draw_analysis(
+        hand_tiles,
+        melds,
+        visible_counts34,
+    )
+    return good_shape_live, improvement_live
+
+
 def _max_hand_value_norm(
     *,
     confirmed_han_floor: float,
@@ -281,9 +361,281 @@ def _max_hand_value_norm(
     return min(value_proxy / 8.0, 1.0)
 
 
+def _hora_truth_value_proxy(truth) -> float:
+    han = float(getattr(truth, "han", 0) or 0)
+    cost = getattr(truth, "cost", {}) or {}
+    cost_total = float(cost.get("total", 0) or 0)
+    han_norm = min(1.0, han / 8.0)
+    cost_norm = min(1.0, cost_total / 12000.0)
+    return min(1.0, 0.65 * han_norm + 0.35 * cost_norm)
+
+
+def _hora_truth_yaku_flags(truth) -> tuple[float, float, float, float, float]:
+    yaku_names = {str(name) for name in (getattr(truth, "yaku", None) or [])}
+    return (
+        1.0 if "Tanyao" in yaku_names else 0.0,
+        1.0 if any(name.startswith("Yakuhai (") for name in yaku_names) else 0.0,
+        1.0 if "Chiitoitsu" in yaku_names else 0.0,
+        1.0 if "Iipeikou" in yaku_names else 0.0,
+        1.0 if "Pinfu" in yaku_names else 0.0,
+    )
+
+
+def _snapshot_with_after_hand(state: dict, actor: int, after_hand: list[str]) -> dict:
+    snap = dict(state)
+    snap["hand"] = list(after_hand)
+    snap["tsumo_pai"] = None
+    snap["last_discard"] = None
+    snap["last_kakan"] = None
+    snap["actor_to_move"] = actor
+    last_tsumo = list(state.get("last_tsumo", [None, None, None, None]))
+    while len(last_tsumo) <= actor:
+        last_tsumo.append(None)
+    last_tsumo[actor] = None
+    snap["last_tsumo"] = last_tsumo
+    last_tsumo_raw = list(state.get("last_tsumo_raw", [None, None, None, None]))
+    while len(last_tsumo_raw) <= actor:
+        last_tsumo_raw.append(None)
+    last_tsumo_raw[actor] = None
+    snap["last_tsumo_raw"] = last_tsumo_raw
+    return snap
+
+
+def _draw_snapshot_for_truth(state: dict, actor: int, draw_tile: str) -> dict:
+    snap = dict(state)
+    snap["hand"] = [*state.get("hand", []), draw_tile]
+    snap["tsumo_pai"] = draw_tile
+    last_tsumo = list(state.get("last_tsumo", [None, None, None, None]))
+    while len(last_tsumo) <= actor:
+        last_tsumo.append(None)
+    last_tsumo[actor] = normalize_tile(draw_tile)
+    snap["last_tsumo"] = last_tsumo
+    last_tsumo_raw = list(state.get("last_tsumo_raw", [None, None, None, None]))
+    while len(last_tsumo_raw) <= actor:
+        last_tsumo_raw.append(None)
+    last_tsumo_raw[actor] = draw_tile
+    snap["last_tsumo_raw"] = last_tsumo_raw
+    snap["actor_to_move"] = actor
+    snap["last_discard"] = None
+    snap["last_kakan"] = None
+    return snap
+
+
+def _resolve_hora_truth_from_snapshot(snapshot: dict, actor: int, pai: str):
+    prepared = _scoring_prepared_hora_payload_from_snapshot(
+        snapshot,
+        actor=actor,
+        pai=pai,
+        is_tsumo=True,
+    )
+    if prepared is False or not isinstance(prepared, dict):
+        return None
+    status, truth = _scoring_evaluate_hora_truth_from_prepared_payload(prepared)
+    if status == "truth" and truth is not None:
+        return truth
+    response, _context, tiles136, dora_ids, ura_ids = _scoring_estimate_hand_value_from_prepared_payload(
+        prepared,
+        actor=actor,
+        pai=pai,
+    )
+    if response.error or not response.cost:
+        return None
+    return _scoring_extract_hora_truth(
+        response,
+        tile_ids=tiles136,
+        dora_indicator_ids=dora_ids,
+        ura_indicator_ids=ura_ids,
+    )
+
+
+def _future_truth_depth_for_shanten(shanten: int) -> int | None:
+    if shanten in (0, 1, 2):
+        return shanten
+    return None
+
+
+def _future_truth_metrics_impl(
+    *,
+    state: dict,
+    actor: int,
+    after_hand: list[str],
+    progress,
+    visible_counts34: tuple[int, ...],
+    open_hand_flag: float,
+    depth_remaining: int,
+) -> tuple[float, float, float, float, float, float, float]:
+    base_snapshot = _snapshot_with_after_hand(state, actor, after_hand)
+    if depth_remaining == 0:
+        max_hand_value_proxy = 0.0
+        reach_hand_value_proxy = 0.0
+        tanyao_route = 0.0
+        yakuhai_route = 0.0
+        chiitoi_route = 0.0
+        iipeiko_route = 0.0
+        pinfu_route = 0.0
+        for tile34, waiting in enumerate(progress.waits_tiles):
+            if not waiting:
+                continue
+            live = max(0, 4 - int(visible_counts34[tile34]))
+            if live <= 0:
+                continue
+            draw_tile = _TILE34_STR[tile34]
+            draw_snapshot = _draw_snapshot_for_truth(base_snapshot, actor, draw_tile)
+            truth = _resolve_hora_truth_from_snapshot(draw_snapshot, actor, draw_tile)
+            if truth is not None:
+                max_hand_value_proxy = max(max_hand_value_proxy, _hora_truth_value_proxy(truth))
+                truth_flags = _hora_truth_yaku_flags(truth)
+                tanyao_route = max(tanyao_route, truth_flags[0])
+                yakuhai_route = max(yakuhai_route, truth_flags[1])
+                chiitoi_route = max(chiitoi_route, truth_flags[2])
+                iipeiko_route = max(iipeiko_route, truth_flags[3])
+                pinfu_route = max(pinfu_route, truth_flags[4])
+            if open_hand_flag > 0.5:
+                continue
+            reached_snapshot = dict(draw_snapshot)
+            reached = list(draw_snapshot.get("reached", [False, False, False, False]))
+            while len(reached) <= actor:
+                reached.append(False)
+            reached[actor] = True
+            reached_snapshot["reached"] = reached
+            pending_reach = list(draw_snapshot.get("pending_reach", [False, False, False, False]))
+            while len(pending_reach) <= actor:
+                pending_reach.append(False)
+            pending_reach[actor] = False
+            reached_snapshot["pending_reach"] = pending_reach
+            ippatsu = list(draw_snapshot.get("ippatsu_eligible", [False, False, False, False]))
+            while len(ippatsu) <= actor:
+                ippatsu.append(False)
+            ippatsu[actor] = False
+            reached_snapshot["ippatsu_eligible"] = ippatsu
+            truth = _resolve_hora_truth_from_snapshot(reached_snapshot, actor, draw_tile)
+            if truth is not None:
+                reach_hand_value_proxy = max(reach_hand_value_proxy, _hora_truth_value_proxy(truth))
+        return (
+            max_hand_value_proxy,
+            reach_hand_value_proxy,
+            tanyao_route,
+            yakuhai_route,
+            chiitoi_route,
+            iipeiko_route,
+            pinfu_route,
+        )
+
+    counts34 = _counts34(after_hand)
+    metrics = [0.0] * 7
+    for tile34, seen in enumerate(visible_counts34):
+        live = max(0, 4 - int(seen))
+        if live <= 0 or counts34[tile34] >= 4:
+            continue
+        draw_tile = _TILE34_STR[tile34]
+        draw_snapshot = _draw_snapshot_for_truth(base_snapshot, actor, draw_tile)
+        draw_hand = list(draw_snapshot.get("hand", []))
+        visible_after_draw = list(visible_counts34)
+        visible_after_draw[tile34] += 1
+        best_key = None
+        best_metrics = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        seen_discards: set[str] = set()
+        for discard_tile in draw_hand:
+            discard_key = normalize_tile(discard_tile)
+            if discard_key in seen_discards:
+                continue
+            seen_discards.add(discard_key)
+            discard_hand = _remove_tiles_once(draw_hand, [discard_tile])
+            discard_snapshot = _snapshot_with_after_hand(draw_snapshot, actor, discard_hand)
+            discard_progress = _replay_calc_normal_progress(discard_hand, [], visible_after_draw)
+            key = _progress_key(discard_progress)
+            child_depth = _future_truth_depth_for_shanten(int(discard_progress.shanten))
+            if child_depth is None or child_depth > depth_remaining - 1:
+                candidate_metrics = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            else:
+                candidate_metrics = _future_truth_metrics_impl(
+                    state=discard_snapshot,
+                    actor=actor,
+                    after_hand=discard_hand,
+                    progress=discard_progress,
+                    visible_counts34=tuple(visible_after_draw),
+                    open_hand_flag=open_hand_flag,
+                    depth_remaining=child_depth,
+                )
+            if best_key is None or key > best_key or (
+                key == best_key and candidate_metrics[0] > best_metrics[0]
+            ):
+                best_key = key
+                best_metrics = candidate_metrics
+        weight = live / 34.0
+        for idx, value in enumerate(best_metrics):
+            metrics[idx] = min(1.0, metrics[idx] + float(value) * weight)
+    return tuple(metrics)
+
+
+def _future_truth_metrics(
+    *,
+    state: dict,
+    actor: int,
+    after_hand: list[str],
+    progress,
+    visible_counts34: tuple[int, ...],
+    open_hand_flag: float,
+) -> tuple[float, float, float, float, float, float, float]:
+    depth = _future_truth_depth_for_shanten(int(progress.shanten))
+    if depth is None:
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    return _future_truth_metrics_impl(
+        state=state,
+        actor=actor,
+        after_hand=after_hand,
+        progress=progress,
+        visible_counts34=visible_counts34,
+        open_hand_flag=open_hand_flag,
+        depth_remaining=depth,
+    )
+
+
+def _exact_tenpai_truth_metrics(
+    *,
+    state: dict,
+    actor: int,
+    after_hand: list[str],
+    progress,
+    visible_counts34: tuple[int, ...],
+    open_hand_flag: float,
+) -> tuple[float, float, float, float, float, float, float]:
+    return _future_truth_metrics(
+        state=state,
+        actor=actor,
+        after_hand=after_hand,
+        progress=progress,
+        visible_counts34=visible_counts34,
+        open_hand_flag=open_hand_flag,
+    )
+
+
+def _exact_one_shanten_truth_metrics(
+    *,
+    state: dict,
+    actor: int,
+    after_hand: list[str],
+    progress,
+    visible_counts34: tuple[int, ...],
+    open_hand_flag: float,
+) -> tuple[float, float, float, float, float, float, float]:
+    return _future_truth_metrics(
+        state=state,
+        actor=actor,
+        after_hand=after_hand,
+        progress=progress,
+        visible_counts34=visible_counts34,
+        open_hand_flag=open_hand_flag,
+    )
+
+
 def _value_proxy_metrics(
     *,
     progress,
+    exact_tenpai_metrics: tuple[float, float, float, float, float, float, float],
+    exact_one_shanten_metrics: tuple[float, float, float, float, float, float, float],
+    good_shape_live: float,
+    improvement_live: float,
     dora_norm: float,
     aka_norm: float,
     open_hand_flag: float,
@@ -298,38 +650,84 @@ def _value_proxy_metrics(
     after_iipeiko_path: float,
     current_pinfu_like_path: float,
     after_pinfu_like_path: float,
+    tenpai_live: float,
+    best_tenpai_waits_live: float,
 ) -> tuple[float, float, float, float]:
+    exact_tenpai_value_proxy, exact_reach_value_proxy, exact_tanyao_route, exact_yakuhai_route, exact_chiitoi_route, exact_iipeiko_route, exact_pinfu_route = exact_tenpai_metrics
+    one_shanten_value_proxy, one_shanten_reach_proxy, one_shanten_tanyao_route, one_shanten_yakuhai_route, one_shanten_chiitoi_route, one_shanten_iipeiko_route, one_shanten_pinfu_route = exact_one_shanten_metrics
     tenpai_flag = 1.0 if progress.shanten == 0 else 0.0
     confirmed_han_floor = min(8.0, yakuhai_triplet + after_tanyao_keep + dora_norm * 10.0 + aka_norm * 3.0)
-    max_hand_value_proxy = tenpai_flag * _max_hand_value_norm(
+    tenpai_value_proxy = _max_hand_value_norm(
         confirmed_han_floor=confirmed_han_floor,
         waits_count=int(progress.waits_count),
         waits_live=int(progress.ukeire_live_count),
         is_tenpai=bool(tenpai_flag),
     )
+    one_shanten_tenpai_pressure = min(1.0, tenpai_live / 34.0) if int(progress.shanten) == 1 else 0.0
+    one_shanten_shape_bonus = min(
+        1.0,
+        0.6 * (good_shape_live / 34.0)
+        + 0.4 * (improvement_live / 34.0)
+        + 0.35 * (min(best_tenpai_waits_live, 12.0) / 12.0),
+    ) if int(progress.shanten) == 1 else 0.0
+    pre_tenpai_value_proxy = (
+        (1.0 - open_hand_flag)
+        * one_shanten_tenpai_pressure
+        * min(1.0, 0.65 * (confirmed_han_floor / 8.0) + 0.35 * one_shanten_shape_bonus)
+    )
+    non_tenpai_value_proxy = max(one_shanten_value_proxy, pre_tenpai_value_proxy)
+    max_hand_value_proxy = max(exact_tenpai_value_proxy, tenpai_flag * tenpai_value_proxy, non_tenpai_value_proxy)
     reach_bonus = (
         0.12
         + 0.05 * after_pinfu_like_path
         + 0.05 * after_iipeiko_path
         + 0.04 * after_chiitoi_path
     )
-    reach_hand_value_proxy = tenpai_flag * (1.0 - open_hand_flag) * min(1.0, max_hand_value_proxy + reach_bonus)
+    reach_hand_value_proxy = max(
+        exact_reach_value_proxy,
+        one_shanten_reach_proxy,
+        tenpai_flag * (1.0 - open_hand_flag) * min(1.0, max_hand_value_proxy + reach_bonus),
+        non_tenpai_value_proxy
+        * min(
+            1.0,
+            0.55
+            + 0.20 * after_pinfu_like_path
+            + 0.15 * after_iipeiko_path
+            + 0.10 * after_chiitoi_path,
+        ),
+    )
+    after_tanyao_truth = max(after_tanyao_keep, exact_tanyao_route, one_shanten_tanyao_route)
+    after_yakuhai_truth = max(yakuhai_pair, exact_yakuhai_route, one_shanten_yakuhai_route)
+    after_chiitoi_truth = max(after_chiitoi_path, exact_chiitoi_route, one_shanten_chiitoi_route)
+    after_iipeiko_truth = max(after_iipeiko_path, exact_iipeiko_route, one_shanten_iipeiko_route)
+    after_pinfu_truth = max(after_pinfu_like_path, exact_pinfu_route, one_shanten_pinfu_route)
     yaku_break_flag = 1.0 if any(
         (
-            current_tanyao_keep > after_tanyao_keep,
-            current_yakuhai_pair > yakuhai_pair,
-            current_chiitoi_path > after_chiitoi_path,
-            current_iipeiko_path > after_iipeiko_path,
-            current_pinfu_like_path > after_pinfu_like_path,
+            current_tanyao_keep > after_tanyao_truth,
+            current_yakuhai_pair > after_yakuhai_truth,
+            current_chiitoi_path > after_chiitoi_truth,
+            current_iipeiko_path > after_iipeiko_truth,
+            current_pinfu_like_path > after_pinfu_truth,
         )
     ) else 0.0
-    closed_route_bonus = max(after_pinfu_like_path, after_iipeiko_path, after_chiitoi_path)
+    closed_route_bonus = max(
+        after_pinfu_like_path,
+        after_iipeiko_path,
+        after_chiitoi_path,
+        exact_pinfu_route,
+        exact_iipeiko_route,
+        exact_chiitoi_route,
+        one_shanten_pinfu_route,
+        one_shanten_iipeiko_route,
+        one_shanten_chiitoi_route,
+    )
     closed_value_proxy = (1.0 - open_hand_flag) * min(
         1.0,
         0.45 * max_hand_value_proxy
         + 0.25 * reach_hand_value_proxy
         + 0.2 * (confirmed_han_floor / 8.0)
-        + 0.1 * closed_route_bonus,
+        + 0.1 * closed_route_bonus
+        + 0.1 * non_tenpai_value_proxy,
     )
     return max_hand_value_proxy, reach_hand_value_proxy, yaku_break_flag, closed_value_proxy
 
@@ -339,6 +737,7 @@ def _shape_value_metrics(
     pair_count: int,
     open_hand_flag: float,
     yakuhai_triplet: float,
+    exact_yakuhai_route: float,
 ) -> tuple[float, float, float, float]:
     suit_counts = [
         sum(counts34[0:9]),
@@ -351,7 +750,7 @@ def _shape_value_metrics(
     honitsu_tendency = (max_suit + honor_count) / total_tiles
     chinitsu_tendency = 0.0 if honor_count > 0 else max_suit / max(1, sum(suit_counts))
     chiitoi_tendency = (1.0 - open_hand_flag) * min(1.0, pair_count / 7.0)
-    yakuhai_value_proxy = min(1.0, 0.6 * yakuhai_triplet + 0.4 * chiitoi_tendency)
+    yakuhai_value_proxy = min(1.0, max(0.6 * yakuhai_triplet + 0.4 * chiitoi_tendency, exact_yakuhai_route))
     return honitsu_tendency, chinitsu_tendency, chiitoi_tendency, yakuhai_value_proxy
 
 
@@ -372,17 +771,36 @@ def _summary_vector(
 ) -> np.ndarray:
     counts34 = _counts34(hand_tiles)
     progress = _replay_calc_normal_progress(hand_tiles, melds, list(visible_counts34))
+    good_shape_live, improvement_live, tenpai_live, best_tenpai_waits_live = _one_shanten_draw_analysis(
+        hand_tiles,
+        melds,
+        visible_counts34,
+    )
     pair_count, taatsu_count = _pair_taatsu_metrics(counts34)
     delta_shanten = np.clip((float(current_shanten) - float(progress.shanten)) / 4.0, -1.0, 1.0)
     dora_norm, aka_norm, terminal_norm, meld_norm, wall_norm, tanyao_keep = _after_state_bonus_metrics(
         state, actor, hand_tiles, melds
     )
+    future_metrics = _future_truth_metrics(
+        state=state,
+        actor=actor,
+        after_hand=hand_tiles,
+        progress=progress,
+        visible_counts34=visible_counts34,
+        open_hand_flag=open_hand_flag,
+    )
+    exact_tenpai_metrics = future_metrics if int(progress.shanten) == 0 else (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    exact_one_shanten_metrics = future_metrics if int(progress.shanten) in (1, 2) else (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     after_tanyao_keep, yakuhai_pair, after_chiitoi_path, after_iipeiko_path, after_pinfu_like_path = _common_yaku_path_metrics(
         counts34, state, actor, open_hand_flag
     )
     yakuhai_triplet = _yakuhai_triplet_flag(counts34, state, actor)
     max_hand_value_proxy, reach_hand_value_proxy, yaku_break_flag, closed_value_proxy = _value_proxy_metrics(
         progress=progress,
+        exact_tenpai_metrics=exact_tenpai_metrics,
+        exact_one_shanten_metrics=exact_one_shanten_metrics,
+        good_shape_live=good_shape_live,
+        improvement_live=improvement_live,
         dora_norm=dora_norm,
         aka_norm=aka_norm,
         open_hand_flag=open_hand_flag,
@@ -397,9 +815,15 @@ def _summary_vector(
         after_iipeiko_path=after_iipeiko_path,
         current_pinfu_like_path=current_pinfu_like_path,
         after_pinfu_like_path=after_pinfu_like_path,
+        tenpai_live=tenpai_live,
+        best_tenpai_waits_live=best_tenpai_waits_live,
     )
     honitsu_tendency, chinitsu_tendency, chiitoi_tendency, yakuhai_value_proxy = _shape_value_metrics(
-        counts34, pair_count, open_hand_flag, yakuhai_triplet
+        counts34,
+        pair_count,
+        open_hand_flag,
+        yakuhai_triplet,
+        max(exact_tenpai_metrics[3], exact_one_shanten_metrics[3]),
     )
     return np.array(
         [
@@ -408,8 +832,8 @@ def _summary_vector(
             progress.waits_count / 34.0,
             progress.ukeire_type_count / 34.0,
             progress.ukeire_live_count / 34.0,
-            progress.good_shape_ukeire_live_count / 34.0,
-            progress.improvement_live_count / 34.0,
+            good_shape_live / 34.0,
+            improvement_live / 34.0,
             pair_count / 7.0,
             taatsu_count / 6.0,
             yakuhai_pair,
@@ -936,7 +1360,11 @@ def build_typed_action_summaries(
             legal_actions,
         )
         rust_summaries_ready = True
-    except Exception:
+    except RuntimeError as exc:
+        if not _is_missing_rust_capability_error(exc):
+            raise
+        # The Python implementation is an emergency mirror for environments
+        # where the Rust typed-summary bridge is missing.
         rust_summaries_ready = False
 
     for action in legal_actions:

@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 from inference.keqing_adapter import KeqingModelAdapter
-from mahjong_env.replay import build_supervised_samples
+from mahjong_env.replay import build_replay_samples_mc_return
 from xmodel1.model import Xmodel1Model
 
 
@@ -31,7 +31,7 @@ def _sample_discard_state():
         {"type": "tsumo", "actor": 0, "pai": "4p"},
         {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
     ]
-    samples = build_supervised_samples(events, value_strategy="mc_return", strict_legal_labels=True)
+    samples = build_replay_samples_mc_return(events, strict_legal_labels=True)
     sample = next(s for s in samples if s.label_action.get("type") == "dahai")
     snap = dict(sample.state)
     snap["legal_actions"] = sample.legal_actions

@@ -20,5 +20,5 @@ def test_xmodel1_preprocess_cli_smoke_reports_rust_cli_path():
         text=True,
     )
     assert result.returncode == 0
-    assert "xmodel1 preprocess launcher -> cargo run --release" in result.stdout
-    assert "Rust Xmodel1 export completed:" in result.stdout
+    assert "xmodel1 preprocess launcher -> native-v2-export" in result.stdout
+    assert "xmodel1 preprocess complete:" in result.stdout

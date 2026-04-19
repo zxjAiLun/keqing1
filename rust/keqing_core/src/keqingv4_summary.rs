@@ -1,7 +1,15 @@
 use serde_json::Value;
 
 use crate::counts::TILE_COUNT;
-use crate::progress_summary::summarize_like_python;
+use crate::future_truth::{future_truth_metrics, FutureTruthMetrics};
+use crate::legal_actions::reach_discard_candidates;
+use crate::progress_summary::{
+    summarize_like_python, summarize_one_shanten_draw_metrics,
+    summarize_one_shanten_tenpai_pressure,
+};
+use crate::value_proxy::{
+    confirmed_han_floor as shared_confirmed_han_floor, tenpai_value_proxy_norm,
+};
 
 fn normalize_tile_repr(tile: &str) -> String {
     match tile {
@@ -12,7 +20,7 @@ fn normalize_tile_repr(tile: &str) -> String {
     }
 }
 
-fn strip_aka(tile: &str) -> String {
+pub(crate) fn strip_aka(tile: &str) -> String {
     if tile == "5mr" || tile == "0m" {
         return "5m".to_string();
     }
@@ -119,7 +127,7 @@ fn collect_actor_all_tiles(after_hand: &[String], snapshot: &Value, actor: usize
     tiles
 }
 
-fn counts34_from_tiles(tiles: &[String]) -> [u8; TILE_COUNT] {
+pub(crate) fn counts34_from_tiles(tiles: &[String]) -> [u8; TILE_COUNT] {
     let mut counts = [0u8; TILE_COUNT];
     for tile in tiles {
         if let Some(idx) = tile34_from_pai(tile) {
@@ -440,8 +448,64 @@ fn common_yaku_path_metrics(
     )
 }
 
+pub(crate) fn progress_key(summary: &crate::progress_summary::Summary3n1) -> (i32, i32, i32, i32) {
+    (
+        -(summary.shanten as i32),
+        summary.ukeire_live_count as i32,
+        summary.ukeire_type_count as i32,
+        summary.waits_count as i32,
+    )
+}
+
+pub(crate) fn hand_tiles_from_snapshot(snapshot: &Value) -> Vec<String> {
+    snapshot
+        .get("hand")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect()
+}
+
+pub(crate) fn snapshot_with_after_hand(
+    snapshot: &Value,
+    actor: usize,
+    after_hand: &[String],
+) -> Value {
+    let mut next_snapshot = snapshot.clone();
+    if let Some(obj) = next_snapshot.as_object_mut() {
+        obj.insert(
+            "hand".to_string(),
+            Value::Array(after_hand.iter().cloned().map(Value::String).collect()),
+        );
+        obj.insert("tsumo_pai".to_string(), Value::Null);
+        obj.insert("last_discard".to_string(), Value::Null);
+        obj.insert("last_kakan".to_string(), Value::Null);
+        obj.insert("actor_to_move".to_string(), Value::from(actor as i64));
+        if let Some(last_tsumo) = obj.get_mut("last_tsumo").and_then(Value::as_array_mut) {
+            if actor < last_tsumo.len() {
+                last_tsumo[actor] = Value::Null;
+            }
+        }
+        if let Some(last_tsumo_raw) = obj.get_mut("last_tsumo_raw").and_then(Value::as_array_mut) {
+            if actor < last_tsumo_raw.len() {
+                last_tsumo_raw[actor] = Value::Null;
+            }
+        }
+    }
+    next_snapshot
+}
+type ExactTruthMetrics = FutureTruthMetrics;
+
 fn value_proxy_metrics(
     summary: &crate::progress_summary::Summary3n1,
+    exact_tenpai_metrics: ExactTruthMetrics,
+    exact_one_shanten_metrics: ExactTruthMetrics,
+    good_shape_live: u8,
+    improvement_live: u8,
+    tenpai_live: u8,
+    best_tenpai_waits_live: u8,
     dora_norm: f32,
     aka_norm: f32,
     open_hand_flag: f32,
@@ -458,24 +522,76 @@ fn value_proxy_metrics(
     after_pinfu_like_path: f32,
 ) -> (f32, f32, f32, f32) {
     let tenpai_flag = if summary.shanten == 0 { 1.0 } else { 0.0 };
-    let confirmed_han_floor =
-        (yakuhai_triplet + after_tanyao_keep + dora_norm * 10.0 + aka_norm * 3.0).min(8.0);
-    let max_hand_value_proxy = tenpai_flag
-        * max_hand_value_norm(
-            confirmed_han_floor,
-            summary.waits_count,
-            summary.ukeire_live_count,
-            summary.shanten == 0,
-        );
+    let confirmed_han_floor = shared_confirmed_han_floor(
+        yakuhai_triplet,
+        after_tanyao_keep,
+        dora_norm * 10.0 + aka_norm * 3.0,
+    );
+    let tenpai_value_proxy = tenpai_value_proxy_norm(
+        confirmed_han_floor,
+        summary.waits_count,
+        summary.ukeire_live_count as usize,
+        summary.shanten == 0,
+    );
+    let one_shanten_tenpai_pressure = if summary.shanten == 1 {
+        (tenpai_live as f32 / 34.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let one_shanten_shape_bonus = if summary.shanten == 1 {
+        ((good_shape_live as f32 / 34.0) * 0.6
+            + (improvement_live as f32 / 34.0) * 0.4
+            + (best_tenpai_waits_live.min(12) as f32 / 12.0) * 0.35)
+            .clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let pre_tenpai_value_proxy = (1.0 - open_hand_flag)
+        * one_shanten_tenpai_pressure
+        * (0.65 * (confirmed_han_floor / 8.0) + 0.35 * one_shanten_shape_bonus).clamp(0.0, 1.0);
+    let non_tenpai_value_proxy = exact_one_shanten_metrics
+        .max_hand_value_proxy
+        .max(pre_tenpai_value_proxy);
+    let max_hand_value_proxy = exact_tenpai_metrics
+        .max_hand_value_proxy
+        .max(tenpai_flag * tenpai_value_proxy)
+        .max(non_tenpai_value_proxy);
     let reach_bonus =
         0.12 + 0.05 * after_pinfu_like_path + 0.05 * after_iipeiko_path + 0.04 * after_chiitoi_path;
-    let reach_hand_value_proxy =
-        tenpai_flag * (1.0 - open_hand_flag) * (max_hand_value_proxy + reach_bonus).min(1.0);
-    let yaku_break_flag = if current_tanyao_keep > after_tanyao_keep
-        || current_yakuhai_pair > yakuhai_pair
-        || current_chiitoi_path > after_chiitoi_path
-        || current_iipeiko_path > after_iipeiko_path
-        || current_pinfu_like_path > after_pinfu_like_path
+    let reach_hand_value_proxy = exact_tenpai_metrics
+        .reach_hand_value_proxy
+        .max(exact_one_shanten_metrics.reach_hand_value_proxy)
+        .max(
+            (tenpai_flag * (1.0 - open_hand_flag) * (max_hand_value_proxy + reach_bonus).min(1.0))
+                .max(
+                    non_tenpai_value_proxy
+                        * (0.55
+                            + 0.20 * after_pinfu_like_path
+                            + 0.15 * after_iipeiko_path
+                            + 0.10 * after_chiitoi_path)
+                            .clamp(0.0, 1.0),
+                ),
+        );
+    let after_tanyao_truth = after_tanyao_keep
+        .max(exact_tenpai_metrics.tanyao_route)
+        .max(exact_one_shanten_metrics.tanyao_route);
+    let after_yakuhai_truth = yakuhai_pair
+        .max(exact_tenpai_metrics.yakuhai_route)
+        .max(exact_one_shanten_metrics.yakuhai_route);
+    let after_chiitoi_truth = after_chiitoi_path
+        .max(exact_tenpai_metrics.chiitoi_route)
+        .max(exact_one_shanten_metrics.chiitoi_route);
+    let after_iipeiko_truth = after_iipeiko_path
+        .max(exact_tenpai_metrics.iipeiko_route)
+        .max(exact_one_shanten_metrics.iipeiko_route);
+    let after_pinfu_truth = after_pinfu_like_path
+        .max(exact_tenpai_metrics.pinfu_route)
+        .max(exact_one_shanten_metrics.pinfu_route);
+    let yaku_break_flag = if current_tanyao_keep > after_tanyao_truth
+        || current_yakuhai_pair > after_yakuhai_truth
+        || current_chiitoi_path > after_chiitoi_truth
+        || current_iipeiko_path > after_iipeiko_truth
+        || current_pinfu_like_path > after_pinfu_truth
     {
         1.0
     } else {
@@ -483,12 +599,19 @@ fn value_proxy_metrics(
     };
     let closed_route_bonus = after_pinfu_like_path
         .max(after_iipeiko_path)
-        .max(after_chiitoi_path);
+        .max(after_chiitoi_path)
+        .max(exact_tenpai_metrics.pinfu_route)
+        .max(exact_tenpai_metrics.iipeiko_route)
+        .max(exact_tenpai_metrics.chiitoi_route)
+        .max(exact_one_shanten_metrics.pinfu_route)
+        .max(exact_one_shanten_metrics.iipeiko_route)
+        .max(exact_one_shanten_metrics.chiitoi_route);
     let closed_value_proxy = (1.0 - open_hand_flag)
         * (0.45 * max_hand_value_proxy
             + 0.25 * reach_hand_value_proxy
             + 0.2 * (confirmed_han_floor / 8.0)
-            + 0.1 * closed_route_bonus)
+            + 0.1 * closed_route_bonus
+            + 0.1 * non_tenpai_value_proxy)
             .min(1.0);
     (
         max_hand_value_proxy,
@@ -498,25 +621,12 @@ fn value_proxy_metrics(
     )
 }
 
-fn max_hand_value_norm(
-    confirmed_han_floor: f32,
-    waits_count: u8,
-    waits_live: u8,
-    is_tenpai: bool,
-) -> f32 {
-    let mut value_proxy = confirmed_han_floor;
-    if is_tenpai {
-        value_proxy +=
-            0.5 + (waits_count.min(5) as f32) * 0.15 + (waits_live.min(12) as f32) * 0.03;
-    }
-    (value_proxy / 8.0).min(1.0)
-}
-
 fn shape_value_metrics(
     counts34: &[u8; TILE_COUNT],
     pair_count: u8,
     open_hand_flag: f32,
     yakuhai_triplet: f32,
+    exact_yakuhai_route: f32,
 ) -> (f32, f32, f32, f32) {
     let suit_counts = [
         counts34[0..9].iter().map(|&v| v as usize).sum::<usize>(),
@@ -533,7 +643,9 @@ fn shape_value_metrics(
         max_suit / (suit_counts.iter().sum::<usize>().max(1) as f32)
     };
     let chiitoi_tendency = (1.0 - open_hand_flag) * ((pair_count as f32) / 7.0).min(1.0);
-    let yakuhai_value_proxy = (0.6 * yakuhai_triplet + 0.4 * chiitoi_tendency).min(1.0);
+    let yakuhai_value_proxy = (0.6 * yakuhai_triplet + 0.4 * chiitoi_tendency)
+        .max(exact_yakuhai_route)
+        .min(1.0);
     (
         honitsu_tendency,
         chinitsu_tendency,
@@ -557,6 +669,28 @@ fn summary_vector(
 ) -> [f32; 28] {
     let counts34 = counts34_from_tiles(after_hand);
     let summary = summarize_like_python(&counts34, visible_counts34);
+    let (good_shape_live, improvement_live) =
+        summarize_one_shanten_draw_metrics(&counts34, visible_counts34);
+    let (tenpai_live, best_tenpai_waits_live) =
+        summarize_one_shanten_tenpai_pressure(&counts34, visible_counts34);
+    let future_metrics = future_truth_metrics(
+        snapshot,
+        actor,
+        after_hand,
+        &summary,
+        visible_counts34,
+        open_hand_flag_value,
+    );
+    let exact_tenpai_metrics = if summary.shanten == 0 {
+        future_metrics
+    } else {
+        ExactTruthMetrics::default()
+    };
+    let exact_one_shanten_metrics = if matches!(summary.shanten, 1 | 2) {
+        future_metrics
+    } else {
+        ExactTruthMetrics::default()
+    };
     let (pair_count, taatsu_count) = pair_taatsu_metrics(&counts34);
     let delta_shanten = ((current_shanten - summary.shanten) as f32 / 4.0).clamp(-1.0, 1.0);
     let (dora_norm, aka_norm, terminal_norm, meld_norm, wall_norm, _tanyao_keep_bonus) =
@@ -572,6 +706,12 @@ fn summary_vector(
     let (max_hand_value_proxy, reach_hand_value_proxy, yaku_break_flag, closed_value_proxy) =
         value_proxy_metrics(
             &summary,
+            exact_tenpai_metrics,
+            exact_one_shanten_metrics,
+            good_shape_live,
+            improvement_live,
+            tenpai_live,
+            best_tenpai_waits_live,
             dora_norm,
             aka_norm,
             open_hand_flag_value,
@@ -588,15 +728,23 @@ fn summary_vector(
             after_pinfu_like_path,
         );
     let (honitsu_tendency, chinitsu_tendency, chiitoi_tendency, yakuhai_value_proxy) =
-        shape_value_metrics(&counts34, pair_count, open_hand_flag_value, yakuhai_triplet);
+        shape_value_metrics(
+            &counts34,
+            pair_count,
+            open_hand_flag_value,
+            yakuhai_triplet,
+            exact_tenpai_metrics
+                .yakuhai_route
+                .max(exact_one_shanten_metrics.yakuhai_route),
+        );
     [
         summary.shanten as f32 / 8.0,
         if summary.shanten == 0 { 1.0 } else { 0.0 },
         summary.waits_count as f32 / 34.0,
         summary.ukeire_type_count as f32 / 34.0,
         summary.ukeire_live_count as f32 / 34.0,
-        0.0,
-        0.0,
+        good_shape_live as f32 / 34.0,
+        improvement_live as f32 / 34.0,
         pair_count as f32 / 7.0,
         taatsu_count as f32 / 6.0,
         yakuhai_pair,
@@ -1121,7 +1269,7 @@ fn projected_call_summary_vector(
     Some(acc)
 }
 
-const TILE34_STRINGS: [&str; TILE_COUNT] = [
+pub(crate) const TILE34_STRINGS: [&str; TILE_COUNT] = [
     "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4p", "5p", "6p", "7p",
     "8p", "9p", "1s", "2s", "3s", "4s", "5s", "6s", "7s", "8s", "9s", "E", "S", "W", "N", "P", "F",
     "C",
@@ -1179,63 +1327,27 @@ fn resolve_reach_tsumo_tile(snapshot: &Value, actor: usize) -> (Option<String>, 
     }
 }
 
-fn collect_combined_hand_raw(snapshot: &Value) -> Vec<String> {
-    let mut hand: Vec<String> = snapshot
+pub fn enumerate_keqingv4_reach_discards(snapshot: &Value, actor: usize) -> Vec<(String, bool)> {
+    let hand_tiles = snapshot
         .get("hand")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(Value::as_str)
-        .map(|value| value.to_string())
-        .collect();
-    if let Some(tsumo) = snapshot.get("tsumo_pai").and_then(Value::as_str) {
-        hand.push(tsumo.to_string());
+        .filter_map(Value::as_str);
+    let mut hand = std::collections::BTreeMap::<String, u8>::new();
+    for tile in hand_tiles {
+        let normalized = strip_aka(tile);
+        *hand.entry(normalized).or_insert(0) += 1;
     }
-    hand
-}
-
-pub fn enumerate_keqingv4_reach_discards(snapshot: &Value, actor: usize) -> Vec<(String, bool)> {
-    let hand = collect_combined_hand_raw(snapshot);
+    if let Some(tsumo) = snapshot.get("tsumo_pai").and_then(Value::as_str) {
+        let normalized = strip_aka(tsumo);
+        *hand.entry(normalized).or_insert(0) += 1;
+    }
     if hand.is_empty() {
         return Vec::new();
     }
-    let mut counts34 = [0i32; TILE_COUNT];
-    for tile in &hand {
-        if let Some(tile34) = tile34_from_pai(tile) {
-            counts34[tile34] += 1;
-        }
-    }
     let (last_tsumo, last_tsumo_raw) = resolve_reach_tsumo_tile(snapshot, actor);
-    let mut seen = std::collections::BTreeSet::<(String, bool)>::new();
-    let mut out = Vec::new();
-    for tile in &hand {
-        let Some(tile34) = tile34_from_pai(tile) else {
-            continue;
-        };
-        if counts34[tile34] <= 0 {
-            continue;
-        }
-        counts34[tile34] -= 1;
-        let counts_u8 = counts34.map(|value| value.max(0) as u8);
-        let tile_count: u8 = counts_u8.iter().sum();
-        let shanten = crate::shanten_table::calc_shanten_all(&counts_u8, tile_count / 3);
-        if shanten == 0 {
-            let tsumogiri = last_tsumo
-                .as_ref()
-                .is_some_and(|value| value == &strip_aka(tile));
-            let pai_out = if tsumogiri {
-                last_tsumo_raw.clone().unwrap_or_else(|| tile.to_string())
-            } else {
-                tile.to_string()
-            };
-            let candidate = (pai_out, tsumogiri);
-            if seen.insert(candidate.clone()) {
-                out.push(candidate);
-            }
-        }
-        counts34[tile34] += 1;
-    }
-    out
+    reach_discard_candidates(&hand, last_tsumo.as_deref(), last_tsumo_raw.as_deref())
 }
 
 pub fn project_keqingv4_reach_snapshot(snapshot: &Value, actor: usize, pai: &str) -> Value {
@@ -1272,7 +1384,7 @@ fn best_reach_summary_vector(
     visible_counts34: &[u8; TILE_COUNT],
     current_shanten: i8,
 ) -> Option<[f32; 28]> {
-    let hand = collect_combined_hand_raw(snapshot);
+    let hand = collect_combined_hand(snapshot);
     if hand.is_empty() {
         return None;
     }

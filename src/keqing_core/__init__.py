@@ -18,7 +18,13 @@ import sys as _sys
 import warnings as _warnings
 
 from riichienv import calculate_shanten as _riichienv_shanten
-from training.cache_schema import KEQINGV4_SUMMARY_DIM
+
+try:
+    from training.cache_schema import KEQINGV4_SUMMARY_DIM
+except ModuleNotFoundError:
+    # Keep subprocess/import smoke checks working when only ``keqing_core`` is on
+    # the import path. The shared schema constant is currently fixed at 28.
+    KEQINGV4_SUMMARY_DIM = 28
 
 _USE_RUST = False
 _RUST_AVAILABLE = False
@@ -35,6 +41,7 @@ _RUST_SUMMARIZE_3N2_CANDIDATES = None
 _RUST_SUMMARIZE_BEST_3N2_CANDIDATE = None
 _RUST_BUILD_XMODEL1_DISCARD_RECORDS = None
 _RUST_BUILD_KEQINGV4_CACHED_RECORDS = None
+_RUST_BUILD_REPLAY_DECISION_RECORDS_MC_RETURN_JSON = None
 _RUST_XMODEL1_SCHEMA_INFO = None
 _RUST_VALIDATE_XMODEL1_DISCARD_RECORD = None
 _RUST_REPLAY_STATE_SNAPSHOT_JSON = None
@@ -46,10 +53,14 @@ _RUST_COMPUTE_HORA_DELTAS_JSON = None
 _RUST_PREPARE_HORA_TILE_ALLOCATION_JSON = None
 _RUST_BUILD_HORA_RESULT_PAYLOAD_JSON = None
 _RUST_EVALUATE_HORA_FROM_PREPARED_JSON = None
+_RUST_EVALUATE_HORA_TRUTH_FROM_PREPARED_JSON = None
 _RUST_BUILD_KEQINGV4_DISCARD_SUMMARY_JSON = None
 _RUST_BUILD_KEQINGV4_CALL_SUMMARY_JSON = None
 _RUST_BUILD_KEQINGV4_SPECIAL_SUMMARY_JSON = None
 _RUST_BUILD_KEQINGV4_TYPED_SUMMARIES_JSON = None
+_RUST_BUILD_KEQINGV4_CONTINUATION_SCENARIOS_JSON = None
+_RUST_SCORE_KEQINGV4_CONTINUATION_SCENARIO_JSON = None
+_RUST_AGGREGATE_KEQINGV4_CONTINUATION_SCORES_JSON = None
 _RUST_PROJECT_KEQINGV4_CALL_SNAPSHOT_JSON = None
 _RUST_PROJECT_KEQINGV4_DISCARD_SNAPSHOT_JSON = None
 _RUST_PROJECT_KEQINGV4_RINSHAN_DRAW_SNAPSHOT_JSON = None
@@ -158,11 +169,17 @@ if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
     _RUST_SUMMARIZE_BEST_3N2_CANDIDATE = getattr(_rust_ext, "summarize_best_3n2_candidate_py", None)
     _RUST_BUILD_XMODEL1_DISCARD_RECORDS = getattr(_rust_ext, "build_xmodel1_discard_records_py", None)
     _RUST_BUILD_KEQINGV4_CACHED_RECORDS = getattr(_rust_ext, "build_keqingv4_cached_records_py", None)
+    _RUST_BUILD_REPLAY_DECISION_RECORDS_MC_RETURN_JSON = getattr(
+        _rust_ext, "build_replay_decision_records_mc_return_json_py", None
+    )
     _RUST_XMODEL1_SCHEMA_INFO = getattr(_rust_ext, "xmodel1_schema_info_py", None)
     _RUST_VALIDATE_XMODEL1_DISCARD_RECORD = getattr(_rust_ext, "validate_xmodel1_discard_record_py", None)
     _RUST_REPLAY_STATE_SNAPSHOT_JSON = getattr(_rust_ext, "replay_state_snapshot_json_py", None)
     _RUST_ENUMERATE_LEGAL_ACTION_SPECS_STRUCTURAL_JSON = getattr(
         _rust_ext, "enumerate_legal_action_specs_structural_json_py", None
+    )
+    _RUST_ENUMERATE_PUBLIC_LEGAL_ACTION_SPECS_JSON = getattr(
+        _rust_ext, "enumerate_public_legal_action_specs_json_py", None
     )
     _RUST_ENUMERATE_HORA_CANDIDATES_JSON = getattr(
         _rust_ext, "enumerate_hora_candidates_json_py", None
@@ -185,6 +202,9 @@ if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
     _RUST_EVALUATE_HORA_FROM_PREPARED_JSON = getattr(
         _rust_ext, "evaluate_hora_from_prepared_json_py", None
     )
+    _RUST_EVALUATE_HORA_TRUTH_FROM_PREPARED_JSON = getattr(
+        _rust_ext, "evaluate_hora_truth_from_prepared_json_py", None
+    )
     _RUST_BUILD_KEQINGV4_DISCARD_SUMMARY_JSON = getattr(
         _rust_ext, "build_keqingv4_discard_summary_json_py", None
     )
@@ -196,6 +216,15 @@ if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
     )
     _RUST_BUILD_KEQINGV4_TYPED_SUMMARIES_JSON = getattr(
         _rust_ext, "build_keqingv4_typed_summaries_json_py", None
+    )
+    _RUST_BUILD_KEQINGV4_CONTINUATION_SCENARIOS_JSON = getattr(
+        _rust_ext, "build_keqingv4_continuation_scenarios_json_py", None
+    )
+    _RUST_SCORE_KEQINGV4_CONTINUATION_SCENARIO_JSON = getattr(
+        _rust_ext, "score_keqingv4_continuation_scenario_json_py", None
+    )
+    _RUST_AGGREGATE_KEQINGV4_CONTINUATION_SCORES_JSON = getattr(
+        _rust_ext, "aggregate_keqingv4_continuation_scores_json_py", None
     )
     _RUST_PROJECT_KEQINGV4_CALL_SNAPSHOT_JSON = getattr(
         _rust_ext, "project_keqingv4_call_snapshot_json_py", None
@@ -452,6 +481,17 @@ def build_keqingv4_cached_records(*, data_dirs=None, output_dir: str = "processe
     return _RUST_BUILD_KEQINGV4_CACHED_RECORDS(data_dirs, str(output_dir), bool(smoke))
 
 
+def build_replay_decision_records_mc_return(events):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_BUILD_REPLAY_DECISION_RECORDS_MC_RETURN_JSON is not None
+    ):
+        raise RuntimeError("Rust replay sample builder capability is not available")
+    payload = _json.dumps(events, ensure_ascii=False)
+    return _json.loads(_RUST_BUILD_REPLAY_DECISION_RECORDS_MC_RETURN_JSON(payload))
+
+
 def xmodel1_schema_info():
     if _USE_RUST and _RUST_AVAILABLE and _RUST_XMODEL1_SCHEMA_INFO is not None:
         name, version, max_candidates, candidate_dim, flag_dim = _RUST_XMODEL1_SCHEMA_INFO()
@@ -524,6 +564,17 @@ def enumerate_legal_action_specs_structural(state_snapshot, actor: int):
         raise RuntimeError("Rust legal action structural capability is not available")
     payload = _json.dumps(state_snapshot, ensure_ascii=False)
     return _json.loads(_RUST_ENUMERATE_LEGAL_ACTION_SPECS_STRUCTURAL_JSON(payload, int(actor)))
+
+
+def enumerate_public_legal_action_specs(state_snapshot, actor: int):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_ENUMERATE_PUBLIC_LEGAL_ACTION_SPECS_JSON is not None
+    ):
+        raise RuntimeError("Rust public legal action capability is not available")
+    payload = _json.dumps(state_snapshot, ensure_ascii=False)
+    return _json.loads(_RUST_ENUMERATE_PUBLIC_LEGAL_ACTION_SPECS_JSON(payload, int(actor)))
 
 
 def enumerate_hora_candidates(state_snapshot, actor: int):
@@ -663,6 +714,17 @@ def evaluate_hora_from_prepared(prepared):
     return _json.loads(_RUST_EVALUATE_HORA_FROM_PREPARED_JSON(payload))
 
 
+def evaluate_hora_truth_from_prepared(prepared):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_EVALUATE_HORA_TRUTH_FROM_PREPARED_JSON is not None
+    ):
+        raise RuntimeError("Rust hora truth capability is not available")
+    payload = _json.dumps(prepared, ensure_ascii=False)
+    return _json.loads(_RUST_EVALUATE_HORA_TRUTH_FROM_PREPARED_JSON(payload))
+
+
 def build_keqingv4_discard_summary(snapshot: dict, actor: int, legal_actions: list[dict]):
     if not (
         _USE_RUST
@@ -724,6 +786,81 @@ def build_keqingv4_typed_summaries(snapshot: dict, actor: int, legal_actions: li
         _np.asarray(discard_flat, dtype=_np.float32).reshape(34, KEQINGV4_SUMMARY_DIM),
         _np.asarray(call_flat, dtype=_np.float32).reshape(8, KEQINGV4_SUMMARY_DIM),
         _np.asarray(special_flat, dtype=_np.float32).reshape(3, KEQINGV4_SUMMARY_DIM),
+    )
+
+
+def resolve_keqingv4_continuation_scenarios(snapshot: dict, actor: int, action: dict):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_BUILD_KEQINGV4_CONTINUATION_SCENARIOS_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 continuation scenario capability is not available")
+    return _json.loads(
+        _RUST_BUILD_KEQINGV4_CONTINUATION_SCENARIOS_JSON(
+            _json.dumps(snapshot, ensure_ascii=False),
+            int(actor),
+            _json.dumps(action, ensure_ascii=False),
+        )
+    )
+
+
+def score_keqingv4_continuation_scenario(
+    continuation_kind: str,
+    policy_logits,
+    legal_actions: list[dict],
+    *,
+    value: float,
+    score_delta: float,
+    win_prob: float,
+    dealin_prob: float,
+    beam_lambda: float,
+    score_delta_lambda: float,
+    win_prob_lambda: float,
+    dealin_prob_lambda: float,
+):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_SCORE_KEQINGV4_CONTINUATION_SCENARIO_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 continuation scoring capability is not available")
+    policy_logits_payload = _json.dumps([float(v) for v in policy_logits], ensure_ascii=False)
+    return _json.loads(
+        _RUST_SCORE_KEQINGV4_CONTINUATION_SCENARIO_JSON(
+            str(continuation_kind),
+            policy_logits_payload,
+            _json.dumps(legal_actions, ensure_ascii=False),
+            float(value),
+            float(score_delta),
+            float(win_prob),
+            float(dealin_prob),
+            float(beam_lambda),
+            float(score_delta_lambda),
+            float(win_prob_lambda),
+            float(dealin_prob_lambda),
+        )
+    )
+
+
+def aggregate_keqingv4_continuation_scores(
+    root_policy_logits,
+    action: dict,
+    scenario_scores: list[dict],
+):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_AGGREGATE_KEQINGV4_CONTINUATION_SCORES_JSON is not None
+    ):
+        raise RuntimeError("Rust keqingv4 continuation aggregation capability is not available")
+    policy_logits_payload = _json.dumps([float(v) for v in root_policy_logits], ensure_ascii=False)
+    return _json.loads(
+        _RUST_AGGREGATE_KEQINGV4_CONTINUATION_SCORES_JSON(
+            policy_logits_payload,
+            _json.dumps(action, ensure_ascii=False),
+            _json.dumps(scenario_scores, ensure_ascii=False),
+        )
     )
 
 
@@ -842,6 +979,27 @@ def project_keqingv4_reach_snapshot(snapshot: dict, actor: int, pai: str):
     )
 
 
+def resolve_keqingv4_post_meld_followup(snapshot: dict, actor: int, action: dict):
+    projected = project_keqingv4_call_snapshot(snapshot, actor, action)
+    if projected is None:
+        return None, []
+    return projected, enumerate_keqingv4_post_meld_discards(projected, actor)
+
+
+def resolve_keqingv4_rinshan_followup(snapshot: dict, actor: int, pai: str):
+    projected = project_keqingv4_rinshan_draw_snapshot(snapshot, actor, pai)
+    return projected, enumerate_legal_action_specs_structural(projected, actor)
+
+
+def resolve_keqingv4_reach_followup(snapshot: dict, actor: int, pai: str):
+    projected = project_keqingv4_reach_snapshot(snapshot, actor, pai)
+    return projected, enumerate_legal_action_specs_structural(projected, actor)
+
+
+def is_missing_rust_capability_error(exc: BaseException) -> bool:
+    return isinstance(exc, RuntimeError) and "capability is not available" in str(exc)
+
+
 def is_available():
     return _RUST_AVAILABLE
 
@@ -880,10 +1038,12 @@ __all__ = [
     "summarize_best_3n2_candidate",
     "build_xmodel1_discard_records",
     "build_keqingv4_cached_records",
+    "build_replay_decision_records_mc_return",
     "xmodel1_schema_info",
     "validate_xmodel1_discard_record",
     "replay_state_snapshot",
     "enumerate_legal_action_specs_structural",
+    "enumerate_public_legal_action_specs",
     "enumerate_hora_candidates",
     "can_hora_shape_from_snapshot",
     "prepare_hora_evaluation_from_snapshot",
@@ -891,10 +1051,14 @@ __all__ = [
     "prepare_hora_tile_allocation",
     "build_hora_result_payload",
     "evaluate_hora_from_prepared",
+    "evaluate_hora_truth_from_prepared",
     "build_keqingv4_discard_summary",
     "build_keqingv4_call_summary",
     "build_keqingv4_special_summary",
     "build_keqingv4_typed_summaries",
+    "resolve_keqingv4_continuation_scenarios",
+    "score_keqingv4_continuation_scenario",
+    "aggregate_keqingv4_continuation_scores",
     "project_keqingv4_call_snapshot",
     "project_keqingv4_discard_snapshot",
     "project_keqingv4_rinshan_draw_snapshot",
@@ -902,6 +1066,10 @@ __all__ = [
     "enumerate_keqingv4_live_draw_weights",
     "enumerate_keqingv4_reach_discards",
     "project_keqingv4_reach_snapshot",
+    "resolve_keqingv4_post_meld_followup",
+    "resolve_keqingv4_rinshan_followup",
+    "resolve_keqingv4_reach_followup",
+    "is_missing_rust_capability_error",
     "is_available",
     "is_enabled",
     "has_3n2_candidate_summaries",

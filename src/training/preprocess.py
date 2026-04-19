@@ -17,34 +17,12 @@ import yaml
 
 from mahjong_env.replay import (
     IllegalLabelActionError,
-    build_supervised_samples,
+    build_replay_samples_mc_return,
     read_mjai_jsonl,
 )
-from keqingv1.action_space import (
-    ANKAN_IDX,
-    CHI_HIGH_IDX,
-    CHI_LOW_IDX,
-    CHI_MID_IDX,
-    DAIMINKAN_IDX,
-    KAKAN_IDX,
-    NONE_IDX,
-    PON_IDX,
-    action_to_idx,
-    build_legal_mask,
-)
-from keqingv1.features import encode
+from mahjong_env.action_space import action_to_idx, build_legal_mask
+from training.state_features import encode
 from training.cache_schema import KEQINGV4_EVENT_HISTORY_DIM, KEQINGV4_EVENT_HISTORY_LEN
-
-_MELD_ACTION_IDXS = {
-    CHI_LOW_IDX,
-    CHI_MID_IDX,
-    CHI_HIGH_IDX,
-    PON_IDX,
-    DAIMINKAN_IDX,
-    ANKAN_IDX,
-    KAKAN_IDX,
-}
-_MELD_TYPES = {"chi", "pon", "daiminkan", "ankan", "kakan"}
 
 _SUIT_PERMS = [
     (0, 1, 2),
@@ -109,11 +87,11 @@ def _get_clear_progress_caches_hook(module_name: str):
     hook = _WORKER_CLEAR_CACHE_HOOKS.get(module_name)
     if hook is not None or module_name in _WORKER_CLEAR_CACHE_HOOKS:
         return hook
-    if module_name != "keqingv3.features":
+    if module_name != "training.state_features":
         _WORKER_CLEAR_CACHE_HOOKS[module_name] = None
         return None
     try:
-        hook = importlib.import_module("keqingv3.progress_oracle").clear_progress_caches
+        hook = importlib.import_module("mahjong_env.progress_oracle").clear_progress_caches
     except Exception:
         hook = None
     _WORKER_CLEAR_CACHE_HOOKS[module_name] = hook
@@ -143,98 +121,6 @@ class BasePreprocessAdapter:
         for key in self.extra_field_names:
             result[key] = np.array(rows[key], dtype=object)
         return result
-
-
-class MeldRankPreprocessAdapter(BasePreprocessAdapter):
-    extra_field_names = ("snap_json",)
-
-    @staticmethod
-    def _permute_snap_json(snap_json_str: str, perm: tuple) -> str:
-        if not snap_json_str:
-            return snap_json_str
-        return _permute_mjson_text(snap_json_str, perm)
-
-    @staticmethod
-    def _snap_min(state: dict, actor: int, label_action: dict, legal_dicts: list) -> str:
-        meld_candidate: Optional[dict] = None
-        action_idx_val = action_to_idx(label_action)
-        if action_idx_val == NONE_IDX:
-            meld_priority = ["daiminkan", "ankan", "kakan", "pon", "chi"]
-            candidates = {a.get("type"): a for a in legal_dicts if a.get("type") in _MELD_TYPES}
-            for mtype in meld_priority:
-                if mtype in candidates:
-                    meld_candidate = candidates[mtype]
-                    break
-
-        snap = {
-            "hand": state.get("hand", []),
-            "melds": state.get("melds", [[], [], [], []]),
-            "discards": state.get("discards", [[], [], [], []]),
-            "dora_markers": state.get("dora_markers", []),
-            "reached": state.get("reached", [False, False, False, False]),
-            "scores": state.get("scores", [25000, 25000, 25000, 25000]),
-            "bakaze": state.get("bakaze", "E"),
-            "kyoku": state.get("kyoku", 1),
-            "honba": state.get("honba", 0),
-            "kyotaku": state.get("kyotaku", 0),
-            "jikaze": state.get("jikaze", 0),
-            "oya": state.get("oya", 0),
-            "actor": actor,
-            "label_action": label_action,
-            "meld_candidate": meld_candidate,
-        }
-        return json.dumps(snap, ensure_ascii=False)
-
-    def init_rows(self) -> Dict[str, list]:
-        return {"snap_json": []}
-
-    def sample_extras(self, sample, action_idx: int) -> Dict[str, object]:
-        if action_idx in _MELD_ACTION_IDXS or action_idx == NONE_IDX:
-            snap_json_str = self._snap_min(
-                sample.state,
-                sample.actor,
-                sample.label_action,
-                sample.legal_actions,
-            )
-        else:
-            snap_json_str = ""
-        return {"snap_json": snap_json_str}
-
-    def permute_result_extras(self, result: Dict[str, np.ndarray], perm: tuple) -> Dict[str, np.ndarray]:
-        if "snap_json" not in result:
-            return {}
-        return {
-            "snap_json": np.array(
-                [self._permute_snap_json(s, perm) for s in result["snap_json"]],
-                dtype=object,
-            )
-        }
-
-
-class V3PreprocessAdapter(BasePreprocessAdapter):
-    extra_field_names = ("score_delta_target", "win_target", "dealin_target")
-
-    def init_rows(self) -> Dict[str, list]:
-        return {
-            "score_delta_target": [],
-            "win_target": [],
-            "dealin_target": [],
-        }
-
-    def sample_extras(self, sample, action_idx: int) -> Dict[str, object]:
-        del action_idx
-        return {
-            "score_delta_target": float(np.clip(sample.score_delta_target, -1.0, 1.0)),
-            "win_target": float(sample.win_target),
-            "dealin_target": float(sample.dealin_target),
-        }
-
-    def finalize_result_extras(self, rows: Dict[str, list]) -> Dict[str, np.ndarray]:
-        return {
-            "score_delta_target": np.array(rows["score_delta_target"], dtype=np.float16),
-            "win_target": np.array(rows["win_target"], dtype=np.float16),
-            "dealin_target": np.array(rows["dealin_target"], dtype=np.float16),
-        }
 
 
 class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
@@ -313,10 +199,6 @@ def create_preprocess_adapter(name: str) -> BasePreprocessAdapter:
     normalized = name.strip().lower()
     if normalized == "base":
         return BasePreprocessAdapter()
-    if normalized == "meld_rank":
-        return MeldRankPreprocessAdapter()
-    if normalized == "v3_aux":
-        return V3PreprocessAdapter()
     if normalized == "keqingv4_aux":
         return KeqingV4PreprocessAdapter()
     raise ValueError(f"unknown preprocess adapter: {name}")
@@ -327,8 +209,8 @@ def events_to_cached_arrays(
     *,
     actor_name_filter=None,
     adapter: Optional[BasePreprocessAdapter] = None,
-    value_strategy: str = "heuristic",
-    encode_module: str = "keqingv1.features",
+    value_strategy: str = "mc_return",
+    encode_module: str = "training.state_features",
 ) -> Optional[Dict[str, np.ndarray]]:
     """Public helper for event-stream -> cache-array conversion.
 
@@ -357,8 +239,8 @@ def save_events_to_cache_file(
     actor_name_filter=None,
     adapter: Optional[BasePreprocessAdapter] = None,
     adapter_name: str = "base",
-    value_strategy: str = "heuristic",
-    encode_module: str = "keqingv1.features",
+    value_strategy: str = "mc_return",
+    encode_module: str = "training.state_features",
     compress_output: bool = True,
 ) -> bool:
     chosen_adapter = adapter or create_preprocess_adapter(adapter_name)
@@ -387,7 +269,7 @@ def _parse_events_to_arrays(
     *,
     actor_name_filter=None,
     adapter: BasePreprocessAdapter,
-    value_strategy: str = "heuristic",
+    value_strategy: str = "mc_return",
     encode_fn=encode,
     encode_timed_fn=None,
 ) -> Optional[Dict[str, np.ndarray]]:
@@ -420,10 +302,11 @@ def _parse_events_to_arrays(
 
     try:
         t_build0 = time.perf_counter()
-        samples = build_supervised_samples(
+        if value_strategy != "mc_return":
+            raise PreprocessBuildError(f"unsupported value_strategy: {value_strategy}")
+        samples = build_replay_samples_mc_return(
             events,
             actor_name_filter=actor_name_filter,
-            value_strategy=value_strategy,
         )
         timings["sample_build_s"] = time.perf_counter() - t_build0
     except IllegalLabelActionError:
@@ -634,8 +517,8 @@ def run_preprocess(
     *,
     default_output_dir: str,
     adapter: BasePreprocessAdapter,
-    default_value_strategy: str = "heuristic",
-    encode_module: str = "keqingv1.features",
+    default_value_strategy: str = "mc_return",
+    encode_module: str = "training.state_features",
 ) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=None)
@@ -656,7 +539,7 @@ def run_preprocess(
         "--value-strategy",
         type=str,
         default=None,
-        choices=["heuristic", "mc_return"],
+        choices=["mc_return"],
     )
     args = parser.parse_args()
 
@@ -801,9 +684,7 @@ def run_preprocess(
 
 __all__ = [
     "BasePreprocessAdapter",
-    "MeldRankPreprocessAdapter",
     "create_preprocess_adapter",
-    "V3PreprocessAdapter",
     "KeqingV4PreprocessAdapter",
     "events_to_cached_arrays",
     "save_events_to_cache_file",

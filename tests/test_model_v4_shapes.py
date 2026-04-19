@@ -1,7 +1,7 @@
 import torch
 
-from keqingv1.action_space import ACTION_SPACE
-from keqingv3.features import C_TILE, N_SCALAR
+from mahjong_env.action_space import ACTION_SPACE
+from training.state_features import C_TILE, N_SCALAR
 from training.cache_schema import (
     KEQINGV4_CALL_SUMMARY_SLOTS,
     KEQINGV4_SPECIAL_SUMMARY_SLOTS,
