@@ -37,6 +37,7 @@ _RUST_DRAW_DELTAS = None
 _RUST_DISCARD_DELTAS = None
 _RUST_BUILD_136_POOL_ENTRIES = None
 _RUST_SUMMARIZE_3N1 = None
+_RUST_SUMMARIZE_ONE_SHANTEN_DRAW_METRICS = None
 _RUST_SUMMARIZE_3N2_CANDIDATES = None
 _RUST_SUMMARIZE_BEST_3N2_CANDIDATE = None
 _RUST_BUILD_XMODEL1_DISCARD_RECORDS = None
@@ -44,6 +45,7 @@ _RUST_BUILD_KEQINGV4_CACHED_RECORDS = None
 _RUST_BUILD_REPLAY_DECISION_RECORDS_MC_RETURN_JSON = None
 _RUST_XMODEL1_SCHEMA_INFO = None
 _RUST_VALIDATE_XMODEL1_DISCARD_RECORD = None
+_RUST_BUILD_XMODEL1_RUNTIME_TENSORS_JSON = None
 _RUST_REPLAY_STATE_SNAPSHOT_JSON = None
 _RUST_ENUMERATE_LEGAL_ACTION_SPECS_STRUCTURAL_JSON = None
 _RUST_ENUMERATE_HORA_CANDIDATES_JSON = None
@@ -69,6 +71,16 @@ _RUST_ENUMERATE_KEQINGV4_LIVE_DRAW_WEIGHTS_JSON = None
 _RUST_ENUMERATE_KEQINGV4_REACH_DISCARDS_JSON = None
 _RUST_PROJECT_KEQINGV4_REACH_SNAPSHOT_JSON = None
 _RUST_IMPORT_ERROR = None
+
+
+def _json_default(value):
+    if isinstance(value, _np.ndarray):
+        return value.tolist()
+    if isinstance(value, (_np.integer, _np.floating)):
+        return value.item()
+    if isinstance(value, _Path):
+        return str(value)
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
 
 
 def _is_native_extension(path: _Path) -> bool:
@@ -165,6 +177,9 @@ if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
     _RUST_DISCARD_DELTAS = getattr(_rust_ext, "calc_discard_deltas_py", None)
     _RUST_BUILD_136_POOL_ENTRIES = getattr(_rust_ext, "build_136_pool_entries_py", None)
     _RUST_SUMMARIZE_3N1 = getattr(_rust_ext, "summarize_3n1_py", None)
+    _RUST_SUMMARIZE_ONE_SHANTEN_DRAW_METRICS = getattr(
+        _rust_ext, "summarize_one_shanten_draw_metrics_py", None
+    )
     _RUST_SUMMARIZE_3N2_CANDIDATES = getattr(_rust_ext, "summarize_3n2_candidates_py", None)
     _RUST_SUMMARIZE_BEST_3N2_CANDIDATE = getattr(_rust_ext, "summarize_best_3n2_candidate_py", None)
     _RUST_BUILD_XMODEL1_DISCARD_RECORDS = getattr(_rust_ext, "build_xmodel1_discard_records_py", None)
@@ -174,6 +189,9 @@ if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
     )
     _RUST_XMODEL1_SCHEMA_INFO = getattr(_rust_ext, "xmodel1_schema_info_py", None)
     _RUST_VALIDATE_XMODEL1_DISCARD_RECORD = getattr(_rust_ext, "validate_xmodel1_discard_record_py", None)
+    _RUST_BUILD_XMODEL1_RUNTIME_TENSORS_JSON = getattr(
+        _rust_ext, "build_xmodel1_runtime_tensors_json_py", None
+    )
     _RUST_REPLAY_STATE_SNAPSHOT_JSON = getattr(_rust_ext, "replay_state_snapshot_json_py", None)
     _RUST_ENUMERATE_LEGAL_ACTION_SPECS_STRUCTURAL_JSON = getattr(
         _rust_ext, "enumerate_legal_action_specs_structural_json_py", None
@@ -356,6 +374,17 @@ def summarize_3n1(counts34, visible_counts34):
         int(item[5]),
         tuple(bool(v) for v in item[6]),
     )
+
+
+def summarize_one_shanten_draw_metrics(counts34, visible_counts34):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_SUMMARIZE_ONE_SHANTEN_DRAW_METRICS is not None
+    ):
+        raise RuntimeError("Rust one-shanten draw metrics are not available")
+    item = _RUST_SUMMARIZE_ONE_SHANTEN_DRAW_METRICS(list(counts34), list(visible_counts34))
+    return int(item[0]), int(item[1])
 
 
 def summarize_3n2_candidates(counts34, visible_counts34, summarize_fn):
@@ -546,6 +575,22 @@ def validate_xmodel1_discard_record(chosen_candidate_idx, candidate_mask, candid
         if mask_value == 1 and not (0 <= tile_id < 34):
             raise ValueError(f"active candidate at index {idx} must use tile34 in [0, 33]")
     return True
+
+
+def build_xmodel1_runtime_tensors(snapshot: dict, actor: int, legal_actions: list[dict]):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_BUILD_XMODEL1_RUNTIME_TENSORS_JSON is not None
+    ):
+        raise RuntimeError("Rust xmodel1 runtime tensor capability is not available")
+    return _json.loads(
+        _RUST_BUILD_XMODEL1_RUNTIME_TENSORS_JSON(
+            _json.dumps(snapshot, ensure_ascii=False, default=_json_default),
+            int(actor),
+            _json.dumps(legal_actions, ensure_ascii=False, default=_json_default),
+        )
+    )
 
 
 def replay_state_snapshot(events, actor: int):
@@ -1034,6 +1079,7 @@ __all__ = [
     "calc_discard_deltas",
     "build_136_pool_entries",
     "summarize_3n1",
+    "summarize_one_shanten_draw_metrics",
     "summarize_3n2_candidates",
     "summarize_best_3n2_candidate",
     "build_xmodel1_discard_records",
@@ -1041,6 +1087,7 @@ __all__ = [
     "build_replay_decision_records_mc_return",
     "xmodel1_schema_info",
     "validate_xmodel1_discard_record",
+    "build_xmodel1_runtime_tensors",
     "replay_state_snapshot",
     "enumerate_legal_action_specs_structural",
     "enumerate_public_legal_action_specs",

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::types::{DiscardEntry, LastDiscard};
 
@@ -71,7 +71,7 @@ impl Default for GameStateCore {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SnapshotCore {
     pub bakaze: String,
     pub kyoku: i32,

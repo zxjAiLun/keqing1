@@ -14,10 +14,7 @@ import torch
 import torch.nn as nn
 
 from mahjong_env.action_space import ACTION_SPACE
-from xmodel1.cached_dataset import (
-    EVENT_HISTORY_LEN,
-    EVENT_TYPE_PAD,
-)
+from training.cache_schema import XMODEL1_HISTORY_SUMMARY_DIM
 from xmodel1.schema import (
     XMODEL1_CHI_SPECIAL_TYPES,
     XMODEL1_KAN_SPECIAL_TYPES,
@@ -97,7 +94,6 @@ class Xmodel1Model(nn.Module):
         self.special_candidate_feature_dim = special_candidate_feature_dim
         self.hidden_dim = hidden_dim
         self.action_space = ACTION_SPACE
-        self.event_history_len = EVENT_HISTORY_LEN
 
         self.state_proj = nn.Sequential(
             nn.Conv1d(state_tile_channels, hidden_dim, kernel_size=1, bias=False),
@@ -111,32 +107,15 @@ class Xmodel1Model(nn.Module):
             nn.Linear(state_scalar_dim, hidden_dim // 4),
             nn.Mish(),
         )
-        history_embed_dim = 128
-        self.history_actor_embed = nn.Embedding(5, 8)
-        self.history_event_type_embed = nn.Embedding(16, 8)
-        self.history_tedashi_embed = nn.Embedding(2, 4)
-        self.history_turn_embed = nn.Embedding(25, 8)
-        self.history_proj = nn.Sequential(
-            nn.Linear(8 + 8 + 16 + 8 + 4, history_embed_dim),
+        history_hidden_dim = 64
+        self.history_summary_proj = nn.Sequential(
+            nn.Linear(XMODEL1_HISTORY_SUMMARY_DIM, history_hidden_dim),
             nn.Mish(),
-            nn.Linear(history_embed_dim, history_embed_dim),
+            nn.Linear(history_hidden_dim, history_hidden_dim),
             nn.Mish(),
         )
-        history_encoder_layer = nn.TransformerEncoderLayer(
-            d_model=history_embed_dim,
-            nhead=4,
-            dim_feedforward=256,
-            dropout=dropout,
-            batch_first=True,
-            activation="gelu",
-        )
-        self.history_encoder = nn.TransformerEncoder(history_encoder_layer, num_layers=2)
-        # Validation/runtime batches may contain fully padded history windows.
-        # PyTorch's nested-tensor fast path can choke on all-padding sequences,
-        # so keep the small encoder on the regular dense path.
-        self.history_encoder.use_nested_tensor = False
         self.state_head = nn.Sequential(
-            nn.Linear(hidden_dim + hidden_dim // 4 + history_embed_dim, hidden_dim),
+            nn.Linear(hidden_dim + hidden_dim // 4 + history_hidden_dim, hidden_dim),
             nn.Mish(),
             nn.Dropout(dropout),
         )
@@ -213,48 +192,25 @@ class Xmodel1Model(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def _encode_history(self, event_history: torch.Tensor | None, batch_size: int, device: torch.device) -> torch.Tensor:
-        if event_history is None:
-            return torch.zeros((batch_size, self.history_proj[0].out_features), device=device)
-        if event_history.dtype not in (torch.int16, torch.int32, torch.int64, torch.long):
-            event_history = event_history.long()
+    def _encode_history_summary(
+        self,
+        history_summary: torch.Tensor | None,
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if history_summary is None:
+            return torch.zeros((batch_size, self.history_summary_proj[0].out_features), device=device)
+        if history_summary.dtype == torch.float16 and device.type != "cuda":
+            history_summary = history_summary.float()
         else:
-            event_history = event_history.long()
-        actor_ids = event_history[..., 0].clamp(min=0, max=4)
-        event_type_ids = event_history[..., 1].clamp(min=0, max=15)
-        tile_ids = event_history[..., 2].clamp(min=-1, max=33)
-        tile_ids = torch.where(tile_ids < 0, torch.full_like(tile_ids, 34), tile_ids)
-        turn_ids = event_history[..., 3].clamp(min=0, max=24)
-        tedashi_ids = event_history[..., 4].clamp(min=0, max=1)
-        history_input = torch.cat(
-            [
-                self.history_actor_embed(actor_ids),
-                self.history_event_type_embed(event_type_ids),
-                self.tile_embed(tile_ids),
-                self.history_turn_embed(turn_ids),
-                self.history_tedashi_embed(tedashi_ids),
-            ],
-            dim=-1,
-        )
-        history_embed = self.history_proj(history_input)
-        pad_mask = event_type_ids == EVENT_TYPE_PAD
-        encoded = self.history_encoder(history_embed, src_key_padding_mask=pad_mask)
-        valid_mask = (~pad_mask).float()
-        pooled = (encoded * valid_mask.unsqueeze(-1)).sum(dim=1)
-        denom = valid_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-        pooled = pooled / denom
-        pooled = torch.where(
-            (valid_mask.sum(dim=1, keepdim=True) > 0),
-            pooled,
-            torch.zeros_like(pooled),
-        )
-        return pooled
+            history_summary = history_summary.float()
+        return self.history_summary_proj(history_summary)
 
     def encode_state(
         self,
         state_tile_feat: torch.Tensor,
         state_scalar: torch.Tensor,
-        event_history: torch.Tensor | None = None,
+        history_summary: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if state_tile_feat.dtype == torch.float16 and state_tile_feat.device.type != "cuda":
             state_tile_feat = state_tile_feat.float()
@@ -264,7 +220,11 @@ class Xmodel1Model(nn.Module):
         x = self.state_blocks(x)
         x = x.mean(dim=-1)
         s = self.scalar_proj(state_scalar)
-        h = self._encode_history(event_history, batch_size=state_tile_feat.shape[0], device=state_tile_feat.device)
+        h = self._encode_history_summary(
+            history_summary,
+            batch_size=state_tile_feat.shape[0],
+            device=state_tile_feat.device,
+        )
         return self.state_head(torch.cat([x, s, h], dim=-1))
 
     def forward(
@@ -278,7 +238,7 @@ class Xmodel1Model(nn.Module):
         special_candidate_feat: torch.Tensor | None = None,
         special_candidate_type_id: torch.Tensor | None = None,
         special_candidate_mask: torch.Tensor | None = None,
-        event_history: torch.Tensor | None = None,
+        history_summary: torch.Tensor | None = None,
     ) -> Xmodel1Output:
         # Legacy 5-arg path:
         #   model(state, scalar, candidate_feat, candidate_flags, candidate_mask)
@@ -302,7 +262,11 @@ class Xmodel1Model(nn.Module):
         ):
             candidate_tile_id, candidate_flags, candidate_mask = candidate_mask, candidate_tile_id, candidate_flags
 
-        state_embed = self.encode_state(state_tile_feat, state_scalar, event_history=event_history)
+        state_embed = self.encode_state(
+            state_tile_feat,
+            state_scalar,
+            history_summary=history_summary,
+        )
         if candidate_tile_id is None:
             candidate_tile_id = torch.full(
                 candidate_mask.shape,

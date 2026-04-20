@@ -11,6 +11,7 @@ use crate::state_core::GameStateCore;
 pub const TILE_KIND_COUNT: usize = 34;
 pub const EVENT_HISTORY_LEN: usize = 48;
 pub const EVENT_HISTORY_FEATURE_DIM: usize = 5;
+pub const HISTORY_SUMMARY_DIM: usize = 20;
 pub const EVENT_MAX_TURN_IDX: i16 = 15;
 pub const EVENT_TYPE_PAD: i16 = 0;
 pub const EVENT_TYPE_TSUMO: i16 = 1;
@@ -870,6 +871,113 @@ pub fn compute_event_history(
     out
 }
 
+fn meaningful_event_kind(event_type: &str) -> Option<&'static str> {
+    match event_type {
+        "dahai" => Some("discard"),
+        "chi" | "pon" => Some("call"),
+        "daiminkan" | "ankan" | "kakan_accepted" => Some("kan"),
+        "reach" => Some("riichi"),
+        _ => None,
+    }
+}
+
+fn recency_norm(distance: Option<usize>) -> f32 {
+    let Some(distance) = distance else {
+        return 0.0;
+    };
+    if distance == 0 {
+        return 0.0;
+    }
+    (1.0 - (distance.min(16) as f32 / 16.0)).max(0.0)
+}
+
+pub fn compute_history_summary(
+    all_events: &[Value],
+    event_index: i32,
+    actor: usize,
+) -> [f32; HISTORY_SUMMARY_DIM] {
+    let mut out = [0.0f32; HISTORY_SUMMARY_DIM];
+    if event_index <= 0 {
+        return out;
+    }
+    let end = (event_index as usize).min(all_events.len());
+    if end == 0 {
+        return out;
+    }
+    let mut kyoku_start: usize = 0;
+    for i in (0..end).rev() {
+        let et = all_events[i]
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if et == "start_kyoku" {
+            kyoku_start = i + 1;
+            break;
+        }
+    }
+    if kyoku_start >= end {
+        return out;
+    }
+
+    let mut meaningful_count = 0usize;
+    let mut discard_count = 0usize;
+    let mut call_count = 0usize;
+    let mut kan_count = 0usize;
+    let mut riichi_count = 0usize;
+    let mut last_seen = [[None; 4]; 4];
+
+    for event in all_events.iter().take(end).skip(kyoku_start) {
+        let et = event.get("type").and_then(Value::as_str).unwrap_or("");
+        let Some(kind) = meaningful_event_kind(et) else {
+            continue;
+        };
+        meaningful_count += 1;
+        match kind {
+            "discard" => discard_count += 1,
+            "call" => call_count += 1,
+            "kan" => kan_count += 1,
+            "riichi" => riichi_count += 1,
+            _ => {}
+        }
+        let who = event
+            .get("actor")
+            .and_then(Value::as_i64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value < 4);
+        let Some(who) = who else {
+            continue;
+        };
+        let kind_idx = match kind {
+            "discard" => 0,
+            "call" => 1,
+            "kan" => 2,
+            "riichi" => 3,
+            _ => continue,
+        };
+        last_seen[who][kind_idx] = Some(meaningful_count);
+    }
+
+    if meaningful_count == 0 {
+        return out;
+    }
+
+    out[0] = (discard_count as f32 / 60.0).min(1.0);
+    out[1] = (call_count as f32 / 16.0).min(1.0);
+    out[2] = (kan_count as f32 / 8.0).min(1.0);
+    out[3] = (riichi_count as f32 / 4.0).min(1.0);
+
+    let mut offset = 4usize;
+    for rel in 0..4usize {
+        let who = (actor + rel) % 4;
+        for kind_idx in 0..4usize {
+            let distance = last_seen[who][kind_idx].map(|pos| meaningful_count - pos + 1);
+            out[offset] = recency_norm(distance);
+            offset += 1;
+        }
+    }
+    out
+}
+
 pub fn is_discard_followed_by_tsumo(et: &str, next_ev: Option<&Value>) -> bool {
     et == "dahai"
         && next_ev
@@ -1324,7 +1432,7 @@ pub fn apply_round_target_updates<R, F>(
     }
 }
 
-pub fn drive_export_records<R, FActor, FStep, FReaction, FApply>(
+pub fn drive_export_records<R, FActor, FStep, FReaction, FApply, FPoll>(
     events: &[Value],
     score_norm: f32,
     mc_return_gamma: f32,
@@ -1332,12 +1440,14 @@ pub fn drive_export_records<R, FActor, FStep, FReaction, FApply>(
     mut on_step_event: FStep,
     mut on_reaction_none: FReaction,
     mut apply_updates: FApply,
+    mut poll_continue: FPoll,
 ) -> Result<Vec<R>, String>
 where
     FActor: FnMut(ExportEventContext<'_>) -> Result<Option<R>, String>,
     FStep: FnMut(ExportEventContext<'_>) -> Result<Option<R>, String>,
     FReaction: FnMut(ReactionRecordContext<'_>) -> Result<Option<R>, String>,
     FApply: FnMut(&mut [R], &[RoundTargetUpdate]),
+    FPoll: FnMut(usize) -> Result<(), String>,
 {
     let mut state = RoundState::default();
     let mut core_state = GameStateCore::default();
@@ -1345,6 +1455,9 @@ where
     let mut pending_records: Vec<PendingRoundRecord> = Vec::new();
 
     for (event_index, event) in events.iter().enumerate() {
+        if event_index % 64 == 0 {
+            poll_continue(event_index)?;
+        }
         let event_index_i32 = event_index as i32;
         let et = event.get("type").and_then(Value::as_str).unwrap_or("");
         let next_ev = events.get(event_index + 1);
@@ -1438,6 +1551,7 @@ where
     {
         apply_updates(&mut records, &updates);
     }
+    poll_continue(events.len())?;
 
     Ok(records)
 }

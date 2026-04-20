@@ -79,6 +79,29 @@ def test_special_comparison_losses_reward_reach_over_dama_and_pon_over_none():
     assert float(call_loss) == 0.0
 
 
+def test_special_comparison_losses_penalize_reach_margin_violation():
+    special_logits = torch.tensor([[0.1, 0.3, -1e4]], dtype=torch.float32)
+    special_type_id = torch.tensor(
+        [[XMODEL1_SPECIAL_TYPE_REACH, XMODEL1_SPECIAL_TYPE_DAMA, -1]],
+        dtype=torch.long,
+    )
+    special_mask = torch.tensor([[1, 1, 0]], dtype=torch.uint8)
+    chosen_special_idx = torch.tensor([0], dtype=torch.long)
+    hard_bad = torch.zeros_like(special_logits)
+
+    reach_loss, call_loss = _special_comparison_losses(
+        special_logits,
+        special_type_id,
+        special_mask,
+        chosen_special_idx,
+        hard_bad,
+        margin=0.25,
+    )
+
+    assert float(reach_loss) > 0.0
+    assert float(call_loss) == 0.0
+
+
 def test_special_comparison_losses_penalize_none_only_when_best_call_is_hard_bad():
     special_logits = torch.tensor([[-1e4, -1e4, 1.0, -1e4, -1e4, 0.2]], dtype=torch.float32)
     special_type_id = torch.tensor([[-1, -1, XMODEL1_SPECIAL_TYPE_CHI_LOW, -1, -1, XMODEL1_SPECIAL_TYPE_NONE]], dtype=torch.long)

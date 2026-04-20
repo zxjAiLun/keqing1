@@ -6,6 +6,7 @@ import torch
 
 from inference.bot_registry import create_runtime_bot
 from inference.runtime_bot import RuntimeBot
+from training.cache_schema import XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM
 from xmodel1.model import Xmodel1Model
 
 
@@ -14,8 +15,8 @@ def test_create_runtime_bot_supports_xmodel1(tmp_path: Path):
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=64,
-        candidate_feature_dim=35,
-        candidate_flag_dim=10,
+        candidate_feature_dim=XMODEL1_CANDIDATE_FEATURE_DIM,
+        candidate_flag_dim=XMODEL1_CANDIDATE_FLAG_DIM,
         hidden_dim=32,
         num_res_blocks=1,
     )
@@ -26,12 +27,16 @@ def test_create_runtime_bot_supports_xmodel1(tmp_path: Path):
                 "model_name": "xmodel1",
                 "state_tile_channels": 57,
                 "state_scalar_dim": 64,
-                "candidate_feature_dim": 35,
-                "candidate_flag_dim": 10,
+                "candidate_feature_dim": XMODEL1_CANDIDATE_FEATURE_DIM,
+                "candidate_flag_dim": XMODEL1_CANDIDATE_FLAG_DIM,
                 "hidden_dim": 32,
                 "num_res_blocks": 1,
+                "schema_name": "xmodel1_discard_v3",
+                "schema_version": 3,
             },
             "model_version": "xmodel1",
+            "schema_name": "xmodel1_discard_v3",
+            "schema_version": 3,
         },
         ckpt,
     )

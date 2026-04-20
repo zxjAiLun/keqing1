@@ -74,6 +74,13 @@ converted mjai replays
 -> runtime/review/slice evaluation
 ```
 
+Current xmodel1 contract notes:
+- active schema: `xmodel1_discard_v3`
+- active context field: `history_summary[20]`
+- active candidate dims: `candidate=22`, `flag=8`, `special=19`
+- training resume requires full v3 checkpoint metadata; old no-`cfg` checkpoints are runtime-loadable only
+- runtime tensor construction enters through `keqing_core.build_xmodel1_runtime_tensors(...)` and may fall back only when the native capability is missing
+
 Backup flow:
 
 ```text

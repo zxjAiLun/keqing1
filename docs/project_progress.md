@@ -4,6 +4,14 @@ Updated: 2026-04-20
 
 This is the primary status board for the repository.
 
+## Executive Summary
+- The repository is in a model-window execution phase, not a legacy runtime maintenance phase.
+- `xmodel1` remains the only active mainline for the current training window, and its code-side public contract is frozen on `xmodel1_discard_v3`.
+- The current xmodel1 blocker is no longer architecture churn or schema uncertainty; it is the missing user-run evidence loop: full preprocess, smoke train, and slice review.
+- `keqingv4` remains a frozen backup line plus Rust-ownership repair path. Its near-term work is verification and boundary hardening, not opening a competing training window.
+- Shared Rust work should continue only insofar as it hardens public semantic ownership and fail-closed boundaries without consuming the mainline training window.
+- Replay/runtime/bot surfaces should be treated as compatibility layers around model work, not as independent product priorities.
+
 ## Current Global Judgment
 - The project remains focused on building a lightweight but strong Mahjong model.
 - `xmodel1` is the current training-window mainline.
@@ -17,20 +25,34 @@ This is the primary status board for the repository.
 ## Active Workstreams
 
 ### P0: xmodel1 Mainline
-- Goal: keep `xmodel1_discard_v2` stable and ready for user-executed preprocess, smoke train, slice review, and runtime validation.
+- Goal: keep `xmodel1_discard_v3` as the only active xmodel1 contract, then reopen full preprocess, smoke train, slice review, and runtime validation on that frozen boundary.
 - Current code-side status:
   - Rust-first preprocess/cache path is in place.
   - Production preprocess ownership is fully in Rust via `scripts/preprocess_xmodel1.py` and `keqing_core.build_xmodel1_discard_records(...)`.
-  - `xmodel1` export now preserves `hora` as a dedicated special sample type end-to-end (Rust export + Python parity oracle + review category), so terminal win decisions are no longer dropped before training.
-  - The preprocess launcher now runs a random-file preflight export/probe gate per shard before the full export, so per-file cache contract drift fails fast instead of surfacing only after the full run.
-  - Existing Rust exports that only missed per-file `schema_name/schema_version` metadata can now be repaired in place via `scripts/repair_xmodel1_cache_schema.py`; they do not require a full recompute.
-  - The default `xmodel1` train config now uses ratio-based random file sampling (`files_per_epoch_ratio`) instead of the old fixed `files_per_epoch_count=350`, so the per-epoch slice scales with the Rust-exported dataset.
-  - The default `xmodel1` train config no longer pins `steps_per_epoch`; when the config value is `<= 0`, the launcher now auto-derives epoch steps from the sampled file slice and current `batch_size`.
-  - Candidate-quality and special-candidate summaries have been recalibrated around after-state value proxy, yaku-break, and risk terms, and focused minimal regressions now pin `simple_discard / riichi / pon_call`.
-  - `src/xmodel1/preprocess.py` remains only as a Python parity oracle used by contract tests; it is no longer a production export or manifest-writing fallback.
-  - Candidate feature parity, slice-report harness, preprocess gates, and train-time gates are in place.
+  - The mainline public schema identity is now `xmodel1_discard_v3` / `schema_version = 3`.
+  - Raw public `event_history` has been removed from the xmodel1 cache/runtime contract and replaced with fixed-shape `history_summary[20]`.
+  - The old `legacy_kakan2` drift was rooted in raw-history slicing on pre-normalized events while parity used normalized events; xmodel1 now builds history context from normalized events on both sides, so the legacy whitelist is no longer part of the target state.
+  - Candidate and special candidate fields have been compressed to the smaller v3 slot tables; v2-only rank buckets and `score_delta_target` are no longer part of the public cache contract.
+  - The model/runtime/train path now consumes `history_summary` directly; the old xmodel1 history transformer path is no longer the target architecture.
+  - The Python parity oracle, cached loader, train script smoke fixtures, and adapter/runtime batch helpers now all gate on the same v3 field set.
+  - `xmodel1` training now runs on the shared `training.train_model(...)` epoch loop; xmodel1 keeps a thin task wrapper for its candidate/special/value losses plus metadata/log shaping.
+  - New xmodel1 checkpoints now write full metadata (`model_version`, `cfg`, schema and tensor dims, hidden size, block count, dropout); runtime keeps read-only legacy loading for old no-`cfg` checkpoints but resume stays fail-closed across the schema cutover.
+  - `RuntimeBot`/`KeqingModelAdapter` now infer legacy xmodel1 structure from weight shapes instead of assuming default hidden depth.
+  - Shared beam continuation scoring now uses batched `forward_many(...)` when the adapter exposes it, reducing repeated per-candidate forwards without changing decision semantics.
+  - The xmodel1 runtime tensor entrypoint is now centralized behind `keqing_core.build_xmodel1_runtime_tensors(...)`, and the native Rust implementation is now the active owner for runtime candidate/special/history-summary tensors when the extension is available; Python fallback remains allowed only for missing capability on that path.
+  - The preprocess launcher still runs a preflight export/probe gate per shard, and the code-side v3 contract freeze plus fixed-subset profile gate are now green.
+  - Xmodel1 discard candidate analysis has been deliberately lowered again on the v3 path: special-waits fallback, one-shanten draw metrics, and pinfu/iipeikou break tracking no longer dominate preprocess compute, while the public v3 schema stays unchanged.
+  - Fixed-subset evidence on `ds1 + ds2 + ds3` (15 files / 8843 samples) is now:
+    - `total_wall=1.386s`
+    - `discard_candidate_analysis=1.891s`
+    - `npz_write=9.670s`
+    - compared with the earlier profile on the same subset:
+      - `total_wall=53.048s`
+      - `discard_candidate_analysis=545.964s`
+  - Rust export now has env-gated stage profiling (`XMODEL1_EXPORT_PROFILE=1`) plus cooperative interrupt/resume work, so the next evidence loop can measure real wall-time and stop safely.
+  - `src/xmodel1/preprocess.py` remains only as a Python parity oracle used by contract tests; it is not a production exporter.
 - User-owned execution remains:
-  - full preprocess on `ds1 + ds2 + ds3`
+  - full preprocess on `ds1 + ds2 + ds3` only after the gate passes
   - smoke train
   - review / slice acceptance / strength judgment
 
@@ -96,18 +118,29 @@ This is the primary status board for the repository.
 4. shared Rust semantic core consolidation
 5. compatibility-surface cleanup around replay/runtime/gateway/UI
 
+## Continuation Guidance
+- The next meaningful project-level state change should come from evidence, not from more structural churn.
+- Treat the following as the current acceptance chain for the mainline:
+  1. rerun full preprocess on `ds1 + ds2 + ds3` with the frozen v3 contract
+  2. run xmodel1 smoke train on the new export
+  3. review slice quality on `reach / call / none / hora`
+- Until those three steps complete, the correct global summary is "code-side mainline is ready for evidence collection", not "model quality is already proven".
+- Any new Rust or backup-line work should be kept bounded enough that it does not delay that evidence chain.
+
 ## Current Risks
 - The user still needs to execute the real preprocess, train, and review loops; code-side gates alone do not prove model quality.
 - Existing `xmodel1` caches exported before the dedicated `hora` sample-type change do not contain those rows; metadata repair cannot synthesize them, so a real re-export is required before retraining.
+- `xmodel1_discard_v2` is no longer the rerun target. Any old v2 cache or checkpoint must now fail closed and be replaced rather than silently reused.
+- The new v3 contract is now aligned across Python loader/runtime/train surfaces, but a real full re-export is still mandatory before retraining because production preprocess remains Rust-owned and old caches cannot be upgraded in place.
 - Some historical docs still mention old model lines for comparison or historical context. They should not be treated as active runbooks.
 - Rust migration is not complete; the remaining work is no longer old-line compatibility, but shared semantic ownership and long-tail continuation/scoring cleanup.
 - `xmodel1` still carries a deliberate Python parity oracle for candidate arrays, and focused contract tests remain the place where real Rust/Python drift is measured.
 - The current local Python environment still lacks `torch`, which blocks some gateway/runtime focused tests here.
 
 ## Near-Term Next Actions
-1. User reruns `xmodel1` full preprocess gate on `ds1 + ds2 + ds3`; old exports must be replaced rather than schema-repaired if they were built before the dedicated `hora` sample-type change.
-2. User runs `xmodel1` smoke train after preprocess passes.
-3. User runs slice/review acceptance on `reach / call / none / hora / chi-position` slices.
+1. Run the focused v3 contract suite plus the runtime-recompute consistency cases; do not reopen full preprocess before that is green.
+2. Rerun full preprocess on `ds1 + ds2 + ds3` on the current green `xmodel1_discard_v3` contract, then smoke train, then slice/review acceptance on `reach / call / none / hora`.
+3. Keep `XMODEL1_EXPORT_PROFILE=1` available for spot checks on resumed shards or any future preprocess regression report; the fixed-subset gate is no longer the blocker.
 4. Keep `keqingv4` on non-training Rust-ownership work by default; only switch it back into preprocess/train/eval if `xmodel1` hits kill criteria.
 5. For `keqingv4`, the next concrete code-side move is Phase B verification rather than new structure: rerun the focused preprocess/inference/special-calibration suites against the current Rust continuation/future-truth path, then freeze that as the current backup snapshot.
 6. Start the next shared Rust push from `plans/rust_ownership_push_2026_04_19.md`, but keep the first execution slice bounded to:

@@ -19,6 +19,8 @@ import torch
 from inference.keqing_adapter import KeqingModelAdapter
 from mahjong_env.legal_actions import enumerate_legal_actions
 from training.cache_schema import (
+    XMODEL1_CANDIDATE_FEATURE_DIM,
+    XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_MAX_SPECIAL_CANDIDATES,
     XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
@@ -81,8 +83,8 @@ def _make_xmodel1_checkpoint(tmp_path: Path) -> Path:
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=56,
-        candidate_feature_dim=35,
-        candidate_flag_dim=10,
+        candidate_feature_dim=XMODEL1_CANDIDATE_FEATURE_DIM,
+        candidate_flag_dim=XMODEL1_CANDIDATE_FLAG_DIM,
         hidden_dim=32,
         num_res_blocks=1,
     )
@@ -96,12 +98,16 @@ def _make_xmodel1_checkpoint(tmp_path: Path) -> Path:
                 "model_name": "xmodel1",
                 "state_tile_channels": 57,
                 "state_scalar_dim": 56,
-                "candidate_feature_dim": 35,
-                "candidate_flag_dim": 10,
+                "candidate_feature_dim": XMODEL1_CANDIDATE_FEATURE_DIM,
+                "candidate_flag_dim": XMODEL1_CANDIDATE_FLAG_DIM,
                 "hidden_dim": 32,
                 "num_res_blocks": 1,
+                "schema_name": "xmodel1_discard_v3",
+                "schema_version": 3,
             },
             "model_version": "xmodel1",
+            "schema_name": "xmodel1_discard_v3",
+            "schema_version": 3,
         },
         ckpt,
     )

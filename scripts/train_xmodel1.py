@@ -66,7 +66,7 @@ def _validate_batch_gate(batch: dict, *, inferred_dims: dict[str, int] | None) -
         "candidate_flags",
         "special_candidate_feat",
         "special_candidate_mask",
-        "event_history",
+        "history_summary",
         "opp_tenpai_target",
         "pts_given_win_target",
         "pts_given_dealin_target",
@@ -93,8 +93,10 @@ def _validate_batch_gate(batch: dict, *, inferred_dims: dict[str, int] | None) -
             raise RuntimeError(
                 f"xmodel1 train gate: special_candidate_feat last dim {batch['special_candidate_feat'].shape[-1]} != {expected_special_dim}"
             )
-    if tuple(batch["event_history"].shape[1:]) != (48, 5):
-        raise RuntimeError(f"xmodel1 train gate: event_history shape {tuple(batch['event_history'].shape)} != (N, 48, 5)")
+    if tuple(batch["history_summary"].shape[1:]) != (20,):
+        raise RuntimeError(
+            f"xmodel1 train gate: history_summary shape {tuple(batch['history_summary'].shape)} != (N, 20)"
+        )
     if int(batch["opp_tenpai_target"].shape[-1]) != 3:
         raise RuntimeError(f"xmodel1 train gate: opp_tenpai_target shape {tuple(batch['opp_tenpai_target'].shape)} != (N, 3)")
 
@@ -353,6 +355,7 @@ def main() -> None:
     root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(root / "src"))
 
+    from training.state_features import N_SCALAR
     from xmodel1.cached_dataset import (
         Xmodel1DiscardDataset,
         discover_cached_files,
@@ -363,6 +366,7 @@ def main() -> None:
         summarize_cached_files,
         validate_export_manifest,
     )
+    from xmodel1.checkpoint import default_xmodel1_state_scalar_dim
     from xmodel1.model import Xmodel1Model
     from xmodel1.schema import (
         XMODEL1_CANDIDATE_FEATURE_DIM,
@@ -454,7 +458,10 @@ def main() -> None:
             raise RuntimeError(f"insufficient cached files: train={len(train_files)} val={len(val_files)}")
 
         selected_files = train_files + [path for path in val_files if path not in train_files]
-        inferred_dims = infer_cached_dimensions(train_files or val_files)
+        inferred_dims = infer_cached_dimensions(
+            train_files or val_files,
+            strict=args.strict_cache_scan,
+        )
         dataset_summary = _build_dataset_summary(
             manifest_map=manifest_map,
             selected_files=selected_files,
@@ -543,8 +550,6 @@ def main() -> None:
                 chosen = int(idx % 5)
                 quality = np.zeros((14,), dtype=np.float32)
                 quality[chosen] = 1.0
-                rank_bucket = np.zeros((14,), dtype=np.int64)
-                rank_bucket[chosen] = 3
                 return {
                     "state_tile_feat": rng.random((57, 34), dtype=np.float32),
                     "state_scalar": rng.random((int(cfg.get("state_scalar_dim", 56)),), dtype=np.float32),
@@ -553,14 +558,22 @@ def main() -> None:
                     "candidate_mask": candidate_mask,
                     "candidate_flags": np.zeros((14, XMODEL1_CANDIDATE_FLAG_DIM), dtype=np.uint8),
                     "chosen_candidate_idx": chosen,
+                    "sample_type": np.int64(0),
+                    "action_idx_target": np.int64(chosen),
                     "candidate_quality_score": quality,
-                    "candidate_rank_bucket": rank_bucket,
                     "candidate_hard_bad_flag": np.zeros((14,), dtype=np.float32),
-                    "global_value_target": np.float32(0.0),
-                    "score_delta_target": np.float32(0.0),
+                    "special_candidate_feat": np.zeros((12, int(cfg.get("special_candidate_feature_dim", 19))), dtype=np.float32),
+                    "special_candidate_type_id": np.full((12,), -1, dtype=np.int16),
+                    "special_candidate_mask": np.zeros((12,), dtype=np.uint8),
+                    "special_candidate_quality_score": np.zeros((12,), dtype=np.float32),
+                    "special_candidate_hard_bad_flag": np.zeros((12,), dtype=np.float32),
+                    "chosen_special_candidate_idx": np.int64(-1),
                     "win_target": np.float32(0.0),
                     "dealin_target": np.float32(0.0),
-                    "offense_quality_target": np.float32(1.0),
+                    "pts_given_win_target": np.float32(0.0),
+                    "pts_given_dealin_target": np.float32(0.0),
+                    "opp_tenpai_target": np.zeros((3,), dtype=np.float32),
+                    "history_summary": np.zeros((20,), dtype=np.float32),
                 }
 
         def _collate(batch):
@@ -599,7 +612,7 @@ def main() -> None:
 
     model = Xmodel1Model(
         state_tile_channels=int(cfg.get("state_tile_channels", 57)),
-        state_scalar_dim=int(cfg.get("state_scalar_dim", 64)),
+        state_scalar_dim=int(cfg.get("state_scalar_dim", default_xmodel1_state_scalar_dim() or N_SCALAR)),
         candidate_feature_dim=int(cfg.get("candidate_feature_dim", XMODEL1_CANDIDATE_FEATURE_DIM)),
         candidate_flag_dim=int(cfg.get("candidate_flag_dim", XMODEL1_CANDIDATE_FLAG_DIM)),
         special_candidate_feature_dim=int(cfg.get("special_candidate_feature_dim", 16)),

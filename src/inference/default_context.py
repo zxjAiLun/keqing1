@@ -4,7 +4,8 @@ from typing import Any, Optional
 
 import keqing_core
 
-from mahjong_env.event_history import compute_event_history
+from mahjong_env.history_summary import compute_history_summary
+from mahjong_env.replay_normalizer import normalize_replay_events
 from mahjong_env.legal_actions import enumerate_legal_actions
 from mahjong_env.state import apply_event
 
@@ -139,9 +140,14 @@ class DefaultDecisionContextBuilder:
             model_snap["tsumo_pai"] = event.get("pai") if etype == "tsumo" else None
 
         if self.model_version == "xmodel1":
-            event_history = compute_event_history(self._event_log, len(self._event_log) - 1)
-            runtime_snap["event_history"] = event_history.copy()
-            model_snap["event_history"] = event_history.copy()
+            normalized_history = normalize_replay_events(self._event_log)
+            history_summary = compute_history_summary(
+                normalized_history,
+                len(normalized_history) - 1,
+                actor,
+            )
+            runtime_snap["history_summary"] = history_summary.copy()
+            model_snap["history_summary"] = history_summary.copy()
 
         return DecisionContext(
             actor=actor,

@@ -10,6 +10,13 @@ import torch
 
 from inference.contracts import ModelAuxOutputs, ModelForwardResult, Xmodel1RuntimeOutputs
 from mahjong_env.legal_actions import enumerate_legal_actions
+from xmodel1.checkpoint import (
+    default_xmodel1_state_scalar_dim,
+    infer_xmodel1_model_dims,
+    load_xmodel1_checkpoint_state,
+    resolve_xmodel1_state_scalar_dim,
+    validate_xmodel1_checkpoint_metadata,
+)
 from training.cache_schema import (
     KEQINGV4_SUMMARY_DIM,
     XMODEL1_CANDIDATE_FEATURE_DIM,
@@ -57,18 +64,37 @@ class KeqingModelAdapter:
         if inferred_version is None and any(key.startswith("call_state_proj.") for key in state_dict):
             inferred_version = "keqingv4"
         if inferred_version == "xmodel1":
+            validate_xmodel1_checkpoint_metadata(
+                ckpt,
+                checkpoint_label=f"xmodel1 checkpoint {model_path}",
+                allow_legacy_inference=True,
+            )
+            inferred_dims = infer_xmodel1_model_dims(
+                state_dict,
+                cfg=cfg if isinstance(cfg, dict) else None,
+            )
             features_mod = importlib.import_module("xmodel1.features")
             model_mod = importlib.import_module("xmodel1.model")
             model = model_mod.Xmodel1Model(
-                state_tile_channels=int(cfg.get("state_tile_channels", 57)),
-                state_scalar_dim=int(cfg.get("state_scalar_dim", 64)),
-                candidate_feature_dim=int(cfg.get("candidate_feature_dim", XMODEL1_CANDIDATE_FEATURE_DIM)),
-                candidate_flag_dim=int(cfg.get("candidate_flag_dim", XMODEL1_CANDIDATE_FLAG_DIM)),
-                hidden_dim=int(cfg.get("hidden_dim", hidden_dim)),
-                num_res_blocks=int(cfg.get("num_res_blocks", num_res_blocks)),
-                dropout=float(cfg.get("dropout", 0.1)),
+                state_tile_channels=int(cfg.get("state_tile_channels", inferred_dims["state_tile_channels"])),
+                state_scalar_dim=int(resolve_xmodel1_state_scalar_dim(cfg, state_dict)),
+                candidate_feature_dim=int(cfg.get("candidate_feature_dim", inferred_dims["candidate_feature_dim"])),
+                candidate_flag_dim=int(cfg.get("candidate_flag_dim", inferred_dims["candidate_flag_dim"])),
+                special_candidate_feature_dim=int(
+                    cfg.get(
+                        "special_candidate_feature_dim",
+                        inferred_dims["special_candidate_feature_dim"],
+                    )
+                ),
+                hidden_dim=int(cfg.get("hidden_dim", inferred_dims["hidden_dim"])),
+                num_res_blocks=int(cfg.get("num_res_blocks", inferred_dims["num_res_blocks"])),
+                dropout=float(cfg.get("dropout", inferred_dims["dropout"])),
             )
-            model.load_state_dict(state_dict, strict=False)
+            load_xmodel1_checkpoint_state(
+                model,
+                state_dict,
+                checkpoint_label=f"xmodel1 checkpoint {model_path}",
+            )
             model.to(device)
             model.eval()
             inst = cls(
@@ -82,8 +108,8 @@ class KeqingModelAdapter:
                 actor,
                 legal_actions,
                 max_candidates=XMODEL1_MAX_CANDIDATES,
-                candidate_feature_dim=int(cfg.get("candidate_feature_dim", XMODEL1_CANDIDATE_FEATURE_DIM)),
-                candidate_flag_dim=int(cfg.get("candidate_flag_dim", XMODEL1_CANDIDATE_FLAG_DIM)),
+                candidate_feature_dim=int(cfg.get("candidate_feature_dim", inferred_dims["candidate_feature_dim"])),
+                candidate_flag_dim=int(cfg.get("candidate_flag_dim", inferred_dims["candidate_flag_dim"])),
             )
             # Stage 3 E:runtime 补上 special candidate 通道,与 preprocess
             # 同源;此前 runtime 这块未 wire,forward 走 zero-default 导致
@@ -93,7 +119,12 @@ class KeqingModelAdapter:
                 actor,
                 legal_actions,
                 max_candidates=int(cfg.get("max_special_candidates", XMODEL1_MAX_SPECIAL_CANDIDATES)),
-                feature_dim=int(cfg.get("special_candidate_feature_dim", XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM)),
+                feature_dim=int(
+                    cfg.get(
+                        "special_candidate_feature_dim",
+                        inferred_dims["special_candidate_feature_dim"],
+                    )
+                ),
             )
             return inst
         c_tile = state_dict["input_proj.0.weight"].shape[1]
@@ -141,7 +172,15 @@ class KeqingModelAdapter:
 
     def encode(self, snap: dict, actor: int) -> tuple[np.ndarray, np.ndarray]:
         if self.model_version == "xmodel1":
-            return self._encode(snap, actor, state_scalar_dim=getattr(self.model, "state_scalar_dim", 64))
+            return self._encode(
+                snap,
+                actor,
+                state_scalar_dim=getattr(
+                    self.model,
+                    "state_scalar_dim",
+                    default_xmodel1_state_scalar_dim(),
+                ),
+            )
         return self._encode(snap, actor)
 
     @staticmethod
@@ -275,12 +314,12 @@ class KeqingModelAdapter:
                     actor,
                     legal_actions,
                 )
-                event_history = features_mod.resolve_runtime_event_history(snap)
+                history_summary = features_mod.resolve_runtime_history_summary(snap)
                 candidate_feat_t = torch.from_numpy(candidate_feat).unsqueeze(0).to(self.device)
                 candidate_tile_id_t = torch.from_numpy(candidate_tile_id).unsqueeze(0).to(self.device)
                 candidate_mask_t = torch.from_numpy(candidate_mask).unsqueeze(0).to(self.device)
                 candidate_flags_t = torch.from_numpy(candidate_flags).unsqueeze(0).to(self.device)
-                event_history_t = torch.from_numpy(event_history).unsqueeze(0).to(self.device).long()
+                history_summary_t = torch.from_numpy(history_summary).unsqueeze(0).to(self.device).float()
                 if self._runtime_special_candidate_builder is not None:
                     special_feat, special_type_id, special_mask = self._runtime_special_candidate_builder(
                         snap,
@@ -308,7 +347,7 @@ class KeqingModelAdapter:
                     special_candidate_mask=(
                         special_mask_t.float() if special_mask_t is not None and self.device.type != "cuda" else special_mask_t
                     ),
-                    event_history=event_history_t,
+                    history_summary=history_summary_t,
                 )
                 policy_logits_t = out.action_logits
                 # Stage 1:删除 MC 形态的 global_value,runtime value 由分解 EV
@@ -366,6 +405,11 @@ class KeqingModelAdapter:
             aux=aux,
             xmodel1=xmodel1_payload,
         )
+
+    def forward_many(self, snaps: list[dict], actor: int) -> list[ModelForwardResult]:
+        if not snaps:
+            return []
+        return [self.forward(snap, actor) for snap in snaps]
 
     def _get_aux_outputs(self) -> ModelAuxOutputs:
         if not hasattr(self.model, "get_last_aux_outputs"):

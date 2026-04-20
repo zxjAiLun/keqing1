@@ -9,7 +9,6 @@ import numpy as np
 from mahjong_env.action_space import TILE_NAME_TO_IDX
 from mahjong_env.feature_tracker import SnapshotFeatureTracker
 from mahjong_env.progress_oracle import analyze_normal_progress_from_counts
-from mahjong_env.replay import _calc_shanten_waits
 from mahjong_env.tiles import normalize_tile, tile_is_aka, tile_to_34
 from xmodel1.schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
@@ -238,23 +237,25 @@ def simulate_discard_snapshot(snap: dict, actor: int, pai: str) -> dict:
 def build_candidate_features(before_snap: dict, actor: int, discard_action: dict):
     hand_before = _combined_hand(before_snap)
     melds_before = (before_snap.get("melds") or [[], [], [], []])[actor]
-    before_shanten, before_waits_count, before_waits_tiles, _ = _calc_shanten_waits(hand_before, melds_before)
-    before_visible = _visible_counts34_from_tracker(before_snap, actor)
-    before_waits_live = sum(max(0, 4 - before_visible[t34]) for t34, flag in enumerate(before_waits_tiles) if flag)
     before_counts34 = _hand_counts34(hand_before)
+    before_visible = _visible_counts34_from_tracker(before_snap, actor)
+    before_progress = analyze_normal_progress_from_counts(before_counts34, before_visible)
+    before_shanten = int(before_progress.shanten)
+    before_waits_count = int(before_progress.waits_count)
+    before_waits_tiles = before_progress.waits_tiles
+    before_waits_live = sum(max(0, 4 - before_visible[t34]) for t34, flag in enumerate(before_waits_tiles) if flag)
     yakuhai_ids = _yakuhai_ids(before_snap, actor)
     dora_target_ids = _dora_target_ids(before_snap)
     before_tanyao = _tanyao_path(before_counts34)
-    before_pinfu = _pinfu_like_path(before_counts34, yakuhai_ids=yakuhai_ids, is_open_hand=len(melds_before) > 0)
-    before_iipeikou = _iipeikou_like_path(before_counts34, is_open_hand=len(melds_before) > 0)
 
     after_snap = simulate_discard_snapshot(before_snap, actor, discard_action["pai"])
     hand_after = list(after_snap.get("hand", []))
-    melds_after = (after_snap.get("melds") or [[], [], [], []])[actor]
-    after_shanten, after_waits_count, after_waits_tiles, _ = _calc_shanten_waits(hand_after, melds_after)
-    after_visible = _visible_counts34_from_tracker(after_snap, actor)
     after_counts34 = _hand_counts34(hand_after)
+    after_visible = _visible_counts34_from_tracker(after_snap, actor)
     after_progress = analyze_normal_progress_from_counts(after_counts34, after_visible)
+    after_shanten = int(after_progress.shanten)
+    after_waits_count = int(after_progress.waits_count)
+    after_waits_tiles = after_progress.waits_tiles
     after_waits_live = sum(max(0, 4 - after_visible[t34]) for t34, flag in enumerate(after_waits_tiles) if flag)
     pair_count, taatsu_count = _pair_taatsu_metrics(after_counts34)
     (
@@ -286,13 +287,14 @@ def build_candidate_features(before_snap: dict, actor: int, discard_action: dict
     break_best_wait = int(before_shanten == 0 and after_waits_live < before_waits_live)
     break_meld_structure = int(before_shanten <= 1 and after_shanten > before_shanten)
     yaku_break_tanyao = int(before_tanyao > 0.5 and tanyao_path < 0.5)
-    yaku_break_pinfu = int(before_pinfu > 0.5 and _pinfu_like_path(after_counts34, yakuhai_ids=yakuhai_ids, is_open_hand=len(melds_before) > 0) < 0.5)
-    yaku_break_iipeikou = int(before_iipeikou > 0.5 and _iipeikou_like_path(after_counts34, is_open_hand=len(melds_before) > 0) < 0.5)
-    is_honor = int(pai34 >= 27)
-    is_terminal = int(pai34 in _TERMINAL_IDS)
+    yaku_break_pinfu = 0
+    yaku_break_iipeikou = 0
     is_dora = int(pai34 in dora_target_ids or tile_is_aka(discard_action["pai"]))
     is_yakuhai = int(pai34 in yakuhai_ids)
     discard_dead = float(after_visible[pai34] >= 3)
+    ukeire_live_norm = min(after_progress.ukeire_live_count / 136.0, 1.0)
+    good_shape_live_norm = ukeire_live_norm if after_shanten <= 1 else 0.0
+    improvement_live_norm = ukeire_live_norm if after_shanten > 0 else 0.0
 
     feat = np.array(
         [
@@ -303,10 +305,6 @@ def build_candidate_features(before_snap: dict, actor: int, discard_action: dict
             after_max_hand_value_norm,
             np.clip((after_shanten - before_shanten) / 4.0, -1.0, 1.0),
             min(after_dora_count / 4.0, 1.0),
-            min(after_aka_count / 2.0, 1.0),
-            float(yaku_break_tanyao),
-            float(yaku_break_pinfu),
-            float(yaku_break_iipeikou),
             after_risks[0],
             after_risks[1],
             after_risks[2],
@@ -316,21 +314,12 @@ def build_candidate_features(before_snap: dict, actor: int, discard_action: dict
             structure_density,
             hand_value_survives,
             yakuhai_pair_preserved,
-            dual_yakuhai_pair_value,
             tanyao_path,
             flush_path,
-            float(any(before_snap.get("reached", [False] * 4)[pid] for pid in range(4) if pid != actor)),
             discard_dead,
-            min(getattr(after_progress, "good_shape_ukeire_live_count", 0) / 136.0, 1.0),
-            min(getattr(after_progress, "improvement_live_count", 0) / 136.0, 1.0),
+            good_shape_live_norm,
+            improvement_live_norm,
             min(confirmed_han_floor / 8.0, 1.0),
-            min(yakuhai_triplet_count / 3.0, 1.0),
-            float(break_tenpai),
-            float(break_best_wait),
-            float(break_meld_structure),
-            float(is_dora),
-            float(is_yakuhai),
-            float(before_waits_live > after_waits_live),
         ],
         dtype=np.float32,
     )
@@ -344,8 +333,6 @@ def build_candidate_features(before_snap: dict, actor: int, discard_action: dict
             yaku_break_tanyao,
             yaku_break_pinfu,
             yaku_break_iipeikou,
-            is_honor,
-            is_terminal,
             is_dora,
             is_yakuhai,
         ],
@@ -355,9 +342,9 @@ def build_candidate_features(before_snap: dict, actor: int, discard_action: dict
         1.5 * float(after_shanten == 0)
         - 0.8 * float(after_shanten)
         + 0.5 * after_max_hand_value_norm
-        + 0.2 * feat[25]
-        + 0.15 * feat[26]
-        + 0.15 * feat[27]
+        + 0.2 * feat[19]
+        + 0.15 * feat[20]
+        + 0.15 * feat[21]
         - 1.2 * float(break_tenpai)
         - 0.5 * float(yaku_break_tanyao or yaku_break_pinfu or yaku_break_iipeikou)
         - 0.7 * float(np.mean(after_risks))
@@ -371,9 +358,12 @@ def build_candidate_features(before_snap: dict, actor: int, discard_action: dict
 def _current_hand_summary(before_snap: dict, actor: int) -> dict[str, object]:
     hand = _combined_hand(before_snap)
     melds = (before_snap.get("melds") or [[], [], [], []])[actor]
-    shanten, waits_count, waits_tiles, _ = _calc_shanten_waits(hand, melds)
-    visible = _visible_counts34_from_tracker(before_snap, actor)
     hand_counts34 = _hand_counts34(hand)
+    visible = _visible_counts34_from_tracker(before_snap, actor)
+    progress = analyze_normal_progress_from_counts(hand_counts34, visible)
+    shanten = int(progress.shanten)
+    waits_count = int(progress.waits_count)
+    waits_tiles = progress.waits_tiles
     yakuhai_ids = _yakuhai_ids(before_snap, actor)
     dora_target_ids = _dora_target_ids(before_snap)
     waits_live = sum(max(0, 4 - visible[t34]) for t34, flag in enumerate(waits_tiles) if flag)
@@ -387,10 +377,10 @@ def _current_hand_summary(before_snap: dict, actor: int) -> dict[str, object]:
         _tanyao_path,
         _flush_path,
         current_dora_count,
-        _current_aka_count,
+        current_aka_count,
         _current_yakuhai_triplet_count,
         current_han_floor,
-        current_max_value_norm,
+        _current_max_value_norm,
         current_hand_value_survives,
     ) = _after_state_path_metrics(
         hand,
@@ -400,6 +390,14 @@ def _current_hand_summary(before_snap: dict, actor: int) -> dict[str, object]:
         is_open_hand=len(melds) > 0,
         waits_count=waits_count,
         waits_live=waits_live,
+    )
+    current_max_value_norm = _max_hand_value_norm(
+        confirmed_han_floor=current_han_floor,
+        dora_count=current_dora_count,
+        aka_count=current_aka_count,
+        waits_count=0,
+        waits_live=0,
+        is_tenpai=False,
     )
     best_discard_quality = 0.0
     for action in iter_legal_discards(before_snap.get("legal_actions", [])):
@@ -631,18 +629,12 @@ def build_special_candidate_arrays(
                 after_value_norm,
                 speed_gain_norm,
                 value_loss_norm,
-                float(summary["current_han_floor_norm"]),
                 action_dora_bonus,
                 action_yakuhai_bonus,
                 risk_proxy[0],
                 risk_proxy[1],
                 risk_proxy[2],
                 hand_value_survives,
-                ankan_preserves_tenpai,
-                chi_low,
-                chi_mid,
-                chi_high,
-                rinshan_bonus,
                 float(summary["current_han_floor_norm"]),
                 float(summary["current_dora_count_norm"]),
             ],

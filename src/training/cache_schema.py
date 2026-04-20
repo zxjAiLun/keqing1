@@ -21,13 +21,14 @@ KEQINGV4_EXTRA_FIELDS = (
 )
 
 # Xmodel1 discard cache schema (candidate-centric)
-XMODEL1_SCHEMA_NAME = "xmodel1_discard_v2"
-XMODEL1_SCHEMA_VERSION = 2
+XMODEL1_SCHEMA_NAME = "xmodel1_discard_v3"
+XMODEL1_SCHEMA_VERSION = 3
 XMODEL1_MAX_CANDIDATES = 14
-XMODEL1_CANDIDATE_FEATURE_DIM = 35
-XMODEL1_CANDIDATE_FLAG_DIM = 10
+XMODEL1_CANDIDATE_FEATURE_DIM = 22
+XMODEL1_CANDIDATE_FLAG_DIM = 8
 XMODEL1_MAX_SPECIAL_CANDIDATES = 12
-XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM = 25
+XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM = 19
+XMODEL1_HISTORY_SUMMARY_DIM = 20
 
 XMODEL1_BASE_FIELDS = (
     "state_tile_feat",
@@ -41,18 +42,16 @@ XMODEL1_BASE_FIELDS = (
 
 XMODEL1_TEACHER_FIELDS = (
     "candidate_quality_score",
-    "candidate_rank_bucket",
     "candidate_hard_bad_flag",
 )
 
 XMODEL1_AUX_TARGET_FIELDS = (
-    "score_delta_target",
     "win_target",
     "dealin_target",
     "pts_given_win_target",
     "pts_given_dealin_target",
     "opp_tenpai_target",
-    "event_history",
+    "history_summary",
 )
 
 XMODEL1_METADATA_FIELDS = (
@@ -70,7 +69,6 @@ XMODEL1_SPECIAL_FIELDS = (
     "special_candidate_type_id",
     "special_candidate_mask",
     "special_candidate_quality_score",
-    "special_candidate_rank_bucket",
     "special_candidate_hard_bad_flag",
     "chosen_special_candidate_idx",
 )
@@ -90,6 +88,7 @@ __all__ = [
     "XMODEL1_CANDIDATE_FLAG_DIM",
     "XMODEL1_MAX_SPECIAL_CANDIDATES",
     "XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM",
+    "XMODEL1_HISTORY_SUMMARY_DIM",
     "XMODEL1_BASE_FIELDS",
     "XMODEL1_TEACHER_FIELDS",
     "XMODEL1_AUX_TARGET_FIELDS",

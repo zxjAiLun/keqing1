@@ -5,12 +5,15 @@
 //! current Python preprocessing contract closely enough for training to start,
 //! while staying focused on the discard-only Xmodel1 schema.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
+use std::ops::AddAssign;
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use half::f16;
 use serde::Serialize;
@@ -28,7 +31,7 @@ use crate::replay_export_core::{normalize_tile_repr, strip_aka, tile34_from_pai}
 use crate::replay_samples::public_legal_actions_for_snapshot;
 use crate::shanten_table::ensure_init;
 use crate::snapshot::snapshot_for_actor;
-use crate::state_core::GameStateCore;
+use crate::state_core::{GameStateCore, SnapshotCore};
 use crate::value_proxy::{
     confirmed_han_floor as shared_confirmed_han_floor, tenpai_value_proxy_norm,
 };
@@ -51,6 +54,150 @@ const XMODEL1_SAMPLE_TYPE_HORA: i8 = 3;
 const MC_RETURN_GAMMA: f32 = 0.99;
 const SCORE_NORM: f32 = 30000.0;
 const TILE_KIND_COUNT: usize = 34;
+const DEEP_SHANTEN_FAST_PATH_CUTOFF: i8 = 3;
+const INTERRUPTED_ERROR_PREFIX: &str = "xmodel1 preprocess interrupted";
+
+#[derive(Debug, Clone, Copy)]
+enum ExportStage {
+    Normalize,
+    RecordDrive,
+    DiscardCandidateAnalysis,
+    SpecialSummary,
+    NpzWrite,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ExportStageTimings {
+    normalize_s: f64,
+    record_drive_s: f64,
+    discard_candidate_analysis_s: f64,
+    special_summary_s: f64,
+    npz_write_s: f64,
+}
+
+impl ExportStageTimings {
+    fn add_stage(&mut self, stage: ExportStage, elapsed_s: f64) {
+        match stage {
+            ExportStage::Normalize => self.normalize_s += elapsed_s,
+            ExportStage::RecordDrive => self.record_drive_s += elapsed_s,
+            ExportStage::DiscardCandidateAnalysis => {
+                self.discard_candidate_analysis_s += elapsed_s;
+            }
+            ExportStage::SpecialSummary => self.special_summary_s += elapsed_s,
+            ExportStage::NpzWrite => self.npz_write_s += elapsed_s,
+        }
+    }
+
+    fn accumulated_s(&self) -> f64 {
+        self.normalize_s
+            + self.record_drive_s
+            + self.discard_candidate_analysis_s
+            + self.special_summary_s
+            + self.npz_write_s
+    }
+}
+
+impl AddAssign for ExportStageTimings {
+    fn add_assign(&mut self, rhs: Self) {
+        self.normalize_s += rhs.normalize_s;
+        self.record_drive_s += rhs.record_drive_s;
+        self.discard_candidate_analysis_s += rhs.discard_candidate_analysis_s;
+        self.special_summary_s += rhs.special_summary_s;
+        self.npz_write_s += rhs.npz_write_s;
+    }
+}
+
+static EXPORT_PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
+static EXPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
+static EXPORT_CANCEL_HANDLER_INSTALL: OnceLock<Result<(), String>> = OnceLock::new();
+static EXPORT_TEST_FILE_SLEEP_MS: OnceLock<u64> = OnceLock::new();
+
+thread_local! {
+    static ACTIVE_EXPORT_TIMINGS: RefCell<Option<ExportStageTimings>> = const { RefCell::new(None) };
+}
+
+fn export_profile_enabled() -> bool {
+    *EXPORT_PROFILE_ENABLED.get_or_init(|| {
+        std::env::var_os("XMODEL1_EXPORT_PROFILE")
+            .map(|value| value != "0")
+            .unwrap_or(false)
+    })
+}
+
+fn export_test_file_sleep_ms() -> u64 {
+    *EXPORT_TEST_FILE_SLEEP_MS.get_or_init(|| {
+        std::env::var("XMODEL1_EXPORT_TEST_SLEEP_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    })
+}
+
+fn with_export_stage_timing<T>(stage: ExportStage, f: impl FnOnce() -> T) -> T {
+    if !export_profile_enabled() {
+        return f();
+    }
+    let t0 = Instant::now();
+    let out = f();
+    let elapsed_s = t0.elapsed().as_secs_f64();
+    ACTIVE_EXPORT_TIMINGS.with(|cell| {
+        if let Some(timings) = cell.borrow_mut().as_mut() {
+            timings.add_stage(stage, elapsed_s);
+        }
+    });
+    out
+}
+
+fn begin_export_profile_scope() {
+    if export_profile_enabled() {
+        ACTIVE_EXPORT_TIMINGS.with(|cell| {
+            *cell.borrow_mut() = Some(ExportStageTimings::default());
+        });
+    }
+}
+
+fn finish_export_profile_scope() -> ExportStageTimings {
+    if !export_profile_enabled() {
+        return ExportStageTimings::default();
+    }
+    ACTIVE_EXPORT_TIMINGS
+        .with(|cell| cell.borrow_mut().take())
+        .unwrap_or_default()
+}
+
+fn ensure_cancel_handler_installed() -> Result<(), String> {
+    EXPORT_CANCEL_HANDLER_INSTALL
+        .get_or_init(|| {
+            ctrlc::set_handler(|| {
+                EXPORT_CANCELLED.store(true, Ordering::SeqCst);
+            })
+            .map_err(|err| format!("failed to install xmodel1 preprocess signal handler: {err}"))
+        })
+        .clone()
+}
+
+fn reset_cancel_flag() {
+    EXPORT_CANCELLED.store(false, Ordering::SeqCst);
+}
+
+fn cancel_requested() -> bool {
+    EXPORT_CANCELLED.load(Ordering::SeqCst)
+}
+
+fn interrupted_error(context: &str) -> String {
+    format!("{INTERRUPTED_ERROR_PREFIX}: {context}")
+}
+
+fn is_interrupted_error(err: &str) -> bool {
+    err.starts_with(INTERRUPTED_ERROR_PREFIX)
+}
+
+fn poll_cancel(context: &str) -> Result<(), String> {
+    if cancel_requested() {
+        return Err(interrupted_error(context));
+    }
+    Ok(())
+}
 
 pub fn xmodel1_schema_info() -> (&'static str, u32, usize, usize, usize) {
     (
@@ -68,6 +215,306 @@ pub fn validate_xmodel1_discard_record(
     candidate_tile_id: &[i16],
 ) -> Result<(), String> {
     validate_candidate_mask_and_choice(chosen_candidate_idx, candidate_mask, candidate_tile_id)
+}
+
+fn f16_bits_to_f32_vec(values: &[u16]) -> Vec<f32> {
+    values
+        .iter()
+        .map(|value| f16::from_bits(*value).to_f32())
+        .collect()
+}
+
+fn runtime_history_summary_from_snapshot(
+    snapshot: &Value,
+) -> Result<[f32; replay_core::HISTORY_SUMMARY_DIM], String> {
+    let mut out = [0.0f32; replay_core::HISTORY_SUMMARY_DIM];
+    let Some(values) = snapshot.get("history_summary") else {
+        return Ok(out);
+    };
+    let array = values
+        .as_array()
+        .ok_or_else(|| "xmodel1 runtime snapshot history_summary must be an array".to_string())?;
+    if array.len() != replay_core::HISTORY_SUMMARY_DIM {
+        return Err(format!(
+            "xmodel1 runtime snapshot history_summary len {} != {}",
+            array.len(),
+            replay_core::HISTORY_SUMMARY_DIM
+        ));
+    }
+    for (idx, value) in array.iter().enumerate() {
+        out[idx] = value.as_f64().ok_or_else(|| {
+            format!("xmodel1 runtime snapshot history_summary[{idx}] must be numeric")
+        })? as f32;
+    }
+    Ok(out)
+}
+
+fn runtime_apply_hand_count_delta(
+    tracker: &mut replay_core::PlayerRoundTracker,
+    tile34: usize,
+    delta: i32,
+) {
+    let before = tracker.hand_counts34[tile34] as i32;
+    let after = (before + delta).clamp(0, 4);
+    tracker.pair_count = tracker.pair_count + usize::from(after >= 2) - usize::from(before >= 2);
+    tracker.ankoutsu_count =
+        tracker.ankoutsu_count + usize::from(after >= 3) - usize::from(before >= 3);
+    tracker.hand_counts34[tile34] = after as u8;
+}
+
+fn runtime_apply_overall_tile_delta(
+    tracker: &mut replay_core::PlayerRoundTracker,
+    tile: &str,
+    delta: i32,
+) {
+    let Some(tile34) = tile34_from_pai(tile) else {
+        return;
+    };
+    let suit = match tile34 {
+        0..=8 => 0usize,
+        9..=17 => 1usize,
+        18..=26 => 2usize,
+        _ => 3usize,
+    };
+    if delta >= 0 {
+        tracker.suit_counts[suit] = tracker.suit_counts[suit].saturating_add(delta as usize);
+    } else {
+        tracker.suit_counts[suit] = tracker.suit_counts[suit].saturating_sub((-delta) as usize);
+    }
+    if replay_core::tile_is_aka(tile) {
+        if delta >= 0 {
+            tracker.aka_counts[0] = tracker.aka_counts[0].saturating_add(delta as usize);
+        } else {
+            tracker.aka_counts[0] = tracker.aka_counts[0].saturating_sub((-delta) as usize);
+        }
+        match strip_aka(tile).as_str() {
+            "5m" => {
+                if delta >= 0 {
+                    tracker.aka_counts[1] = tracker.aka_counts[1].saturating_add(delta as usize);
+                } else {
+                    tracker.aka_counts[1] = tracker.aka_counts[1].saturating_sub((-delta) as usize);
+                }
+            }
+            "5p" => {
+                if delta >= 0 {
+                    tracker.aka_counts[2] = tracker.aka_counts[2].saturating_add(delta as usize);
+                } else {
+                    tracker.aka_counts[2] = tracker.aka_counts[2].saturating_sub((-delta) as usize);
+                }
+            }
+            "5s" => {
+                if delta >= 0 {
+                    tracker.aka_counts[3] = tracker.aka_counts[3].saturating_add(delta as usize);
+                } else {
+                    tracker.aka_counts[3] = tracker.aka_counts[3].saturating_sub((-delta) as usize);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn runtime_parse_melds(values: &[Value]) -> Vec<replay_core::MeldInfo> {
+    values
+        .iter()
+        .map(|meld| replay_core::MeldInfo {
+            kind: meld
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            pai: meld
+                .get("pai")
+                .and_then(Value::as_str)
+                .map(normalize_tile_repr),
+            consumed: meld
+                .get("consumed")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(normalize_tile_repr)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn runtime_build_round_state_from_snapshot(
+    snapshot: &SnapshotCore,
+    actor: usize,
+) -> Result<RoundState, String> {
+    if actor >= 4 {
+        return Err(format!("xmodel1 runtime actor out of range: {actor}"));
+    }
+    if snapshot.hand.is_empty() {
+        return Err(format!(
+            "xmodel1 runtime snapshot has empty hand for actor {actor}"
+        ));
+    }
+    let mut round_state = RoundState::default();
+    round_state.bakaze = snapshot.bakaze.clone();
+    round_state.kyoku = snapshot.kyoku as i8;
+    round_state.honba = snapshot.honba as i8;
+    round_state.kyotaku = snapshot.kyotaku as i8;
+    round_state.oya = snapshot.oya as i8;
+    for (idx, score) in snapshot.scores.iter().take(4).enumerate() {
+        round_state.scores[idx] = *score;
+    }
+    round_state.dora_markers = snapshot
+        .dora_markers
+        .iter()
+        .map(|tile| normalize_tile_repr(tile))
+        .collect();
+    round_state.last_tsumo = snapshot
+        .last_tsumo
+        .iter()
+        .map(|tile| tile.as_ref().map(|value| normalize_tile_repr(value)))
+        .collect();
+    round_state.remaining_wall = snapshot.remaining_wall.unwrap_or(70).max(0);
+    round_state.pending_rinshan_actor = snapshot.pending_rinshan_actor;
+    round_state.in_game = true;
+    round_state.round_step_index = snapshot
+        .discards
+        .iter()
+        .map(|discards| discards.len())
+        .sum::<usize>() as i32;
+    round_state.round_terminal_finalized = false;
+
+    let mut parsed_melds: Vec<Vec<replay_core::MeldInfo>> = Vec::with_capacity(4);
+    for pid in 0..4 {
+        let discards = snapshot.discards.get(pid).cloned().unwrap_or_default();
+        let meld_values = snapshot.melds.get(pid).cloned().unwrap_or_default();
+        let melds = runtime_parse_melds(&meld_values);
+        parsed_melds.push(melds.clone());
+        round_state.players[pid] = replay_core::PlayerState {
+            discards: discards
+                .iter()
+                .filter_map(|discard| {
+                    let tile = normalize_tile_repr(&discard.pai);
+                    let tile34 = tile34_from_pai(&tile)?;
+                    Some(replay_core::DiscardInfo {
+                        tile34,
+                        tsumogiri: discard.tsumogiri,
+                        reach_declared: discard.reach_declared,
+                    })
+                })
+                .collect(),
+            melds,
+            reached: snapshot.reached.get(pid).copied().unwrap_or(false),
+            pending_reach: snapshot.pending_reach.get(pid).copied().unwrap_or(false),
+            furiten: snapshot.furiten.get(pid).copied().unwrap_or(false),
+        };
+    }
+
+    let mut actor_tracker = replay_core::PlayerRoundTracker::default();
+    actor_tracker.hand_tiles = snapshot
+        .hand
+        .iter()
+        .map(|tile| normalize_tile_repr(tile))
+        .collect();
+    for tile in actor_tracker.hand_tiles.clone() {
+        if let Some(tile34) = tile34_from_pai(&tile).map(|value| value as usize) {
+            runtime_apply_hand_count_delta(&mut actor_tracker, tile34, 1);
+        }
+        runtime_apply_overall_tile_delta(&mut actor_tracker, &tile, 1);
+    }
+    for meld in &parsed_melds[actor] {
+        for tile in meld.consumed.iter().chain(meld.pai.iter()) {
+            actor_tracker.meld_tiles.push(tile.clone());
+            if let Some(tile34) = tile34_from_pai(tile).map(|value| value as usize) {
+                actor_tracker.meld_counts34[tile34] =
+                    actor_tracker.meld_counts34[tile34].saturating_add(1);
+            }
+            runtime_apply_overall_tile_delta(&mut actor_tracker, tile, 1);
+        }
+    }
+    actor_tracker.discards_count = round_state.players[actor].discards.len();
+    actor_tracker.meld_count = round_state.players[actor].melds.len();
+
+    let mut visible_counts34 = [0u8; TILE_KIND_COUNT];
+    for tile in &actor_tracker.hand_tiles {
+        if let Some(tile34) = tile34_from_pai(tile).map(|value| value as usize) {
+            visible_counts34[tile34] = visible_counts34[tile34].saturating_add(1);
+        }
+    }
+    for melds in &parsed_melds {
+        for meld in melds {
+            for tile in meld.consumed.iter().chain(meld.pai.iter()) {
+                if let Some(tile34) = tile34_from_pai(tile).map(|value| value as usize) {
+                    visible_counts34[tile34] = visible_counts34[tile34].saturating_add(1);
+                }
+            }
+        }
+    }
+    for discards in &snapshot.discards {
+        for discard in discards {
+            let tile = normalize_tile_repr(&discard.pai);
+            if let Some(tile34) = tile34_from_pai(&tile).map(|value| value as usize) {
+                visible_counts34[tile34] = visible_counts34[tile34].saturating_add(1);
+            }
+        }
+    }
+    for marker in &round_state.dora_markers {
+        if let Some(tile34) = tile34_from_pai(marker).map(|value| value as usize) {
+            visible_counts34[tile34] = visible_counts34[tile34].saturating_add(1);
+        }
+    }
+    actor_tracker.visible_counts34 = visible_counts34;
+    round_state.feature_tracker.players[actor] = actor_tracker;
+    Ok(round_state)
+}
+
+pub fn build_xmodel1_runtime_tensors(
+    snapshot: &Value,
+    actor: usize,
+    legal_actions: &[Value],
+) -> Result<Value, String> {
+    let parsed_snapshot: SnapshotCore = serde_json::from_value(snapshot.clone())
+        .map_err(|err| format!("failed to parse xmodel1 runtime snapshot: {err}"))?;
+    let round_state = runtime_build_round_state_from_snapshot(&parsed_snapshot, actor)?;
+    let history_summary = runtime_history_summary_from_snapshot(snapshot)?;
+    let decision_ctx = DecisionAnalysisContext::new(&round_state, actor, true);
+
+    let mut candidate_feat = vec![0u16; XMODEL1_MAX_CANDIDATES * XMODEL1_CANDIDATE_FEATURE_DIM];
+    let mut candidate_tile_id = vec![-1i16; XMODEL1_MAX_CANDIDATES];
+    let mut candidate_mask = vec![0u8; XMODEL1_MAX_CANDIDATES];
+    let mut candidate_flags = vec![0u8; XMODEL1_MAX_CANDIDATES * XMODEL1_CANDIDATE_FLAG_DIM];
+
+    for (slot, analysis) in decision_ctx.candidate_analyses.iter().enumerate() {
+        let feat_offset = slot * XMODEL1_CANDIDATE_FEATURE_DIM;
+        for (idx, value) in analysis.feat.iter().enumerate() {
+            candidate_feat[feat_offset + idx] = f16::from_f32(*value).to_bits();
+        }
+        let flags_offset = slot * XMODEL1_CANDIDATE_FLAG_DIM;
+        candidate_flags[flags_offset..flags_offset + XMODEL1_CANDIDATE_FLAG_DIM]
+            .copy_from_slice(&analysis.flags);
+        candidate_tile_id[slot] = analysis.tile34;
+        candidate_mask[slot] = 1;
+    }
+
+    let special = encode_special_candidate_arrays_with_legal_actions(
+        &round_state,
+        actor,
+        legal_actions,
+        &json!({"type":"dahai"}),
+        &decision_ctx,
+    );
+
+    Ok(json!({
+        "candidate_feat": f16_bits_to_f32_vec(&candidate_feat),
+        "candidate_tile_id": candidate_tile_id,
+        "candidate_mask": candidate_mask,
+        "candidate_flags": candidate_flags,
+        "special_candidate_feat": f16_bits_to_f32_vec(&special.feat),
+        "special_candidate_type_id": special.type_id,
+        "special_candidate_mask": special.mask,
+        "special_candidate_quality_score": special.quality,
+        "special_candidate_hard_bad_flag": special.hard_bad,
+        "history_summary": history_summary,
+    }))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,10 +577,7 @@ struct FullRecord {
     // 顺序: [(actor+1)%4, (actor+2)%4, (actor+3)%4] —— 与 Python reference
     // `mahjong_env.replay._compute_opp_tenpai_target` 完全一致。
     opp_tenpai_target: [f32; 3],
-    // Stage 2 Rust 迁移: 事件历史窗口。
-    // 右对齐,最新事件在末尾;仅含当前 kyoku 内决策时刻之前发生的事件。
-    // 见 xmodel1_model_design_v1.md §C.4。
-    event_history: [[i16; replay_core::EVENT_HISTORY_FEATURE_DIM]; replay_core::EVENT_HISTORY_LEN],
+    history_summary: [f32; replay_core::HISTORY_SUMMARY_DIM],
     offense_quality_target: f32,
     sample_type: i8,
     actor: i8,
@@ -148,6 +592,52 @@ struct CandidateMetrics {
     quality: f32,
     rank_bucket: i8,
     hard_bad: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AfterStateStructureMetrics {
+    yakuhai_pair_preserved: f32,
+    dual_yakuhai_pair_value: f32,
+    tanyao_path: f32,
+    flush_path: f32,
+    after_dora_count: f32,
+    after_aka_count: f32,
+    yakuhai_triplet_count: f32,
+    confirmed_han_floor: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AfterStateValueMetrics {
+    after_max_hand_value_norm: f32,
+    hand_value_survives: f32,
+}
+
+#[derive(Debug, Clone)]
+struct DiscardCandidateAnalysis {
+    discard_tile: String,
+    tile34: i16,
+    feat: [f32; XMODEL1_CANDIDATE_FEATURE_DIM],
+    flags: [u8; XMODEL1_CANDIDATE_FLAG_DIM],
+    metrics: CandidateMetrics,
+}
+
+#[derive(Debug, Clone)]
+struct DecisionAnalysisContext {
+    before_counts34: [u8; TILE_KIND_COUNT],
+    before_visible34: [u8; TILE_KIND_COUNT],
+    before_progress: Summary3n1,
+    before_shanten_raw: i8,
+    before_decision_shanten: i8,
+    before_decision_waits_count: u8,
+    before_waits_live: usize,
+    yakuhai: [bool; TILE_KIND_COUNT],
+    dora_flags: [bool; TILE_KIND_COUNT],
+    before_tanyao: f32,
+    any_other_reached: bool,
+    is_open_hand: bool,
+    hand_aka_total: usize,
+    risk_table: [[f32; 3]; TILE_KIND_COUNT],
+    candidate_analyses: Vec<DiscardCandidateAnalysis>,
 }
 
 #[derive(Debug, Clone)]
@@ -344,6 +834,18 @@ fn per_opponent_dealin_risks(
         risks[rel - 1] = (live_factor * base).clamp(0.0, 1.0);
     }
     risks
+}
+
+fn tile_risk_table(
+    round_state: &RoundState,
+    actor: usize,
+    visible_counts34: &[u8; TILE_KIND_COUNT],
+) -> [[f32; 3]; TILE_KIND_COUNT] {
+    let mut table = [[0.0; 3]; TILE_KIND_COUNT];
+    for tile34 in 0..TILE_KIND_COUNT {
+        table[tile34] = per_opponent_dealin_risks(round_state, actor, tile34, visible_counts34);
+    }
+    table
 }
 
 fn pair_taatsu_ankoutsu_metrics_from_counts(
@@ -592,6 +1094,8 @@ fn sorted_candidate_tiles(hand_tiles: &[String]) -> Vec<String> {
 fn candidate_metrics(
     after_shanten: i8,
     after_max_hand_value_norm: f32,
+    good_shape_ukeire_live_norm: f32,
+    improvement_live_norm: f32,
     confirmed_han_floor_norm: f32,
     break_tenpai: u8,
     break_meld_structure: u8,
@@ -601,6 +1105,8 @@ fn candidate_metrics(
 ) -> CandidateMetrics {
     let quality = 1.5 * f32::from(after_shanten == 0) - 0.8 * f32::from(after_shanten)
         + 0.5 * after_max_hand_value_norm
+        + 0.2 * good_shape_ukeire_live_norm
+        + 0.15 * improvement_live_norm
         + 0.15 * confirmed_han_floor_norm
         - 1.2 * f32::from(break_tenpai)
         - 0.5 * f32::from(yaku_break_any)
@@ -638,13 +1144,12 @@ fn dora_target_flags(round_state: &RoundState) -> [bool; TILE_KIND_COUNT] {
     flags
 }
 
-fn after_state_path_metrics(
+fn after_state_structure_metrics(
     after_counts34: &[u8; TILE_KIND_COUNT],
     yakuhai: &[bool; TILE_KIND_COUNT],
     dora_flags: &[bool; TILE_KIND_COUNT],
     after_aka_total: usize,
-    is_open_hand: bool,
-) -> (f32, f32, f32, f32, f32, f32, f32, f32, f32, f32) {
+) -> AfterStateStructureMetrics {
     let yakuhai_pair_preserved = f32::from(
         yakuhai
             .iter()
@@ -676,14 +1181,7 @@ fn after_state_path_metrics(
         .count() as f32;
     let confirmed_han_floor =
         shared_confirmed_han_floor(yakuhai_triplet_count, tanyao_path, after_dora_count);
-    let after_max_hand_value_norm = tenpai_value_proxy_norm(
-        confirmed_han_floor + 0.5 * after_dora_count + 0.35 * after_aka_count,
-        0,
-        0,
-        false,
-    );
-    let hand_value_survives = f32::from(!is_open_hand || confirmed_han_floor > 0.0);
-    (
+    AfterStateStructureMetrics {
         yakuhai_pair_preserved,
         dual_yakuhai_pair_value,
         tanyao_path,
@@ -692,9 +1190,128 @@ fn after_state_path_metrics(
         after_aka_count,
         yakuhai_triplet_count,
         confirmed_han_floor,
+    }
+}
+
+fn exact_after_state_value_metrics(
+    structure: &AfterStateStructureMetrics,
+    after_waits_count: u8,
+    after_waits_live: usize,
+    is_open_hand: bool,
+) -> AfterStateValueMetrics {
+    let after_max_hand_value_norm = tenpai_value_proxy_norm(
+        structure.confirmed_han_floor
+            + 0.5 * structure.after_dora_count
+            + 0.35 * structure.after_aka_count,
+        after_waits_count,
+        after_waits_live,
+        after_waits_count > 0,
+    );
+    let hand_value_survives = f32::from(!is_open_hand || structure.confirmed_han_floor > 0.0);
+    AfterStateValueMetrics {
         after_max_hand_value_norm,
         hand_value_survives,
-    )
+    }
+}
+
+fn baseline_after_state_value_metrics(
+    structure: &AfterStateStructureMetrics,
+    is_open_hand: bool,
+) -> AfterStateValueMetrics {
+    let after_max_hand_value_norm = tenpai_value_proxy_norm(
+        structure.confirmed_han_floor
+            + 0.5 * structure.after_dora_count
+            + 0.35 * structure.after_aka_count,
+        0,
+        0,
+        false,
+    );
+    let hand_value_survives = f32::from(!is_open_hand || structure.confirmed_han_floor > 0.0);
+    AfterStateValueMetrics {
+        after_max_hand_value_norm,
+        hand_value_survives,
+    }
+}
+
+fn deep_shanten_after_state_value_metrics(
+    structure: &AfterStateStructureMetrics,
+    ukeire_live_count: usize,
+    pair_count: usize,
+    taatsu_count: usize,
+    ankoutsu_count: usize,
+    is_open_hand: bool,
+) -> AfterStateValueMetrics {
+    let structure_density = ((pair_count + taatsu_count + ankoutsu_count) as f32 / 10.0).min(1.0);
+    let ukeire_live_norm = (ukeire_live_count as f32 / 136.0).min(1.0);
+    let dora_norm = (structure.after_dora_count / 4.0).min(1.0);
+    let confirmed_han_floor_norm = (structure.confirmed_han_floor / 8.0).min(1.0);
+    let after_max_hand_value_norm = (0.35 * ukeire_live_norm
+        + 0.22 * structure_density
+        + 0.15 * dora_norm
+        + 0.1 * structure.yakuhai_pair_preserved
+        + 0.08 * structure.flush_path
+        + 0.1 * confirmed_han_floor_norm)
+        .clamp(0.0, 1.0);
+    let hand_value_survives = f32::from(
+        !is_open_hand
+            || structure.confirmed_han_floor > 0.0
+            || structure.flush_path > 0.5
+            || structure.yakuhai_pair_preserved > 0.5
+            || structure.after_dora_count > 0.0,
+    );
+    AfterStateValueMetrics {
+        after_max_hand_value_norm,
+        hand_value_survives,
+    }
+}
+
+fn deep_shanten_candidate_metrics(
+    after_shanten: i8,
+    after_max_hand_value_norm: f32,
+    confirmed_han_floor_norm: f32,
+    ukeire_live_count: usize,
+    pair_count: usize,
+    taatsu_count: usize,
+    ankoutsu_count: usize,
+    flush_path: f32,
+    yakuhai_pair_preserved: f32,
+    break_tenpai: u8,
+    break_meld_structure: u8,
+    yaku_break_any: bool,
+    mean_risk: f32,
+    discard_dead: f32,
+) -> CandidateMetrics {
+    let structure_density = ((pair_count + taatsu_count + ankoutsu_count) as f32 / 10.0).min(1.0);
+    let ukeire_live_norm = (ukeire_live_count as f32 / 136.0).min(1.0);
+    let quality = -0.55 * f32::from(after_shanten)
+        + 0.95 * ukeire_live_norm
+        + 0.5 * structure_density
+        + 0.22 * flush_path
+        + 0.18 * yakuhai_pair_preserved
+        + 0.35 * after_max_hand_value_norm
+        + 0.12 * confirmed_han_floor_norm
+        - 1.2 * f32::from(break_tenpai)
+        - 0.35 * f32::from(break_meld_structure)
+        - 0.45 * f32::from(yaku_break_any)
+        - 0.65 * mean_risk
+        - 0.15 * discard_dead;
+    let hard_bad = u8::from(
+        break_tenpai == 1 || break_meld_structure == 1 || mean_risk > 0.75 || after_shanten >= 5,
+    );
+    let rank_bucket = if hard_bad == 1 {
+        0
+    } else if quality >= 1.0 {
+        3
+    } else if quality >= 0.0 {
+        2
+    } else {
+        1
+    };
+    CandidateMetrics {
+        quality,
+        rank_bucket,
+        hard_bad,
+    }
 }
 
 fn hand_aka_count(hand_tiles: &[String]) -> usize {
@@ -704,103 +1321,238 @@ fn hand_aka_count(hand_tiles: &[String]) -> usize {
         .count()
 }
 
-fn candidate_quality_for_discard(
-    round_state: &RoundState,
-    actor: usize,
+impl DecisionAnalysisContext {
+    fn new(round_state: &RoundState, actor: usize, include_candidate_analyses: bool) -> Self {
+        let tracker = &round_state.feature_tracker.players[actor];
+        let before_counts34 = tracker.hand_counts34;
+        let before_visible34 = visible_counts_for_decision(round_state, actor);
+        let before_progress = analyze_progress_like_python(&before_counts34, &before_visible34);
+        let before_shanten_raw = before_progress.shanten;
+        let before_decision_shanten = before_progress.shanten;
+        let before_decision_waits_count = before_progress.waits_count;
+        let before_waits_live: usize = before_progress
+            .waits_tiles
+            .iter()
+            .enumerate()
+            .filter(|(_, flag)| **flag)
+            .map(|(tile34, _)| usize::from(4u8.saturating_sub(before_visible34[tile34])))
+            .sum();
+        let yakuhai = yakuhai_tiles(&round_state.bakaze, actor as i8, round_state.oya);
+        let is_open_hand = !round_state.players[actor].melds.is_empty();
+        let before_tanyao = tanyao_path_from_counts(&before_counts34);
+        let mut ctx = Self {
+            before_counts34,
+            before_visible34,
+            before_progress,
+            before_shanten_raw,
+            before_decision_shanten,
+            before_decision_waits_count,
+            before_waits_live,
+            yakuhai,
+            dora_flags: dora_target_flags(round_state),
+            before_tanyao,
+            any_other_reached: round_state
+                .players
+                .iter()
+                .enumerate()
+                .any(|(pid, player)| pid != actor && player.reached),
+            is_open_hand,
+            hand_aka_total: hand_aka_count(&tracker.hand_tiles),
+            risk_table: tile_risk_table(round_state, actor, &before_visible34),
+            candidate_analyses: Vec::new(),
+        };
+        if include_candidate_analyses {
+            let candidate_tiles = sorted_candidate_tiles(&tracker.hand_tiles);
+            ctx.candidate_analyses =
+                with_export_stage_timing(ExportStage::DiscardCandidateAnalysis, || {
+                    candidate_tiles
+                        .iter()
+                        .take(XMODEL1_MAX_CANDIDATES)
+                        .filter_map(|discard_tile| analyze_discard_candidate(discard_tile, &ctx))
+                        .collect()
+                });
+        }
+        ctx
+    }
+
+    fn best_discard_quality_for_legal_actions(&self, legal_actions: &[Value]) -> f32 {
+        let mut best = f32::NEG_INFINITY;
+        for action in legal_actions {
+            if action.get("type").and_then(Value::as_str) != Some("dahai") {
+                continue;
+            }
+            let Some(pai) = action.get("pai").and_then(Value::as_str) else {
+                continue;
+            };
+            let normalized = normalize_tile_repr(pai);
+            if let Some(analysis) = self
+                .candidate_analyses
+                .iter()
+                .find(|analysis| analysis.discard_tile == normalized)
+            {
+                best = best.max(analysis.metrics.quality);
+            }
+        }
+        if best.is_finite() {
+            best
+        } else {
+            0.0
+        }
+    }
+}
+
+fn analyze_discard_candidate(
     discard_tile: &str,
-) -> Option<CandidateMetrics> {
-    let tracker = &round_state.feature_tracker.players[actor];
-    let before_counts34 = tracker.hand_counts34;
-    let before_visible34 = visible_counts_for_decision(round_state, actor);
-    let before_tile_count: u8 = before_counts34.iter().sum();
-    let before_shanten_raw =
-        crate::shanten_table::calc_shanten_all(&before_counts34, before_tile_count / 3);
-    let yakuhai = yakuhai_tiles(&round_state.bakaze, actor as i8, round_state.oya);
-    let before_tanyao = tanyao_path_from_counts(&before_counts34);
-    let before_pinfu = pinfu_like_path_from_counts(
-        &before_counts34,
-        &yakuhai,
-        !round_state.players[actor].melds.is_empty(),
-    );
-    let before_iipeikou = iipeikou_like_path_from_counts(
-        &before_counts34,
-        !round_state.players[actor].melds.is_empty(),
-    );
-    let dora_flags = dora_target_flags(round_state);
+    ctx: &DecisionAnalysisContext,
+) -> Option<DiscardCandidateAnalysis> {
     let tile34 = tile34_from_pai(discard_tile)?;
     let discard_idx = tile34 as usize;
-    let mut after_counts34 = before_counts34;
+    let mut after_counts34 = ctx.before_counts34;
     if after_counts34[discard_idx] == 0 {
         return None;
     }
     after_counts34[discard_idx] -= 1;
-    let after_visible34 = before_visible34;
-    let (after_shanten_raw, after_waits_count_raw, after_waits_tiles_raw) =
-        calc_shanten_waits_like_python(
-            &after_counts34,
-            !round_state.players[actor].melds.is_empty(),
-        );
-    let after_waits_live: usize = after_waits_tiles_raw
+
+    let after_progress = summarize_after_discard(&after_counts34, &ctx.before_visible34);
+    let after_shanten_raw = after_progress.shanten;
+    let after_waits_count_raw = after_progress.waits_count;
+    let after_waits_live: usize = after_progress
+        .waits_tiles
         .iter()
         .enumerate()
         .filter(|(_, flag)| **flag)
-        .map(|(tile34, _)| usize::from(4u8.saturating_sub(after_visible34[tile34])))
+        .map(|(tile34, _)| usize::from(4u8.saturating_sub(ctx.before_visible34[tile34])))
         .sum();
-    let break_tenpai = u8::from(before_shanten_raw == 0 && after_shanten_raw > 0);
+    let (pair_count, taatsu_count, ankoutsu_count) =
+        pair_taatsu_ankoutsu_metrics_from_counts(&after_counts34);
+    let break_tenpai = u8::from(ctx.before_shanten_raw == 0 && after_shanten_raw > 0);
+    let break_best_wait =
+        u8::from(ctx.before_shanten_raw == 0 && after_waits_live < ctx.before_waits_live);
     let break_meld_structure =
-        u8::from(before_shanten_raw <= 1 && after_shanten_raw > before_shanten_raw);
+        u8::from(ctx.before_shanten_raw <= 1 && after_shanten_raw > ctx.before_shanten_raw);
     let is_aka = u8::from(replay_core::tile_is_aka(discard_tile));
-    let after_aka_total =
-        hand_aka_count(&round_state.feature_tracker.players[actor].hand_tiles)
-            .saturating_sub(is_aka as usize);
-    let (
-        _yakuhai_pair_preserved,
-        _dual_yakuhai_pair_value,
-        tanyao_path,
-        _flush_path,
-        after_dora_count,
-        after_aka_count,
-        _yakuhai_triplet_count,
-        confirmed_han_floor,
-        _after_max_hand_value_norm,
-        _hand_value_survives,
-    ) = after_state_path_metrics(
+    let after_aka_total = ctx.hand_aka_total.saturating_sub(is_aka as usize);
+    let structure = after_state_structure_metrics(
         &after_counts34,
-        &yakuhai,
-        &dora_flags,
+        &ctx.yakuhai,
+        &ctx.dora_flags,
         after_aka_total,
-        !round_state.players[actor].melds.is_empty(),
     );
-    let after_max_hand_value_norm = tenpai_value_proxy_norm(
-        confirmed_han_floor + 0.5 * after_dora_count + 0.35 * after_aka_count,
-        after_waits_count_raw,
-        after_waits_live,
-        after_waits_count_raw > 0,
-    );
-    let after_pinfu = pinfu_like_path_from_counts(
-        &after_counts34,
-        &yakuhai,
-        !round_state.players[actor].melds.is_empty(),
-    );
-    let after_iipeikou = iipeikou_like_path_from_counts(
-        &after_counts34,
-        !round_state.players[actor].melds.is_empty(),
-    );
-    let yaku_break_tanyao = before_tanyao > 0.5 && tanyao_path < 0.5;
-    let yaku_break_pinfu = before_pinfu > 0.5 && after_pinfu < 0.5;
-    let yaku_break_iipeikou = before_iipeikou > 0.5 && after_iipeikou < 0.5;
-    let after_risks = per_opponent_dealin_risks(round_state, actor, discard_idx, &before_visible34);
-    let discard_dead = f32::from(after_visible34[discard_idx] >= 3);
-    Some(candidate_metrics(
-        after_shanten_raw,
-        after_max_hand_value_norm,
-        (confirmed_han_floor / 8.0).min(1.0),
-        break_tenpai,
-        break_meld_structure,
-        yaku_break_tanyao || yaku_break_pinfu || yaku_break_iipeikou,
-        (after_risks[0] + after_risks[1] + after_risks[2]) / 3.0,
+    let yaku_break_tanyao = u8::from(ctx.before_tanyao > 0.5 && structure.tanyao_path < 0.5);
+    let yaku_break_pinfu = 0;
+    let yaku_break_iipeikou = 0;
+    let after_risks = ctx.risk_table[discard_idx];
+    let discard_dead = f32::from(ctx.before_visible34[discard_idx] >= 3);
+    let wait_density = if after_waits_count_raw > 0 {
+        (after_waits_live as f32 / (4.0 * after_waits_count_raw as f32).max(1.0)).min(1.0)
+    } else {
+        0.0
+    };
+    let ukeire_live_norm = (after_progress.ukeire_live_count as f32 / 136.0).min(1.0);
+    let good_shape_ukeire_live_norm = if after_shanten_raw <= 1 {
+        ukeire_live_norm
+    } else {
+        0.0
+    };
+    let improvement_live_norm = if after_shanten_raw > 0 {
+        ukeire_live_norm
+    } else {
+        0.0
+    };
+    let structure_density = ((pair_count + taatsu_count) as f32 / 8.0).min(1.0);
+    let is_dora = u8::from(ctx.dora_flags[discard_idx] || is_aka == 1);
+    let is_yakuhai = u8::from(ctx.yakuhai[discard_idx]);
+    let confirmed_han_floor_norm = (structure.confirmed_han_floor / 8.0).min(1.0);
+    let value_metrics = if after_shanten_raw >= DEEP_SHANTEN_FAST_PATH_CUTOFF {
+        deep_shanten_after_state_value_metrics(
+            &structure,
+            after_progress.ukeire_live_count as usize,
+            pair_count,
+            taatsu_count,
+            ankoutsu_count,
+            ctx.is_open_hand,
+        )
+    } else {
+        exact_after_state_value_metrics(
+            &structure,
+            after_waits_count_raw,
+            after_waits_live,
+            ctx.is_open_hand,
+        )
+    };
+    let metrics = if after_shanten_raw >= DEEP_SHANTEN_FAST_PATH_CUTOFF {
+        deep_shanten_candidate_metrics(
+            after_shanten_raw,
+            value_metrics.after_max_hand_value_norm,
+            confirmed_han_floor_norm,
+            after_progress.ukeire_live_count as usize,
+            pair_count,
+            taatsu_count,
+            ankoutsu_count,
+            structure.flush_path,
+            structure.yakuhai_pair_preserved,
+            break_tenpai,
+            break_meld_structure,
+            yaku_break_tanyao == 1 || yaku_break_pinfu == 1 || yaku_break_iipeikou == 1,
+            (after_risks[0] + after_risks[1] + after_risks[2]) / 3.0,
+            discard_dead,
+        )
+    } else {
+        candidate_metrics(
+            after_shanten_raw,
+            value_metrics.after_max_hand_value_norm,
+            good_shape_ukeire_live_norm,
+            improvement_live_norm,
+            confirmed_han_floor_norm,
+            break_tenpai,
+            break_meld_structure,
+            yaku_break_tanyao == 1 || yaku_break_pinfu == 1 || yaku_break_iipeikou == 1,
+            (after_risks[0] + after_risks[1] + after_risks[2]) / 3.0,
+            discard_dead,
+        )
+    };
+    let feat = [
+        f32::from(after_shanten_raw) / 8.0,
+        f32::from(after_shanten_raw == 0),
+        after_waits_count_raw as f32 / 34.0,
+        (after_progress.ukeire_live_count as f32 / 136.0).min(1.0),
+        value_metrics.after_max_hand_value_norm,
+        (((after_shanten_raw - ctx.before_shanten_raw) as f32) / 4.0).clamp(-1.0, 1.0),
+        (structure.after_dora_count / 4.0).min(1.0),
+        after_risks[0],
+        after_risks[1],
+        after_risks[2],
+        wait_density,
+        pair_count as f32 / 7.0,
+        taatsu_count as f32 / 6.0,
+        structure_density,
+        value_metrics.hand_value_survives,
+        structure.yakuhai_pair_preserved,
+        structure.tanyao_path,
+        structure.flush_path,
         discard_dead,
-    ))
+        good_shape_ukeire_live_norm,
+        improvement_live_norm,
+        confirmed_han_floor_norm,
+    ];
+    let flags = [
+        break_tenpai,
+        break_best_wait,
+        break_meld_structure,
+        yaku_break_tanyao,
+        yaku_break_pinfu,
+        yaku_break_iipeikou,
+        is_dora,
+        is_yakuhai,
+    ];
+
+    Some(DiscardCandidateAnalysis {
+        discard_tile: normalize_tile_repr(discard_tile),
+        tile34,
+        feat,
+        flags,
+        metrics,
+    })
 }
 
 fn special_call_family_score(action: &Value) -> f32 {
@@ -936,19 +1688,9 @@ fn build_special_hand_summary(
     round_state: &RoundState,
     actor: usize,
     legal_actions: &[Value],
+    decision_ctx: &DecisionAnalysisContext,
 ) -> SpecialHandSummary {
     let tracker = &round_state.feature_tracker.players[actor];
-    let before_visible34 = visible_counts_for_decision(round_state, actor);
-    let (shanten, waits_count, waits_tiles) = calc_shanten_waits_like_python(
-        &tracker.hand_counts34,
-        !round_state.players[actor].melds.is_empty(),
-    );
-    let waits_live: usize = waits_tiles
-        .iter()
-        .enumerate()
-        .filter(|(_, flag)| **flag)
-        .map(|(tile34, _)| usize::from(4u8.saturating_sub(before_visible34[tile34])))
-        .sum();
     let actor_score = round_state.scores.get(actor).copied().unwrap_or(25000) as f32;
     let mean_score = round_state
         .scores
@@ -957,48 +1699,38 @@ fn build_special_hand_summary(
         .sum::<f32>()
         / 4.0;
     let score_gap = ((actor_score - mean_score) / SCORE_NORM).clamp(-1.0, 1.0);
-    let threat_by_opponent = per_opponent_dealin_risks(round_state, actor, 27, &before_visible34);
-    let yakuhai = yakuhai_tiles(&round_state.bakaze, actor as i8, round_state.oya);
-    let dora_flags = dora_target_flags(round_state);
-    let (
-        _current_yakuhai_pair,
-        _current_dual_yakuhai,
-        _current_tanyao,
-        _current_flush,
-        current_dora_count,
-        _current_aka_count,
-        _current_yakuhai_triplet_count,
-        current_han_floor,
-        current_max_value_norm,
-        current_hand_value_survives,
-    ) = after_state_path_metrics(
+    let threat_by_opponent = decision_ctx.risk_table[27];
+    let current_structure = after_state_structure_metrics(
         &tracker.hand_counts34,
-        &yakuhai,
-        &dora_flags,
+        &decision_ctx.yakuhai,
+        &decision_ctx.dora_flags,
         hand_aka_count(&tracker.hand_tiles),
-        !round_state.players[actor].melds.is_empty(),
     );
-    let mut best_discard_quality = 0.0f32;
-    for action in legal_actions {
-        if action.get("type").and_then(Value::as_str) != Some("dahai") {
-            continue;
-        }
-        if let Some(pai) = action.get("pai").and_then(Value::as_str) {
-            if let Some(metrics) = candidate_quality_for_discard(round_state, actor, pai) {
-                best_discard_quality = best_discard_quality.max(metrics.quality);
-            }
-        }
-    }
+    let current_value = if decision_ctx.before_progress.shanten >= DEEP_SHANTEN_FAST_PATH_CUTOFF {
+        let (pair_count, taatsu_count, ankoutsu_count) =
+            pair_taatsu_ankoutsu_metrics_from_counts(&tracker.hand_counts34);
+        deep_shanten_after_state_value_metrics(
+            &current_structure,
+            decision_ctx.before_progress.ukeire_live_count as usize,
+            pair_count,
+            taatsu_count,
+            ankoutsu_count,
+            decision_ctx.is_open_hand,
+        )
+    } else {
+        baseline_after_state_value_metrics(&current_structure, decision_ctx.is_open_hand)
+    };
+    let best_discard_quality = decision_ctx.best_discard_quality_for_legal_actions(legal_actions);
     let total_discards: usize = round_state
         .players
         .iter()
         .map(|player| player.discards.len())
         .sum();
     SpecialHandSummary {
-        shanten,
-        tenpai: f32::from(shanten == 0),
-        waits_count,
-        waits_live_norm: (waits_live as f32 / 136.0).min(1.0),
+        shanten: decision_ctx.before_decision_shanten,
+        tenpai: f32::from(decision_ctx.before_decision_shanten == 0),
+        waits_count: decision_ctx.before_decision_waits_count,
+        waits_live_norm: (decision_ctx.before_waits_live as f32 / 136.0).min(1.0),
         round_progress: (total_discards as f32 / 60.0).min(1.0),
         score_gap,
         threat_proxy_any_reached: f32::from(
@@ -1009,12 +1741,12 @@ fn build_special_hand_summary(
                 .any(|(pid, player)| pid != actor && player.reached),
         ),
         threat_by_opponent,
-        is_open: f32::from(!round_state.players[actor].melds.is_empty()),
+        is_open: f32::from(decision_ctx.is_open_hand),
         best_discard_quality_norm: (best_discard_quality / 3.0).min(1.0),
-        current_han_floor_norm: (current_han_floor / 8.0).min(1.0),
-        current_dora_count_norm: (current_dora_count / 4.0).min(1.0),
-        current_max_value_norm,
-        current_hand_value_survives,
+        current_han_floor_norm: (current_structure.confirmed_han_floor / 8.0).min(1.0),
+        current_dora_count_norm: (current_structure.after_dora_count / 4.0).min(1.0),
+        current_max_value_norm: current_value.after_max_hand_value_norm,
+        current_hand_value_survives: current_value.hand_value_survives,
     }
 }
 
@@ -1042,12 +1774,10 @@ fn special_action_after_value(
         | XMODEL1_SPECIAL_TYPE_PON
         | XMODEL1_SPECIAL_TYPE_DAIMINKAN
         | XMODEL1_SPECIAL_TYPE_ANKAN
-        | XMODEL1_SPECIAL_TYPE_KAKAN => {
-            (0.6 * summary.best_discard_quality_norm
-                + 0.25 * action_dora_bonus
-                + 0.25 * action_yakuhai_bonus)
-                .min(1.0)
-        }
+        | XMODEL1_SPECIAL_TYPE_KAKAN => (0.6 * summary.best_discard_quality_norm
+            + 0.25 * action_dora_bonus
+            + 0.25 * action_yakuhai_bonus)
+            .min(1.0),
         XMODEL1_SPECIAL_TYPE_HORA => summary.current_max_value_norm.max(0.8),
         _ => 0.0,
     }
@@ -1059,10 +1789,13 @@ fn encode_special_candidate_arrays_with_legal_actions(
     actor: usize,
     legal_actions: &[Value],
     chosen_action: &Value,
+    decision_ctx: &DecisionAnalysisContext,
 ) -> SpecialCandidateArrays {
-    let summary = build_special_hand_summary(round_state, actor, legal_actions);
-    let yakuhai = yakuhai_tiles(&round_state.bakaze, actor as i8, round_state.oya);
-    let dora_flags = dora_target_flags(round_state);
+    let summary = with_export_stage_timing(ExportStage::SpecialSummary, || {
+        build_special_hand_summary(round_state, actor, legal_actions, decision_ctx)
+    });
+    let yakuhai = decision_ctx.yakuhai;
+    let dora_flags = decision_ctx.dora_flags;
 
     let mut feat =
         vec![0u16; XMODEL1_MAX_SPECIAL_CANDIDATES * XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM];
@@ -1085,7 +1818,10 @@ fn encode_special_candidate_arrays_with_legal_actions(
         let Some(special_type) = special_type_from_action(action, true) else {
             continue;
         };
-        if matches!(special_type, XMODEL1_SPECIAL_TYPE_REACH | XMODEL1_SPECIAL_TYPE_DAMA) {
+        if matches!(
+            special_type,
+            XMODEL1_SPECIAL_TYPE_REACH | XMODEL1_SPECIAL_TYPE_DAMA
+        ) {
             continue;
         }
         let replace = grouped[special_type as usize]
@@ -1117,10 +1853,9 @@ fn encode_special_candidate_arrays_with_legal_actions(
     .iter()
     .any(|special_type| grouped[*special_type as usize].is_some());
     if has_call_special {
-        grouped[XMODEL1_SPECIAL_TYPE_NONE as usize] =
-            grouped[XMODEL1_SPECIAL_TYPE_NONE as usize]
-                .clone()
-                .or_else(|| Some(json!({"type":"none"})));
+        grouped[XMODEL1_SPECIAL_TYPE_NONE as usize] = grouped[XMODEL1_SPECIAL_TYPE_NONE as usize]
+            .clone()
+            .or_else(|| Some(json!({"type":"none"})));
     }
 
     let order = [
@@ -1137,7 +1872,11 @@ fn encode_special_candidate_arrays_with_legal_actions(
         XMODEL1_SPECIAL_TYPE_RYUKYOKU,
         XMODEL1_SPECIAL_TYPE_NONE,
     ];
-    for (slot, special_type) in order.iter().take(XMODEL1_MAX_SPECIAL_CANDIDATES).enumerate() {
+    for (slot, special_type) in order
+        .iter()
+        .take(XMODEL1_MAX_SPECIAL_CANDIDATES)
+        .enumerate()
+    {
         let Some(action) = grouped[*special_type as usize].as_ref() else {
             continue;
         };
@@ -1147,22 +1886,8 @@ fn encode_special_candidate_arrays_with_legal_actions(
 
         let (action_dora_bonus, action_yakuhai_bonus, _call_breaks_closed, _kan_rinshan_bonus) =
             special_action_bonus_metrics(action, &yakuhai, &dora_flags);
-        let ankan_preserves_tenpai = f32::from(
-            special_type == XMODEL1_SPECIAL_TYPE_ANKAN && summary.tenpai > 0.5,
-        );
-        let chi_low = f32::from(special_type == XMODEL1_SPECIAL_TYPE_CHI_LOW);
-        let chi_mid = f32::from(special_type == XMODEL1_SPECIAL_TYPE_CHI_MID);
-        let chi_high = f32::from(special_type == XMODEL1_SPECIAL_TYPE_CHI_HIGH);
-        let rinshan_bonus = if matches!(
-            special_type,
-            XMODEL1_SPECIAL_TYPE_DAIMINKAN
-                | XMODEL1_SPECIAL_TYPE_ANKAN
-                | XMODEL1_SPECIAL_TYPE_KAKAN
-        ) {
-            0.25
-        } else {
-            0.0
-        };
+        let ankan_preserves_tenpai =
+            f32::from(special_type == XMODEL1_SPECIAL_TYPE_ANKAN && summary.tenpai > 0.5);
         let after_value_norm =
             special_action_after_value(&summary, special_type, action, &yakuhai, &dora_flags);
         let (speed_gain_norm, value_loss_norm) = match special_type {
@@ -1205,18 +1930,12 @@ fn encode_special_candidate_arrays_with_legal_actions(
             after_value_norm,
             speed_gain_norm,
             value_loss_norm,
-            summary.current_han_floor_norm,
             action_dora_bonus,
             action_yakuhai_bonus,
             risk_proxy[0],
             risk_proxy[1],
             risk_proxy[2],
             hand_value_survives,
-            ankan_preserves_tenpai,
-            chi_low,
-            chi_mid,
-            chi_high,
-            rinshan_bonus,
             summary.current_han_floor_norm,
             summary.current_dora_count_norm,
         ];
@@ -1225,8 +1944,7 @@ fn encode_special_candidate_arrays_with_legal_actions(
             feat[feat_offset + idx] = f16::from_f32(*value).to_bits();
         }
 
-        let candidate_quality = 0.6 * after_value_norm
-            + 0.35 * speed_gain_norm
+        let candidate_quality = 0.6 * after_value_norm + 0.35 * speed_gain_norm
             - 0.4 * value_loss_norm
             - 0.35 * ((risk_proxy[0] + risk_proxy[1] + risk_proxy[2]) / 3.0)
             + 0.15 * action_dora_bonus
@@ -1292,6 +2010,7 @@ fn encode_special_candidate_arrays_with_legal_actions(
     }
 }
 
+#[allow(dead_code)]
 fn encode_special_candidate_arrays(
     round_state: &RoundState,
     actor: usize,
@@ -1340,24 +2059,15 @@ fn encode_special_candidate_arrays(
     let tracker = &round_state.feature_tracker.players[actor];
     let yakuhai = yakuhai_tiles(&round_state.bakaze, actor as i8, round_state.oya);
     let dora_flags = dora_target_flags(round_state);
-    let (
-        _current_yakuhai_pair,
-        _current_dual_yakuhai,
-        _current_tanyao,
-        _current_flush,
-        current_dora_count,
-        _current_aka_count,
-        current_yakuhai_triplet_count,
-        current_han_floor,
-        _current_max_value_norm,
-        _current_hand_value_survives,
-    ) = after_state_path_metrics(
+    let current_structure = after_state_structure_metrics(
         &tracker.hand_counts34,
         &yakuhai,
         &dora_flags,
         round_state.feature_tracker.players[actor].aka_counts[0],
-        has_any_meld,
     );
+    let current_dora_count = current_structure.after_dora_count;
+    let current_yakuhai_triplet_count = current_structure.yakuhai_triplet_count;
+    let current_han_floor = current_structure.confirmed_han_floor;
     let reach_available = before_decision_shanten <= 0
         && !has_open_meld
         && !round_state.players[actor].reached
@@ -1582,21 +2292,30 @@ fn encode_special_sample_record(
     chosen_action: &Value,
     sample_type: i8,
     event_index: i32,
-    event_history: [[i16; replay_core::EVENT_HISTORY_FEATURE_DIM]; replay_core::EVENT_HISTORY_LEN],
+    history_summary: [f32; replay_core::HISTORY_SUMMARY_DIM],
 ) -> Result<FullRecord, String> {
-    let tracker = &round_state.feature_tracker.players[actor];
-    let before_counts34 = tracker.hand_counts34;
-    let before_visible34 = visible_counts_for_decision(round_state, actor);
-    let before_progress = analyze_progress_like_python(&before_counts34, &before_visible34);
-    let state_tile_feat =
-        encode_state_tile_features(round_state, actor, &before_progress, &before_visible34)?;
-    let state_scalar =
-        encode_state_scalar_features(round_state, actor, &before_progress, &before_visible34)?;
+    let include_candidate_analyses = legal_actions
+        .iter()
+        .any(|action| action.get("type").and_then(Value::as_str) == Some("dahai"));
+    let decision_ctx = DecisionAnalysisContext::new(round_state, actor, include_candidate_analyses);
+    let state_tile_feat = encode_state_tile_features(
+        round_state,
+        actor,
+        &decision_ctx.before_progress,
+        &decision_ctx.before_visible34,
+    )?;
+    let state_scalar = encode_state_scalar_features(
+        round_state,
+        actor,
+        &decision_ctx.before_progress,
+        &decision_ctx.before_visible34,
+    )?;
     let special = encode_special_candidate_arrays_with_legal_actions(
         round_state,
         actor,
         legal_actions,
         chosen_action,
+        &decision_ctx,
     );
     let action_idx_target = action_idx_from_action(chosen_action);
     let offense_quality_target = if special.chosen_idx >= 0 {
@@ -1605,7 +2324,7 @@ fn encode_special_sample_record(
         0.0
     };
     let opp_tenpai_target =
-        replay_core::compute_opp_tenpai_target(round_state, actor, &before_visible34);
+        replay_core::compute_opp_tenpai_target(round_state, actor, &decision_ctx.before_visible34);
     Ok(FullRecord {
         state_tile_feat,
         state_scalar,
@@ -1632,14 +2351,14 @@ fn encode_special_sample_record(
         pts_given_win_target: 0.0,
         pts_given_dealin_target: 0.0,
         opp_tenpai_target,
-        event_history,
+        history_summary,
         offense_quality_target,
         sample_type,
         actor: actor as i8,
         event_index,
         kyoku: round_state.kyoku,
         honba: round_state.honba,
-        is_open_hand: u8::from(!round_state.players[actor].melds.is_empty()),
+        is_open_hand: u8::from(decision_ctx.is_open_hand),
     })
 }
 
@@ -1649,43 +2368,22 @@ fn encode_candidate_features(
     actor: usize,
     chosen_tile: &str,
     event_index: i32,
-    event_history: [[i16; replay_core::EVENT_HISTORY_FEATURE_DIM]; replay_core::EVENT_HISTORY_LEN],
+    history_summary: [f32; replay_core::HISTORY_SUMMARY_DIM],
 ) -> Result<FullRecord, String> {
-    let tracker = &round_state.feature_tracker.players[actor];
-    let before_counts34 = tracker.hand_counts34;
-    let before_visible34 = visible_counts_for_decision(round_state, actor);
-    let before_progress = analyze_progress_like_python(&before_counts34, &before_visible34);
-    let before_tile_count: u8 = before_counts34.iter().sum();
-    let before_shanten_raw =
-        crate::shanten_table::calc_shanten_all(&before_counts34, before_tile_count / 3);
-    let (before_decision_shanten, before_decision_waits_count, before_decision_waits_tiles) =
-        calc_shanten_waits_like_python(
-            &before_counts34,
-            !round_state.players[actor].melds.is_empty(),
-        );
-    let before_waits_live: usize = before_decision_waits_tiles
-        .iter()
-        .enumerate()
-        .filter(|(_, flag)| **flag)
-        .map(|(tile34, _)| usize::from(4u8.saturating_sub(before_visible34[tile34])))
-        .sum();
-    let yakuhai = yakuhai_tiles(&round_state.bakaze, actor as i8, round_state.oya);
-    let before_tanyao = tanyao_path_from_counts(&before_counts34);
-    let before_pinfu = pinfu_like_path_from_counts(
-        &before_counts34,
-        &yakuhai,
-        !round_state.players[actor].melds.is_empty(),
-    );
-    let before_iipeikou = iipeikou_like_path_from_counts(
-        &before_counts34,
-        !round_state.players[actor].melds.is_empty(),
-    );
-    let state_tile_feat =
-        encode_state_tile_features(round_state, actor, &before_progress, &before_visible34)?;
-    let state_scalar =
-        encode_state_scalar_features(round_state, actor, &before_progress, &before_visible34)?;
+    let decision_ctx = DecisionAnalysisContext::new(round_state, actor, true);
+    let state_tile_feat = encode_state_tile_features(
+        round_state,
+        actor,
+        &decision_ctx.before_progress,
+        &decision_ctx.before_visible34,
+    )?;
+    let state_scalar = encode_state_scalar_features(
+        round_state,
+        actor,
+        &decision_ctx.before_progress,
+        &decision_ctx.before_visible34,
+    )?;
 
-    let candidate_tiles = sorted_candidate_tiles(&tracker.hand_tiles);
     let mut candidate_feat = vec![0u16; XMODEL1_MAX_CANDIDATES * XMODEL1_CANDIDATE_FEATURE_DIM];
     let mut candidate_tile_id = vec![-1i16; XMODEL1_MAX_CANDIDATES];
     let mut candidate_mask = vec![0u8; XMODEL1_MAX_CANDIDATES];
@@ -1695,172 +2393,21 @@ fn encode_candidate_features(
     let mut candidate_hard_bad = vec![0u8; XMODEL1_MAX_CANDIDATES];
     let mut chosen_candidate_idx: Option<i16> = None;
 
-    let dora_flags = dora_target_flags(round_state);
-    let any_other_reached = round_state
-        .players
-        .iter()
-        .enumerate()
-        .any(|(pid, player)| pid != actor && player.reached);
-
-    for (slot, discard_tile) in candidate_tiles
-        .iter()
-        .take(XMODEL1_MAX_CANDIDATES)
-        .enumerate()
-    {
-        let Some(tile34) = tile34_from_pai(discard_tile) else {
-            continue;
-        };
-        let mut after_counts34 = before_counts34;
-        let discard_idx = tile34 as usize;
-        if after_counts34[discard_idx] == 0 {
-            continue;
-        }
-        after_counts34[discard_idx] -= 1;
-        let after_visible34 = before_visible34;
-        let after_progress = summarize_after_discard(&after_counts34, &after_visible34);
-        let (after_shanten_raw, after_waits_count_raw, after_waits_tiles_raw) =
-            calc_shanten_waits_like_python(
-                &after_counts34,
-                !round_state.players[actor].melds.is_empty(),
-            );
-        let after_waits_live: usize = after_waits_tiles_raw
-            .iter()
-            .enumerate()
-            .filter(|(_, flag)| **flag)
-            .map(|(tile34, _)| usize::from(4u8.saturating_sub(after_visible34[tile34])))
-            .sum();
-        let (pair_count, taatsu_count) = pair_taatsu_metrics_from_counts(&after_counts34);
-        let break_tenpai = u8::from(before_shanten_raw == 0 && after_shanten_raw > 0);
-        let break_best_wait =
-            u8::from(before_shanten_raw == 0 && after_waits_live < before_waits_live);
-        let break_meld_structure =
-            u8::from(before_shanten_raw <= 1 && after_shanten_raw > before_shanten_raw);
-        let is_honor = u8::from(tile34 >= 27);
-        let is_terminal = u8::from(matches!(tile34, 0 | 8 | 9 | 17 | 18 | 26));
-        let is_aka = u8::from(replay_core::tile_is_aka(discard_tile));
-        let after_aka_total = hand_aka_count(&round_state.feature_tracker.players[actor].hand_tiles)
-            .saturating_sub(is_aka as usize);
-        let (
-            yakuhai_pair_preserved,
-            dual_yakuhai_pair_value,
-            tanyao_path,
-            flush_path,
-            after_dora_count,
-            after_aka_count,
-            yakuhai_triplet_count,
-            confirmed_han_floor,
-            _after_max_hand_value_norm,
-            hand_value_survives,
-        ) = after_state_path_metrics(
-            &after_counts34,
-            &yakuhai,
-            &dora_flags,
-            after_aka_total,
-            !round_state.players[actor].melds.is_empty(),
-        );
-        let after_max_hand_value_norm = tenpai_value_proxy_norm(
-            confirmed_han_floor + 0.5 * after_dora_count + 0.35 * after_aka_count,
-            after_waits_count_raw,
-            after_waits_live,
-            after_waits_count_raw > 0,
-        );
-        let after_pinfu = pinfu_like_path_from_counts(
-            &after_counts34,
-            &yakuhai,
-            !round_state.players[actor].melds.is_empty(),
-        );
-        let after_iipeikou = iipeikou_like_path_from_counts(
-            &after_counts34,
-            !round_state.players[actor].melds.is_empty(),
-        );
-        let yaku_break_tanyao = u8::from(before_tanyao > 0.5 && tanyao_path < 0.5);
-        let yaku_break_pinfu = u8::from(before_pinfu > 0.5 && after_pinfu < 0.5);
-        let yaku_break_iipeikou = u8::from(before_iipeikou > 0.5 && after_iipeikou < 0.5);
-        let after_risks =
-            per_opponent_dealin_risks(round_state, actor, discard_idx, &before_visible34);
-        let wait_density = if after_waits_count_raw > 0 {
-            (after_waits_live as f32 / (4.0 * after_waits_count_raw as f32).max(1.0)).min(1.0)
-        } else {
-            0.0
-        };
-        let structure_density = ((pair_count + taatsu_count) as f32 / 8.0).min(1.0);
-        let is_dora = u8::from(dora_flags[discard_idx] || is_aka == 1);
-        let is_yakuhai = u8::from(yakuhai[discard_idx]);
-        let discard_dead = f32::from(after_visible34[discard_idx] >= 3);
-        let metrics = candidate_metrics(
-            after_shanten_raw,
-            after_max_hand_value_norm,
-            (confirmed_han_floor / 8.0).min(1.0),
-            break_tenpai,
-            break_meld_structure,
-            yaku_break_tanyao == 1 || yaku_break_pinfu == 1 || yaku_break_iipeikou == 1,
-            (after_risks[0] + after_risks[1] + after_risks[2]) / 3.0,
-            discard_dead,
-        );
-
-        let feat = [
-            f32::from(after_shanten_raw) / 8.0,
-            f32::from(after_shanten_raw == 0),
-            after_waits_count_raw as f32 / 34.0,
-            (after_progress.ukeire_live_count as f32 / 136.0).min(1.0),
-            after_max_hand_value_norm,
-            (((after_shanten_raw - before_shanten_raw) as f32) / 4.0).clamp(-1.0, 1.0),
-            (after_dora_count / 4.0).min(1.0),
-            (after_aka_count / 2.0).min(1.0),
-            f32::from(yaku_break_tanyao),
-            f32::from(yaku_break_pinfu),
-            f32::from(yaku_break_iipeikou),
-            after_risks[0],
-            after_risks[1],
-            after_risks[2],
-            wait_density,
-            pair_count as f32 / 7.0,
-            taatsu_count as f32 / 6.0,
-            structure_density,
-            hand_value_survives,
-            yakuhai_pair_preserved,
-            dual_yakuhai_pair_value,
-            tanyao_path,
-            flush_path,
-            f32::from(any_other_reached),
-            discard_dead,
-            0.0,
-            0.0,
-            (confirmed_han_floor / 8.0).min(1.0),
-            (yakuhai_triplet_count / 3.0).min(1.0),
-            f32::from(break_tenpai),
-            f32::from(break_best_wait),
-            f32::from(break_meld_structure),
-            f32::from(is_dora),
-            f32::from(is_yakuhai),
-            f32::from(before_waits_live > after_waits_live),
-        ];
-        let flags = [
-            break_tenpai,
-            break_best_wait,
-            break_meld_structure,
-            yaku_break_tanyao,
-            yaku_break_pinfu,
-            yaku_break_iipeikou,
-            is_honor,
-            is_terminal,
-            is_dora,
-            is_yakuhai,
-        ];
-
+    let chosen_normalized = normalize_tile_repr(chosen_tile);
+    for (slot, analysis) in decision_ctx.candidate_analyses.iter().enumerate() {
         let feat_offset = slot * XMODEL1_CANDIDATE_FEATURE_DIM;
-        for (idx, value) in feat.iter().enumerate() {
+        for (idx, value) in analysis.feat.iter().enumerate() {
             candidate_feat[feat_offset + idx] = f16::from_f32(*value).to_bits();
         }
         let flags_offset = slot * XMODEL1_CANDIDATE_FLAG_DIM;
         candidate_flags[flags_offset..flags_offset + XMODEL1_CANDIDATE_FLAG_DIM]
-            .copy_from_slice(&flags);
-        candidate_tile_id[slot] = tile34;
+            .copy_from_slice(&analysis.flags);
+        candidate_tile_id[slot] = analysis.tile34;
         candidate_mask[slot] = 1;
-        candidate_quality[slot] = metrics.quality;
-        candidate_rank[slot] = metrics.rank_bucket;
-        candidate_hard_bad[slot] = metrics.hard_bad;
-        if normalize_tile_repr(chosen_tile) == *discard_tile {
+        candidate_quality[slot] = analysis.metrics.quality;
+        candidate_rank[slot] = analysis.metrics.rank_bucket;
+        candidate_hard_bad[slot] = analysis.metrics.hard_bad;
+        if chosen_normalized == analysis.discard_tile {
             chosen_candidate_idx = Some(slot as i16);
         }
     }
@@ -1873,17 +2420,6 @@ fn encode_candidate_features(
     })?;
     validate_xmodel1_discard_record(chosen_candidate_idx, &candidate_mask, &candidate_tile_id)?;
     let chosen_quality = candidate_quality[chosen_candidate_idx as usize];
-    let best_discard_quality = candidate_quality
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| candidate_mask[*idx] > 0)
-        .map(|(_, value)| *value)
-        .fold(f32::NEG_INFINITY, f32::max);
-    let best_discard_quality = if best_discard_quality.is_finite() {
-        best_discard_quality
-    } else {
-        0.0
-    };
     let snapshot = snapshot_for_actor(core_state, actor);
     let snapshot_value = serde_json::to_value(&snapshot)
         .map_err(|err| format!("failed to serialize discard snapshot for actor {actor}: {err}"))?;
@@ -1893,6 +2429,7 @@ fn encode_candidate_features(
         actor,
         &legal_actions,
         &json!({"type":"dahai", "pai": chosen_tile}),
+        &decision_ctx,
     );
 
     Ok(FullRecord {
@@ -1923,16 +2460,16 @@ fn encode_candidate_features(
         opp_tenpai_target: replay_core::compute_opp_tenpai_target(
             round_state,
             actor,
-            &before_visible34,
+            &decision_ctx.before_visible34,
         ),
-        event_history,
+        history_summary,
         offense_quality_target: chosen_quality,
         sample_type: XMODEL1_SAMPLE_TYPE_DISCARD,
         actor: actor as i8,
         event_index,
         kyoku: round_state.kyoku,
         honba: round_state.honba,
-        is_open_hand: u8::from(!round_state.players[actor].melds.is_empty()),
+        is_open_hand: u8::from(decision_ctx.is_open_hand),
     })
 }
 
@@ -2339,6 +2876,7 @@ fn existing_export_sample_count(path: &Path) -> Result<Option<usize>, String> {
 
 #[derive(Debug)]
 struct FileExportResult {
+    source_file: String,
     ds_name: String,
     exported_file_count: usize,
     exported_sample_count: usize,
@@ -2346,6 +2884,7 @@ struct FileExportResult {
     skipped_existing_file_count: usize,
     produced_npz: bool,
     elapsed_s: f64,
+    timings: ExportStageTimings,
 }
 
 fn resolved_export_jobs(requested_jobs: usize, total_files: usize) -> usize {
@@ -2369,6 +2908,7 @@ fn process_export_file(
     resume: bool,
 ) -> Result<FileExportResult, String> {
     let file_t0 = Instant::now();
+    begin_export_profile_scope();
     let input_path = Path::new(file);
     let ds_name = input_path
         .parent()
@@ -2377,11 +2917,18 @@ fn process_export_file(
         .unwrap_or("dataset")
         .to_string();
     let out_file = output_npz_path(output_path, file);
+    poll_cancel(&format!("before exporting {}", input_path.display()))?;
+    let test_sleep_ms = export_test_file_sleep_ms();
+    if test_sleep_ms > 0 {
+        thread::sleep(Duration::from_millis(test_sleep_ms));
+        poll_cancel(&format!("before exporting {}", input_path.display()))?;
+    }
 
     if resume {
         match existing_export_sample_count(&out_file) {
             Ok(Some(existing_sample_count)) => {
                 return Ok(FileExportResult {
+                    source_file: file.to_string(),
                     ds_name,
                     exported_file_count: 1,
                     exported_sample_count: existing_sample_count,
@@ -2389,6 +2936,7 @@ fn process_export_file(
                     skipped_existing_file_count: 1,
                     produced_npz: true,
                     elapsed_s: file_t0.elapsed().as_secs_f64(),
+                    timings: finish_export_profile_scope(),
                 });
             }
             Ok(None) => {}
@@ -2420,9 +2968,12 @@ fn process_export_file(
                 out_dir.display()
             )
         })?;
-        write_full_npz(&out_file, &records)
-            .map_err(|err| format!("failed to write export for {file}: {err}"))?;
+        with_export_stage_timing(ExportStage::NpzWrite, || {
+            write_full_npz(&out_file, &records)
+        })
+        .map_err(|err| format!("failed to write export for {file}: {err}"))?;
         return Ok(FileExportResult {
+            source_file: file.to_string(),
             ds_name,
             exported_file_count: 1,
             exported_sample_count: records.len(),
@@ -2430,10 +2981,12 @@ fn process_export_file(
             skipped_existing_file_count: 0,
             produced_npz: true,
             elapsed_s: file_t0.elapsed().as_secs_f64(),
+            timings: finish_export_profile_scope(),
         });
     }
 
     Ok(FileExportResult {
+        source_file: file.to_string(),
         ds_name,
         exported_file_count: 0,
         exported_sample_count: 0,
@@ -2441,6 +2994,7 @@ fn process_export_file(
         skipped_existing_file_count: 0,
         produced_npz: false,
         elapsed_s: file_t0.elapsed().as_secs_f64(),
+        timings: finish_export_profile_scope(),
     })
 }
 
@@ -2460,331 +3014,306 @@ fn apply_round_target_updates(
 
 fn collect_records_from_mjson(path: &str) -> Result<Vec<FullRecord>, String> {
     ensure_init();
-    let events = replay_core::normalize_replay_events(path)?;
-    // Stage 2 Rust 迁移: event_history 需要从完整 events 列表里按 event_index 切窗口,
-    // 通过闭包捕获 &events 传进 encode 函数。drive_export_records 本身也持有 &events
-    // 的不可变借用,这里再拿一个不可变 slice 引用不冲突。
+    poll_cancel(&format!("before normalizing {path}"))?;
+    let events = with_export_stage_timing(ExportStage::Normalize, || {
+        replay_core::normalize_replay_events(path)
+    })?;
+    // v3: history_summary 统一由 normalized events 计算并贯穿 preprocess/runtime/parity。
     let events_slice: &[Value] = events.as_slice();
-    replay_core::drive_export_records(
-        &events,
-        SCORE_NORM,
-        MC_RETURN_GAMMA,
-        |ctx| {
-            let Some(decision) = replay_core::build_special_actor_chosen_action_context(ctx)?
-            else {
-                return Ok(None);
-            };
-            let sample_type = match decision.decision.event.et {
-                "reach" => XMODEL1_SAMPLE_TYPE_RIICHI,
-                "hora" => XMODEL1_SAMPLE_TYPE_HORA,
-                _ => XMODEL1_SAMPLE_TYPE_CALL,
-            };
-            let event_history = replay_core::compute_event_history(
-                events_slice,
-                decision.decision.event.event_index,
-            );
-            encode_special_sample_record(
-                decision.decision.event.state,
-                decision.decision.event.actor,
-                &decision.decision.legal_actions,
-                &decision.chosen_action,
-                sample_type,
-                decision.decision.event.event_index,
-                event_history,
-            )
-            .map(Some)
-        },
-        |ctx| {
-            let Some(discard) = replay_core::build_discard_decision_context(ctx) else {
-                return Ok(None);
-            };
-            let event_history =
-                replay_core::compute_event_history(events_slice, discard.event.event_index);
-            encode_candidate_features(
-                discard.event.state,
-                discard.event.core_state,
-                discard.event.actor,
-                &discard.chosen_tile,
-                discard.event.event_index,
-                event_history,
-            )
-            .map(Some)
-        },
-        |ctx| {
-            let reaction = replay_core::build_reaction_none_context(ctx);
-            let event_history =
-                replay_core::compute_event_history(events_slice, reaction.reaction.event_index);
-            encode_special_sample_record(
-                reaction.reaction.state,
-                reaction.reaction.actor,
-                reaction.reaction.legal_actions,
-                &reaction.chosen_action,
-                2,
-                reaction.reaction.event_index,
-                event_history,
-            )
-            .map(Some)
-        },
-        apply_round_target_updates,
-    )
+    with_export_stage_timing(ExportStage::RecordDrive, || {
+        replay_core::drive_export_records(
+            &events,
+            SCORE_NORM,
+            MC_RETURN_GAMMA,
+            |ctx| {
+                let Some(decision) = replay_core::build_special_actor_chosen_action_context(ctx)?
+                else {
+                    return Ok(None);
+                };
+                let sample_type = match decision.decision.event.et {
+                    "reach" => XMODEL1_SAMPLE_TYPE_RIICHI,
+                    "hora" => XMODEL1_SAMPLE_TYPE_HORA,
+                    _ => XMODEL1_SAMPLE_TYPE_CALL,
+                };
+                let history_summary = replay_core::compute_history_summary(
+                    events_slice,
+                    decision.decision.event.event_index,
+                    decision.decision.event.actor,
+                );
+                encode_special_sample_record(
+                    decision.decision.event.state,
+                    decision.decision.event.actor,
+                    &decision.decision.legal_actions,
+                    &decision.chosen_action,
+                    sample_type,
+                    decision.decision.event.event_index,
+                    history_summary,
+                )
+                .map(Some)
+            },
+            |ctx| {
+                let Some(discard) = replay_core::build_discard_decision_context(ctx) else {
+                    return Ok(None);
+                };
+                let history_summary = replay_core::compute_history_summary(
+                    events_slice,
+                    discard.event.event_index,
+                    discard.event.actor,
+                );
+                encode_candidate_features(
+                    discard.event.state,
+                    discard.event.core_state,
+                    discard.event.actor,
+                    &discard.chosen_tile,
+                    discard.event.event_index,
+                    history_summary,
+                )
+                .map(Some)
+            },
+            |ctx| {
+                let reaction = replay_core::build_reaction_none_context(ctx);
+                let history_summary = replay_core::compute_history_summary(
+                    events_slice,
+                    reaction.reaction.event_index,
+                    reaction.reaction.actor,
+                );
+                encode_special_sample_record(
+                    reaction.reaction.state,
+                    reaction.reaction.actor,
+                    reaction.reaction.legal_actions,
+                    &reaction.chosen_action,
+                    2,
+                    reaction.reaction.event_index,
+                    history_summary,
+                )
+                .map(Some)
+            },
+            apply_round_target_updates,
+            |event_index| poll_cancel(&format!("while scanning {path} at event {event_index}")),
+        )
+    })
 }
 
 fn write_full_npz(path: &Path, records: &[FullRecord]) -> Result<(), String> {
     let temp_path = temp_npz_path(path);
-    let file = fs::File::create(&temp_path)
-        .map_err(|err| format!("failed to create temp npz {}: {err}", temp_path.display()))?;
-    let mut zip = ZipWriter::new(file);
-    let n = records.len();
+    let write_result = (|| {
+        let file = fs::File::create(&temp_path)
+            .map_err(|err| format!("failed to create temp npz {}: {err}", temp_path.display()))?;
+        let mut zip = ZipWriter::new(file);
+        let n = records.len();
 
-    let mut state_tile_feat = Vec::with_capacity(n * XMODEL1_STATE_TILE_CHANNELS * TILE_KIND_COUNT);
-    let mut state_scalar = Vec::with_capacity(n * XMODEL1_STATE_SCALAR_DIM);
-    let mut candidate_feat =
-        Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES * XMODEL1_CANDIDATE_FEATURE_DIM);
-    let mut candidate_tile_id = Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES);
-    let mut candidate_mask = Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES);
-    let mut candidate_flags =
-        Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES * XMODEL1_CANDIDATE_FLAG_DIM);
-    let mut chosen_candidate_idx = Vec::with_capacity(n);
-    let mut candidate_quality = Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES);
-    let mut candidate_rank = Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES);
-    let mut candidate_hard_bad = Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES);
-    let mut special_candidate_feat = Vec::with_capacity(
-        n * XMODEL1_MAX_SPECIAL_CANDIDATES * XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
-    );
-    let mut special_candidate_type_id = Vec::with_capacity(n * XMODEL1_MAX_SPECIAL_CANDIDATES);
-    let mut special_candidate_mask = Vec::with_capacity(n * XMODEL1_MAX_SPECIAL_CANDIDATES);
-    let mut special_candidate_quality = Vec::with_capacity(n * XMODEL1_MAX_SPECIAL_CANDIDATES);
-    let mut special_candidate_rank = Vec::with_capacity(n * XMODEL1_MAX_SPECIAL_CANDIDATES);
-    let mut special_candidate_hard_bad = Vec::with_capacity(n * XMODEL1_MAX_SPECIAL_CANDIDATES);
-    let mut chosen_special_candidate_idx = Vec::with_capacity(n);
-    let mut action_idx_target = Vec::with_capacity(n);
-    let mut global_value_target = Vec::with_capacity(n);
-    let mut score_delta_target = Vec::with_capacity(n);
-    let mut win_target = Vec::with_capacity(n);
-    let mut dealin_target = Vec::with_capacity(n);
-    let mut pts_given_win_target = Vec::with_capacity(n);
-    let mut pts_given_dealin_target = Vec::with_capacity(n);
-    // Stage 2: opp_tenpai × 3 (顺序 actor+1, actor+2, actor+3 mod 4)。
-    let mut opp_tenpai_target: Vec<f32> = Vec::with_capacity(n * 3);
-    // Stage 2 Rust 迁移: event_history flatten 成 int16,shape [n, 48, 5]。
-    let mut event_history: Vec<i16> = Vec::with_capacity(
-        n * replay_core::EVENT_HISTORY_LEN * replay_core::EVENT_HISTORY_FEATURE_DIM,
-    );
-    let mut offense_quality_target = Vec::with_capacity(n);
-    let mut sample_type = Vec::with_capacity(n);
-    let mut actor = Vec::with_capacity(n);
-    let mut event_index = Vec::with_capacity(n);
-    let mut kyoku = Vec::with_capacity(n);
-    let mut honba = Vec::with_capacity(n);
-    let mut is_open_hand = Vec::with_capacity(n);
+        let mut state_tile_feat =
+            Vec::with_capacity(n * XMODEL1_STATE_TILE_CHANNELS * TILE_KIND_COUNT);
+        let mut state_scalar = Vec::with_capacity(n * XMODEL1_STATE_SCALAR_DIM);
+        let mut candidate_feat =
+            Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES * XMODEL1_CANDIDATE_FEATURE_DIM);
+        let mut candidate_tile_id = Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES);
+        let mut candidate_mask = Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES);
+        let mut candidate_flags =
+            Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES * XMODEL1_CANDIDATE_FLAG_DIM);
+        let mut chosen_candidate_idx = Vec::with_capacity(n);
+        let mut candidate_quality = Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES);
+        let mut candidate_hard_bad = Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES);
+        let mut special_candidate_feat = Vec::with_capacity(
+            n * XMODEL1_MAX_SPECIAL_CANDIDATES * XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+        );
+        let mut special_candidate_type_id = Vec::with_capacity(n * XMODEL1_MAX_SPECIAL_CANDIDATES);
+        let mut special_candidate_mask = Vec::with_capacity(n * XMODEL1_MAX_SPECIAL_CANDIDATES);
+        let mut special_candidate_quality = Vec::with_capacity(n * XMODEL1_MAX_SPECIAL_CANDIDATES);
+        let mut special_candidate_hard_bad = Vec::with_capacity(n * XMODEL1_MAX_SPECIAL_CANDIDATES);
+        let mut chosen_special_candidate_idx = Vec::with_capacity(n);
+        let mut action_idx_target = Vec::with_capacity(n);
+        let mut win_target = Vec::with_capacity(n);
+        let mut dealin_target = Vec::with_capacity(n);
+        let mut pts_given_win_target = Vec::with_capacity(n);
+        let mut pts_given_dealin_target = Vec::with_capacity(n);
+        let mut opp_tenpai_target: Vec<f32> = Vec::with_capacity(n * 3);
+        let mut history_summary = Vec::with_capacity(n * replay_core::HISTORY_SUMMARY_DIM);
+        let mut sample_type = Vec::with_capacity(n);
+        let mut actor = Vec::with_capacity(n);
+        let mut event_index = Vec::with_capacity(n);
+        let mut kyoku = Vec::with_capacity(n);
+        let mut honba = Vec::with_capacity(n);
+        let mut is_open_hand = Vec::with_capacity(n);
 
-    for record in records {
-        state_tile_feat.extend_from_slice(&record.state_tile_feat);
-        state_scalar.extend_from_slice(&record.state_scalar);
-        candidate_feat.extend_from_slice(&record.candidate_feat);
-        candidate_tile_id.extend_from_slice(&record.candidate_tile_id);
-        candidate_mask.extend_from_slice(&record.candidate_mask);
-        candidate_flags.extend_from_slice(&record.candidate_flags);
-        chosen_candidate_idx.push(record.chosen_candidate_idx);
-        candidate_quality.extend_from_slice(&record.candidate_quality);
-        candidate_rank.extend_from_slice(&record.candidate_rank);
-        candidate_hard_bad.extend_from_slice(&record.candidate_hard_bad);
-        special_candidate_feat.extend_from_slice(&record.special_candidate_feat);
-        special_candidate_type_id.extend_from_slice(&record.special_candidate_type_id);
-        special_candidate_mask.extend_from_slice(&record.special_candidate_mask);
-        special_candidate_quality.extend_from_slice(&record.special_candidate_quality);
-        special_candidate_rank.extend_from_slice(&record.special_candidate_rank);
-        special_candidate_hard_bad.extend_from_slice(&record.special_candidate_hard_bad);
-        chosen_special_candidate_idx.push(record.chosen_special_candidate_idx);
-        action_idx_target.push(record.action_idx_target);
-        global_value_target.push(record.global_value_target);
-        score_delta_target.push(record.score_delta_target);
-        win_target.push(record.win_target);
-        dealin_target.push(record.dealin_target);
-        pts_given_win_target.push(record.pts_given_win_target);
-        pts_given_dealin_target.push(record.pts_given_dealin_target);
-        opp_tenpai_target.extend_from_slice(&record.opp_tenpai_target);
-        for row in record.event_history.iter() {
-            event_history.extend_from_slice(row);
+        for (idx, record) in records.iter().enumerate() {
+            if idx % 256 == 0 {
+                poll_cancel(&format!("while flattening {}", path.display()))?;
+            }
+            state_tile_feat.extend_from_slice(&record.state_tile_feat);
+            state_scalar.extend_from_slice(&record.state_scalar);
+            candidate_feat.extend_from_slice(&record.candidate_feat);
+            candidate_tile_id.extend_from_slice(&record.candidate_tile_id);
+            candidate_mask.extend_from_slice(&record.candidate_mask);
+            candidate_flags.extend_from_slice(&record.candidate_flags);
+            chosen_candidate_idx.push(record.chosen_candidate_idx);
+            candidate_quality.extend_from_slice(&record.candidate_quality);
+            candidate_hard_bad.extend_from_slice(&record.candidate_hard_bad);
+            special_candidate_feat.extend_from_slice(&record.special_candidate_feat);
+            special_candidate_type_id.extend_from_slice(&record.special_candidate_type_id);
+            special_candidate_mask.extend_from_slice(&record.special_candidate_mask);
+            special_candidate_quality.extend_from_slice(&record.special_candidate_quality);
+            special_candidate_hard_bad.extend_from_slice(&record.special_candidate_hard_bad);
+            chosen_special_candidate_idx.push(record.chosen_special_candidate_idx);
+            action_idx_target.push(record.action_idx_target);
+            win_target.push(record.win_target);
+            dealin_target.push(record.dealin_target);
+            pts_given_win_target.push(record.pts_given_win_target);
+            pts_given_dealin_target.push(record.pts_given_dealin_target);
+            opp_tenpai_target.extend_from_slice(&record.opp_tenpai_target);
+            for value in record.history_summary.iter() {
+                history_summary.push(f16::from_f32(*value).to_bits());
+            }
+            sample_type.push(record.sample_type);
+            actor.push(record.actor);
+            event_index.push(record.event_index);
+            kyoku.push(record.kyoku);
+            honba.push(record.honba);
+            is_open_hand.push(record.is_open_hand);
         }
-        offense_quality_target.push(record.offense_quality_target);
-        sample_type.push(record.sample_type);
-        actor.push(record.actor);
-        event_index.push(record.event_index);
-        kyoku.push(record.kyoku);
-        honba.push(record.honba);
-        is_open_hand.push(record.is_open_hand);
-    }
 
-    write_npy_unicode_scalar(&mut zip, "schema_name.npy", XMODEL1_SCHEMA_NAME)?;
-    write_npy_i32(
-        &mut zip,
-        "schema_version.npy",
-        &[],
-        &[XMODEL1_SCHEMA_VERSION as i32],
-    )?;
-    write_npy_f16(
-        &mut zip,
-        "state_tile_feat.npy",
-        &[n, XMODEL1_STATE_TILE_CHANNELS, TILE_KIND_COUNT],
-        &state_tile_feat,
-    )?;
-    write_npy_f16(
-        &mut zip,
-        "state_scalar.npy",
-        &[n, XMODEL1_STATE_SCALAR_DIM],
-        &state_scalar,
-    )?;
-    write_npy_f16(
-        &mut zip,
-        "candidate_feat.npy",
-        &[n, XMODEL1_MAX_CANDIDATES, XMODEL1_CANDIDATE_FEATURE_DIM],
-        &candidate_feat,
-    )?;
-    write_npy_i16(
-        &mut zip,
-        "candidate_tile_id.npy",
-        &[n, XMODEL1_MAX_CANDIDATES],
-        &candidate_tile_id,
-    )?;
-    write_npy_u8(
-        &mut zip,
-        "candidate_mask.npy",
-        &[n, XMODEL1_MAX_CANDIDATES],
-        &candidate_mask,
-    )?;
-    write_npy_u8(
-        &mut zip,
-        "candidate_flags.npy",
-        &[n, XMODEL1_MAX_CANDIDATES, XMODEL1_CANDIDATE_FLAG_DIM],
-        &candidate_flags,
-    )?;
-    write_npy_i16(
-        &mut zip,
-        "chosen_candidate_idx.npy",
-        &[n],
-        &chosen_candidate_idx,
-    )?;
-    write_npy_f32(
-        &mut zip,
-        "candidate_quality_score.npy",
-        &[n, XMODEL1_MAX_CANDIDATES],
-        &candidate_quality,
-    )?;
-    write_npy_i8(
-        &mut zip,
-        "candidate_rank_bucket.npy",
-        &[n, XMODEL1_MAX_CANDIDATES],
-        &candidate_rank,
-    )?;
-    write_npy_u8(
-        &mut zip,
-        "candidate_hard_bad_flag.npy",
-        &[n, XMODEL1_MAX_CANDIDATES],
-        &candidate_hard_bad,
-    )?;
-    write_npy_f16(
-        &mut zip,
-        "special_candidate_feat.npy",
-        &[
-            n,
-            XMODEL1_MAX_SPECIAL_CANDIDATES,
-            XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
-        ],
-        &special_candidate_feat,
-    )?;
-    write_npy_i16(
-        &mut zip,
-        "special_candidate_type_id.npy",
-        &[n, XMODEL1_MAX_SPECIAL_CANDIDATES],
-        &special_candidate_type_id,
-    )?;
-    write_npy_u8(
-        &mut zip,
-        "special_candidate_mask.npy",
-        &[n, XMODEL1_MAX_SPECIAL_CANDIDATES],
-        &special_candidate_mask,
-    )?;
-    write_npy_f32(
-        &mut zip,
-        "special_candidate_quality_score.npy",
-        &[n, XMODEL1_MAX_SPECIAL_CANDIDATES],
-        &special_candidate_quality,
-    )?;
-    write_npy_i8(
-        &mut zip,
-        "special_candidate_rank_bucket.npy",
-        &[n, XMODEL1_MAX_SPECIAL_CANDIDATES],
-        &special_candidate_rank,
-    )?;
-    write_npy_u8(
-        &mut zip,
-        "special_candidate_hard_bad_flag.npy",
-        &[n, XMODEL1_MAX_SPECIAL_CANDIDATES],
-        &special_candidate_hard_bad,
-    )?;
-    write_npy_i16(
-        &mut zip,
-        "chosen_special_candidate_idx.npy",
-        &[n],
-        &chosen_special_candidate_idx,
-    )?;
-    write_npy_i16(&mut zip, "action_idx_target.npy", &[n], &action_idx_target)?;
-    write_npy_f32(
-        &mut zip,
-        "global_value_target.npy",
-        &[n],
-        &global_value_target,
-    )?;
-    write_npy_f32(
-        &mut zip,
-        "score_delta_target.npy",
-        &[n],
-        &score_delta_target,
-    )?;
-    write_npy_f32(&mut zip, "win_target.npy", &[n], &win_target)?;
-    write_npy_f32(&mut zip, "dealin_target.npy", &[n], &dealin_target)?;
-    write_npy_f32(
-        &mut zip,
-        "pts_given_win_target.npy",
-        &[n],
-        &pts_given_win_target,
-    )?;
-    write_npy_f32(
-        &mut zip,
-        "pts_given_dealin_target.npy",
-        &[n],
-        &pts_given_dealin_target,
-    )?;
-    write_npy_f32(
-        &mut zip,
-        "opp_tenpai_target.npy",
-        &[n, 3],
-        &opp_tenpai_target,
-    )?;
-    write_npy_i16(
-        &mut zip,
-        "event_history.npy",
-        &[
-            n,
-            replay_core::EVENT_HISTORY_LEN,
-            replay_core::EVENT_HISTORY_FEATURE_DIM,
-        ],
-        &event_history,
-    )?;
-    write_npy_f32(
-        &mut zip,
-        "offense_quality_target.npy",
-        &[n],
-        &offense_quality_target,
-    )?;
-    write_npy_i8(&mut zip, "sample_type.npy", &[n], &sample_type)?;
-    write_npy_i8(&mut zip, "actor.npy", &[n], &actor)?;
-    write_npy_i32(&mut zip, "event_index.npy", &[n], &event_index)?;
-    write_npy_i8(&mut zip, "kyoku.npy", &[n], &kyoku)?;
-    write_npy_i8(&mut zip, "honba.npy", &[n], &honba)?;
-    write_npy_u8(&mut zip, "is_open_hand.npy", &[n], &is_open_hand)?;
-    finalize_temp_npz(zip, &temp_path, path, true)
+        poll_cancel(&format!("before finalizing {}", path.display()))?;
+        write_npy_unicode_scalar(&mut zip, "schema_name.npy", XMODEL1_SCHEMA_NAME)?;
+        write_npy_i32(
+            &mut zip,
+            "schema_version.npy",
+            &[],
+            &[XMODEL1_SCHEMA_VERSION as i32],
+        )?;
+        write_npy_f16(
+            &mut zip,
+            "state_tile_feat.npy",
+            &[n, XMODEL1_STATE_TILE_CHANNELS, TILE_KIND_COUNT],
+            &state_tile_feat,
+        )?;
+        write_npy_f16(
+            &mut zip,
+            "state_scalar.npy",
+            &[n, XMODEL1_STATE_SCALAR_DIM],
+            &state_scalar,
+        )?;
+        write_npy_f16(
+            &mut zip,
+            "candidate_feat.npy",
+            &[n, XMODEL1_MAX_CANDIDATES, XMODEL1_CANDIDATE_FEATURE_DIM],
+            &candidate_feat,
+        )?;
+        write_npy_i16(
+            &mut zip,
+            "candidate_tile_id.npy",
+            &[n, XMODEL1_MAX_CANDIDATES],
+            &candidate_tile_id,
+        )?;
+        write_npy_u8(
+            &mut zip,
+            "candidate_mask.npy",
+            &[n, XMODEL1_MAX_CANDIDATES],
+            &candidate_mask,
+        )?;
+        write_npy_u8(
+            &mut zip,
+            "candidate_flags.npy",
+            &[n, XMODEL1_MAX_CANDIDATES, XMODEL1_CANDIDATE_FLAG_DIM],
+            &candidate_flags,
+        )?;
+        write_npy_i16(
+            &mut zip,
+            "chosen_candidate_idx.npy",
+            &[n],
+            &chosen_candidate_idx,
+        )?;
+        write_npy_f32(
+            &mut zip,
+            "candidate_quality_score.npy",
+            &[n, XMODEL1_MAX_CANDIDATES],
+            &candidate_quality,
+        )?;
+        write_npy_u8(
+            &mut zip,
+            "candidate_hard_bad_flag.npy",
+            &[n, XMODEL1_MAX_CANDIDATES],
+            &candidate_hard_bad,
+        )?;
+        write_npy_f16(
+            &mut zip,
+            "special_candidate_feat.npy",
+            &[
+                n,
+                XMODEL1_MAX_SPECIAL_CANDIDATES,
+                XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+            ],
+            &special_candidate_feat,
+        )?;
+        write_npy_i16(
+            &mut zip,
+            "special_candidate_type_id.npy",
+            &[n, XMODEL1_MAX_SPECIAL_CANDIDATES],
+            &special_candidate_type_id,
+        )?;
+        write_npy_u8(
+            &mut zip,
+            "special_candidate_mask.npy",
+            &[n, XMODEL1_MAX_SPECIAL_CANDIDATES],
+            &special_candidate_mask,
+        )?;
+        write_npy_f32(
+            &mut zip,
+            "special_candidate_quality_score.npy",
+            &[n, XMODEL1_MAX_SPECIAL_CANDIDATES],
+            &special_candidate_quality,
+        )?;
+        write_npy_u8(
+            &mut zip,
+            "special_candidate_hard_bad_flag.npy",
+            &[n, XMODEL1_MAX_SPECIAL_CANDIDATES],
+            &special_candidate_hard_bad,
+        )?;
+        write_npy_i16(
+            &mut zip,
+            "chosen_special_candidate_idx.npy",
+            &[n],
+            &chosen_special_candidate_idx,
+        )?;
+        write_npy_i16(&mut zip, "action_idx_target.npy", &[n], &action_idx_target)?;
+        write_npy_f32(&mut zip, "win_target.npy", &[n], &win_target)?;
+        write_npy_f32(&mut zip, "dealin_target.npy", &[n], &dealin_target)?;
+        write_npy_f32(
+            &mut zip,
+            "pts_given_win_target.npy",
+            &[n],
+            &pts_given_win_target,
+        )?;
+        write_npy_f32(
+            &mut zip,
+            "pts_given_dealin_target.npy",
+            &[n],
+            &pts_given_dealin_target,
+        )?;
+        write_npy_f32(
+            &mut zip,
+            "opp_tenpai_target.npy",
+            &[n, 3],
+            &opp_tenpai_target,
+        )?;
+        write_npy_f16(
+            &mut zip,
+            "history_summary.npy",
+            &[n, replay_core::HISTORY_SUMMARY_DIM],
+            &history_summary,
+        )?;
+        write_npy_i8(&mut zip, "sample_type.npy", &[n], &sample_type)?;
+        write_npy_i8(&mut zip, "actor.npy", &[n], &actor)?;
+        write_npy_i32(&mut zip, "event_index.npy", &[n], &event_index)?;
+        write_npy_i8(&mut zip, "kyoku.npy", &[n], &kyoku)?;
+        write_npy_i8(&mut zip, "honba.npy", &[n], &honba)?;
+        write_npy_u8(&mut zip, "is_open_hand.npy", &[n], &is_open_hand)?;
+        finalize_temp_npz(zip, &temp_path, path, true)
+    })();
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn write_manifest(
@@ -2843,6 +3372,8 @@ pub fn build_xmodel1_discard_records_with_options(
     output_dir: &str,
     options: ExportRunOptions,
 ) -> Result<(usize, String, bool), String> {
+    ensure_cancel_handler_installed()?;
+    reset_cancel_flag();
     let mut files = collect_mjson_files(data_dirs, options.smoke)?;
     if options.limit_files > 0 {
         files.truncate(options.limit_files);
@@ -2865,6 +3396,7 @@ pub fn build_xmodel1_discard_records_with_options(
     let mut shard_sample_counts = BTreeMap::<String, usize>::new();
     let progress_every = options.progress_every.max(1);
     let mut recent_file_seconds = VecDeque::with_capacity(32);
+    let mut accumulated_timings = ExportStageTimings::default();
 
     let (tx, rx) = mpsc::channel::<Result<FileExportResult, String>>();
     let work_queue = Arc::new(Mutex::new(files.clone()));
@@ -2875,6 +3407,9 @@ pub fn build_xmodel1_discard_records_with_options(
         let output_dir = output_path.to_path_buf();
         let resume = options.resume;
         handles.push(thread::spawn(move || loop {
+            if cancel_requested() {
+                break;
+            }
             let maybe_file = {
                 let mut queue = queue.lock().expect("work queue poisoned");
                 queue.pop()
@@ -2882,14 +3417,22 @@ pub fn build_xmodel1_discard_records_with_options(
             let Some(file) = maybe_file else {
                 break;
             };
+            if cancel_requested() {
+                break;
+            }
             let result = process_export_file(&file, &output_dir, resume);
+            let should_stop = matches!(&result, Err(err) if is_interrupted_error(err));
             let _ = tx.send(result);
+            if should_stop {
+                break;
+            }
         }));
     }
     drop(tx);
 
     let mut done = 0usize;
     let mut first_error: Option<String> = None;
+    let mut interrupted = false;
     while let Ok(result) = rx.recv() {
         done += 1;
         match result {
@@ -2899,11 +3442,31 @@ pub fn build_xmodel1_discard_records_with_options(
                 exported_sample_count += result.exported_sample_count;
                 processed_file_count += result.processed_file_count;
                 skipped_existing_file_count += result.skipped_existing_file_count;
+                accumulated_timings += result.timings;
                 if result.exported_file_count > 0 {
                     *shard_file_counts.entry(result.ds_name.clone()).or_insert(0) +=
                         result.exported_file_count;
                     *shard_sample_counts.entry(result.ds_name).or_insert(0) +=
                         result.exported_sample_count;
+                }
+                if export_profile_enabled() {
+                    let per_sample_ms = if result.exported_sample_count > 0 {
+                        1000.0 * result.elapsed_s / result.exported_sample_count as f64
+                    } else {
+                        0.0
+                    };
+                    eprintln!(
+                        "[xmodel1 preprocess][profile] file={} samples={} total={:.3}s sample_ms={:.3} normalize={:.3}s record_drive={:.3}s discard_candidate_analysis={:.3}s special_summary={:.3}s npz_write={:.3}s",
+                        result.source_file,
+                        result.exported_sample_count,
+                        result.elapsed_s,
+                        per_sample_ms,
+                        result.timings.normalize_s,
+                        result.timings.record_drive_s,
+                        result.timings.discard_candidate_analysis_s,
+                        result.timings.special_summary_s,
+                        result.timings.npz_write_s,
+                    );
                 }
                 recent_file_seconds.push_back(result.elapsed_s);
                 while recent_file_seconds.len() > 32 {
@@ -2911,8 +3474,14 @@ pub fn build_xmodel1_discard_records_with_options(
                 }
             }
             Err(err) => {
-                first_error = Some(err);
-                break;
+                if is_interrupted_error(&err) {
+                    interrupted = true;
+                    EXPORT_CANCELLED.store(true, Ordering::SeqCst);
+                } else {
+                    first_error = Some(err);
+                    EXPORT_CANCELLED.store(true, Ordering::SeqCst);
+                    break;
+                }
             }
         }
         if options.progress_every > 0 && ((done % progress_every == 0) || (done == files.len())) {
@@ -2932,8 +3501,30 @@ pub fn build_xmodel1_discard_records_with_options(
     for handle in handles {
         let _ = handle.join();
     }
-    if let Some(err) = first_error {
-        return Err(err);
+    if export_profile_enabled() {
+        let elapsed = start.elapsed().as_secs_f64();
+        let avg_file_s = if done > 0 { elapsed / done as f64 } else { 0.0 };
+        let avg_sample_ms = if exported_sample_count > 0 {
+            1000.0 * elapsed / exported_sample_count as f64
+        } else {
+            0.0
+        };
+        eprintln!(
+            "[xmodel1 preprocess][profile] total_wall={:.3}s files={} processed_files={} exported_files={} samples={} avg_file={:.3}s avg_sample={:.3}ms accumulated_stage={:.3}s normalize={:.3}s record_drive={:.3}s discard_candidate_analysis={:.3}s special_summary={:.3}s npz_write={:.3}s",
+            elapsed,
+            files.len(),
+            processed_file_count,
+            exported_file_count,
+            exported_sample_count,
+            avg_file_s,
+            avg_sample_ms,
+            accumulated_timings.accumulated_s(),
+            accumulated_timings.normalize_s,
+            accumulated_timings.record_drive_s,
+            accumulated_timings.discard_candidate_analysis_s,
+            accumulated_timings.special_summary_s,
+            accumulated_timings.npz_write_s,
+        );
     }
     let export_mode = if options.smoke {
         "rust_full_npz_smoke_export"
@@ -2952,5 +3543,14 @@ pub fn build_xmodel1_discard_records_with_options(
         false,
         export_mode,
     )?;
+    if let Some(err) = first_error {
+        return Err(err);
+    }
+    if interrupted {
+        return Err(format!(
+            "{}; manifest={manifest_path}; processed_files={processed_file_count}; skipped_existing_files={skipped_existing_file_count}; exported_files={exported_file_count}",
+            interrupted_error("safe partial manifest written")
+        ));
+    }
     Ok((files.len(), manifest_path, produced_npz))
 }

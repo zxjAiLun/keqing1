@@ -9,9 +9,9 @@ device: cuda
 
 state_tile_channels: 57
 state_scalar_dim: 56
-candidate_feature_dim: 35
-candidate_flag_dim: 10
-special_candidate_feature_dim: 25
+candidate_feature_dim: 22
+candidate_flag_dim: 8
+special_candidate_feature_dim: 19
 
 hidden_dim: 256
 num_res_blocks: 4
@@ -44,9 +44,9 @@ action_ce_loss_weight: 0.25
 rank_loss_weight: 0.5
 hard_bad_loss_weight: 0.25
 # Stage 1 分解 EV:win/dealin BCE + pts_given_{win,dealin} 条件回归
-win_loss_weight: 0.5
-dealin_loss_weight: 0.5
-pts_win_loss_weight: 0.3
-pts_dealin_loss_weight: 0.3
+win_loss_weight: 0.65
+dealin_loss_weight: 0.35
+pts_win_loss_weight: 0.4
+pts_dealin_loss_weight: 0.2
 opp_tenpai_loss_weight: 0.25
 ranking_temperature: 1.0

@@ -5,15 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 
-from xmodel1.candidate_quality import build_special_candidate_arrays
+from xmodel1.checkpoint import (
+    default_xmodel1_state_scalar_dim,
+    infer_xmodel1_model_dims,
+    load_xmodel1_checkpoint_state,
+    resolve_xmodel1_state_scalar_dim,
+    validate_xmodel1_checkpoint_metadata,
+)
 from xmodel1.features import (
-    EVENT_HISTORY_FEATURE_DIM,
-    EVENT_HISTORY_LEN,
     build_runtime_candidate_arrays,
-    empty_event_history,
-    resolve_runtime_event_history,
+    empty_history_summary,
+    resolve_runtime_history_summary,
+    resolve_runtime_tensor_payload,
 )
 from xmodel1.model import Xmodel1Model
 from xmodel1.review_export import (
@@ -24,7 +30,9 @@ from xmodel1.review_export import (
     topk_special_candidates_from_row,
 )
 from xmodel1.schema import (
+    XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_MAX_CANDIDATES,
+    XMODEL1_MAX_SPECIAL_CANDIDATES,
     XMODEL1_SAMPLE_TYPE_DISCARD,
     XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
@@ -60,19 +68,26 @@ class Xmodel1Adapter:
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str | Path, *, device: str = "cpu") -> "Xmodel1Adapter":
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        validate_xmodel1_checkpoint_metadata(
+            ckpt,
+            checkpoint_label=f"Xmodel1 checkpoint {checkpoint_path}",
+            allow_legacy_inference=True,
+        )
         cfg = ckpt.get("cfg", {})
         state_dict = ckpt["model"]
+        inferred_dims = infer_xmodel1_model_dims(
+            state_dict,
+            cfg=cfg if isinstance(cfg, dict) else None,
+        )
         state_tile_channels = int(
-            cfg.get("state_tile_channels", state_dict["state_proj.0.weight"].shape[1])
+            cfg.get("state_tile_channels", inferred_dims["state_tile_channels"])
         )
-        state_scalar_dim = int(
-            cfg.get("state_scalar_dim", state_dict["scalar_proj.0.weight"].shape[1])
-        )
-        candidate_flag_dim = int(cfg.get("candidate_flag_dim", 10))
+        state_scalar_dim = resolve_xmodel1_state_scalar_dim(cfg, state_dict)
+        candidate_flag_dim = int(cfg.get("candidate_flag_dim", inferred_dims["candidate_flag_dim"]))
         candidate_feature_dim = int(
             cfg.get(
                 "candidate_feature_dim",
-                state_dict["candidate_proj.0.weight"].shape[1] - 16 - candidate_flag_dim,
+                inferred_dims["candidate_feature_dim"],
             )
         )
         model = Xmodel1Model(
@@ -80,12 +95,21 @@ class Xmodel1Adapter:
             state_scalar_dim=state_scalar_dim,
             candidate_feature_dim=candidate_feature_dim,
             candidate_flag_dim=candidate_flag_dim,
-            special_candidate_feature_dim=int(cfg.get("special_candidate_feature_dim", XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM)),
-            hidden_dim=int(cfg.get("hidden_dim", 256)),
-            num_res_blocks=int(cfg.get("num_res_blocks", 4)),
-            dropout=float(cfg.get("dropout", 0.1)),
+            special_candidate_feature_dim=int(
+                cfg.get(
+                    "special_candidate_feature_dim",
+                    inferred_dims["special_candidate_feature_dim"],
+                )
+            ),
+            hidden_dim=int(cfg.get("hidden_dim", inferred_dims["hidden_dim"])),
+            num_res_blocks=int(cfg.get("num_res_blocks", inferred_dims["num_res_blocks"])),
+            dropout=float(cfg.get("dropout", inferred_dims["dropout"])),
         )
-        model.load_state_dict(state_dict, strict=False)
+        load_xmodel1_checkpoint_state(
+            model,
+            state_dict,
+            checkpoint_label=f"Xmodel1 checkpoint {checkpoint_path}",
+        )
         return cls(model, device=device)
 
     def score_batch(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -107,7 +131,7 @@ class Xmodel1Adapter:
                 moved.get("special_candidate_feat"),
                 moved.get("special_candidate_type_id"),
                 moved.get("special_candidate_mask"),
-                event_history=moved.get("event_history"),
+                history_summary=moved.get("history_summary"),
             )
         return {
             "discard_logits": out.discard_logits.detach().cpu(),
@@ -122,16 +146,14 @@ class Xmodel1Adapter:
             "candidate_tile_id": batch["candidate_tile_id"].detach().cpu(),
             "candidate_mask": batch["candidate_mask"].detach().cpu(),
             "candidate_quality_score": batch["candidate_quality_score"].detach().cpu(),
-            "candidate_rank_bucket": batch["candidate_rank_bucket"].detach().cpu(),
             "candidate_hard_bad_flag": batch["candidate_hard_bad_flag"].detach().cpu(),
             "sample_type": batch["sample_type"].detach().cpu(),
             "special_candidate_type_id": batch["special_candidate_type_id"].detach().cpu(),
             "special_candidate_mask": batch["special_candidate_mask"].detach().cpu(),
             "special_candidate_quality_score": batch["special_candidate_quality_score"].detach().cpu(),
-            "special_candidate_rank_bucket": batch["special_candidate_rank_bucket"].detach().cpu(),
             "special_candidate_hard_bad_flag": batch["special_candidate_hard_bad_flag"].detach().cpu(),
             "chosen_special_candidate_idx": batch["chosen_special_candidate_idx"].detach().cpu(),
-            "event_history": batch["event_history"].detach().cpu(),
+            "history_summary": batch["history_summary"].detach().cpu(),
             "replay_id": list(batch.get("replay_id", [])),
             "sample_id": list(batch.get("sample_id", [])),
         }
@@ -143,36 +165,60 @@ class Xmodel1Adapter:
         *,
         state_scalar_dim: int | None = None,
     ) -> dict[str, torch.Tensor]:
-        state_scalar_dim = int(state_scalar_dim or self.model.state_scalar_dim)
+        state_scalar_dim = int(
+            state_scalar_dim
+            or getattr(self.model, "state_scalar_dim", default_xmodel1_state_scalar_dim())
+        )
         candidate_feat, candidate_tile_id, candidate_mask, candidate_flags = build_runtime_candidate_arrays(
             snap,
             actor,
+            snap.get("legal_actions", []),
             max_candidates=XMODEL1_MAX_CANDIDATES,
             candidate_feature_dim=self.model.candidate_feature_dim,
             candidate_flag_dim=self.model.candidate_flag_dim,
         )
-        (
-            special_candidate_feat,
-            special_candidate_type_id,
-            special_candidate_mask,
-            special_candidate_quality_score,
-            special_candidate_rank_bucket,
-            special_candidate_hard_bad_flag,
-            chosen_special_candidate_idx,
-        ) = build_special_candidate_arrays(
-            snap,
-            actor,
-            snap.get("legal_actions", []),
-            None,
-            include_terminal_actions=True,
-        )
+        if all(key in snap for key in ("bakaze", "scores", "melds", "discards", "reached")):
+            runtime_payload = resolve_runtime_tensor_payload(
+                snap,
+                actor,
+                snap.get("legal_actions", []),
+                max_special_candidates=XMODEL1_MAX_SPECIAL_CANDIDATES,
+                special_feature_dim=self.model.special_candidate_feature_dim,
+            )
+            special_candidate_feat = runtime_payload["special_candidate_feat"]
+            special_candidate_type_id = runtime_payload["special_candidate_type_id"]
+            special_candidate_mask = runtime_payload["special_candidate_mask"]
+            special_candidate_quality_score = runtime_payload["special_candidate_quality_score"]
+            special_candidate_hard_bad_flag = runtime_payload["special_candidate_hard_bad_flag"]
+        else:
+            special_candidate_feat = np.zeros(
+                (XMODEL1_MAX_SPECIAL_CANDIDATES, self.model.special_candidate_feature_dim),
+                dtype=np.float32,
+            )
+            special_candidate_type_id = np.full(
+                (XMODEL1_MAX_SPECIAL_CANDIDATES,),
+                -1,
+                dtype=np.int16,
+            )
+            special_candidate_mask = np.zeros((XMODEL1_MAX_SPECIAL_CANDIDATES,), dtype=np.uint8)
+            special_candidate_quality_score = np.zeros(
+                (XMODEL1_MAX_SPECIAL_CANDIDATES,),
+                dtype=np.float32,
+            )
+            special_candidate_hard_bad_flag = np.zeros(
+                (XMODEL1_MAX_SPECIAL_CANDIDATES,),
+                dtype=np.uint8,
+            )
         from xmodel1.features import encode
 
         state_tile_feat, state_scalar = encode(snap, actor, state_scalar_dim=state_scalar_dim)
         valid_indices = [i for i, flag in enumerate(candidate_mask) if flag > 0]
         chosen_idx = valid_indices[0] if valid_indices else 0
-        event_history = resolve_runtime_event_history(snap) if "event_history" in snap else empty_event_history()
-        assert event_history.shape == (EVENT_HISTORY_LEN, EVENT_HISTORY_FEATURE_DIM)
+        history_summary = (
+            resolve_runtime_history_summary(snap)
+            if "history_summary" in snap
+            else empty_history_summary()
+        )
         return {
             "state_tile_feat": torch.from_numpy(state_tile_feat).unsqueeze(0),
             "state_scalar": torch.from_numpy(state_scalar).unsqueeze(0),
@@ -182,16 +228,14 @@ class Xmodel1Adapter:
             "candidate_flags": torch.from_numpy(candidate_flags).unsqueeze(0),
             "chosen_candidate_idx": torch.tensor([chosen_idx], dtype=torch.long),
             "candidate_quality_score": torch.zeros((1, XMODEL1_MAX_CANDIDATES), dtype=torch.float32),
-            "candidate_rank_bucket": torch.zeros((1, XMODEL1_MAX_CANDIDATES), dtype=torch.long),
             "candidate_hard_bad_flag": torch.zeros((1, XMODEL1_MAX_CANDIDATES), dtype=torch.float32),
             "special_candidate_feat": torch.from_numpy(special_candidate_feat).unsqueeze(0),
             "special_candidate_type_id": torch.from_numpy(special_candidate_type_id).unsqueeze(0),
             "special_candidate_mask": torch.from_numpy(special_candidate_mask).unsqueeze(0),
             "special_candidate_quality_score": torch.from_numpy(special_candidate_quality_score).unsqueeze(0),
-            "special_candidate_rank_bucket": torch.from_numpy(special_candidate_rank_bucket).unsqueeze(0),
             "special_candidate_hard_bad_flag": torch.from_numpy(special_candidate_hard_bad_flag).unsqueeze(0),
-            "chosen_special_candidate_idx": torch.tensor([int(chosen_special_candidate_idx)], dtype=torch.long),
-            "event_history": torch.from_numpy(event_history).unsqueeze(0).long(),
+            "chosen_special_candidate_idx": torch.tensor([-1], dtype=torch.long),
+            "history_summary": torch.from_numpy(history_summary).unsqueeze(0).float(),
         }
 
     def scored_row_to_review(self, scored: dict[str, torch.Tensor], row_index: int, *, k: int = 3) -> Xmodel1ScoredRow:
@@ -201,14 +245,12 @@ class Xmodel1Adapter:
             tile_ids = scored["candidate_tile_id"][row_index].tolist()
             mask = scored["candidate_mask"][row_index].tolist()
             quality = scored["candidate_quality_score"][row_index].tolist()
-            rank = scored["candidate_rank_bucket"][row_index].tolist()
             hard_bad = scored["candidate_hard_bad_flag"][row_index].tolist()
             top_k = topk_candidates_from_row(
                 scores=logits,
                 candidate_tile_ids=tile_ids,
                 candidate_mask=mask,
                 quality_scores=quality,
-                rank_buckets=rank,
                 hard_bad_flags=hard_bad,
                 k=k,
             )
@@ -223,14 +265,12 @@ class Xmodel1Adapter:
             special_type_ids = scored["special_candidate_type_id"][row_index].tolist()
             special_mask = scored["special_candidate_mask"][row_index].tolist()
             special_quality = scored["special_candidate_quality_score"][row_index].tolist()
-            special_rank = scored["special_candidate_rank_bucket"][row_index].tolist()
             special_hard_bad = scored["special_candidate_hard_bad_flag"][row_index].tolist()
             top_k = topk_special_candidates_from_row(
                 scores=special_logits,
                 special_type_ids=special_type_ids,
                 special_mask=special_mask,
                 quality_scores=special_quality,
-                rank_buckets=special_rank,
                 hard_bad_flags=special_hard_bad,
                 k=k,
             )

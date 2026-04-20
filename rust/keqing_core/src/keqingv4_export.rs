@@ -222,6 +222,7 @@ fn collect_records_from_mjson(path: &Path) -> Result<Vec<KeqingV4Record>, String
             .ok())
         },
         apply_round_target_updates,
+        |_| Ok(()),
     )
 }
 

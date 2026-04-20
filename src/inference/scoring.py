@@ -450,6 +450,32 @@ def _eval_snapshot_outputs(
     return result.value, result.aux
 
 
+def _forward_snapshot_results_many(
+    adapter: KeqingModelAdapter,
+    snapshots: list[tuple[dict, list[dict] | None]],
+    actor: int,
+) -> list[ModelForwardResult]:
+    if not snapshots:
+        return []
+    resolved = [
+        snap if legal_actions is None else dict(snap, legal_actions=legal_actions)
+        for snap, legal_actions in snapshots
+    ]
+    forward_many = getattr(adapter, "forward_many", None)
+    if callable(forward_many):
+        return list(forward_many(resolved, actor))
+    return [adapter.forward(snap, actor) for snap in resolved]
+
+
+def _eval_snapshot_outputs_many(
+    adapter: KeqingModelAdapter,
+    snapshots: list[tuple[dict, list[dict] | None]],
+    actor: int,
+) -> list[tuple[float, ModelAuxOutputs]]:
+    results = _forward_snapshot_results_many(adapter, snapshots, actor)
+    return [(result.value, result.aux) for result in results]
+
+
 def _resolve_runtime_legal_actions(snap: dict, actor: int) -> list[dict]:
     try:
         return _rust_enumerate_legal_action_specs_structural(snap, actor)
@@ -957,14 +983,18 @@ def _score_continuation_scenarios(
 
     scenario_scores_payload: list[dict] = []
     legacy_scenario_scores: list[tuple[float, float, dict]] = []
+    resolved_snapshots: list[tuple[dict, list[dict] | None]] = []
     for scenario in scenarios:
         projected_snapshot = dict(scenario.get("projected_snapshot", {}))
+        legal_actions = list(scenario.get("legal_actions", []))
+        resolved_snapshots.append((projected_snapshot, legal_actions))
+
+    resolved_results = _forward_snapshot_results_many(adapter, resolved_snapshots, actor)
+    for scenario, result in zip(scenarios, resolved_results):
         legal_actions = list(scenario.get("legal_actions", []))
         continuation_kind = str(scenario.get("continuation_kind", ""))
         declaration_action = scenario.get("declaration_action")
         weight = float(scenario.get("weight", 1.0) or 0.0)
-        resolved_snapshot = projected_snapshot if not legal_actions else dict(projected_snapshot, legal_actions=legal_actions)
-        result = adapter.forward(resolved_snapshot, actor)
         _best_action, continuation_score = _score_continuation_result_payload(
             continuation_kind,
             result,
@@ -1038,12 +1068,11 @@ def _dahai_beam_search(
     best_score = -1e18
     best_action = sorted_dahai[0]
     value_scores: dict[int, float] = {}
-
-    for a in sorted_dahai:
-        pai = a.get("pai", "")
-        fake_snap = _simulate_discard_snapshot(snap, actor, pai)
-
-        value, aux = _eval_snapshot_outputs(adapter, fake_snap, actor)
+    followups = [
+        (_simulate_discard_snapshot(snap, actor, a.get("pai", "")), None)
+        for a in sorted_dahai
+    ]
+    for a, (value, aux) in zip(sorted_dahai, _eval_snapshot_outputs_many(adapter, followups, actor)):
         score = (
             float(policy_logits[action_to_idx(a)])
             + beam_lambda * value
@@ -1085,6 +1114,8 @@ def _meld_value_eval(
                 best_score = s
                 best_action = a
 
+    pending_simple: list[dict] = []
+    pending_simple_actions: list[dict] = []
     for a in meld_actions:
         scenarios = _resolve_continuation_scenarios(snap, actor, a)
         if scenarios:
@@ -1100,17 +1131,30 @@ def _meld_value_eval(
                 dealin_prob_lambda=dealin_prob_lambda,
             )
         else:
-            fake_snap = _simulate_meld_snapshot(snap, actor, a)
-            value, aux = _eval_snapshot_outputs(adapter, fake_snap, actor)
+            pending_simple_actions.append(a)
+            pending_simple.append(_simulate_meld_snapshot(snap, actor, a))
+            continue
+        value_scores[action_to_idx(a)] = score
+        if score > best_score:
+            best_score = score
+            best_action = a
+
+    if pending_simple:
+        evals = _eval_snapshot_outputs_many(
+            adapter,
+            [(fake_snap, None) for fake_snap in pending_simple],
+            actor,
+        )
+        for a, (value, aux) in zip(pending_simple_actions, evals):
             score = (
                 float(policy_logits[action_to_idx(a)])
                 + beam_lambda * value
                 + _aux_bonus(aux, score_delta_lambda, win_prob_lambda, dealin_prob_lambda)
             )
-        value_scores[action_to_idx(a)] = score
-        if score > best_score:
-            best_score = score
-            best_action = a
+            value_scores[action_to_idx(a)] = score
+            if score > best_score:
+                best_score = score
+                best_action = a
 
     return best_action, value_scores
 

@@ -100,7 +100,8 @@ archive/
 .omx/
 
 # Local-only working surfaces
-docs/
+docs/**
+!docs/project_overview_current.md
 deploy/
 tmp/
 agents.md

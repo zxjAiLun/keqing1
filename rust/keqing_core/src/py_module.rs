@@ -30,7 +30,7 @@ use crate::progress_batch::{
     summarize_3n2_candidates_py_impl, summarize_best_3n2_candidate_py_impl,
 };
 use crate::progress_delta::{calc_discard_deltas, calc_draw_deltas, calc_required_tiles};
-use crate::progress_summary::summarize_3n1;
+use crate::progress_summary::{summarize_3n1, summarize_one_shanten_draw_metrics};
 use crate::replay_samples::build_replay_decision_records_mc_return;
 use crate::score_rules::{
     build_hora_result_payload, compute_hora_deltas, prepare_hora_tile_allocation,
@@ -38,7 +38,9 @@ use crate::score_rules::{
 use crate::scoring_pool::build_136_pool_entries;
 use crate::shanten_table::{calc_shanten_all, calc_shanten_normal, ensure_init};
 use crate::standard::counts34_to_ids;
-use crate::xmodel1_export::{validate_xmodel1_discard_record, xmodel1_schema_info};
+use crate::xmodel1_export::{
+    build_xmodel1_runtime_tensors, validate_xmodel1_discard_record, xmodel1_schema_info,
+};
 use crate::xmodel1_schema::{
     XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM, XMODEL1_MAX_CANDIDATES,
     XMODEL1_SCHEMA_NAME, XMODEL1_SCHEMA_VERSION,
@@ -164,6 +166,18 @@ fn summarize_3n1_py(
         summary.ukeire_live_count as i32,
         summary.ukeire_tiles.into_iter().collect(),
     ))
+}
+
+#[pyfunction]
+fn summarize_one_shanten_draw_metrics_py(
+    counts34: &Bound<'_, PyList>,
+    visible_counts34: &Bound<'_, PyList>,
+) -> PyResult<(i32, i32)> {
+    ensure_init();
+    let counts = extract_counts34_array(counts34)?;
+    let visible = extract_counts34_array(visible_counts34)?;
+    let (good_shape_live, improvement_live) = summarize_one_shanten_draw_metrics(&counts, &visible);
+    Ok((good_shape_live as i32, improvement_live as i32))
 }
 
 #[pyfunction]
@@ -506,6 +520,21 @@ fn replay_state_snapshot_json_py(events_json: &str, actor: usize) -> PyResult<St
 }
 
 #[pyfunction]
+fn build_xmodel1_runtime_tensors_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    legal_actions_json: &str,
+) -> PyResult<String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let legal_actions: Vec<serde_json::Value> = serde_json::from_str(legal_actions_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let payload = build_xmodel1_runtime_tensors(&snapshot, actor, &legal_actions)
+        .map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&payload).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
 fn enumerate_legal_action_specs_structural_json_py(
     snapshot_json: &str,
     actor: usize,
@@ -662,6 +691,7 @@ pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calc_discard_deltas_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_136_pool_entries_py, m)?)?;
     m.add_function(wrap_pyfunction!(summarize_3n1_py, m)?)?;
+    m.add_function(wrap_pyfunction!(summarize_one_shanten_draw_metrics_py, m)?)?;
     m.add_function(wrap_pyfunction!(summarize_3n2_candidates_py, m)?)?;
     m.add_function(wrap_pyfunction!(summarize_best_3n2_candidate_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_xmodel1_discard_records_py, m)?)?;
@@ -713,6 +743,7 @@ pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(xmodel1_schema_info_py, m)?)?;
     m.add_function(wrap_pyfunction!(validate_xmodel1_discard_record_py, m)?)?;
+    m.add_function(wrap_pyfunction!(build_xmodel1_runtime_tensors_json_py, m)?)?;
     m.add_function(wrap_pyfunction!(replay_state_snapshot_json_py, m)?)?;
     m.add_function(wrap_pyfunction!(
         enumerate_legal_action_specs_structural_json_py,

@@ -15,9 +15,12 @@ import numpy as np
 from mahjong_env.action_space import action_to_idx
 from keqing_core import validate_xmodel1_discard_record, xmodel1_schema_info
 from mahjong_env.replay import build_replay_samples_mc_return
+from mahjong_env.replay_normalizer import normalize_replay_events
 from mahjong_env.tiles import tile_to_34
 from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
+    XMODEL1_CANDIDATE_FLAG_DIM,
+    XMODEL1_HISTORY_SUMMARY_DIM,
     XMODEL1_MAX_CANDIDATES,
     XMODEL1_MAX_SPECIAL_CANDIDATES,
     XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
@@ -27,7 +30,7 @@ from xmodel1.candidate_quality import (
     build_special_candidate_arrays,
     iter_legal_discards,
 )
-from xmodel1.features import compute_event_history, encode
+from xmodel1.features import compute_history_summary, encode
 from xmodel1.schema import (
     XMODEL1_SAMPLE_TYPE_CALL,
     XMODEL1_SAMPLE_TYPE_DISCARD,
@@ -47,16 +50,13 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         "candidate_flags": [],
         "chosen_candidate_idx": [],
         "candidate_quality_score": [],
-        "candidate_rank_bucket": [],
         "candidate_hard_bad_flag": [],
         "special_candidate_feat": [],
         "special_candidate_type_id": [],
         "special_candidate_mask": [],
         "special_candidate_quality_score": [],
-        "special_candidate_rank_bucket": [],
         "special_candidate_hard_bad_flag": [],
         "chosen_special_candidate_idx": [],
-        "score_delta_target": [],
         "win_target": [],
         "dealin_target": [],
         "pts_given_win_target": [],
@@ -64,7 +64,7 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         # Stage 2 Python 原型:3 家对手的 tenpai 标签 (1.0 表示该对手当前向听 ≤ 0)。
         # 相对 actor 顺序为 (actor+1,actor+2,actor+3)%4。Rust preprocess 迁移后保持同样含义。
         "opp_tenpai_target": [],
-        "event_history": [],
+        "history_summary": [],
         "sample_type": [],
         "action_idx_target": [],
         "actor": [],
@@ -76,6 +76,8 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         "sample_id": [],
     }
 
+    normalized_events = normalize_replay_events(events)
+
     for sample_index, sample in enumerate(samples):
         event_index = int(getattr(sample, "event_index", sample_index))
         tile_feat, scalar = encode(sample.state, sample.actor, state_scalar_dim=56)
@@ -84,16 +86,15 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         candidate_feat = np.zeros((XMODEL1_MAX_CANDIDATES, XMODEL1_CANDIDATE_FEATURE_DIM), dtype=np.float16)
         candidate_tile_id = np.full((XMODEL1_MAX_CANDIDATES,), -1, dtype=np.int16)
         candidate_mask = np.zeros((XMODEL1_MAX_CANDIDATES,), dtype=np.uint8)
-        candidate_flags = np.zeros((XMODEL1_MAX_CANDIDATES, 10), dtype=np.uint8)
+        candidate_flags = np.zeros((XMODEL1_MAX_CANDIDATES, XMODEL1_CANDIDATE_FLAG_DIM), dtype=np.uint8)
         candidate_quality = np.zeros((XMODEL1_MAX_CANDIDATES,), dtype=np.float32)
-        candidate_rank = np.zeros((XMODEL1_MAX_CANDIDATES,), dtype=np.int8)
         candidate_hard_bad = np.zeros((XMODEL1_MAX_CANDIDATES,), dtype=np.uint8)
         (
             special_candidate_feat,
             special_candidate_type_id,
             special_candidate_mask,
             special_candidate_quality,
-            special_candidate_rank,
+            _special_candidate_rank,
             special_candidate_hard_bad,
             chosen_special_idx,
         ) = build_special_candidate_arrays(
@@ -115,13 +116,16 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
             if not legal_discards:
                 continue
             for cidx, action in enumerate(legal_discards[:XMODEL1_MAX_CANDIDATES]):
-                feat, flags, quality, rank_bucket, hard_bad = build_candidate_features(sample.state, sample.actor, action)
+                feat, flags, quality, _rank_bucket, hard_bad = build_candidate_features(
+                    sample.state,
+                    sample.actor,
+                    action,
+                )
                 candidate_feat[cidx] = feat.astype(np.float16)
                 candidate_tile_id[cidx] = int(tile_to_34(action["pai"]))
                 candidate_mask[cidx] = 1
                 candidate_flags[cidx] = flags
                 candidate_quality[cidx] = quality
-                candidate_rank[cidx] = rank_bucket
                 candidate_hard_bad[cidx] = hard_bad
                 if action == sample.label_action:
                     chosen_idx = cidx
@@ -154,16 +158,13 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         rows["candidate_flags"].append(candidate_flags)
         rows["chosen_candidate_idx"].append(np.int16(chosen_idx if chosen_idx is not None else -1))
         rows["candidate_quality_score"].append(candidate_quality)
-        rows["candidate_rank_bucket"].append(candidate_rank)
         rows["candidate_hard_bad_flag"].append(candidate_hard_bad)
         rows["special_candidate_feat"].append(special_candidate_feat.astype(np.float16))
         rows["special_candidate_type_id"].append(special_candidate_type_id)
         rows["special_candidate_mask"].append(special_candidate_mask)
         rows["special_candidate_quality_score"].append(special_candidate_quality)
-        rows["special_candidate_rank_bucket"].append(special_candidate_rank)
         rows["special_candidate_hard_bad_flag"].append(special_candidate_hard_bad)
         rows["chosen_special_candidate_idx"].append(np.int16(chosen_special_idx))
-        rows["score_delta_target"].append(np.float32(sample.score_delta_target))
         rows["win_target"].append(np.float32(sample.win_target))
         rows["dealin_target"].append(np.float32(sample.dealin_target))
         rows["pts_given_win_target"].append(np.float32(sample.pts_given_win_target))
@@ -172,7 +173,9 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         rows["opp_tenpai_target"].append(
             np.asarray(opp_tenpai, dtype=np.float32).reshape(3)
         )
-        rows["event_history"].append(compute_event_history(events, event_index))
+        rows["history_summary"].append(
+            compute_history_summary(normalized_events, event_index, sample.actor)
+        )
         rows["sample_type"].append(np.int8(sample_type))
         rows["action_idx_target"].append(np.int16(action_idx_target))
         rows["actor"].append(np.int8(sample.actor))
@@ -195,16 +198,14 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         "candidate_mask",
         "candidate_flags",
         "candidate_quality_score",
-        "candidate_rank_bucket",
         "candidate_hard_bad_flag",
         "special_candidate_feat",
         "special_candidate_type_id",
         "special_candidate_mask",
         "special_candidate_quality_score",
-        "special_candidate_rank_bucket",
         "special_candidate_hard_bad_flag",
         "opp_tenpai_target",
-        "event_history",
+        "history_summary",
     }
     out: Dict[str, np.ndarray] = {}
     for key, value in rows.items():
@@ -214,6 +215,10 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
     out["max_candidates"] = np.array(max_candidates, dtype=np.int32)
     out["candidate_dim"] = np.array(candidate_dim, dtype=np.int32)
     out["candidate_flag_dim"] = np.array(flag_dim, dtype=np.int32)
+    if out["history_summary"].shape[1] != XMODEL1_HISTORY_SUMMARY_DIM:
+        raise RuntimeError(
+            f"xmodel1 parity oracle history_summary drift: {out['history_summary'].shape}"
+        )
     return out
 
 

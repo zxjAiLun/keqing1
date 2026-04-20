@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
+from training.cache_schema import (
+    XMODEL1_CANDIDATE_FEATURE_DIM,
+    XMODEL1_CANDIDATE_FLAG_DIM,
+    XMODEL1_HISTORY_SUMMARY_DIM,
+    XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+)
 from xmodel1.candidate_quality import build_candidate_features
 from xmodel1.candidate_quality import build_special_candidate_arrays
 from xmodel1.preprocess import events_to_xmodel1_arrays
@@ -68,13 +74,15 @@ def test_xmodel1_events_to_arrays_smoke():
     assert arrays is not None
     assert arrays["state_tile_feat"].shape[0] >= 1
     assert arrays["state_scalar"].shape[1] == 56
-    assert arrays["candidate_feat"].shape[1:] == (14, 35)
-    assert arrays["candidate_flags"].shape[1:] == (14, 10)
-    assert arrays["special_candidate_feat"].shape[1:] == (12, 25)
+    assert arrays["candidate_feat"].shape[1:] == (14, XMODEL1_CANDIDATE_FEATURE_DIM)
+    assert arrays["candidate_flags"].shape[1:] == (14, XMODEL1_CANDIDATE_FLAG_DIM)
+    assert arrays["special_candidate_feat"].shape[1:] == (12, XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM)
     assert arrays["special_candidate_mask"].shape[1] == 12
+    assert arrays["history_summary"].shape[1:] == (XMODEL1_HISTORY_SUMMARY_DIM,)
+    assert "event_history" not in arrays
 
 
-def test_xmodel1_events_to_arrays_uses_true_replay_event_index_for_history():
+def test_xmodel1_events_to_arrays_emits_history_summary():
     events = [
         {"type": "start_game", "names": ["A", "B", "C", "D"]},
         {
@@ -98,10 +106,10 @@ def test_xmodel1_events_to_arrays_uses_true_replay_event_index_for_history():
     ]
     arrays = events_to_xmodel1_arrays(events, replay_id="fixture.mjson")
     assert arrays is not None
-    history = arrays["event_history"][0]
-    non_pad = history[history[:, 1] != 0]
-    assert non_pad.shape[0] == 1
-    assert non_pad[-1].tolist() == [0, 1, 12, 0, 0]
+    history_summary = arrays["history_summary"][0]
+    assert history_summary.shape == (XMODEL1_HISTORY_SUMMARY_DIM,)
+    assert np.isfinite(history_summary).all()
+    assert float(history_summary[4]) >= 0.0
 
 
 def test_xmodel1_events_to_arrays_exports_reach_dama_special_candidates():
@@ -239,12 +247,12 @@ def test_build_candidate_features_emits_after_state_path_metrics():
     }
     feat, flags, quality, rank, hard_bad = build_candidate_features(state, 0, {"type": "dahai", "pai": "1m"})
 
-    assert feat.shape == (35,)
-    assert flags.shape == (10,)
-    assert float(feat[27]) > 0.0  # confirmed_han_floor
-    assert float(feat[21]) == 1.0  # tanyao_path
+    assert feat.shape == (XMODEL1_CANDIDATE_FEATURE_DIM,)
+    assert flags.shape == (XMODEL1_CANDIDATE_FLAG_DIM,)
+    assert float(feat[21]) > 0.0  # confirmed_han_floor_norm
+    assert float(feat[16]) == 1.0  # tanyao_path
     assert float(feat[6]) > 0.0  # after_dora_count
-    assert float(feat[23]) == 1.0  # other player reached
+    assert np.isfinite(feat).all()
     assert quality != 0.0
     assert rank in {0, 1, 2, 3}
     assert hard_bad in {0, 1}

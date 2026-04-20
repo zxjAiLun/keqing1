@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import random
+import sys
 import tempfile
 
 import yaml
@@ -98,7 +99,7 @@ def _run_export_gate(
         flush=True,
     )
     print(
-        f"{label} launcher -> native-v2-export progress_every={progress_every} jobs={jobs} limit_files={limit_files}",
+        f"{label} launcher -> native-v3-export progress_every={progress_every} jobs={jobs} limit_files={limit_files}",
         flush=True,
     )
     count, manifest_path, produced_npz = build_xmodel1_discard_records(
@@ -118,7 +119,7 @@ def _run_export_gate(
     if not manifest_map:
         raise RuntimeError(f"{label} gate: no export manifest found under {output_dir}")
     manifest_path_obj = sorted(manifest_map)[0]
-    required_shards = _requested_shards(data_dirs)
+    required_shards = _requested_shards(data_dirs) if limit_files is None else []
     manifest = validate_export_manifest(manifest_path_obj, required_shards=required_shards)
     cache_files = discover_cached_files([output_dir])
     if not cache_files:
@@ -154,7 +155,6 @@ def _run_export_gate(
 
 def main() -> None:
     root = Path(__file__).resolve().parent.parent
-    import sys
 
     sys.path.insert(0, str(root / "src"))
     from keqing_core import build_xmodel1_discard_records
@@ -197,55 +197,76 @@ def main() -> None:
             smoke_root = output_dir.parent / f"{output_dir.name}_smoke"
             smoke_root.mkdir(parents=True, exist_ok=True)
             output_dir = Path(tempfile.mkdtemp(prefix="run_", dir=str(smoke_root)))
-    if (not args.smoke) and (not args.skip_preflight) and preflight_files > 0:
-        with tempfile.TemporaryDirectory(prefix="xmodel1_preflight_") as temp_dir:
-            temp_root = Path(temp_dir)
-            sampled_dirs, sampled_counts = _build_preflight_sample_dirs(
-                temp_root,
-                data_dirs,
-                files_per_shard=preflight_files,
-                seed=preflight_seed,
-            )
-            if not sampled_dirs:
-                raise RuntimeError("xmodel1 preprocess preflight: no sampleable .mjson files found")
-            print(
-                "xmodel1 preprocess preflight selection: "
-                f"sampled_counts={sampled_counts} "
-                f"seed={preflight_seed}",
-                flush=True,
-            )
-            _run_export_gate(
-                label="xmodel1 preprocess preflight",
-                build_xmodel1_discard_records=build_xmodel1_discard_records,
-                data_dirs=sampled_dirs,
-                output_dir=temp_root / "output",
-                progress_every=max(1, min(progress_every, 1)),
-                jobs=jobs,
-                limit_files=None,
-                smoke=False,
-                resume=False,
-                discover_cached_files=discover_cached_files,
-                find_export_manifests=find_export_manifests,
-                probe_cached_samples=probe_cached_samples,
-                summarize_cached_files=summarize_cached_files,
-                validate_export_manifest=validate_export_manifest,
-            )
-    _run_export_gate(
-        label="xmodel1 preprocess",
-        build_xmodel1_discard_records=build_xmodel1_discard_records,
-        data_dirs=data_dirs,
-        output_dir=output_dir,
-        progress_every=progress_every,
-        jobs=jobs,
-        limit_files=args.limit_files,
-        smoke=args.smoke,
-        resume=(not args.force) and (not args.smoke),
-        discover_cached_files=discover_cached_files,
-        find_export_manifests=find_export_manifests,
-        probe_cached_samples=probe_cached_samples,
-        summarize_cached_files=summarize_cached_files,
-        validate_export_manifest=validate_export_manifest,
-    )
+    try:
+        if (not args.smoke) and (not args.skip_preflight) and preflight_files > 0:
+            with tempfile.TemporaryDirectory(prefix="xmodel1_preflight_") as temp_dir:
+                temp_root = Path(temp_dir)
+                sampled_dirs, sampled_counts = _build_preflight_sample_dirs(
+                    temp_root,
+                    data_dirs,
+                    files_per_shard=preflight_files,
+                    seed=preflight_seed,
+                )
+                if not sampled_dirs:
+                    raise RuntimeError("xmodel1 preprocess preflight: no sampleable .mjson files found")
+                print(
+                    "xmodel1 preprocess preflight selection: "
+                    f"sampled_counts={sampled_counts} "
+                    f"seed={preflight_seed}",
+                    flush=True,
+                )
+                _run_export_gate(
+                    label="xmodel1 preprocess preflight",
+                    build_xmodel1_discard_records=build_xmodel1_discard_records,
+                    data_dirs=sampled_dirs,
+                    output_dir=temp_root / "output",
+                    progress_every=max(1, min(progress_every, 1)),
+                    jobs=jobs,
+                    limit_files=None,
+                    smoke=False,
+                    resume=False,
+                    discover_cached_files=discover_cached_files,
+                    find_export_manifests=find_export_manifests,
+                    probe_cached_samples=probe_cached_samples,
+                    summarize_cached_files=summarize_cached_files,
+                    validate_export_manifest=validate_export_manifest,
+                )
+        _run_export_gate(
+            label="xmodel1 preprocess",
+            build_xmodel1_discard_records=build_xmodel1_discard_records,
+            data_dirs=data_dirs,
+            output_dir=output_dir,
+            progress_every=progress_every,
+            jobs=jobs,
+            limit_files=args.limit_files,
+            smoke=args.smoke,
+            resume=(not args.force) and (not args.smoke),
+            discover_cached_files=discover_cached_files,
+            find_export_manifests=find_export_manifests,
+            probe_cached_samples=probe_cached_samples,
+            summarize_cached_files=summarize_cached_files,
+            validate_export_manifest=validate_export_manifest,
+        )
+    except KeyboardInterrupt:
+        print(
+            "xmodel1 preprocess interrupted by Ctrl-C. Resume by rerunning the same command; "
+            "completed shard/file outputs are kept when resume=True.",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(130)
+    except RuntimeError as exc:
+        message = str(exc)
+        if "interrupted" not in message.lower():
+            raise
+        print(message, file=sys.stderr, flush=True)
+        print(
+            "xmodel1 preprocess resume hint: rerun the same command. Existing completed shard/file outputs "
+            "will be skipped while unfinished files are re-exported.",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

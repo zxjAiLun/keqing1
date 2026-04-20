@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import torch
 
+from training.cache_schema import XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM
+from inference.keqing_adapter import KeqingModelAdapter
 from inference.runtime_bot import RuntimeBot
 from mahjong_env.state import GameState, apply_event
 from xmodel1.model import Xmodel1Model
@@ -13,8 +16,8 @@ def _save_xmodel1_ckpt(path: Path) -> None:
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=64,
-        candidate_feature_dim=35,
-        candidate_flag_dim=10,
+        candidate_feature_dim=XMODEL1_CANDIDATE_FEATURE_DIM,
+        candidate_flag_dim=XMODEL1_CANDIDATE_FLAG_DIM,
         hidden_dim=64,
         num_res_blocks=2,
         dropout=0.0,
@@ -26,12 +29,16 @@ def _save_xmodel1_ckpt(path: Path) -> None:
                 "model_name": "xmodel1",
                 "state_tile_channels": 57,
                 "state_scalar_dim": 64,
-                "candidate_feature_dim": 35,
-                "candidate_flag_dim": 10,
+                "candidate_feature_dim": XMODEL1_CANDIDATE_FEATURE_DIM,
+                "candidate_flag_dim": XMODEL1_CANDIDATE_FLAG_DIM,
+                "schema_name": "xmodel1_discard_v3",
+                "schema_version": 3,
                 "hidden_dim": 64,
                 "num_res_blocks": 2,
                 "dropout": 0.0,
             },
+            "schema_name": "xmodel1_discard_v3",
+            "schema_version": 3,
         },
         path,
     )
@@ -78,3 +85,40 @@ def test_runtime_bot_xmodel1_tsumo_react_smoke(tmp_path: Path):
     chosen = bot.react({"type": "tsumo", "actor": 0, "pai": "5m"})
     assert chosen is not None
     assert chosen.get("type") in {"dahai", "reach", "ankan", "kakan", "hora"}
+
+
+def test_keqing_model_adapter_rejects_partial_xmodel1_checkpoint(tmp_path: Path):
+    model = Xmodel1Model(
+        state_tile_channels=57,
+        state_scalar_dim=56,
+        candidate_feature_dim=XMODEL1_CANDIDATE_FEATURE_DIM,
+        candidate_flag_dim=XMODEL1_CANDIDATE_FLAG_DIM,
+        hidden_dim=32,
+        num_res_blocks=1,
+        dropout=0.0,
+    )
+    state_dict = model.state_dict()
+    state_dict.pop("dealin_head.2.bias")
+    ckpt = tmp_path / "partial_xmodel1.pth"
+    torch.save(
+        {
+            "model": state_dict,
+            "cfg": {
+                "model_name": "xmodel1",
+                "state_tile_channels": 57,
+                "candidate_feature_dim": XMODEL1_CANDIDATE_FEATURE_DIM,
+                "candidate_flag_dim": XMODEL1_CANDIDATE_FLAG_DIM,
+                "schema_name": "xmodel1_discard_v3",
+                "schema_version": 3,
+                "hidden_dim": 32,
+                "num_res_blocks": 1,
+                "dropout": 0.0,
+            },
+            "schema_name": "xmodel1_discard_v3",
+            "schema_version": 3,
+        },
+        ckpt,
+    )
+
+    with pytest.raises(RuntimeError, match="Refusing partial load"):
+        KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"), model_version="xmodel1")

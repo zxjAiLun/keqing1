@@ -8,53 +8,21 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from training.cache_schema import XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM
+from tests.xmodel1_test_utils import write_xmodel1_v3_npz
 from xmodel1.cached_dataset import split_cached_files
 from xmodel1.model import Xmodel1Model
 from xmodel1.trainer import _autocast_enabled, _unpack_batch, build_dataloaders, train
 
 
 def _write_fixture(path: Path, n: int = 16) -> None:
-    k = 14
-    d = 35
-    f = 10
-    candidate_mask = np.zeros((n, k), dtype=np.uint8)
-    candidate_mask[:, :4] = 1
-    np.savez(
-        path,
-        schema_name=np.array("xmodel1_discard_v2", dtype=np.str_),
-        schema_version=np.array(2, dtype=np.int32),
-        state_tile_feat=np.random.randn(n, 57, 34).astype(np.float16),
-        state_scalar=np.random.randn(n, 64).astype(np.float16),
-        candidate_feat=np.random.randn(n, k, d).astype(np.float16),
-        candidate_tile_id=np.where(candidate_mask > 0, np.arange(k), -1).astype(np.int16),
-        candidate_mask=candidate_mask,
-        candidate_flags=np.zeros((n, k, f), dtype=np.uint8),
-        chosen_candidate_idx=np.zeros((n,), dtype=np.int16),
-        action_idx_target=np.zeros((n,), dtype=np.int16),
-        candidate_quality_score=np.random.randn(n, k).astype(np.float32),
-        candidate_rank_bucket=np.zeros((n, k), dtype=np.int8),
-        candidate_hard_bad_flag=np.zeros((n, k), dtype=np.uint8),
-        special_candidate_feat=np.zeros((n, 12, 25), dtype=np.float16),
-        special_candidate_type_id=np.full((n, 12), -1, dtype=np.int16),
-        special_candidate_mask=np.zeros((n, 12), dtype=np.uint8),
-        special_candidate_quality_score=np.zeros((n, 12), dtype=np.float32),
-        special_candidate_rank_bucket=np.zeros((n, 12), dtype=np.int8),
-        special_candidate_hard_bad_flag=np.zeros((n, 12), dtype=np.uint8),
-        chosen_special_candidate_idx=np.full((n,), -1, dtype=np.int16),
-        score_delta_target=np.zeros((n,), dtype=np.float32),
-        win_target=np.zeros((n,), dtype=np.float32),
-        dealin_target=np.zeros((n,), dtype=np.float32),
-        pts_given_win_target=np.zeros((n,), dtype=np.float32),
-        pts_given_dealin_target=np.zeros((n,), dtype=np.float32),
-        opp_tenpai_target=np.zeros((n, 3), dtype=np.float32),
-        event_history=np.zeros((n, 48, 5), dtype=np.int16),
-        sample_type=np.zeros((n,), dtype=np.int8),
-        actor=np.zeros((n,), dtype=np.int8),
-        event_index=np.arange(n, dtype=np.int32),
-        kyoku=np.ones((n,), dtype=np.int8),
-        honba=np.zeros((n,), dtype=np.int8),
-        is_open_hand=np.zeros((n,), dtype=np.uint8),
-    )
+    payload = write_xmodel1_v3_npz(path, n=n)
+    payload["state_tile_feat"][:] = np.random.randn(n, 57, 34).astype(np.float16)
+    payload["state_scalar"][:] = np.random.randn(n, 64).astype(np.float16)
+    payload["candidate_feat"][:] = np.random.randn(n, 14, XMODEL1_CANDIDATE_FEATURE_DIM).astype(np.float16)
+    payload["candidate_tile_id"][:] = np.where(payload["candidate_mask"] > 0, np.arange(14), -1).astype(np.int16)
+    payload["candidate_quality_score"][:] = np.random.randn(n, 14).astype(np.float32)
+    np.savez(path, **payload)
 
 
 def test_xmodel1_training_smoke(tmp_path: Path):
@@ -74,8 +42,8 @@ def test_xmodel1_training_smoke(tmp_path: Path):
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=64,
-        candidate_feature_dim=35,
-        candidate_flag_dim=10,
+        candidate_feature_dim=XMODEL1_CANDIDATE_FEATURE_DIM,
+        candidate_flag_dim=XMODEL1_CANDIDATE_FLAG_DIM,
         hidden_dim=32,
         num_res_blocks=1,
     )
@@ -138,8 +106,8 @@ def test_xmodel1_training_supports_epoch_file_sampling(tmp_path: Path):
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=64,
-        candidate_feature_dim=35,
-        candidate_flag_dim=10,
+        candidate_feature_dim=XMODEL1_CANDIDATE_FEATURE_DIM,
+        candidate_flag_dim=XMODEL1_CANDIDATE_FLAG_DIM,
         hidden_dim=32,
         num_res_blocks=1,
     )

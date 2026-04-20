@@ -2,31 +2,33 @@
 
 from __future__ import annotations
 
-from typing import Iterable, Tuple
+from collections.abc import Iterable
 
 import numpy as np
 
-from mahjong_env.event_history import (
-    EVENT_HISTORY_FEATURE_DIM,
-    EVENT_HISTORY_LEN,
-    EVENT_NO_ACTOR,
-    EVENT_NO_TILE,
-    EVENT_TYPE_PAD,
-    compute_event_history,
-    empty_event_history,
+from keqing_core import (
+    build_xmodel1_runtime_tensors as _build_xmodel1_runtime_tensors,
+    is_missing_rust_capability_error,
 )
-from training.state_features import C_TILE, N_SCALAR, encode as _encode_state, encode_with_timings
+from mahjong_env.history_summary import (
+    HISTORY_SUMMARY_DIM,
+    compute_history_summary,
+    empty_history_summary,
+)
 from mahjong_env.legal_actions import enumerate_legal_actions
 from mahjong_env.tiles import tile_to_34
 from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
+    XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_MAX_CANDIDATES,
     XMODEL1_MAX_SPECIAL_CANDIDATES,
     XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
+from training.state_features import C_TILE, N_SCALAR, encode as _encode_state, encode_with_timings
 from xmodel1.candidate_quality import build_candidate_features, build_special_candidate_arrays, iter_legal_discards
 
-def encode(state: dict, actor: int, *, state_scalar_dim: int = 64):
+
+def encode(state: dict, actor: int, *, state_scalar_dim: int = N_SCALAR):
     tile_feat, scalar = _encode_state(state, actor)
     if scalar.shape[0] < state_scalar_dim:
         padded = np.zeros((state_scalar_dim,), dtype=np.float32)
@@ -37,31 +39,37 @@ def encode(state: dict, actor: int, *, state_scalar_dim: int = 64):
     return tile_feat, scalar.astype(np.float32)
 
 
-def resolve_runtime_event_history(snap: dict) -> np.ndarray:
-    value = snap.get("event_history")
+def resolve_runtime_history_summary(snap: dict) -> np.ndarray:
+    value = snap.get("history_summary")
     if value is None:
-        return empty_event_history()
-    arr = np.asarray(value, dtype=np.int16)
-    if arr.shape != (EVENT_HISTORY_LEN, EVENT_HISTORY_FEATURE_DIM):
-        raise ValueError(
-            f"event_history shape {arr.shape} != ({EVENT_HISTORY_LEN}, {EVENT_HISTORY_FEATURE_DIM})"
-        )
+        return empty_history_summary()
+    arr = np.asarray(value, dtype=np.float16)
+    if arr.shape != (HISTORY_SUMMARY_DIM,):
+        raise ValueError(f"history_summary shape {arr.shape} != ({HISTORY_SUMMARY_DIM},)")
     return arr
 
 
-def build_runtime_candidate_arrays(
+def _normalize_legal_actions(
     state: dict,
     actor: int,
-    legal_actions: Iterable[dict] | None = None,
-    *,
-    max_candidates: int = XMODEL1_MAX_CANDIDATES,
-    candidate_feature_dim: int = XMODEL1_CANDIDATE_FEATURE_DIM,
-    candidate_flag_dim: int = 10,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    legal_actions: Iterable[dict] | None,
+) -> list[dict]:
     if legal_actions is None:
-        legal_actions = [a.to_mjai() for a in enumerate_legal_actions(state, actor)]
-    else:
-        legal_actions = [dict(a) for a in legal_actions]
+        return [a.to_mjai() for a in enumerate_legal_actions(state, actor)]
+    return [dict(a) for a in legal_actions]
+
+
+def _python_runtime_tensor_payload(
+    state: dict,
+    actor: int,
+    legal_actions: list[dict],
+    *,
+    max_candidates: int,
+    candidate_feature_dim: int,
+    candidate_flag_dim: int,
+    max_special_candidates: int,
+    special_feature_dim: int,
+) -> dict[str, np.ndarray]:
     discard_actions = iter_legal_discards(legal_actions)
     candidate_feat = np.zeros((max_candidates, candidate_feature_dim), dtype=np.float32)
     candidate_tile_id = np.full((max_candidates,), -1, dtype=np.int16)
@@ -73,7 +81,126 @@ def build_runtime_candidate_arrays(
         candidate_tile_id[slot] = int(tile_to_34(action["pai"]))
         candidate_mask[slot] = 1
         candidate_flags[slot] = flags.astype(np.uint8, copy=False)
-    return candidate_feat, candidate_tile_id, candidate_mask, candidate_flags
+
+    (
+        special_feat,
+        special_type_id,
+        special_mask,
+        special_quality,
+        _special_rank_bucket,
+        special_hard_bad,
+        _chosen_idx,
+    ) = build_special_candidate_arrays(
+        state,
+        actor,
+        legal_actions,
+        chosen_action=None,
+        max_candidates=max_special_candidates,
+        feature_dim=special_feature_dim,
+        include_terminal_actions=True,
+    )
+    return {
+        "candidate_feat": candidate_feat,
+        "candidate_tile_id": candidate_tile_id,
+        "candidate_mask": candidate_mask,
+        "candidate_flags": candidate_flags,
+        "special_candidate_feat": special_feat.astype(np.float32, copy=False),
+        "special_candidate_type_id": special_type_id.astype(np.int16, copy=False),
+        "special_candidate_mask": special_mask.astype(np.uint8, copy=False),
+        "special_candidate_quality_score": special_quality.astype(np.float32, copy=False),
+        "special_candidate_hard_bad_flag": special_hard_bad.astype(np.uint8, copy=False),
+        "history_summary": resolve_runtime_history_summary(state),
+    }
+
+
+def resolve_runtime_tensor_payload(
+    state: dict,
+    actor: int,
+    legal_actions: Iterable[dict] | None = None,
+    *,
+    max_candidates: int = XMODEL1_MAX_CANDIDATES,
+    candidate_feature_dim: int = XMODEL1_CANDIDATE_FEATURE_DIM,
+    candidate_flag_dim: int = XMODEL1_CANDIDATE_FLAG_DIM,
+    max_special_candidates: int = XMODEL1_MAX_SPECIAL_CANDIDATES,
+    special_feature_dim: int = XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+) -> dict[str, np.ndarray]:
+    resolved_legal_actions = _normalize_legal_actions(state, actor, legal_actions)
+    try:
+        payload = _build_xmodel1_runtime_tensors(
+            state,
+            actor,
+            resolved_legal_actions,
+        )
+    except RuntimeError as exc:
+        if not is_missing_rust_capability_error(exc):
+            raise
+    else:
+        return {
+            "candidate_feat": np.asarray(payload["candidate_feat"], dtype=np.float32).reshape(
+                max_candidates,
+                candidate_feature_dim,
+            ),
+            "candidate_tile_id": np.asarray(payload["candidate_tile_id"], dtype=np.int16).reshape(max_candidates),
+            "candidate_mask": np.asarray(payload["candidate_mask"], dtype=np.uint8).reshape(max_candidates),
+            "candidate_flags": np.asarray(payload["candidate_flags"], dtype=np.uint8).reshape(
+                max_candidates,
+                candidate_flag_dim,
+            ),
+            "special_candidate_feat": np.asarray(payload["special_candidate_feat"], dtype=np.float32).reshape(
+                max_special_candidates,
+                special_feature_dim,
+            ),
+            "special_candidate_type_id": np.asarray(payload["special_candidate_type_id"], dtype=np.int16).reshape(
+                max_special_candidates,
+            ),
+            "special_candidate_mask": np.asarray(payload["special_candidate_mask"], dtype=np.uint8).reshape(
+                max_special_candidates,
+            ),
+            "special_candidate_quality_score": np.asarray(
+                payload["special_candidate_quality_score"],
+                dtype=np.float32,
+            ).reshape(max_special_candidates),
+            "special_candidate_hard_bad_flag": np.asarray(
+                payload["special_candidate_hard_bad_flag"],
+                dtype=np.uint8,
+            ).reshape(max_special_candidates),
+            "history_summary": np.asarray(payload["history_summary"], dtype=np.float16).reshape(HISTORY_SUMMARY_DIM),
+        }
+    return _python_runtime_tensor_payload(
+        state,
+        actor,
+        resolved_legal_actions,
+        max_candidates=max_candidates,
+        candidate_feature_dim=candidate_feature_dim,
+        candidate_flag_dim=candidate_flag_dim,
+        max_special_candidates=max_special_candidates,
+        special_feature_dim=special_feature_dim,
+    )
+
+
+def build_runtime_candidate_arrays(
+    state: dict,
+    actor: int,
+    legal_actions: Iterable[dict] | None = None,
+    *,
+    max_candidates: int = XMODEL1_MAX_CANDIDATES,
+    candidate_feature_dim: int = XMODEL1_CANDIDATE_FEATURE_DIM,
+    candidate_flag_dim: int = XMODEL1_CANDIDATE_FLAG_DIM,
+):
+    payload = resolve_runtime_tensor_payload(
+        state,
+        actor,
+        legal_actions,
+        max_candidates=max_candidates,
+        candidate_feature_dim=candidate_feature_dim,
+        candidate_flag_dim=candidate_flag_dim,
+    )
+    return (
+        payload["candidate_feat"],
+        payload["candidate_tile_id"],
+        payload["candidate_mask"],
+        payload["candidate_flags"],
+    )
 
 
 def build_runtime_special_candidate_arrays(
@@ -83,34 +210,29 @@ def build_runtime_special_candidate_arrays(
     *,
     max_candidates: int = XMODEL1_MAX_SPECIAL_CANDIDATES,
     feature_dim: int = XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if legal_actions is None:
-        legal_actions = [a.to_mjai() for a in enumerate_legal_actions(state, actor)]
-    else:
-        legal_actions = [dict(a) for a in legal_actions]
-    feat, type_id, mask, _quality, _rank_bucket, _hard_bad, _chosen_idx = build_special_candidate_arrays(
+):
+    payload = resolve_runtime_tensor_payload(
         state,
         actor,
         legal_actions,
-        chosen_action=None,
-        max_candidates=max_candidates,
-        feature_dim=feature_dim,
-        include_terminal_actions=True,
+        max_special_candidates=max_candidates,
+        special_feature_dim=feature_dim,
     )
-    return feat.astype(np.float32, copy=False), type_id.astype(np.int16, copy=False), mask.astype(np.uint8, copy=False)
+    return (
+        payload["special_candidate_feat"],
+        payload["special_candidate_type_id"],
+        payload["special_candidate_mask"],
+    )
 
 
 __all__ = [
     "C_TILE",
     "N_SCALAR",
-    "EVENT_HISTORY_FEATURE_DIM",
-    "EVENT_HISTORY_LEN",
-    "EVENT_NO_ACTOR",
-    "EVENT_NO_TILE",
-    "EVENT_TYPE_PAD",
-    "compute_event_history",
-    "empty_event_history",
-    "resolve_runtime_event_history",
+    "HISTORY_SUMMARY_DIM",
+    "compute_history_summary",
+    "empty_history_summary",
+    "resolve_runtime_history_summary",
+    "resolve_runtime_tensor_payload",
     "encode",
     "encode_with_timings",
     "build_runtime_candidate_arrays",

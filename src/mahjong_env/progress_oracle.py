@@ -10,6 +10,7 @@ from keqing_core import calc_draw_deltas as _calc_draw_deltas_native
 from keqing_core import calc_required_tiles as _calc_required_tiles_native
 from keqing_core import has_3n2_candidate_summaries as _has_3n2_candidate_summaries
 from keqing_core import calc_shanten_normal as _calc_shanten_normal_native
+from keqing_core import summarize_one_shanten_draw_metrics as _summarize_one_shanten_draw_metrics_native
 from keqing_core import calc_standard_shanten as _calc_standard_shanten_native
 from keqing_core import summarize_3n1 as _summarize_3n1_native
 from keqing_core import summarize_best_3n2_candidate as _summarize_best_3n2_candidate_native
@@ -458,6 +459,65 @@ def _select_best_candidate_progress_3n2_python(
 
 
 @lru_cache(maxsize=_SUMMARY_CACHE_SIZE)
+def summarize_one_shanten_draw_metrics(
+    counts_3n1: tuple[int, ...],
+    visible_counts_local: tuple[int, ...],
+) -> tuple[int, int]:
+    try:
+        return tuple(
+            int(value)
+            for value in _summarize_one_shanten_draw_metrics_native(counts_3n1, visible_counts_local)
+        )
+    except RuntimeError:
+        pass
+    current = _summarize_3n1_cached(counts_3n1, visible_counts_local)
+    current_key = (
+        -current.shanten,
+        current.ukeire_live_count,
+        current.ukeire_type_count,
+        current.waits_count,
+        0,
+        0,
+    )
+    good_shape_live = 0
+    improvement_live = 0
+    for tile34, live_count, _draw_shanten_diff in _calc_draw_deltas(counts_3n1, visible_counts_local):
+        if live_count <= 0 or counts_3n1[tile34] >= 4:
+            continue
+        counts_3n2 = list(counts_3n1)
+        counts_3n2[tile34] += 1
+        counts_3n2_t = tuple(counts_3n2)
+        after_best: Optional[CandidateProgressV1] = None
+        if _has_3n2_candidate_summaries():
+            try:
+                native_best = _summarize_best_3n2_candidate_native(
+                    counts_3n2_t,
+                    visible_counts_local,
+                    _summarize_3n1_cached,
+                )
+            except RuntimeError:
+                native_best = None
+            if native_best is not None:
+                after_best = _candidate_progress_v1_from_native(native_best)
+        if after_best is None:
+            discard_candidates = _select_candidate_discards_3n2(counts_3n2_t)
+            after_best = _select_best_candidate_progress_3n2_python(
+                counts_3n2_t,
+                visible_counts_local,
+                discard_candidates,
+            )
+        if after_best is None:
+            continue
+        if after_best.shanten == 0:
+            if after_best.ukeire_live_count > 4:
+                good_shape_live += live_count
+            continue
+        if after_best.shanten == current.shanten and _candidate_progress_key(after_best) > current_key:
+            improvement_live += live_count
+    return good_shape_live, improvement_live
+
+
+@lru_cache(maxsize=_SUMMARY_CACHE_SIZE)
 def _summarize_3n1_cached(
     counts_3n1: tuple[int, ...],
     visible_counts_local: tuple[int, ...],
@@ -579,5 +639,6 @@ def analyze_normal_progress_with_timings(
 def clear_progress_caches() -> None:
     calc_shanten_waits_from_counts.cache_clear()
     calc_standard_shanten_from_counts.cache_clear()
+    summarize_one_shanten_draw_metrics.cache_clear()
     _summarize_3n1_cached.cache_clear()
     _summarize_3n2_cached.cache_clear()

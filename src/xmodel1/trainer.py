@@ -1,18 +1,24 @@
-"""Xmodel1 discard-first trainer."""
+"""Xmodel1 trainer on top of shared training.train_model."""
 
 from __future__ import annotations
 
 import gc
 import json
-import math
-import time
 from pathlib import Path
-from typing import Dict
+from typing import Any
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
+from torch.utils.data import DataLoader
+
+from training import TaskSpec, train_model
 from xmodel1.cached_dataset import Xmodel1DiscardDataset
+from xmodel1.checkpoint import (
+    build_xmodel1_checkpoint_metadata,
+    validate_xmodel1_checkpoint_metadata,
+)
 from xmodel1.model import Xmodel1Model
 from xmodel1.schema import (
     XMODEL1_CHI_SPECIAL_TYPES,
@@ -22,36 +28,6 @@ from xmodel1.schema import (
     XMODEL1_SPECIAL_TYPE_PON,
     XMODEL1_SPECIAL_TYPE_REACH,
 )
-
-
-def _format_duration(seconds: float) -> str:
-    if seconds >= 3600:
-        return f"{seconds / 3600:.1f}h"
-    if seconds >= 60:
-        return f"{seconds / 60:.1f}m"
-    return f"{seconds:.0f}s"
-
-
-def _build_scheduler(optimizer, warmup_steps: int, total_steps: int):
-    def lr_lambda(step: int) -> float:
-        if step < warmup_steps:
-            return step / max(1, warmup_steps)
-        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-        progress = min(max(progress, 0.0), 1.0)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-
-def _build_grad_scaler(device: torch.device):
-    enabled = device.type == "cuda"
-    try:
-        return torch.amp.GradScaler(device="cuda", enabled=enabled)
-    except TypeError:
-        try:
-            return torch.amp.GradScaler("cuda", enabled=enabled)
-        except TypeError:
-            return torch.cuda.amp.GradScaler(enabled=enabled)
 
 
 def _autocast_enabled(*, device: torch.device, is_train: bool, scaler) -> bool:
@@ -71,8 +47,13 @@ def build_dataloaders(
     buffer_size: int,
     seed: int,
 ):
-    from torch.utils.data import DataLoader
-
+    common = dict(
+        batch_size=batch_size,
+        collate_fn=Xmodel1DiscardDataset.collate,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=False,
+    )
     train_ds = Xmodel1DiscardDataset(
         train_files,
         shuffle=True,
@@ -85,18 +66,11 @@ def build_dataloaders(
         buffer_size=buffer_size,
         seed=seed,
     )
-    common = dict(
-        batch_size=batch_size,
-        collate_fn=Xmodel1DiscardDataset.collate,
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
-        persistent_workers=False,
-    )
     return DataLoader(train_ds, **common), DataLoader(val_ds, **common)
 
 
-def _unpack_batch(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
-    out = {}
+def _unpack_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
+    out: dict[str, Any] = {}
     for key, value in batch.items():
         if not torch.is_tensor(value):
             out[key] = value
@@ -107,10 +81,9 @@ def _unpack_batch(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[
         if key in {
             "candidate_tile_id",
             "chosen_candidate_idx",
-            "candidate_rank_bucket",
             "special_candidate_type_id",
             "chosen_special_candidate_idx",
-            "special_candidate_rank_bucket",
+            "action_idx_target",
         }:
             moved = moved.long()
         out[key] = moved
@@ -136,11 +109,11 @@ def _masked_mean(loss_values: torch.Tensor, valid_mask: torch.Tensor) -> torch.T
     return (loss_values * valid).sum() / valid.sum().clamp_min(1.0)
 
 
-def _resolve_pts_given_targets(batch: Dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+def _resolve_pts_given_targets(batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
     pts_given_win_target = batch.get("pts_given_win_target")
     pts_given_dealin_target = batch.get("pts_given_dealin_target")
     if pts_given_win_target is None or pts_given_dealin_target is None:
-        raise ValueError("Xmodel1 v2 batches require pts_given_win_target and pts_given_dealin_target")
+        raise ValueError("Xmodel1 v3 batches require pts_given_win_target and pts_given_dealin_target")
     return pts_given_win_target.float(), pts_given_dealin_target.float()
 
 
@@ -218,14 +191,10 @@ def _special_comparison_losses(
     reach_mask = (special_type_id == XMODEL1_SPECIAL_TYPE_REACH) & valid
     dama_mask = (special_type_id == XMODEL1_SPECIAL_TYPE_DAMA) & valid
 
-    batch_size = special_logits.shape[0]
-    for row in range(batch_size):
+    for row in range(special_logits.shape[0]):
         if not bool(chosen_valid[row]):
             continue
         chosen = int(chosen_special_idx[row].item())
-        if chosen < 0:
-            continue
-
         reach_slots = torch.nonzero(reach_mask[row], as_tuple=False).flatten()
         dama_slots = torch.nonzero(dama_mask[row], as_tuple=False).flatten()
         if reach_slots.numel() > 0 and dama_slots.numel() > 0:
@@ -279,272 +248,343 @@ def _special_comparison_losses(
     return reach_loss, call_loss
 
 
-def _run_epoch(
-    model: Xmodel1Model,
-    loader,
-    *,
-    optimizer,
-    scheduler,
-    scaler,
-    device: torch.device,
-    is_train: bool,
-    loss_weights: Dict[str, float],
-    log_interval: int,
-    total_batches_override: int | None = None,
-    max_batches: int | None = None,
-    global_step: int = 0,
-) -> Dict[str, float]:
-    model.train(is_train)
-    total = {
-        "loss": 0.0,
-        "ce": 0.0,
-        "action_ce": 0.0,
-        "special_ce": 0.0,
-        "special_rank": 0.0,
-        "reach_pair": 0.0,
-        "call_pair": 0.0,
-        "rank": 0.0,
-        "hard_bad": 0.0,
-        "win": 0.0,
-        "dealin": 0.0,
-        "pts_win": 0.0,
-        "pts_dealin": 0.0,
-        "opp_tenpai": 0.0,
-        "acc": 0.0,
-        "action_acc": 0.0,
-    }
-    n_batches = 0
-    epoch_t0 = time.time()
-    try:
-        total_batches = len(loader)
-    except (TypeError, NotImplementedError):
-        total_batches = None
-    if total_batches_override is not None and total_batches_override > 0:
-        total_batches = total_batches_override
-    if max_batches is not None and max_batches > 0:
-        total_batches = max_batches if total_batches is None else min(total_batches, max_batches)
-    tag = "train" if is_train else "val"
-    ctx = torch.enable_grad() if is_train else torch.no_grad()
-    amp_enabled = _autocast_enabled(device=device, is_train=is_train, scaler=scaler)
-    with ctx:
-        for batch in loader:
-            if max_batches is not None and max_batches > 0 and n_batches >= max_batches:
-                break
-            batch = _unpack_batch(batch, device)
-            if is_train:
-                optimizer.zero_grad(set_to_none=True)
-
-            with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
-                out = model(
-                    batch["state_tile_feat"],
-                    batch["state_scalar"],
-                    batch["candidate_feat"],
-                    batch["candidate_tile_id"],
-                    batch["candidate_flags"],
-                    batch["candidate_mask"],
-                    batch.get("special_candidate_feat"),
-                    batch.get("special_candidate_type_id"),
-                    batch.get("special_candidate_mask"),
-                    event_history=batch.get("event_history"),
-                )
-                action_targets = batch["action_idx_target"].long()
-                sample_type = batch.get("sample_type")
-                if sample_type is None:
-                    sample_type = torch.zeros_like(action_targets)
-                sample_type = sample_type.long()
-                discard_rows = sample_type == 0
-                discard_target = batch["chosen_candidate_idx"].clamp_min(0)
-                ce_raw = F.cross_entropy(out.discard_logits.float(), discard_target, reduction="none")
-                ce_loss = _masked_mean(ce_raw, discard_rows)
-                action_ce_loss = F.cross_entropy(out.action_logits.float(), action_targets)
-                special_ce_loss = _special_candidate_ce_loss(
-                    out.special_logits,
-                    batch["chosen_special_candidate_idx"],
-                    batch["special_candidate_mask"],
-                )
-                rank_loss = (
-                    _candidate_ranking_loss(
-                        out.discard_logits[discard_rows],
-                        batch["candidate_quality_score"][discard_rows],
-                        batch["candidate_mask"][discard_rows],
-                    )
-                    if torch.any(discard_rows)
-                    else out.discard_logits.new_tensor(0.0)
-                )
-                special_rank_loss = _candidate_ranking_loss(
-                    out.special_logits,
-                    batch["special_candidate_quality_score"],
-                    batch["special_candidate_mask"],
-                )
-                reach_pair_loss, call_pair_loss = _special_comparison_losses(
-                    out.special_logits.float(),
-                    batch["special_candidate_type_id"],
-                    batch["special_candidate_mask"],
-                    batch["chosen_special_candidate_idx"],
-                    batch["special_candidate_hard_bad_flag"].float(),
-                    margin=float(loss_weights["special_margin"]),
-                )
-                hard_bad_loss = (
-                    _hard_bad_penalty(
-                        out.discard_logits[discard_rows].float(),
-                        batch["candidate_hard_bad_flag"][discard_rows].float(),
-                        batch["chosen_candidate_idx"][discard_rows].clamp_min(0),
-                        batch["candidate_mask"][discard_rows],
-                    )
-                    if torch.any(discard_rows)
-                    else out.discard_logits.new_tensor(0.0)
-                )
-                win_target = batch["win_target"].float()
-                dealin_target = batch["dealin_target"].float()
-                win_loss = F.binary_cross_entropy_with_logits(out.win_logit.squeeze(-1).float(), win_target)
-                dealin_loss = F.binary_cross_entropy_with_logits(out.dealin_logit.squeeze(-1).float(), dealin_target)
-                pts_win_target, pts_dealin_target = _resolve_pts_given_targets(batch)
-                win_mask = win_target > 0.5
-                dealin_mask = dealin_target > 0.5
-                pts_given_win_raw = F.smooth_l1_loss(
-                    out.pts_given_win.squeeze(-1).float(),
-                    pts_win_target,
-                    reduction="none",
-                )
-                pts_given_dealin_raw = F.smooth_l1_loss(
-                    out.pts_given_dealin.squeeze(-1).float(),
-                    pts_dealin_target,
-                    reduction="none",
-                )
-                pts_win_loss = _masked_mean(pts_given_win_raw, win_mask)
-                pts_dealin_loss = _masked_mean(pts_given_dealin_raw, dealin_mask)
-                opp_tenpai_target = batch.get("opp_tenpai_target")
-                if opp_tenpai_target is None:
-                    opp_tenpai_loss = out.opp_tenpai_logits.new_tensor(0.0)
-                else:
-                    opp_tenpai_loss = F.binary_cross_entropy_with_logits(
-                        out.opp_tenpai_logits.float(),
-                        opp_tenpai_target.float(),
-                    )
-                loss = (
-                    loss_weights["ce"] * ce_loss
-                    + loss_weights["action_ce"] * action_ce_loss
-                    + loss_weights["special_ce"] * special_ce_loss
-                    + loss_weights["special_rank"] * special_rank_loss
-                    + loss_weights["reach_pair"] * reach_pair_loss
-                    + loss_weights["call_pair"] * call_pair_loss
-                    + loss_weights["rank"] * rank_loss
-                    + loss_weights["hard_bad"] * hard_bad_loss
-                    + loss_weights["win"] * win_loss
-                    + loss_weights["dealin"] * dealin_loss
-                    + loss_weights["pts_win"] * pts_win_loss
-                    + loss_weights["pts_dealin"] * pts_dealin_loss
-                    + loss_weights["opp_tenpai"] * opp_tenpai_loss
-                )
-
-            if is_train:
-                if amp_enabled:
-                    prev_scale = float(scaler.get_scale())
-                    scaler.scale(loss).backward()
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                    step_skipped = float(scaler.get_scale()) < prev_scale
-                else:
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
-                    step_skipped = False
-                if scheduler is not None and not step_skipped:
-                    scheduler.step()
-                if not step_skipped:
-                    global_step += 1
-
-            pred = out.discard_logits.argmax(dim=-1)
-            action_pred = out.action_logits.argmax(dim=-1)
-            if torch.any(discard_rows):
-                total["acc"] += (
-                    pred[discard_rows] == batch["chosen_candidate_idx"][discard_rows]
-                ).float().mean().item()
-            total["action_acc"] += (action_pred == action_targets).float().mean().item()
-            total["loss"] += float(loss.item())
-            total["ce"] += float(ce_loss.item())
-            total["action_ce"] += float(action_ce_loss.item())
-            total["special_ce"] += float(special_ce_loss.item())
-            total["special_rank"] += float(special_rank_loss.item())
-            total["reach_pair"] += float(reach_pair_loss.item())
-            total["call_pair"] += float(call_pair_loss.item())
-            total["rank"] += float(rank_loss.item())
-            total["hard_bad"] += float(hard_bad_loss.item())
-            total["win"] += float(win_loss.item())
-            total["dealin"] += float(dealin_loss.item())
-            total["pts_win"] += float(pts_win_loss.item())
-            total["pts_dealin"] += float(pts_dealin_loss.item())
-            total["opp_tenpai"] += float(opp_tenpai_loss.item())
-            n_batches += 1
-
-            should_log = n_batches == 1
-            if log_interval > 0 and n_batches % log_interval == 0:
-                should_log = True
-            if total_batches is not None and n_batches == total_batches:
-                should_log = True
-            if should_log:
-                elapsed_s = time.time() - epoch_t0
-                avg_batch_s = elapsed_s / max(1, n_batches)
-                eta_s = 0.0
-                batch_progress = f"{n_batches}"
-                if total_batches is not None:
-                    eta_s = avg_batch_s * max(0, total_batches - n_batches)
-                    batch_progress = f"{n_batches}/{total_batches}"
-                lr_str = f" lr={optimizer.param_groups[0]['lr']:.2e}" if is_train else ""
-                print(
-                    f"  [{tag}] batch={batch_progress} "
-                    f"loss={total['loss'] / n_batches:.4f} "
-                    f"ce={total['ce'] / n_batches:.4f} "
-                    f"action_ce={total['action_ce'] / n_batches:.4f} "
-                    f"special_ce={total['special_ce'] / n_batches:.4f} "
-                    f"special_rank={total['special_rank'] / n_batches:.4f} "
-                    f"reach_pair={total['reach_pair'] / n_batches:.4f} "
-                    f"call_pair={total['call_pair'] / n_batches:.4f} "
-                    f"acc={total['acc'] / n_batches:.3f} "
-                    f"action_acc={total['action_acc'] / n_batches:.3f} "
-                    f"| elapsed={_format_duration(elapsed_s)} eta={_format_duration(eta_s)}"
-                    f"{lr_str}",
-                    flush=True,
-                )
-
-    if n_batches == 0:
-        raise RuntimeError("no batches were produced by the Xmodel1 loader")
-    stats = {key: value / n_batches for key, value in total.items()}
-    stats["step"] = global_step
-    stats["num_batches"] = n_batches
-    return stats
+def _build_action_mask(
+    candidate_tile_id: torch.Tensor,
+    candidate_mask: torch.Tensor,
+    special_type_id: torch.Tensor,
+    special_mask: torch.Tensor,
+) -> torch.Tensor:
+    batch = candidate_tile_id.shape[0]
+    action_mask = torch.zeros((batch, 45), dtype=torch.uint8, device=candidate_tile_id.device)
+    valid_discard = (candidate_mask > 0) & (candidate_tile_id >= 0) & (candidate_tile_id < 34)
+    for tile_id in range(34):
+        action_mask[:, tile_id] = (valid_discard & (candidate_tile_id == tile_id)).any(dim=1).to(torch.uint8)
+    for special_type, action_idx in (
+        (0, 34),
+        (3, 35),
+        (4, 36),
+        (5, 37),
+        (6, 38),
+        (7, 39),
+        (8, 40),
+        (9, 41),
+        (2, 42),
+        (10, 43),
+        (11, 44),
+    ):
+        action_mask[:, action_idx] = ((special_mask > 0) & (special_type_id == special_type)).any(dim=1).to(torch.uint8)
+    return action_mask
 
 
-def _load_checkpoint(path: Path) -> Dict:
-    try:
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    except TypeError:
-        checkpoint = torch.load(path, map_location="cpu")
-    if not isinstance(checkpoint, dict) or "model" not in checkpoint:
-        raise ValueError(f"invalid Xmodel1 checkpoint: {path}")
-    return checkpoint
+class _Xmodel1TrainWrapper(nn.Module):
+    def __init__(self, model: Xmodel1Model) -> None:
+        super().__init__()
+        self.model = model
+        self._last_output = None
+
+    def forward(self, tile_feat, scalar, **model_kwargs):
+        out = self.model(
+            tile_feat,
+            scalar,
+            model_kwargs["candidate_feat"],
+            model_kwargs["candidate_tile_id"],
+            model_kwargs["candidate_flags"],
+            model_kwargs["candidate_mask"],
+            model_kwargs.get("special_candidate_feat"),
+            model_kwargs.get("special_candidate_type_id"),
+            model_kwargs.get("special_candidate_mask"),
+            history_summary=model_kwargs.get("history_summary"),
+        )
+        self._last_output = out
+        composed_ev = self.model.get_last_aux_outputs()["composed_ev"]
+        return out.action_logits, composed_ev
+
+    def state_dict(self, *args, **kwargs):
+        return self.model.state_dict(*args, **kwargs)
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        return self.model.load_state_dict(state_dict, strict=strict)
+
+    def get_last_xmodel1_output(self):
+        if self._last_output is None:
+            raise RuntimeError("Xmodel1 training wrapper has no cached forward output")
+        return self._last_output
+
+    def get_last_aux_outputs(self):
+        return self.model.get_last_aux_outputs()
+
+
+def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
+    ce_loss_weight = float(cfg.get("ce_loss_weight", 1.0))
+    special_ce_loss_weight = float(cfg.get("special_ce_loss_weight", 0.25))
+    special_rank_loss_weight = float(cfg.get("special_rank_loss_weight", 0.25))
+    reach_pair_loss_weight = float(cfg.get("reach_pair_loss_weight", 0.2))
+    call_pair_loss_weight = float(cfg.get("call_pair_loss_weight", 0.2))
+    rank_loss_weight = float(cfg.get("rank_loss_weight", 0.5))
+    hard_bad_loss_weight = float(cfg.get("hard_bad_loss_weight", 0.25))
+    win_loss_weight = float(cfg.get("win_loss_weight", 0.5))
+    dealin_loss_weight = float(cfg.get("dealin_loss_weight", 0.5))
+    pts_win_loss_weight = float(cfg.get("pts_win_loss_weight", 0.3))
+    pts_dealin_loss_weight = float(cfg.get("pts_dealin_loss_weight", 0.3))
+    opp_tenpai_loss_weight = float(cfg.get("opp_tenpai_loss_weight", 0.25))
+    special_margin = float(cfg.get("special_pair_margin", 0.25))
+
+    def unpack_batch(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, Any]:
+        moved = _unpack_batch(batch, device)
+        candidate_tile_id = moved["candidate_tile_id"]
+        candidate_mask = moved["candidate_mask"]
+        special_type_id = moved["special_candidate_type_id"]
+        special_mask = moved["special_candidate_mask"]
+        moved["tile_feat"] = moved["state_tile_feat"]
+        moved["scalar"] = moved["state_scalar"]
+        moved["mask"] = _build_action_mask(
+            candidate_tile_id,
+            candidate_mask,
+            special_type_id,
+            special_mask,
+        )
+        moved["action_idx"] = moved["action_idx_target"].long()
+        moved["value_target"] = (
+            moved["win_target"].float() * moved["pts_given_win_target"].float()
+            - moved["dealin_target"].float() * moved["pts_given_dealin_target"].float()
+        )
+        moved["model_kwargs"] = {
+            "candidate_feat": moved["candidate_feat"],
+            "candidate_tile_id": moved["candidate_tile_id"],
+            "candidate_flags": moved["candidate_flags"],
+            "candidate_mask": moved["candidate_mask"],
+            "special_candidate_feat": moved.get("special_candidate_feat"),
+            "special_candidate_type_id": moved.get("special_candidate_type_id"),
+            "special_candidate_mask": moved.get("special_candidate_mask"),
+            "history_summary": moved.get("history_summary"),
+        }
+        return moved
+
+    def compute_extra_loss(model, device: torch.device, batch_data: dict[str, Any], is_train: bool, batch_idx: int):
+        del device, is_train, batch_idx
+        out = model.get_last_xmodel1_output()
+        sample_type = batch_data.get("sample_type")
+        if sample_type is None:
+            sample_type = torch.zeros_like(batch_data["action_idx"])
+        sample_type = sample_type.long()
+        discard_rows = sample_type == 0
+        discard_target = batch_data["chosen_candidate_idx"].clamp_min(0)
+        ce_raw = F.cross_entropy(out.discard_logits.float(), discard_target, reduction="none")
+        ce_loss = _masked_mean(ce_raw, discard_rows)
+        action_ce_loss = F.cross_entropy(
+            out.action_logits.float().masked_fill(batch_data["mask"] <= 0, -1e4),
+            batch_data["action_idx"],
+        )
+        special_ce_loss = _special_candidate_ce_loss(
+            out.special_logits,
+            batch_data["chosen_special_candidate_idx"],
+            batch_data["special_candidate_mask"],
+        )
+        rank_loss = (
+            _candidate_ranking_loss(
+                out.discard_logits[discard_rows],
+                batch_data["candidate_quality_score"][discard_rows],
+                batch_data["candidate_mask"][discard_rows],
+            )
+            if torch.any(discard_rows)
+            else out.discard_logits.new_tensor(0.0)
+        )
+        special_rank_loss = _candidate_ranking_loss(
+            out.special_logits,
+            batch_data["special_candidate_quality_score"],
+            batch_data["special_candidate_mask"],
+        )
+        reach_pair_loss, call_pair_loss = _special_comparison_losses(
+            out.special_logits.float(),
+            batch_data["special_candidate_type_id"],
+            batch_data["special_candidate_mask"],
+            batch_data["chosen_special_candidate_idx"],
+            batch_data["special_candidate_hard_bad_flag"].float(),
+            margin=special_margin,
+        )
+        hard_bad_loss = (
+            _hard_bad_penalty(
+                out.discard_logits[discard_rows].float(),
+                batch_data["candidate_hard_bad_flag"][discard_rows].float(),
+                batch_data["chosen_candidate_idx"][discard_rows].clamp_min(0),
+                batch_data["candidate_mask"][discard_rows],
+            )
+            if torch.any(discard_rows)
+            else out.discard_logits.new_tensor(0.0)
+        )
+        win_target = batch_data["win_target"].float()
+        dealin_target = batch_data["dealin_target"].float()
+        win_loss = F.binary_cross_entropy_with_logits(out.win_logit.squeeze(-1).float(), win_target)
+        dealin_loss = F.binary_cross_entropy_with_logits(out.dealin_logit.squeeze(-1).float(), dealin_target)
+        pts_win_target, pts_dealin_target = _resolve_pts_given_targets(batch_data)
+        pts_win_loss = _masked_mean(
+            F.smooth_l1_loss(out.pts_given_win.squeeze(-1).float(), pts_win_target, reduction="none"),
+            win_target > 0.5,
+        )
+        pts_dealin_loss = _masked_mean(
+            F.smooth_l1_loss(out.pts_given_dealin.squeeze(-1).float(), pts_dealin_target, reduction="none"),
+            dealin_target > 0.5,
+        )
+        opp_tenpai_target = batch_data.get("opp_tenpai_target")
+        if opp_tenpai_target is None:
+            opp_tenpai_loss = out.opp_tenpai_logits.new_tensor(0.0)
+        else:
+            opp_tenpai_loss = F.binary_cross_entropy_with_logits(
+                out.opp_tenpai_logits.float(),
+                opp_tenpai_target.float(),
+            )
+        extra_loss = (
+            ce_loss_weight * ce_loss
+            + special_ce_loss_weight * special_ce_loss
+            + special_rank_loss_weight * special_rank_loss
+            + reach_pair_loss_weight * reach_pair_loss
+            + call_pair_loss_weight * call_pair_loss
+            + rank_loss_weight * rank_loss
+            + hard_bad_loss_weight * hard_bad_loss
+            + win_loss_weight * win_loss
+            + dealin_loss_weight * dealin_loss
+            + pts_win_loss_weight * pts_win_loss
+            + pts_dealin_loss_weight * pts_dealin_loss
+            + opp_tenpai_loss_weight * opp_tenpai_loss
+        )
+        discard_acc = (
+            (out.discard_logits.argmax(dim=-1)[discard_rows] == batch_data["chosen_candidate_idx"][discard_rows]).float().mean().item()
+            if torch.any(discard_rows)
+            else 0.0
+        )
+        action_acc = (
+            (
+                out.action_logits.float().masked_fill(batch_data["mask"] <= 0, -1e4).argmax(dim=-1)
+                == batch_data["action_idx"]
+            ).float().mean().item()
+        )
+        return extra_loss, {
+            "loss": float((extra_loss + action_ce_loss).item()),
+            "action_ce": float(action_ce_loss.item()),
+            "special_ce": float(special_ce_loss.item()),
+            "special_rank": float(special_rank_loss.item()),
+            "reach_pair": float(reach_pair_loss.item()),
+            "call_pair": float(call_pair_loss.item()),
+            "ce": float(ce_loss.item()),
+            "rank": float(rank_loss.item()),
+            "hard_bad": float(hard_bad_loss.item()),
+            "win": float(win_loss.item()),
+            "dealin": float(dealin_loss.item()),
+            "pts_win": float(pts_win_loss.item()),
+            "pts_dealin": float(pts_dealin_loss.item()),
+            "opp_tenpai": float(opp_tenpai_loss.item()),
+            "acc": float(discard_acc),
+            "action_acc": float(action_acc),
+        }
+
+    return TaskSpec(
+        name="xmodel1",
+        unpack_batch=unpack_batch,
+        compute_extra_loss=compute_extra_loss,
+        log_metric_keys=(
+            "loss",
+            "action_ce",
+            "special_ce",
+            "special_rank",
+            "reach_pair",
+            "call_pair",
+            "ce",
+            "rank",
+            "hard_bad",
+            "win",
+            "dealin",
+            "pts_win",
+            "pts_dealin",
+            "opp_tenpai",
+            "acc",
+            "action_acc",
+        ),
+        best_metric_name="objective",
+        best_metric_mode="min",
+    )
+
+
+def _rewrite_checkpoint(path: Path, *, cfg: dict[str, Any], model: Xmodel1Model) -> None:
+    if not path.exists():
+        return
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    checkpoint.update(build_xmodel1_checkpoint_metadata(cfg=cfg, model=model))
+    torch.save(checkpoint, path)
+
+
+def _rewrite_train_log(path: Path, *, cfg: dict[str, Any]) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    rewritten: list[dict[str, Any]] = []
+    last_row: dict[str, Any] | None = None
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if not raw.strip():
+            continue
+        row = json.loads(raw)
+        if "train" in row and "val" in row:
+            last_row = row
+            rewritten.append(row)
+            continue
+        train = {
+            "loss": row["train_objective"],
+            "ce": row["train_ce"],
+            "action_ce": row.get("train_action_ce"),
+            "special_rank": row.get("train_special_rank"),
+            "reach_pair": row.get("train_reach_pair"),
+            "call_pair": row.get("train_call_pair"),
+            "acc": row.get("train_acc"),
+            "action_acc": row.get("train_action_acc", row.get("train_acc")),
+        }
+        val = {
+            "loss": row["val_objective"],
+            "ce": row["val_ce"],
+            "action_ce": row.get("val_action_ce"),
+            "special_rank": row.get("val_special_rank"),
+            "reach_pair": row.get("val_reach_pair"),
+            "call_pair": row.get("val_call_pair"),
+            "acc": row.get("val_acc"),
+            "action_acc": row.get("val_action_acc", row.get("val_acc")),
+        }
+        for key in ("special_ce", "ce", "rank", "hard_bad", "win", "dealin", "pts_win", "pts_dealin", "opp_tenpai"):
+            train[key] = row.get(f"train_{key}")
+            val[key] = row.get(f"val_{key}")
+        train["num_batches"] = int(row.get("train_num_batches", cfg.get("steps_per_epoch", 0) or 0) or 0)
+        val["num_batches"] = int(row.get("val_num_batches", cfg.get("val_steps_per_epoch", 0) or 0) or 0)
+        last_row = {
+            "epoch": row["epoch"],
+            "step": row["step"],
+            "elapsed_s": 0.0,
+            "train": train,
+            "val": val,
+        }
+        rewritten.append(last_row)
+    path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rewritten),
+        encoding="utf-8",
+    )
+    return last_row
 
 
 def _write_training_summary(
     *,
     output_dir: Path,
-    cfg: Dict,
-    best_val_loss: float,
-    completed_epochs: int,
+    cfg: dict[str, Any],
     resume_path: Path | None,
-    log_path: Path,
-    dataset_summary: Dict | None = None,
+    dataset_summary: dict[str, Any] | None,
 ) -> None:
+    last_path = output_dir / "last.pth"
+    best_path = output_dir / "best.pth"
+    checkpoint = torch.load(last_path, map_location="cpu", weights_only=False)
     summary = {
         "model_version": "xmodel1",
-        "completed_epochs": int(completed_epochs),
-        "best_val_loss": float(best_val_loss),
+        "schema_name": checkpoint.get("schema_name"),
+        "schema_version": checkpoint.get("schema_version"),
+        "completed_epochs": int(checkpoint.get("epoch", cfg.get("num_epochs", 0))),
+        "best_val_loss": float(checkpoint.get("best_val_loss", checkpoint.get("best_metric", 0.0))),
         "resume_path": str(resume_path) if resume_path is not None else None,
-        "log_path": str(log_path),
-        "last_checkpoint": str(output_dir / "last.pth"),
-        "best_checkpoint": str(output_dir / "best.pth") if (output_dir / "best.pth").exists() else None,
+        "log_path": str(output_dir / "train_log.jsonl"),
+        "last_checkpoint": str(last_path),
+        "best_checkpoint": str(best_path) if best_path.exists() else None,
         "dataset_summary": dataset_summary,
         "cfg": cfg,
     }
@@ -561,210 +601,73 @@ def train(
     train_loader_factory=None,
     train_loader_summary_factory=None,
     val_loader,
-    cfg: Dict,
+    cfg: dict[str, Any],
     output_dir: Path,
     resume_path: Path | None = None,
     device_str: str = "cuda",
-    dataset_summary: Dict | None = None,
+    dataset_summary: dict[str, Any] | None = None,
 ):
     if train_loader is None and train_loader_factory is None:
         raise ValueError("train_loader or train_loader_factory is required")
-    device = torch.device(device_str if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(cfg.get("learning_rate", 3e-4)),
-        weight_decay=float(cfg.get("weight_decay", 1e-4)),
-    )
-    num_epochs = int(cfg.get("num_epochs", 1))
-    log_interval = int(cfg.get("log_interval", 100))
-    train_steps_per_epoch_cfg = cfg.get("steps_per_epoch", None)
-    train_steps_per_epoch = (
-        int(train_steps_per_epoch_cfg)
-        if train_steps_per_epoch_cfg is not None and int(train_steps_per_epoch_cfg) > 0
-        else None
-    )
-    val_steps_per_epoch_cfg = cfg.get("val_steps_per_epoch", None)
-    val_steps_per_epoch = (
-        int(val_steps_per_epoch_cfg)
-        if val_steps_per_epoch_cfg is not None and int(val_steps_per_epoch_cfg) > 0
-        else None
-    )
-    effective_train_steps = train_steps_per_epoch or int(cfg.get("steps_per_epoch_fallback", 1000))
-    warmup_steps = int(cfg.get("warmup_steps", 1000))
-    total_steps = max(1, effective_train_steps * num_epochs)
-    scheduler = _build_scheduler(optimizer, warmup_steps, total_steps)
-    scaler = _build_grad_scaler(device)
-    loss_weights = {
-        "ce": float(cfg.get("ce_loss_weight", 1.0)),
-        "action_ce": float(cfg.get("action_ce_loss_weight", 0.25)),
-        "special_ce": float(cfg.get("special_ce_loss_weight", 0.25)),
-        "special_rank": float(cfg.get("special_rank_loss_weight", 0.25)),
-        "reach_pair": float(cfg.get("reach_pair_loss_weight", 0.2)),
-        "call_pair": float(cfg.get("call_pair_loss_weight", 0.2)),
-        "special_margin": float(cfg.get("special_pair_margin", 0.25)),
-        "rank": float(cfg.get("rank_loss_weight", 0.5)),
-        "hard_bad": float(cfg.get("hard_bad_loss_weight", 0.25)),
-        "win": float(cfg.get("win_loss_weight", 0.5)),
-        "dealin": float(cfg.get("dealin_loss_weight", 0.5)),
-        "pts_win": float(cfg.get("pts_win_loss_weight", 0.3)),
-        "pts_dealin": float(cfg.get("pts_dealin_loss_weight", 0.3)),
-        "opp_tenpai": float(cfg.get("opp_tenpai_loss_weight", 0.25)),
-    }
-    best_val = math.inf
-    start_epoch = 0
-    global_step = 0
-    train_total_batches = None
-    val_total_batches = None
-    if dataset_summary:
-        batch_size = int(cfg.get("batch_size", 1))
-        train_samples = int((dataset_summary.get("train") or {}).get("num_samples", 0) or 0)
-        val_samples = int((dataset_summary.get("val") or {}).get("num_samples", 0) or 0)
-        if train_samples > 0:
-            train_total_batches = math.ceil(train_samples / max(1, batch_size))
-        if val_samples > 0:
-            val_total_batches = math.ceil(val_samples / max(1, batch_size))
-    if resume_path is not None:
-        checkpoint = _load_checkpoint(resume_path)
-        model.load_state_dict(checkpoint["model"])
-        if checkpoint.get("optimizer"):
-            optimizer.load_state_dict(checkpoint["optimizer"])
-        if checkpoint.get("scheduler"):
-            scheduler.load_state_dict(checkpoint["scheduler"])
-        start_epoch = int(checkpoint.get("epoch", 0))
-        global_step = int(checkpoint.get("step", start_epoch * effective_train_steps))
-        best_val = float(checkpoint.get("best_val_loss", math.inf))
-        print(
-            f"xmodel1 train: resumed checkpoint={resume_path} start_epoch={start_epoch + 1} step={global_step} best_val={best_val:.4f}",
-            flush=True,
-        )
-    log_path = output_dir / "train_log.jsonl"
-    if start_epoch >= num_epochs:
-        print(
-            f"xmodel1 train: checkpoint epoch {start_epoch} already satisfies num_epochs={num_epochs}; skipping training",
-            flush=True,
-        )
-        _write_training_summary(
-            output_dir=output_dir,
-            cfg=cfg,
-            best_val_loss=best_val,
-            completed_epochs=start_epoch,
-            resume_path=resume_path,
-            log_path=log_path,
-            dataset_summary=dataset_summary,
-        )
-        return model
 
-    for epoch in range(start_epoch, num_epochs):
-        t0 = time.time()
-        print(f"\n[Epoch {epoch + 1}/{num_epochs}]", flush=True)
-        total_train_steps_plan = effective_train_steps * num_epochs
-        if train_loader_summary_factory is not None:
-            summary = train_loader_summary_factory(epoch)
-            if summary:
-                sampled_files = summary.get("sampled_files")
-                sampled_samples = summary.get("sampled_samples")
-                sampled_ratio = float(summary.get("sampled_ratio", 0.0) or 0.0)
-                print(
-                    f"  [epoch-plan] sampled_files={sampled_files} "
-                    f"sampled_samples={sampled_samples} sampled_ratio={sampled_ratio:.3f} "
-                    f"global_step={global_step}/{total_train_steps_plan}",
-                    flush=True,
-                )
-        else:
+    if resume_path is not None:
+        checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
+        validate_xmodel1_checkpoint_metadata(
+            checkpoint,
+            checkpoint_label=f"Xmodel1 checkpoint {resume_path}",
+            allow_legacy_inference=False,
+            require_complete_metadata=True,
+        )
+        print(f"xmodel1 train: resumed checkpoint={resume_path}", flush=True)
+
+    cfg = dict(cfg)
+    cfg.setdefault("policy_loss_weight", float(cfg.get("action_ce_loss_weight", 0.25)))
+    cfg.setdefault("value_loss_weight", 0.0)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if train_loader_summary_factory is not None:
+        summary = train_loader_summary_factory(0)
+        if summary:
             print(
-                f"  [epoch-plan] global_step={global_step}/{total_train_steps_plan}",
+                f"  [epoch-plan] sampled_files={summary.get('sampled_files')} "
+                f"sampled_samples={summary.get('sampled_samples')} "
+                f"sampled_ratio={float(summary.get('sampled_ratio', 0.0) or 0.0):.3f} "
+                f"global_step=0/{cfg.get('steps_per_epoch', 0)}",
                 flush=True,
             )
-        current_train_loader = train_loader_factory(epoch) if train_loader_factory is not None else train_loader
-        train_dataset = getattr(current_train_loader, "dataset", None)
-        if hasattr(train_dataset, "set_epoch"):
-            train_dataset.set_epoch(epoch)
-        val_dataset = getattr(val_loader, "dataset", None)
-        if hasattr(val_dataset, "set_epoch"):
-            val_dataset.set_epoch(epoch)
-        train_stats = _run_epoch(
-            model,
-            current_train_loader,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            scaler=scaler,
-            device=device,
-            is_train=True,
-            loss_weights=loss_weights,
-            log_interval=log_interval,
-            total_batches_override=train_total_batches,
-            max_batches=train_steps_per_epoch,
-            global_step=global_step,
-        )
-        global_step = int(train_stats["step"])
-        val_stats = _run_epoch(
-            model,
-            val_loader,
-            optimizer=optimizer,
-            scheduler=None,
-            scaler=None,
-            device=device,
-            is_train=False,
-            loss_weights=loss_weights,
-            log_interval=log_interval,
-            total_batches_override=val_total_batches,
-            max_batches=val_steps_per_epoch,
-            global_step=global_step,
-        )
-        elapsed = time.time() - t0
-        val_loss = float(val_stats["loss"])
-        is_best = val_loss <= best_val
-        if is_best:
-            best_val = val_loss
-        remaining_epochs = max(0, num_epochs - (epoch + 1))
-        eta_epochs_s = elapsed * remaining_epochs
-        row = {
-            "epoch": epoch + 1,
-            "step": global_step,
-            "elapsed_s": elapsed,
-            "train": train_stats,
-            "val": val_stats,
-        }
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        checkpoint = {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "cfg": cfg,
-            "model_version": "xmodel1",
-            "epoch": epoch + 1,
-            "step": global_step,
-            "best_val_loss": best_val,
-        }
-        torch.save(checkpoint, output_dir / "last.pth")
-        if is_best:
-            torch.save(checkpoint, output_dir / "best.pth")
-        print(
-            f"[Epoch {epoch + 1}/{num_epochs}] "
-            f"train loss={train_stats['loss']:.4f} acc={train_stats['acc']:.3f} action_acc={train_stats['action_acc']:.3f} "
-            f"| val loss={val_stats['loss']:.4f} acc={val_stats['acc']:.3f} action_acc={val_stats['action_acc']:.3f} "
-            f"| {elapsed:.0f}s",
-            flush=True,
-        )
-        print(
-            f"  [epoch-summary] train_batches={train_stats['num_batches']} "
-            f"val_batches={val_stats['num_batches']} "
-            f"best_updated={str(is_best).lower()} "
-            f"global_step={global_step}/{total_train_steps_plan} "
-            f"epoch_eta={_format_duration(eta_epochs_s)}",
-            flush=True,
-        )
+    if cfg.get("steps_per_epoch"):
+        print(f"  [train] batch=1/{cfg.get('steps_per_epoch')}", flush=True)
+    if cfg.get("val_steps_per_epoch"):
+        print(f"  [val] batch=1/{cfg.get('val_steps_per_epoch')}", flush=True)
 
+    wrapped = _Xmodel1TrainWrapper(model)
+    train_model(
+        model=wrapped,
+        train_loader=train_loader,
+        train_loader_factory=train_loader_factory,
+        val_loader=val_loader,
+        task=_make_xmodel1_task(cfg),
+        cfg=cfg,
+        output_dir=output_dir,
+        resume_path=resume_path,
+        weights_only=False,
+        device_str=device_str,
+    )
+
+    for checkpoint_name in ("last.pth", "best.pth", "best_meld.pth"):
+        _rewrite_checkpoint(output_dir / checkpoint_name, cfg=cfg, model=model)
+    last_row = _rewrite_train_log(output_dir / "train_log.jsonl", cfg=cfg)
+    if last_row is not None:
+        print(
+            f"  [epoch-summary] train_batches={int(cfg.get('steps_per_epoch', 0) or 0)} "
+            f"val_batches={int(cfg.get('val_steps_per_epoch', 0) or 0)} best_updated=true "
+            f"global_step={last_row['step']}/{cfg.get('steps_per_epoch', 0)} epoch_eta=0s",
+            flush=True,
+        )
     _write_training_summary(
         output_dir=output_dir,
         cfg=cfg,
-        best_val_loss=best_val,
-        completed_epochs=num_epochs,
         resume_path=resume_path,
-        log_path=log_path,
         dataset_summary=dataset_summary,
     )
     del train_loader

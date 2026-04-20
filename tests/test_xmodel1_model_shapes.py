@@ -3,6 +3,11 @@ from __future__ import annotations
 import pytest
 import torch
 
+from training.cache_schema import (
+    XMODEL1_CANDIDATE_FEATURE_DIM,
+    XMODEL1_CANDIDATE_FLAG_DIM,
+    XMODEL1_HISTORY_SUMMARY_DIM,
+)
 from xmodel1.model import Xmodel1Model
 from xmodel1.schema import (
     XMODEL1_SPECIAL_TYPE_ANKAN,
@@ -24,8 +29,8 @@ def test_xmodel1_model_forward_shapes():
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=64,
-        candidate_feature_dim=35,
-        candidate_flag_dim=10,
+        candidate_feature_dim=XMODEL1_CANDIDATE_FEATURE_DIM,
+        candidate_flag_dim=XMODEL1_CANDIDATE_FLAG_DIM,
         hidden_dim=64,
         num_res_blocks=2,
     )
@@ -34,11 +39,11 @@ def test_xmodel1_model_forward_shapes():
     out = model(
         torch.randn(batch_size, 57, 34),
         torch.randn(batch_size, 64),
-        torch.randn(batch_size, max_candidates, 35),
+        torch.randn(batch_size, max_candidates, XMODEL1_CANDIDATE_FEATURE_DIM),
         torch.randint(0, 34, (batch_size, max_candidates), dtype=torch.long),
-        torch.randint(0, 2, (batch_size, max_candidates, 10), dtype=torch.uint8),
+        torch.randint(0, 2, (batch_size, max_candidates, XMODEL1_CANDIDATE_FLAG_DIM), dtype=torch.uint8),
         torch.ones(batch_size, max_candidates, dtype=torch.uint8),
-        event_history=torch.zeros(batch_size, 48, 5, dtype=torch.long),
+        history_summary=torch.zeros(batch_size, XMODEL1_HISTORY_SUMMARY_DIM, dtype=torch.float32),
     )
     assert out.discard_logits.shape == (batch_size, max_candidates)
     assert out.special_logits.shape == (batch_size, 12)
@@ -54,8 +59,8 @@ def test_xmodel1_model_event_history_changes_state_encoding():
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=64,
-        candidate_feature_dim=35,
-        candidate_flag_dim=10,
+        candidate_feature_dim=XMODEL1_CANDIDATE_FEATURE_DIM,
+        candidate_flag_dim=XMODEL1_CANDIDATE_FLAG_DIM,
         hidden_dim=64,
         num_res_blocks=1,
         dropout=0.0,
@@ -66,23 +71,23 @@ def test_xmodel1_model_event_history_changes_state_encoding():
     common_args = (
         torch.randn(batch_size, 57, 34),
         torch.randn(batch_size, 64),
-        torch.randn(batch_size, max_candidates, 35),
+        torch.randn(batch_size, max_candidates, XMODEL1_CANDIDATE_FEATURE_DIM),
         torch.randint(0, 34, (batch_size, max_candidates), dtype=torch.long),
-        torch.randint(0, 2, (batch_size, max_candidates, 10), dtype=torch.uint8),
+        torch.randint(0, 2, (batch_size, max_candidates, XMODEL1_CANDIDATE_FLAG_DIM), dtype=torch.uint8),
         torch.ones(batch_size, max_candidates, dtype=torch.uint8),
     )
-    pad_history = torch.zeros(batch_size, 48, 5, dtype=torch.long)
+    pad_history = torch.zeros(batch_size, XMODEL1_HISTORY_SUMMARY_DIM, dtype=torch.float32)
     active_history = pad_history.clone()
-    active_history[0, -1] = torch.tensor([0, 2, 5, 1, 1], dtype=torch.long)
+    active_history[0, -1] = 1.0
 
-    out_pad = model(*common_args, event_history=pad_history)
-    out_active = model(*common_args, event_history=active_history)
+    out_pad = model(*common_args, history_summary=pad_history)
+    out_active = model(*common_args, history_summary=active_history)
 
     assert not torch.allclose(out_pad.discard_logits, out_active.discard_logits)
 
 
 def test_xmodel1_action_logits_use_special_candidate_path_for_reach_and_none():
-    model = Xmodel1Model(57, 64, 35, 10, hidden_dim=32, num_res_blocks=1)
+    model = Xmodel1Model(57, 64, XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM, hidden_dim=32, num_res_blocks=1)
     discard_logits = torch.zeros(1, 14)
     candidate_tile_id = torch.full((1, 14), -1, dtype=torch.long)
     candidate_mask = torch.zeros(1, 14, dtype=torch.uint8)
@@ -104,7 +109,7 @@ def test_xmodel1_action_logits_use_special_candidate_path_for_reach_and_none():
 
 
 def test_xmodel1_action_logits_use_special_candidate_path_for_call_families():
-    model = Xmodel1Model(57, 64, 35, 10, hidden_dim=32, num_res_blocks=1)
+    model = Xmodel1Model(57, 64, XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM, hidden_dim=32, num_res_blocks=1)
     discard_logits = torch.zeros(1, 14)
     candidate_tile_id = torch.full((1, 14), -1, dtype=torch.long)
     candidate_mask = torch.zeros(1, 14, dtype=torch.uint8)
@@ -131,7 +136,7 @@ def test_xmodel1_action_logits_use_special_candidate_path_for_call_families():
 
 
 def test_xmodel1_action_logits_use_special_candidate_path_for_hora_and_ryukyoku():
-    model = Xmodel1Model(57, 64, 35, 10, hidden_dim=32, num_res_blocks=1)
+    model = Xmodel1Model(57, 64, XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM, hidden_dim=32, num_res_blocks=1)
     discard_logits = torch.zeros(1, 14)
     candidate_tile_id = torch.full((1, 14), -1, dtype=torch.long)
     candidate_mask = torch.zeros(1, 14, dtype=torch.uint8)

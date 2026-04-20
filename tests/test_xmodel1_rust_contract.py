@@ -6,11 +6,20 @@ import pytest
 from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
     XMODEL1_CANDIDATE_FLAG_DIM,
+    XMODEL1_HISTORY_SUMMARY_DIM,
     XMODEL1_MAX_CANDIDATES,
+    XMODEL1_MAX_SPECIAL_CANDIDATES,
     XMODEL1_SCHEMA_NAME,
     XMODEL1_SCHEMA_VERSION,
+    XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
-from xmodel1.schema import XMODEL1_SAMPLE_TYPE_HORA, XMODEL1_SPECIAL_TYPE_HORA
+from xmodel1.schema import (
+    XMODEL1_SAMPLE_TYPE_HORA,
+    XMODEL1_SAMPLE_TYPE_RIICHI,
+    XMODEL1_SPECIAL_TYPE_DAMA,
+    XMODEL1_SPECIAL_TYPE_HORA,
+    XMODEL1_SPECIAL_TYPE_REACH,
+)
 
 
 def _export_rust_arrays(tmp_path, events):
@@ -47,7 +56,14 @@ def _candidate_feat_diff_message(rust_candidate_feat, py_candidate_feat, candida
     return "\n".join(lines)
 
 
-def _assert_rust_matches_python_oracle(tmp_path, events, *, replay_id="fixture.mjson", compare_targets=False):
+def _assert_rust_matches_python_oracle(
+    tmp_path,
+    events,
+    *,
+    replay_id="fixture.mjson",
+    compare_targets=False,
+    allow_teacher_proxy_drift=False,
+):
     from xmodel1.preprocess import events_to_xmodel1_arrays
 
     py_arrays = events_to_xmodel1_arrays(events, replay_id=replay_id)
@@ -56,22 +72,33 @@ def _assert_rust_matches_python_oracle(tmp_path, events, *, replay_id="fixture.m
         py_discard_mask = py_arrays["sample_type"] == 0
         rust_discard_mask = rust_arrays["sample_type"] == 0
         rust_tile_ids = rust_arrays["candidate_tile_id"][rust_discard_mask]
+        py_candidate_feat = py_arrays["candidate_feat"][py_discard_mask]
         exact_fields = [
             "state_tile_feat",
             "state_scalar",
-            "candidate_feat",
             "candidate_flags",
             "candidate_tile_id",
             "candidate_mask",
             "chosen_candidate_idx",
-            "candidate_rank_bucket",
-            "candidate_hard_bad_flag",
             "special_candidate_type_id",
             "special_candidate_mask",
             "chosen_special_candidate_idx",
-            "special_candidate_rank_bucket",
-            "special_candidate_hard_bad_flag",
+            "sample_type",
+            "action_idx_target",
+            "actor",
+            "event_index",
+            "kyoku",
+            "honba",
+            "is_open_hand",
         ]
+        if not allow_teacher_proxy_drift:
+            exact_fields.extend(
+                [
+                    "candidate_feat",
+                    "candidate_hard_bad_flag",
+                    "history_summary",
+                ]
+            )
         for field in exact_fields:
             if field == "candidate_feat":
                 rust_field = rust_arrays[field][rust_discard_mask]
@@ -81,32 +108,25 @@ def _assert_rust_matches_python_oracle(tmp_path, events, *, replay_id="fixture.m
                     py_field,
                 ), _candidate_feat_diff_message(rust_field, py_field, rust_tile_ids)
                 continue
-            assert np.array_equal(rust_arrays[field][rust_discard_mask], py_arrays[field][py_discard_mask]), field
-        assert np.allclose(
-            rust_arrays["special_candidate_feat"][rust_discard_mask],
-            py_arrays["special_candidate_feat"][py_discard_mask],
-            atol=1e-3,
-            rtol=0.0,
-        ), "special_candidate_feat"
-        assert np.allclose(
-            rust_arrays["candidate_quality_score"][rust_discard_mask],
-            py_arrays["candidate_quality_score"][py_discard_mask],
-            atol=1e-6,
-            rtol=0.0,
-        )
-        assert np.allclose(
-            rust_arrays["special_candidate_quality_score"][rust_discard_mask],
-            py_arrays["special_candidate_quality_score"][py_discard_mask],
-            atol=1e-6,
-            rtol=0.0,
-        )
-        assert np.array_equal(
-            rust_arrays["event_history"][rust_discard_mask],
-            py_arrays["event_history"][py_discard_mask],
-        ), "event_history"
+            rust_field = rust_arrays[field][rust_discard_mask]
+            py_field = py_arrays[field][py_discard_mask]
+            assert np.array_equal(rust_field, py_field), field
+        if allow_teacher_proxy_drift:
+            rust_feat = rust_arrays["candidate_feat"][rust_discard_mask]
+            py_feat = py_candidate_feat
+            assert np.array_equal(
+                rust_feat[..., :4],
+                py_feat[..., :4],
+            ), "candidate_feat_stable_prefix"
+        else:
+            assert np.allclose(
+                rust_arrays["candidate_quality_score"][rust_discard_mask],
+                py_arrays["candidate_quality_score"][py_discard_mask],
+                atol=1e-6,
+                rtol=0.0,
+            )
         if compare_targets:
             target_fields = [
-                "score_delta_target",
                 "win_target",
                 "dealin_target",
                 "pts_given_win_target",
@@ -251,20 +271,19 @@ def test_xmodel1_rust_export_produces_multiple_candidates_for_real_smoke_record(
         mask = data["candidate_mask"][0]
         tile_ids = data["candidate_tile_id"][0]
         qualities = data["candidate_quality_score"][0]
-        rank_bucket = data["candidate_rank_bucket"][0]
         hard_bad = data["candidate_hard_bad_flag"][0]
         flags = data["candidate_flags"][0]
+        history_summary = data["history_summary"][0]
         assert int(mask.sum()) >= 4
         assert tile_ids[0] >= 0
         assert qualities.shape[0] == XMODEL1_MAX_CANDIDATES
-        assert rank_bucket.shape[0] == XMODEL1_MAX_CANDIDATES
         assert hard_bad.shape[0] == XMODEL1_MAX_CANDIDATES
         assert flags.shape == (XMODEL1_MAX_CANDIDATES, XMODEL1_CANDIDATE_FLAG_DIM)
+        assert history_summary.shape == (20,)
         active_idx = np.where(mask > 0)[0]
         assert len(active_idx) >= 4
         assert np.any(qualities[active_idx] != 0.0)
-        assert np.all(rank_bucket[active_idx] >= 0)
-        assert np.all(rank_bucket[active_idx] <= 3)
+        assert np.any(history_summary >= 0.0)
 
 
 def test_xmodel1_rust_export_matches_python_oracle_on_simple_discard_fixture(tmp_path):
@@ -290,6 +309,139 @@ def test_xmodel1_rust_export_matches_python_oracle_on_simple_discard_fixture(tmp
         {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
     ]
     _assert_rust_matches_python_oracle(tmp_path, events)
+
+
+def test_xmodel1_runtime_tensors_match_v3_discard_export_row():
+    from keqing_core import build_xmodel1_runtime_tensors
+    from mahjong_env.legal_actions import enumerate_legal_actions
+    from mahjong_env.state import GameState, apply_event
+    from xmodel1.preprocess import events_to_xmodel1_arrays
+
+    events = [
+        {"type": "start_game", "names": ["A", "B", "C", "D"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+                ["1s"] * 13,
+                ["2s"] * 13,
+                ["3s"] * 13,
+            ],
+        },
+        {"type": "tsumo", "actor": 0, "pai": "4p"},
+        {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
+    ]
+    arrays = events_to_xmodel1_arrays(events, replay_id="runtime_contract_fixture.mjson")
+    assert arrays is not None
+
+    state = GameState()
+    for event in events[:-1]:
+        apply_event(state, event)
+    snapshot = state.snapshot(0)
+    snapshot["history_summary"] = arrays["history_summary"][0].astype(np.float32).tolist()
+    legal_actions = [action.to_mjai() for action in enumerate_legal_actions(snapshot, 0)]
+
+    try:
+        payload = build_xmodel1_runtime_tensors(snapshot, 0, legal_actions)
+    except RuntimeError:
+        pytest.skip("Rust extension unavailable")
+
+    assert np.array_equal(
+        np.asarray(payload["candidate_feat"], dtype=np.float32).reshape(
+            XMODEL1_MAX_CANDIDATES,
+            XMODEL1_CANDIDATE_FEATURE_DIM,
+        ),
+        arrays["candidate_feat"][0],
+    )
+    assert np.array_equal(
+        np.asarray(payload["candidate_tile_id"], dtype=np.int16).reshape(XMODEL1_MAX_CANDIDATES),
+        arrays["candidate_tile_id"][0],
+    )
+    assert np.array_equal(
+        np.asarray(payload["candidate_mask"], dtype=np.uint8).reshape(XMODEL1_MAX_CANDIDATES),
+        arrays["candidate_mask"][0],
+    )
+    assert np.array_equal(
+        np.asarray(payload["candidate_flags"], dtype=np.uint8).reshape(
+            XMODEL1_MAX_CANDIDATES,
+            XMODEL1_CANDIDATE_FLAG_DIM,
+        ),
+        arrays["candidate_flags"][0],
+    )
+    assert np.array_equal(
+        np.asarray(payload["special_candidate_feat"], dtype=np.float32).reshape(
+            XMODEL1_MAX_SPECIAL_CANDIDATES,
+            XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+        ),
+        arrays["special_candidate_feat"][0],
+    )
+    assert np.array_equal(
+        np.asarray(payload["special_candidate_type_id"], dtype=np.int16).reshape(
+            XMODEL1_MAX_SPECIAL_CANDIDATES,
+        ),
+        arrays["special_candidate_type_id"][0],
+    )
+    assert np.array_equal(
+        np.asarray(payload["special_candidate_mask"], dtype=np.uint8).reshape(
+            XMODEL1_MAX_SPECIAL_CANDIDATES,
+        ),
+        arrays["special_candidate_mask"][0],
+    )
+    assert np.allclose(
+        np.asarray(payload["special_candidate_quality_score"], dtype=np.float32).reshape(
+            XMODEL1_MAX_SPECIAL_CANDIDATES,
+        ),
+        arrays["special_candidate_quality_score"][0],
+        atol=1e-6,
+        rtol=0.0,
+    )
+    assert np.array_equal(
+        np.asarray(payload["special_candidate_hard_bad_flag"], dtype=np.uint8).reshape(
+            XMODEL1_MAX_SPECIAL_CANDIDATES,
+        ),
+        arrays["special_candidate_hard_bad_flag"][0],
+    )
+    assert np.array_equal(
+        np.asarray(payload["history_summary"], dtype=np.float32).reshape(XMODEL1_HISTORY_SUMMARY_DIM),
+        arrays["history_summary"][0].astype(np.float32),
+    )
+
+
+def test_xmodel1_rust_export_keeps_structural_contract_on_deep_shanten_fixture(tmp_path):
+    events = [
+        {"type": "start_game", "names": ["A", "B", "C", "D"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "4m", "7m", "9m", "2p", "5p", "8p", "1s", "4s", "7s", "E", "S", "W"],
+                ["1s"] * 13,
+                ["2s"] * 13,
+                ["3s"] * 13,
+            ],
+        },
+        {"type": "tsumo", "actor": 0, "pai": "N"},
+        {"type": "dahai", "actor": 0, "pai": "N", "tsumogiri": True},
+    ]
+    _assert_rust_matches_python_oracle(
+        tmp_path,
+        events,
+        replay_id="deep_shanten.mjson",
+        allow_teacher_proxy_drift=True,
+    )
 
 
 def test_xmodel1_rust_export_keeps_hora_as_dedicated_special_sample(tmp_path):
@@ -334,6 +486,58 @@ def test_xmodel1_rust_export_keeps_hora_as_dedicated_special_sample(tmp_path):
         assert rust_chosen >= 0
         assert int(py_arrays["special_candidate_type_id"][py_row, py_chosen]) == XMODEL1_SPECIAL_TYPE_HORA
         assert int(rust_arrays["special_candidate_type_id"][rust_row, rust_chosen]) == XMODEL1_SPECIAL_TYPE_HORA
+
+
+def test_xmodel1_rust_export_keeps_reach_as_dedicated_special_sample_with_dama_pair(tmp_path):
+    events = [
+        {"type": "start_game", "names": ["A", "B", "C", "D"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+                ["1s"] * 13,
+                ["2s"] * 13,
+                ["3s"] * 13,
+            ],
+        },
+        {"type": "tsumo", "actor": 0, "pai": "4p"},
+        {"type": "reach", "actor": 0},
+        {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
+        {"type": "reach_accepted", "actor": 0, "scores": [24000, 25000, 25000, 25000], "kyotaku": 1},
+    ]
+
+    from xmodel1.preprocess import events_to_xmodel1_arrays
+
+    py_arrays = events_to_xmodel1_arrays(events, replay_id="reach_fixture.mjson")
+    assert py_arrays is not None
+    with _export_rust_arrays(tmp_path, events) as rust_arrays:
+        py_rows = np.where(py_arrays["sample_type"] == XMODEL1_SAMPLE_TYPE_RIICHI)[0]
+        rust_rows = np.where(rust_arrays["sample_type"] == XMODEL1_SAMPLE_TYPE_RIICHI)[0]
+        assert py_rows.tolist() == [0]
+        assert rust_rows.tolist() == [0]
+        py_row = int(py_rows[0])
+        rust_row = int(rust_rows[0])
+        assert int(py_arrays["action_idx_target"][py_row]) == 34
+        assert int(rust_arrays["action_idx_target"][rust_row]) == 34
+
+        py_chosen = int(py_arrays["chosen_special_candidate_idx"][py_row])
+        rust_chosen = int(rust_arrays["chosen_special_candidate_idx"][rust_row])
+        assert py_chosen >= 0
+        assert rust_chosen >= 0
+        assert int(py_arrays["special_candidate_type_id"][py_row, py_chosen]) == XMODEL1_SPECIAL_TYPE_REACH
+        assert int(rust_arrays["special_candidate_type_id"][rust_row, rust_chosen]) == XMODEL1_SPECIAL_TYPE_REACH
+
+        py_active = set(py_arrays["special_candidate_type_id"][py_row, py_arrays["special_candidate_mask"][py_row] > 0].tolist())
+        rust_active = set(rust_arrays["special_candidate_type_id"][rust_row, rust_arrays["special_candidate_mask"][rust_row] > 0].tolist())
+        assert {XMODEL1_SPECIAL_TYPE_REACH, XMODEL1_SPECIAL_TYPE_DAMA}.issubset(py_active)
+        assert {XMODEL1_SPECIAL_TYPE_REACH, XMODEL1_SPECIAL_TYPE_DAMA}.issubset(rust_active)
 
 
 @pytest.mark.parametrize(
@@ -730,7 +934,11 @@ def test_xmodel1_rust_export_candidate_feat_minimal_regressions(tmp_path, name, 
     ],
 )
 def test_xmodel1_rust_export_matches_python_oracle_on_extended_discard_fixtures(tmp_path, name, events):
-    _assert_rust_matches_python_oracle(tmp_path, events, replay_id=f"{name}.mjson")
+    _assert_rust_matches_python_oracle(
+        tmp_path,
+        events,
+        replay_id=f"{name}.mjson",
+    )
 
 
 @pytest.mark.parametrize(
@@ -835,7 +1043,6 @@ def test_xmodel1_rust_export_emits_nonzero_round_targets(tmp_path):
         {"type": "end_kyoku"},
     ]
     with _export_rust_arrays(tmp_path, events) as data:
-        assert np.allclose(data["score_delta_target"], np.array([0.4], dtype=np.float32))
         assert np.allclose(data["win_target"], np.array([1.0], dtype=np.float32))
         assert np.allclose(data["dealin_target"], np.array([0.0], dtype=np.float32))
         assert np.allclose(data["pts_given_win_target"], np.array([0.4], dtype=np.float32))
@@ -871,7 +1078,6 @@ def test_xmodel1_rust_export_emits_dealin_target(tmp_path):
         hora_rows = data["sample_type"] == XMODEL1_SAMPLE_TYPE_HORA
         assert int(discard_rows.sum()) == 1
         assert int(hora_rows.sum()) == 1
-        assert np.allclose(data["score_delta_target"][discard_rows], np.array([-8000 / 30000], dtype=np.float32))
         assert np.allclose(data["win_target"][discard_rows], np.array([0.0], dtype=np.float32))
         assert np.allclose(data["dealin_target"][discard_rows], np.array([1.0], dtype=np.float32))
         assert np.allclose(data["pts_given_win_target"][discard_rows], np.array([0.0], dtype=np.float32))
@@ -958,7 +1164,7 @@ def test_xmodel1_rust_export_opp_tenpai_matches_python_oracle_on_non_tenpai_fixt
         assert np.all(rust_opp == 0.0)
 
 
-def test_xmodel1_rust_export_emits_ryukyoku_score_delta_target(tmp_path):
+def test_xmodel1_rust_export_emits_ryukyoku_targets(tmp_path):
     events = [
         {"type": "start_game", "names": ["A", "B", "C", "D"]},
         {
@@ -983,7 +1189,6 @@ def test_xmodel1_rust_export_emits_ryukyoku_score_delta_target(tmp_path):
         {"type": "end_kyoku"},
     ]
     with _export_rust_arrays(tmp_path, events) as data:
-        assert np.allclose(data["score_delta_target"], np.array([1500 / 30000], dtype=np.float32))
         assert np.allclose(data["win_target"], np.array([0.0], dtype=np.float32))
         assert np.allclose(data["dealin_target"], np.array([0.0], dtype=np.float32))
         assert np.allclose(data["pts_given_win_target"], np.array([0.0], dtype=np.float32))

@@ -1,9 +1,10 @@
-"""Strict Xmodel1 v2 cached dataset loader."""
+"""Strict Xmodel1 v3 cached dataset loader."""
 
 from __future__ import annotations
 
 import json
 import random
+import sys
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -18,6 +19,7 @@ from xmodel1.schema import (
     XMODEL1_SCHEMA_VERSION,
     XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
+from training.cache_schema import XMODEL1_HISTORY_SUMMARY_DIM
 
 DEFAULT_BUFFER_SIZE = 512
 _MANIFEST_NAME = "xmodel1_export_manifest.json"
@@ -33,19 +35,8 @@ _MANIFEST_REQUIRED_KEYS = (
     "shard_sample_counts",
 )
 
-EVENT_HISTORY_LEN = 48
-EVENT_HISTORY_FEATURE_DIM = 5
-EVENT_TYPE_PAD = 0
-EVENT_NO_ACTOR = 4
-EVENT_NO_TILE = -1
-
-
-def _empty_event_history() -> np.ndarray:
-    out = np.zeros((EVENT_HISTORY_LEN, EVENT_HISTORY_FEATURE_DIM), dtype=np.int16)
-    out[:, 0] = EVENT_NO_ACTOR
-    out[:, 1] = EVENT_TYPE_PAD
-    out[:, 2] = EVENT_NO_TILE
-    return out
+def _empty_history_summary() -> np.ndarray:
+    return np.zeros((XMODEL1_HISTORY_SUMMARY_DIM,), dtype=np.float16)
 
 
 def _validate_xmodel1_cache_contract(data: np.lib.npyio.NpzFile, path: Path) -> None:
@@ -54,7 +45,8 @@ def _validate_xmodel1_cache_contract(data: np.lib.npyio.NpzFile, path: Path) -> 
     if schema_name != XMODEL1_SCHEMA_NAME or schema_version != XMODEL1_SCHEMA_VERSION:
         raise ValueError(
             f"Xmodel1 cache schema mismatch in {path}: got {schema_name}@{schema_version}, "
-            f"expected {XMODEL1_SCHEMA_NAME}@{XMODEL1_SCHEMA_VERSION}; rerun preprocess"
+            f"expected {XMODEL1_SCHEMA_NAME}@{XMODEL1_SCHEMA_VERSION}; "
+            f"rerun preprocess for {XMODEL1_SCHEMA_NAME}"
         )
     missing = [field for field in XMODEL1_DISCARD_REQUIRED_FIELDS if field not in data]
     if missing:
@@ -65,20 +57,20 @@ def _validate_xmodel1_cache_contract(data: np.lib.npyio.NpzFile, path: Path) -> 
     ):
         raise ValueError(
             f"special_candidate_feat shape {data['special_candidate_feat'].shape} incompatible with "
-            f"v2 contract ({XMODEL1_MAX_SPECIAL_CANDIDATES}, {XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM}) in {path}; rerun preprocess"
+            f"v3 contract ({XMODEL1_MAX_SPECIAL_CANDIDATES}, {XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM}) in {path}; "
+            f"rerun preprocess for {XMODEL1_SCHEMA_NAME}"
         )
     for field in (
         "special_candidate_type_id",
         "special_candidate_mask",
         "special_candidate_quality_score",
-        "special_candidate_rank_bucket",
         "special_candidate_hard_bad_flag",
     ):
         if int(data[field].shape[1]) != XMODEL1_MAX_SPECIAL_CANDIDATES:
-            raise ValueError(f"{field} shape {data[field].shape} incompatible with v2 special slots in {path}")
-    if tuple(data["event_history"].shape[1:]) != (EVENT_HISTORY_LEN, EVENT_HISTORY_FEATURE_DIM):
+            raise ValueError(f"{field} shape {data[field].shape} incompatible with v3 special slots in {path}")
+    if tuple(data["history_summary"].shape[1:]) != (XMODEL1_HISTORY_SUMMARY_DIM,):
         raise ValueError(
-            f"event_history shape {data['event_history'].shape} != ({EVENT_HISTORY_LEN}, {EVENT_HISTORY_FEATURE_DIM}) in {path}; rerun preprocess"
+            f"history_summary shape {data['history_summary'].shape} != ({XMODEL1_HISTORY_SUMMARY_DIM},) in {path}; rerun preprocess"
         )
 
 
@@ -131,6 +123,8 @@ def probe_cached_samples(
             rows_probed += min(sample_count, max(1, rows_per_file))
             if int(data["opp_tenpai_target"].shape[1]) != 3:
                 raise ValueError(f"opp_tenpai_target shape {data['opp_tenpai_target'].shape} incompatible in {path}")
+            if int(data["history_summary"].shape[1]) != XMODEL1_HISTORY_SUMMARY_DIM:
+                raise ValueError(f"history_summary shape {data['history_summary'].shape} incompatible in {path}")
             if len(data["pts_given_win_target"].shape) != 1:
                 raise ValueError(f"pts_given_win_target shape {data['pts_given_win_target'].shape} incompatible in {path}")
             if len(data["pts_given_dealin_target"].shape) != 1:
@@ -218,12 +212,13 @@ def split_cached_files(
     return all_files[n_val:], all_files[:n_val]
 
 
-def infer_cached_dimensions(file_paths: List[Path]) -> Dict[str, int]:
+def infer_cached_dimensions(file_paths: List[Path], *, strict: bool = False) -> Dict[str, int]:
+    skipped_errors: list[str] = []
     for path in file_paths:
         try:
             with np.load(path, allow_pickle=False) as data:
                 _validate_xmodel1_cache_contract(data, path)
-                return {
+                dims = {
                     "state_tile_channels": int(data["state_tile_feat"].shape[1]),
                     "state_scalar_dim": int(data["state_scalar"].shape[1]),
                     "candidate_feature_dim": int(data["candidate_feat"].shape[2]),
@@ -232,9 +227,32 @@ def infer_cached_dimensions(file_paths: List[Path]) -> Dict[str, int]:
                     "special_candidate_feature_dim": int(data["special_candidate_feat"].shape[2]),
                     "max_special_candidates": int(data["special_candidate_feat"].shape[1]),
                 }
-        except Exception:
+                if skipped_errors:
+                    print(
+                        f"xmodel1 cache scan: skipped {len(skipped_errors)} unreadable cache file(s) "
+                        f"before inferring dims from {path}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                return dims
+        except Exception as exc:
+            skipped_errors.append(f"{path}: {exc}")
+            print(
+                f"xmodel1 cache scan: skipping unreadable cache {path}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            if strict:
+                raise RuntimeError(
+                    f"xmodel1 strict cache scan failed on {path}: {exc}"
+                ) from exc
             continue
-    raise FileNotFoundError("no readable Xmodel1 v2 cache files were found")
+    if skipped_errors:
+        raise FileNotFoundError(
+            "no readable Xmodel1 v3 cache files were found; skipped errors: "
+            + " | ".join(skipped_errors)
+        )
+    raise FileNotFoundError("no readable Xmodel1 v3 cache files were found")
 
 
 class Xmodel1DiscardDataset(IterableDataset):
@@ -268,22 +286,19 @@ class Xmodel1DiscardDataset(IterableDataset):
             sample_type = data["sample_type"]
             action_idx_target = data["action_idx_target"]
             candidate_quality_score = data["candidate_quality_score"]
-            candidate_rank_bucket = data["candidate_rank_bucket"]
             candidate_hard_bad_flag = data["candidate_hard_bad_flag"]
             special_candidate_feat = data["special_candidate_feat"]
             special_candidate_type_id = data["special_candidate_type_id"]
             special_candidate_mask = data["special_candidate_mask"]
             special_candidate_quality_score = data["special_candidate_quality_score"]
-            special_candidate_rank_bucket = data["special_candidate_rank_bucket"]
             special_candidate_hard_bad_flag = data["special_candidate_hard_bad_flag"]
             chosen_special_candidate_idx = data["chosen_special_candidate_idx"]
-            score_delta_target = data["score_delta_target"]
             win_target = data["win_target"]
             dealin_target = data["dealin_target"]
             pts_given_win_target = data["pts_given_win_target"]
             pts_given_dealin_target = data["pts_given_dealin_target"]
             opp_tenpai_target = data["opp_tenpai_target"]
-            event_history = data["event_history"]
+            history_summary = data["history_summary"]
             event_index = data["event_index"]
             replay_id = data["replay_id"] if "replay_id" in data else None
             sample_id = data["sample_id"] if "sample_id" in data else None
@@ -306,22 +321,19 @@ class Xmodel1DiscardDataset(IterableDataset):
                     int(sample_type[i]),
                     int(action_idx_target[i]),
                     candidate_quality_score[i],
-                    candidate_rank_bucket[i],
                     candidate_hard_bad_flag[i],
                     special_candidate_feat[i],
                     special_candidate_type_id[i],
                     special_candidate_mask[i],
                     special_candidate_quality_score[i],
-                    special_candidate_rank_bucket[i],
                     special_candidate_hard_bad_flag[i],
                     int(chosen_special_candidate_idx[i]),
-                    np.float32(score_delta_target[i]),
                     np.float32(win_target[i]),
                     np.float32(dealin_target[i]),
                     np.float32(pts_given_win_target[i]),
                     np.float32(pts_given_dealin_target[i]),
                     np.asarray(opp_tenpai_target[i], dtype=np.float32).reshape(3),
-                    np.asarray(event_history[i], dtype=np.int16).reshape(EVENT_HISTORY_LEN, EVENT_HISTORY_FEATURE_DIM),
+                    np.asarray(history_summary[i], dtype=np.float16).reshape(XMODEL1_HISTORY_SUMMARY_DIM),
                     replay_id_value,
                     sample_id_value,
                 )
@@ -365,22 +377,19 @@ class Xmodel1DiscardDataset(IterableDataset):
             sample_type,
             action_idx_target,
             candidate_quality_score,
-            candidate_rank_bucket,
             candidate_hard_bad_flag,
             special_candidate_feat,
             special_candidate_type_id,
             special_candidate_mask,
             special_candidate_quality_score,
-            special_candidate_rank_bucket,
             special_candidate_hard_bad_flag,
             chosen_special_candidate_idx,
-            score_delta_target,
             win_target,
             dealin_target,
             pts_given_win_target,
             pts_given_dealin_target,
             opp_tenpai_target,
-            event_history,
+            history_summary,
             replay_id,
             sample_id,
         ) = zip(*batch)
@@ -395,22 +404,19 @@ class Xmodel1DiscardDataset(IterableDataset):
             "sample_type": torch.tensor(sample_type, dtype=torch.long),
             "action_idx_target": torch.tensor(action_idx_target, dtype=torch.long),
             "candidate_quality_score": torch.from_numpy(np.stack(candidate_quality_score)).float(),
-            "candidate_rank_bucket": torch.from_numpy(np.stack(candidate_rank_bucket)).long(),
             "candidate_hard_bad_flag": torch.from_numpy(np.stack(candidate_hard_bad_flag)).float(),
             "special_candidate_feat": torch.from_numpy(np.stack(special_candidate_feat)),
             "special_candidate_type_id": torch.from_numpy(np.stack(special_candidate_type_id)).long(),
             "special_candidate_mask": torch.from_numpy(np.stack(special_candidate_mask)),
             "special_candidate_quality_score": torch.from_numpy(np.stack(special_candidate_quality_score)).float(),
-            "special_candidate_rank_bucket": torch.from_numpy(np.stack(special_candidate_rank_bucket)).long(),
             "special_candidate_hard_bad_flag": torch.from_numpy(np.stack(special_candidate_hard_bad_flag)).float(),
             "chosen_special_candidate_idx": torch.tensor(chosen_special_candidate_idx, dtype=torch.long),
-            "score_delta_target": torch.tensor(score_delta_target, dtype=torch.float32),
             "win_target": torch.tensor(win_target, dtype=torch.float32),
             "dealin_target": torch.tensor(dealin_target, dtype=torch.float32),
             "pts_given_win_target": torch.tensor(pts_given_win_target, dtype=torch.float32),
             "pts_given_dealin_target": torch.tensor(pts_given_dealin_target, dtype=torch.float32),
             "opp_tenpai_target": torch.from_numpy(np.stack(opp_tenpai_target)).float(),
-            "event_history": torch.from_numpy(np.stack(event_history)).long(),
+            "history_summary": torch.from_numpy(np.stack(history_summary)).float(),
             "replay_id": list(replay_id),
             "sample_id": list(sample_id),
         }
@@ -418,12 +424,7 @@ class Xmodel1DiscardDataset(IterableDataset):
 
 __all__ = [
     "DEFAULT_BUFFER_SIZE",
-    "EVENT_HISTORY_FEATURE_DIM",
-    "EVENT_HISTORY_LEN",
-    "EVENT_NO_ACTOR",
-    "EVENT_NO_TILE",
-    "EVENT_TYPE_PAD",
-    "_empty_event_history",
+    "_empty_history_summary",
     "Xmodel1DiscardDataset",
     "discover_cached_files",
     "find_export_manifests",

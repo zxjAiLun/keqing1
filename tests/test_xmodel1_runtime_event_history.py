@@ -10,10 +10,15 @@ import types
 import keqing_core
 from inference.default_context import DefaultDecisionContextBuilder
 from inference.keqing_adapter import KeqingModelAdapter
-from mahjong_env.event_history import EVENT_TYPE_DAHAI, EVENT_TYPE_TSUMO, compute_event_history as shared_compute_event_history
+from mahjong_env.history_summary import compute_history_summary as shared_compute_history_summary
 from mahjong_env.replay import build_replay_samples_mc_return
 from mahjong_env.state import GameState
-from xmodel1.features import compute_event_history as xmodel1_compute_event_history
+from training.cache_schema import (
+    XMODEL1_CANDIDATE_FEATURE_DIM,
+    XMODEL1_CANDIDATE_FLAG_DIM,
+    XMODEL1_HISTORY_SUMMARY_DIM,
+)
+from xmodel1.features import compute_history_summary as xmodel1_compute_history_summary
 from xmodel1.model import Xmodel1Model
 
 
@@ -64,7 +69,7 @@ def _minimal_snapshot(actor: int) -> dict:
     }
 
 
-def test_default_context_builder_injects_training_aligned_xmodel1_event_history():
+def test_default_context_builder_injects_training_aligned_xmodel1_history_summary():
     builder = DefaultDecisionContextBuilder(
         model_version="xmodel1",
         riichi_state=None,
@@ -97,13 +102,12 @@ def test_default_context_builder_injects_training_aligned_xmodel1_event_history(
     assert builder.build(state, 0, events[2]) is None
     ctx = builder.build(state, 0, events[3])
     assert ctx is not None
-    event_history = ctx.model_snap["event_history"]
-    non_pad = event_history[event_history[:, 1] != 0]
-    assert non_pad.shape[0] == 1
-    assert int(non_pad[-1, 1]) == EVENT_TYPE_TSUMO
-    assert not np.any(
-        (event_history[:, 1] == EVENT_TYPE_DAHAI) & (event_history[:, 2] == 5)
-    ), "current discard event should be excluded from xmodel1 runtime history"
+    history_summary = ctx.model_snap["history_summary"]
+    assert history_summary.shape == (XMODEL1_HISTORY_SUMMARY_DIM,)
+    assert np.array_equal(
+        history_summary,
+        shared_compute_history_summary(events, 3, 0),
+    )
 
 
 def test_default_context_builder_prefers_rust_replay_snapshot(monkeypatch):
@@ -248,7 +252,7 @@ def test_default_context_builder_propagates_unexpected_rust_snapshot_errors(monk
         builder.build(state, 0, events[3])
 
 
-def test_xmodel1_features_event_history_reuses_shared_owner():
+def test_xmodel1_features_history_summary_reuses_shared_owner():
     events = [
         {"type": "start_game", "names": ["A", "B", "C", "D"]},
         {
@@ -265,8 +269,8 @@ def test_xmodel1_features_event_history_reuses_shared_owner():
         {"type": "foo", "actor": 1, "pai": "1m"},
     ]
     assert np.array_equal(
-        xmodel1_compute_event_history(events, len(events)),
-        shared_compute_event_history(events, len(events)),
+        xmodel1_compute_history_summary(events, len(events), 0),
+        shared_compute_history_summary(events, len(events), 0),
     )
 
 
@@ -299,13 +303,13 @@ def _sample_discard_state():
     return snap, sample.actor
 
 
-def test_keqing_adapter_xmodel1_forward_passes_event_history(tmp_path: Path, monkeypatch):
+def test_keqing_adapter_xmodel1_forward_passes_history_summary(tmp_path: Path, monkeypatch):
     ckpt = tmp_path / "xmodel1_test.pth"
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=56,
-        candidate_feature_dim=35,
-        candidate_flag_dim=10,
+        candidate_feature_dim=XMODEL1_CANDIDATE_FEATURE_DIM,
+        candidate_flag_dim=XMODEL1_CANDIDATE_FLAG_DIM,
         hidden_dim=32,
         num_res_blocks=1,
     )
@@ -316,31 +320,35 @@ def test_keqing_adapter_xmodel1_forward_passes_event_history(tmp_path: Path, mon
                 "model_name": "xmodel1",
                 "state_tile_channels": 57,
                 "state_scalar_dim": 56,
-                "candidate_feature_dim": 35,
-                "candidate_flag_dim": 10,
+                "candidate_feature_dim": XMODEL1_CANDIDATE_FEATURE_DIM,
+                "candidate_flag_dim": XMODEL1_CANDIDATE_FLAG_DIM,
+                "schema_name": "xmodel1_discard_v3",
+                "schema_version": 3,
                 "hidden_dim": 32,
                 "num_res_blocks": 1,
             },
             "model_version": "xmodel1",
+            "schema_name": "xmodel1_discard_v3",
+            "schema_version": 3,
         },
         ckpt,
     )
     snap, actor = _sample_discard_state()
-    event_history = np.zeros((48, 5), dtype=np.int16)
-    event_history[-1] = np.array([0, EVENT_TYPE_TSUMO, 12, 0, 0], dtype=np.int16)
-    snap["event_history"] = event_history
+    history_summary = np.zeros((XMODEL1_HISTORY_SUMMARY_DIM,), dtype=np.float16)
+    history_summary[-1] = 1.0
+    snap["history_summary"] = history_summary
     adapter = KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
     captured: dict[str, torch.Tensor | None] = {}
     original_forward = adapter.model.forward
 
     def _wrapped_forward(*args, **kwargs):
-        captured["event_history"] = kwargs.get("event_history")
+        captured["history_summary"] = kwargs.get("history_summary")
         return original_forward(*args, **kwargs)
 
     monkeypatch.setattr(adapter.model, "forward", _wrapped_forward)
     result = adapter.forward(snap, actor)
 
     assert result.policy_logits.shape == (45,)
-    assert captured["event_history"] is not None
-    assert captured["event_history"].shape == (1, 48, 5)
-    assert captured["event_history"][0, -1].tolist() == [0, EVENT_TYPE_TSUMO, 12, 0, 0]
+    assert captured["history_summary"] is not None
+    assert captured["history_summary"].shape == (1, XMODEL1_HISTORY_SUMMARY_DIM)
+    assert captured["history_summary"][0, -1].item() == 1.0
