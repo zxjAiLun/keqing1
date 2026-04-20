@@ -82,7 +82,9 @@ def main() -> None:
             }
             actor = int(entry.get("actor_to_move", 0))
             try:
-                _discard_summary, _call_summary, special_summary = build_typed_action_summaries(state, actor, legal_actions)
+                _discard_summary, _call_summary, special_summary, _opportunity = build_typed_action_summaries(
+                    state, actor, legal_actions
+                )
             except Exception:
                 continue
 

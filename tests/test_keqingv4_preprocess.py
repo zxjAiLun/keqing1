@@ -32,7 +32,7 @@ from keqingv4.preprocess_features import (
 )
 from mahjong_env.replay import _calc_normal_progress as _replay_calc_normal_progress
 from training.preprocess import KeqingV4PreprocessAdapter, events_to_cached_arrays
-from training.cache_schema import KEQINGV4_SUMMARY_DIM
+from training.cache_schema import KEQINGV4_OPPORTUNITY_DIM, KEQINGV4_SUMMARY_DIM
 
 
 def test_build_typed_action_summaries_smoke():
@@ -55,7 +55,7 @@ def test_build_typed_action_summaries_smoke():
         {"type": "dahai", "actor": 0, "pai": "1p", "tsumogiri": False},
         {"type": "reach", "actor": 0},
     ]
-    discard_summary, call_summary, special_summary = build_typed_action_summaries(
+    discard_summary, call_summary, special_summary, opportunity = build_typed_action_summaries(
         discard_state,
         0,
         discard_legal,
@@ -63,6 +63,8 @@ def test_build_typed_action_summaries_smoke():
     assert discard_summary.shape == (34, KEQINGV4_SUMMARY_DIM)
     assert call_summary.shape == (8, KEQINGV4_SUMMARY_DIM)
     assert special_summary.shape == (3, KEQINGV4_SUMMARY_DIM)
+    assert opportunity.shape == (KEQINGV4_OPPORTUNITY_DIM,)
+    assert opportunity.tolist() == [1, 0, 0]
     assert float(discard_summary[12].sum()) > 0.0
     assert float(special_summary[0].sum()) > 0.0
 
@@ -84,9 +86,10 @@ def test_build_typed_action_summaries_smoke():
         {"type": "chi", "actor": 1, "pai": "3m", "consumed": ["2m", "4m"], "target": 0},
         {"type": "none"},
     ]
-    _, call_summary, _ = build_typed_action_summaries(call_state, 1, call_legal)
+    _, call_summary, _, opportunity = build_typed_action_summaries(call_state, 1, call_legal)
     assert float(call_summary[:3].sum()) > 0.0
     assert float(call_summary[7].sum()) > 0.0
+    assert opportunity.tolist() == [0, 0, 1]
 
 
 def test_build_typed_action_summaries_falls_back_only_for_missing_rust_capability(monkeypatch):
@@ -117,13 +120,14 @@ def test_build_typed_action_summaries_falls_back_only_for_missing_rust_capabilit
         ),
     )
 
-    discard_summary, call_summary, special_summary = build_typed_action_summaries(state, 0, legal)
+    discard_summary, call_summary, special_summary, opportunity = build_typed_action_summaries(state, 0, legal)
 
     assert discard_summary.shape == (34, KEQINGV4_SUMMARY_DIM)
     assert call_summary.shape == (8, KEQINGV4_SUMMARY_DIM)
     assert special_summary.shape == (3, KEQINGV4_SUMMARY_DIM)
     assert float(discard_summary[12].sum()) > 0.0
     assert float(special_summary[0].sum()) > 0.0
+    assert opportunity.tolist() == [1, 0, 0]
 
 
 def test_build_typed_action_summaries_propagates_unexpected_rust_bridge_errors(monkeypatch):
@@ -153,6 +157,31 @@ def test_build_typed_action_summaries_propagates_unexpected_rust_bridge_errors(m
 
     with pytest.raises(RuntimeError, match="typed summary bridge drift"):
         build_typed_action_summaries(state, 0, legal)
+
+
+def test_build_typed_action_summaries_emits_explicit_opportunity_contract():
+    state = {
+        "hand": ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+        "tsumo_pai": "4p",
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "dora_markers": ["1m"],
+        "reached": [False, False, False, False],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "kyoku": 1,
+        "honba": 0,
+        "kyotaku": 0,
+        "oya": 0,
+    }
+    legal = [
+        {"type": "reach", "actor": 0},
+        {"type": "hora", "actor": 0, "pai": "4p"},
+        {"type": "none"},
+    ]
+    _discard, _call, _special, opportunity = build_typed_action_summaries(state, 0, legal)
+    assert opportunity.shape == (KEQINGV4_OPPORTUNITY_DIM,)
+    assert opportunity.tolist() == [1, 1, 1]
 
 
 def test_call_none_summary_matches_current_vector():
@@ -821,11 +850,14 @@ def test_keqingv4_events_to_arrays_and_cached_dataset_smoke(tmp_path: Path):
     assert "pts_given_dealin_target" in arrays
     assert "opp_tenpai_target" in arrays
     assert "event_history" in arrays
+    assert "v4_opportunity" in arrays
     assert arrays["v4_discard_summary"].shape[1:] == (34, KEQINGV4_SUMMARY_DIM)
     assert arrays["v4_call_summary"].shape[1:] == (8, KEQINGV4_SUMMARY_DIM)
     assert arrays["v4_special_summary"].shape[1:] == (3, KEQINGV4_SUMMARY_DIM)
     assert arrays["opp_tenpai_target"].shape[1:] == (3,)
     assert arrays["event_history"].shape[1:] == (48, 5)
+    assert arrays["v4_opportunity"].shape[1:] == (KEQINGV4_OPPORTUNITY_DIM,)
+    assert np.any(arrays["event_history"][0, :, 1] != 0)
 
     cache_path = tmp_path / "sample.npz"
     np.savez(cache_path, **{k: v for k, v in arrays.items() if not k.startswith("_")})
@@ -835,9 +867,10 @@ def test_keqingv4_events_to_arrays_and_cached_dataset_smoke(tmp_path: Path):
     assert sample[9].shape == ()
     assert sample[10].shape == (3,)
     assert sample[14].shape == (48, 5)
-    assert sample[16].shape == (34, KEQINGV4_SUMMARY_DIM)
-    assert sample[17].shape == (8, KEQINGV4_SUMMARY_DIM)
-    assert sample[18].shape == (3, KEQINGV4_SUMMARY_DIM)
+    assert sample[16].shape == (KEQINGV4_OPPORTUNITY_DIM,)
+    assert sample[17].shape == (34, KEQINGV4_SUMMARY_DIM)
+    assert sample[18].shape == (8, KEQINGV4_SUMMARY_DIM)
+    assert sample[19].shape == (3, KEQINGV4_SUMMARY_DIM)
 
 
 def test_keqingv4_cached_dataset_fails_fast_on_contract_mismatch(tmp_path: Path):
@@ -856,6 +889,7 @@ def test_keqingv4_cached_dataset_fails_fast_on_contract_mismatch(tmp_path: Path)
         pts_given_dealin_target=np.zeros((1,), dtype=np.float32),
         opp_tenpai_target=np.zeros((1, 3), dtype=np.float32),
         event_history=np.zeros((1, 48, 5), dtype=np.int16),
+        v4_opportunity=np.zeros((1, KEQINGV4_OPPORTUNITY_DIM), dtype=np.uint8),
         v4_discard_summary=np.zeros((1, 34, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
         v4_call_summary=np.zeros((1, 7, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
         v4_special_summary=np.zeros((1, 3, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
@@ -880,7 +914,7 @@ def test_call_summary_uses_best_post_meld_discard_projection():
         "oya": 0,
     }
     chi_action = {"type": "chi", "actor": 1, "pai": "3m", "consumed": ["1m", "2m"], "target": 0}
-    _, call_summary, _ = build_typed_action_summaries(state, 1, [chi_action, {"type": "none"}])
+    _, call_summary, _, _opportunity = build_typed_action_summaries(state, 1, [chi_action, {"type": "none"}])
 
     projected_hand, projected_melds, projected_open_hand, needs_rinshan = _project_call_state(state, 1, chi_action) or (None, None, None, None)
     assert projected_hand is not None
@@ -1190,7 +1224,7 @@ def test_ankan_summary_uses_rinshan_projection_and_stays_closed():
         "oya": 0,
     }
     ankan_action = {"type": "ankan", "actor": 0, "pai": "1m", "consumed": ["1m", "1m", "1m", "1m"]}
-    _, call_summary, _ = build_typed_action_summaries(state, 0, [ankan_action])
+    _, call_summary, _, _opportunity = build_typed_action_summaries(state, 0, [ankan_action])
 
     projected_hand, projected_melds, projected_open_hand, needs_rinshan = _project_call_state(state, 0, ankan_action) or (None, None, None, None)
     assert projected_hand is not None
@@ -1267,7 +1301,7 @@ def test_reach_special_summary_uses_best_declaration_discard(monkeypatch):
     )
     monkeypatch.setattr(v4_pf, "_reach_discard_candidates", lambda hand, last_tsumo, last_tsumo_raw: [("1p", False), ("5s", True)])
 
-    _discard_summary, _call_summary, special_summary = build_typed_action_summaries(
+    _discard_summary, _call_summary, special_summary, _opportunity = build_typed_action_summaries(
         state,
         0,
         [{"type": "reach", "actor": 0}],
@@ -1383,7 +1417,7 @@ def test_hora_special_summary_encodes_terminal_win_semantics():
         "oya": 0,
         "_hora_is_rinshan": True,
     }
-    _discard_summary, _call_summary, special_summary = build_typed_action_summaries(
+    _discard_summary, _call_summary, special_summary, _opportunity = build_typed_action_summaries(
         state,
         0,
         [{"type": "hora", "actor": 0, "target": 0, "pai": "P", "is_rinshan": True}],
@@ -1414,7 +1448,7 @@ def test_ryukyoku_special_summary_encodes_kyuushu_kyuuhai_shape():
         "kyotaku": 0,
         "oya": 0,
     }
-    _discard_summary, _call_summary, special_summary = build_typed_action_summaries(
+    _discard_summary, _call_summary, special_summary, _opportunity = build_typed_action_summaries(
         state,
         0,
         [{"type": "ryukyoku"}],

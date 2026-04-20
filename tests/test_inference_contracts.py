@@ -5,6 +5,7 @@ from keqing_core import (
     aggregate_keqingv4_continuation_scores,
     score_keqingv4_continuation_scenario,
 )
+from inference.default_context import DefaultDecisionContextBuilder
 from training.cache_schema import KEQINGV4_SUMMARY_DIM
 from inference import (
     DecisionContext,
@@ -23,6 +24,15 @@ from inference import (
     Xmodel1RuntimeOutputs,
 )
 from mahjong_env.action_space import action_to_idx
+from mahjong_env.event_history import compute_event_history
+from mahjong_env.state import GameState
+
+
+def _inject_shanten_waits_stub(snap, *, hand_list, melds_list, model_version):
+    del hand_list, melds_list, model_version
+    snap["shanten"] = 1
+    snap["waits_count"] = 0
+    snap["waits_tiles"] = [0] * 34
 
 
 def test_inference_contract_dataclasses_roundtrip():
@@ -67,6 +77,44 @@ def test_inference_contract_dataclasses_roundtrip():
     assert result.candidates[0].final_score == 0.5
     assert result.model_aux.win_prob == 0.4
     assert forward.xmodel1 is not None
+
+
+def test_default_context_builder_injects_keqingv4_event_history():
+    builder = DefaultDecisionContextBuilder(
+        model_version="keqingv4",
+        riichi_state=None,
+        inject_shanten_waits=_inject_shanten_waits_stub,
+    )
+    state = GameState()
+    events = [
+        {"type": "start_game", "names": ["A", "B", "C", "D"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4p"],
+                ["1s"] * 13,
+                ["2s"] * 13,
+                ["3s"] * 13,
+            ],
+        },
+        {"type": "tsumo", "actor": 1, "pai": "6m"},
+        {"type": "dahai", "actor": 1, "pai": "6m", "tsumogiri": True},
+    ]
+    assert builder.build(state, 0, events[0]) is None
+    assert builder.build(state, 0, events[1]) is None
+    assert builder.build(state, 0, events[2]) is None
+    ctx = builder.build(state, 0, events[3])
+    assert ctx is not None
+    expected = compute_event_history(events, 3)
+    assert np.array_equal(ctx.runtime_snap["event_history"], expected)
+    assert np.array_equal(ctx.model_snap["event_history"], expected)
 
 
 class _FakeAdapter:

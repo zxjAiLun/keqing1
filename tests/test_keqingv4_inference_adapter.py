@@ -7,7 +7,9 @@ import pytest
 import torch
 
 from inference.keqing_adapter import KeqingModelAdapter
+from keqingv4.checkpoint import build_keqingv4_checkpoint_metadata
 from mahjong_env.replay import build_replay_samples_mc_return
+from mahjong_env.event_history import compute_event_history
 from keqingv4.model import KeqingV4Model
 from training.cache_schema import KEQINGV4_SUMMARY_DIM
 
@@ -38,7 +40,28 @@ def _sample_discard_state():
     sample = next(s for s in samples if s.label_action.get("type") == "dahai")
     snap = dict(sample.state)
     snap["legal_actions"] = sample.legal_actions
+    snap["event_history"] = compute_event_history(sample.events or [], int(sample.event_index))
     return snap, sample.actor
+
+
+def _write_keqingv4_checkpoint(path: Path, model: KeqingV4Model, *, metadata: bool = True) -> None:
+    cfg = {
+        "model_name": "keqingv4",
+        "hidden_dim": 64,
+        "num_res_blocks": 2,
+        "action_embed_dim": 16,
+        "context_dim": 12,
+        "dropout": 0.0,
+    }
+    payload = {
+        "model": model.state_dict(),
+        "cfg": cfg,
+    }
+    if metadata:
+        payload.update(build_keqingv4_checkpoint_metadata(cfg=cfg, model=model))
+    else:
+        payload["model_version"] = "keqingv4"
+    torch.save(payload, path)
 
 
 def test_keqingv4_keqing_adapter_forward_with_checkpoint(tmp_path: Path):
@@ -50,21 +73,7 @@ def test_keqingv4_keqing_adapter_forward_with_checkpoint(tmp_path: Path):
         context_dim=12,
         dropout=0.0,
     )
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "cfg": {
-                "model_name": "keqingv4",
-                "hidden_dim": 64,
-                "num_res_blocks": 2,
-                "action_embed_dim": 16,
-                "context_dim": 12,
-                "dropout": 0.0,
-            },
-            "model_version": "keqingv4",
-        },
-        ckpt,
-    )
+    _write_keqingv4_checkpoint(ckpt, model)
     snap, actor = _sample_discard_state()
     adapter = KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
     result = adapter.forward(snap, actor)
@@ -81,21 +90,7 @@ def test_keqingv4_keqing_adapter_reuses_runtime_summary_cache(tmp_path: Path):
         context_dim=12,
         dropout=0.0,
     )
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "cfg": {
-                "model_name": "keqingv4",
-                "hidden_dim": 64,
-                "num_res_blocks": 2,
-                "action_embed_dim": 16,
-                "context_dim": 12,
-                "dropout": 0.0,
-            },
-            "model_version": "keqingv4",
-        },
-        ckpt,
-    )
+    _write_keqingv4_checkpoint(ckpt, model)
     snap, actor = _sample_discard_state()
     adapter = KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
 
@@ -125,21 +120,7 @@ def test_keqingv4_keqing_adapter_prefers_core_typed_summary_bridge(tmp_path: Pat
         context_dim=12,
         dropout=0.0,
     )
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "cfg": {
-                "model_name": "keqingv4",
-                "hidden_dim": 64,
-                "num_res_blocks": 2,
-                "action_embed_dim": 16,
-                "context_dim": 12,
-                "dropout": 0.0,
-            },
-            "model_version": "keqingv4",
-        },
-        ckpt,
-    )
+    _write_keqingv4_checkpoint(ckpt, model)
     snap, actor = _sample_discard_state()
 
     import keqing_core
@@ -178,21 +159,7 @@ def test_keqingv4_keqing_adapter_falls_back_only_for_missing_core_capability(tmp
         context_dim=12,
         dropout=0.0,
     )
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "cfg": {
-                "model_name": "keqingv4",
-                "hidden_dim": 64,
-                "num_res_blocks": 2,
-                "action_embed_dim": 16,
-                "context_dim": 12,
-                "dropout": 0.0,
-            },
-            "model_version": "keqingv4",
-        },
-        ckpt,
-    )
+    _write_keqingv4_checkpoint(ckpt, model)
     snap, actor = _sample_discard_state()
 
     import keqing_core
@@ -231,21 +198,7 @@ def test_keqingv4_keqing_adapter_propagates_core_bridge_errors(tmp_path: Path, m
         context_dim=12,
         dropout=0.0,
     )
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "cfg": {
-                "model_name": "keqingv4",
-                "hidden_dim": 64,
-                "num_res_blocks": 2,
-                "action_embed_dim": 16,
-                "context_dim": 12,
-                "dropout": 0.0,
-            },
-            "model_version": "keqingv4",
-        },
-        ckpt,
-    )
+    _write_keqingv4_checkpoint(ckpt, model)
     snap, actor = _sample_discard_state()
 
     import keqing_core
@@ -276,21 +229,7 @@ def test_keqingv4_keqing_adapter_rejects_core_typed_summary_shape_drift(tmp_path
         context_dim=12,
         dropout=0.0,
     )
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "cfg": {
-                "model_name": "keqingv4",
-                "hidden_dim": 64,
-                "num_res_blocks": 2,
-                "action_embed_dim": 16,
-                "context_dim": 12,
-                "dropout": 0.0,
-            },
-            "model_version": "keqingv4",
-        },
-        ckpt,
-    )
+    _write_keqingv4_checkpoint(ckpt, model)
     snap, actor = _sample_discard_state()
 
     import keqing_core
@@ -314,3 +253,68 @@ def test_keqingv4_keqing_adapter_rejects_core_typed_summary_shape_drift(tmp_path
     adapter = KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
     with pytest.raises(RuntimeError, match="keqingv4 discard summary contract drift"):
         adapter.forward(snap, actor)
+
+
+def test_keqingv4_keqing_adapter_rejects_missing_runtime_event_history(tmp_path: Path):
+    ckpt = tmp_path / "keqingv4_missing_history.pth"
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
+    _write_keqingv4_checkpoint(ckpt, model)
+    snap, actor = _sample_discard_state()
+    snap.pop("event_history", None)
+    adapter = KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
+    with pytest.raises(RuntimeError, match="missing event_history"):
+        adapter.forward(snap, actor)
+
+
+def test_keqingv4_keqing_adapter_rejects_runtime_event_history_shape_drift(tmp_path: Path):
+    ckpt = tmp_path / "keqingv4_bad_history_shape.pth"
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
+    _write_keqingv4_checkpoint(ckpt, model)
+    snap, actor = _sample_discard_state()
+    snap["event_history"] = np.zeros((47, 5), dtype=np.int16)
+    adapter = KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
+    with pytest.raises(RuntimeError, match="event_history contract drift"):
+        adapter.forward(snap, actor)
+
+
+def test_keqingv4_keqing_adapter_rejects_checkpoint_without_metadata(tmp_path: Path):
+    ckpt = tmp_path / "keqingv4_legacy_no_metadata.pth"
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
+    _write_keqingv4_checkpoint(ckpt, model, metadata=False)
+    with pytest.raises(RuntimeError, match="missing required keqingv4 checkpoint metadata"):
+        KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
+
+
+def test_keqingv4_keqing_adapter_rejects_checkpoint_metadata_drift(tmp_path: Path):
+    ckpt = tmp_path / "keqingv4_metadata_drift.pth"
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
+    _write_keqingv4_checkpoint(ckpt, model)
+    payload = torch.load(ckpt, map_location="cpu", weights_only=False)
+    payload["event_history_dim"] = 6
+    torch.save(payload, ckpt)
+    with pytest.raises(RuntimeError, match="event_history_dim metadata drifted"):
+        KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))

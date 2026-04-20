@@ -78,7 +78,7 @@ Context brief:
 Primary write scope:
 
 - `docs/project_progress.md`
-- `docs/todo_2026_04_20.md`
+- `docs/todo_2026_04_21.md`
 - focused tests under `tests/`
 
 Tasks:
@@ -106,6 +106,14 @@ Rollback:
 - Docs/tests only; revert the new guardrail notes and targeted tests.
 
 ### S1. keqingv4 Fail-Closed Cleanup
+
+Status note (`2026-04-21`):
+
+- This slice has landed on the current `keqingv4` backup line:
+  - runtime `event_history` is explicit and fail-closed
+  - `v4_opportunity` replaced summary magic-channel reads
+  - keqingv4 checkpoints now require metadata validation and `strict=True` load for inference and resume
+- Treat S1 as complete unless a new drift is discovered. The next remaining shared-core step is `S2`.
 
 Context brief:
 
@@ -379,7 +387,7 @@ Tasks:
 Verification:
 
 ```bash
-rg -n "xmodel1|keqingv4|Rust" docs/project_progress.md docs/agent_sync.md docs/todo_2026_04_20.md
+rg -n "xmodel1|keqingv4|Rust" docs/project_progress.md docs/agent_sync.md docs/todo_2026_04_21.md
 ```
 
 Exit criteria:

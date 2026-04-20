@@ -381,6 +381,9 @@ class ReplaySample:
     # 触发该监督样本的原始 replay 事件索引。xmodel1 preprocess 构造 event_history
     # 时必须使用真实事件位置，而不是样本序号。
     event_index: int = 0
+    # 规范化后的原始事件序,供 parity / smoke preprocess 构造与生产一致的
+    # event_history。
+    events: Optional[List[MjaiEvent]] = None
 
 
 class IllegalLabelActionError(ValueError):
@@ -496,6 +499,7 @@ def build_replay_samples_mc_return(
                 ryukyoku_tenpai_target=float(record.get("ryukyoku_tenpai_target", 0.0)),
                 opp_tenpai_target=tuple(float(v) for v in record.get("opp_tenpai_target", (0.0, 0.0, 0.0))),
                 event_index=int(record.get("event_index", 0)),
+                events=events,
             )
         )
     return samples
@@ -521,5 +525,4 @@ def extract_actor_names(events: Sequence[MjaiEvent]) -> List[str]:
         ):
             return [str(x) for x in e["names"]]
     return ["p0", "p1", "p2", "p3"]
-
 

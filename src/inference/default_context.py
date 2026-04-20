@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 import keqing_core
 
+from mahjong_env.event_history import compute_event_history
 from mahjong_env.history_summary import compute_history_summary
 from mahjong_env.replay_normalizer import normalize_replay_events
 from mahjong_env.legal_actions import enumerate_legal_actions
@@ -148,6 +149,14 @@ class DefaultDecisionContextBuilder:
             )
             runtime_snap["history_summary"] = history_summary.copy()
             model_snap["history_summary"] = history_summary.copy()
+        elif self.model_version == "keqingv4":
+            normalized_history = normalize_replay_events(self._event_log)
+            event_history = compute_event_history(
+                normalized_history,
+                len(normalized_history) - 1,
+            )
+            runtime_snap["event_history"] = event_history.copy()
+            model_snap["event_history"] = event_history.copy()
 
         return DecisionContext(
             actor=actor,

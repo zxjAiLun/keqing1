@@ -25,10 +25,11 @@ use crate::xmodel1_export::{
 };
 
 const KEQINGV4_SCHEMA_NAME: &str = "keqingv4_cached_v1";
-const KEQINGV4_SCHEMA_VERSION: u32 = 5;
+const KEQINGV4_SCHEMA_VERSION: u32 = 6;
 const KEQINGV4_SUMMARY_DIM: usize = 28;
 const KEQINGV4_CALL_SUMMARY_SLOTS: usize = 8;
 const KEQINGV4_SPECIAL_SUMMARY_SLOTS: usize = 3;
+const KEQINGV4_OPPORTUNITY_DIM: usize = 3;
 
 const STATE_TILE_CHANNELS: usize = 57;
 const STATE_SCALAR_DIM: usize = 56;
@@ -49,6 +50,7 @@ struct ExportManifest<'a> {
     summary_dim: usize,
     call_summary_slots: usize,
     special_summary_slots: usize,
+    opportunity_dim: usize,
     file_count: usize,
     exported_file_count: usize,
     processed_file_count: usize,
@@ -88,6 +90,7 @@ struct KeqingV4Record {
     pts_given_dealin_target: f32,
     opp_tenpai_target: [f32; 3],
     event_history: [[i16; replay_core::EVENT_HISTORY_FEATURE_DIM]; replay_core::EVENT_HISTORY_LEN],
+    v4_opportunity: [u8; KEQINGV4_OPPORTUNITY_DIM],
     discard_summary: Vec<u16>,
     call_summary: Vec<u16>,
     special_summary: Vec<u16>,
@@ -111,6 +114,23 @@ fn build_legal_mask(legal_actions: &[Value]) -> Vec<u8> {
 
 fn f16_bits_vec(values: &[f32]) -> Vec<u16> {
     values.iter().map(|v| f16::from_f32(*v).to_bits()).collect()
+}
+
+fn build_v4_opportunity(legal_actions: &[Value]) -> [u8; KEQINGV4_OPPORTUNITY_DIM] {
+    let mut out = [0u8; KEQINGV4_OPPORTUNITY_DIM];
+    for action in legal_actions {
+        let action_type = action
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match action_type {
+            "reach" => out[0] = 1,
+            "hora" => out[1] = 1,
+            "chi" | "pon" | "daiminkan" | "ankan" | "kakan" | "none" => out[2] = 1,
+            _ => {}
+        }
+    }
+    out
 }
 
 fn encode_record(
@@ -146,6 +166,7 @@ fn encode_record(
     let discard_summary = build_keqingv4_discard_summary(&snapshot_json, actor, legal_actions);
     let call_summary = build_keqingv4_call_summary(&snapshot_json, actor, legal_actions);
     let special_summary = build_keqingv4_special_summary(&snapshot_json, actor, legal_actions);
+    let v4_opportunity = build_v4_opportunity(legal_actions);
 
     Ok(KeqingV4Record {
         tile_feat,
@@ -160,6 +181,7 @@ fn encode_record(
         pts_given_dealin_target: 0.0,
         opp_tenpai_target,
         event_history,
+        v4_opportunity,
         discard_summary: f16_bits_vec(&discard_summary),
         call_summary: f16_bits_vec(&call_summary),
         special_summary: f16_bits_vec(&special_summary),
@@ -247,6 +269,7 @@ fn write_npz(path: &Path, records: &[KeqingV4Record]) -> Result<(), String> {
     let mut event_history = Vec::with_capacity(
         n * replay_core::EVENT_HISTORY_LEN * replay_core::EVENT_HISTORY_FEATURE_DIM,
     );
+    let mut v4_opportunity = Vec::with_capacity(n * KEQINGV4_OPPORTUNITY_DIM);
     let mut discard_summary = Vec::with_capacity(n * 34 * KEQINGV4_SUMMARY_DIM);
     let mut call_summary =
         Vec::with_capacity(n * KEQINGV4_CALL_SUMMARY_SLOTS * KEQINGV4_SUMMARY_DIM);
@@ -268,6 +291,7 @@ fn write_npz(path: &Path, records: &[KeqingV4Record]) -> Result<(), String> {
         for row in record.event_history.iter() {
             event_history.extend_from_slice(row);
         }
+        v4_opportunity.extend_from_slice(&record.v4_opportunity);
         discard_summary.extend_from_slice(&record.discard_summary);
         call_summary.extend_from_slice(&record.call_summary);
         special_summary.extend_from_slice(&record.special_summary);
@@ -303,6 +327,12 @@ fn write_npz(path: &Path, records: &[KeqingV4Record]) -> Result<(), String> {
             replay_core::EVENT_HISTORY_FEATURE_DIM,
         ],
         &event_history,
+    )?;
+    write_npy_u8(
+        &mut zip,
+        "v4_opportunity.npy",
+        &[n, KEQINGV4_OPPORTUNITY_DIM],
+        &v4_opportunity,
     )?;
     write_npy_f16(
         &mut zip,
@@ -376,6 +406,7 @@ fn write_manifest(
         summary_dim: KEQINGV4_SUMMARY_DIM,
         call_summary_slots: KEQINGV4_CALL_SUMMARY_SLOTS,
         special_summary_slots: KEQINGV4_SPECIAL_SUMMARY_SLOTS,
+        opportunity_dim: KEQINGV4_OPPORTUNITY_DIM,
         file_count,
         exported_file_count,
         processed_file_count,

@@ -575,12 +575,23 @@ def _write_training_summary(
     last_path = output_dir / "last.pth"
     best_path = output_dir / "best.pth"
     checkpoint = torch.load(last_path, map_location="cpu", weights_only=False)
+    best_checkpoint = (
+        torch.load(best_path, map_location="cpu", weights_only=False)
+        if best_path.exists()
+        else checkpoint
+    )
+    best_metric_value = float(
+        best_checkpoint.get("best_val_loss", best_checkpoint.get("best_metric", 0.0))
+    )
     summary = {
         "model_version": "xmodel1",
         "schema_name": checkpoint.get("schema_name"),
         "schema_version": checkpoint.get("schema_version"),
         "completed_epochs": int(checkpoint.get("epoch", cfg.get("num_epochs", 0))),
-        "best_val_loss": float(checkpoint.get("best_val_loss", checkpoint.get("best_metric", 0.0))),
+        "best_metric_name": "val_objective",
+        "best_metric_mode": "min",
+        "best_metric_value": best_metric_value,
+        "best_val_loss": best_metric_value,
         "resume_path": str(resume_path) if resume_path is not None else None,
         "log_path": str(output_dir / "train_log.jsonl"),
         "last_checkpoint": str(last_path),

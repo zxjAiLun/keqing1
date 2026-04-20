@@ -10,6 +10,11 @@ import torch
 
 from inference.contracts import ModelAuxOutputs, ModelForwardResult, Xmodel1RuntimeOutputs
 from mahjong_env.legal_actions import enumerate_legal_actions
+from keqingv4.checkpoint import (
+    infer_keqingv4_input_dims,
+    load_keqingv4_checkpoint_state,
+    validate_keqingv4_checkpoint_metadata,
+)
 from xmodel1.checkpoint import (
     default_xmodel1_state_scalar_dim,
     infer_xmodel1_model_dims,
@@ -18,6 +23,8 @@ from xmodel1.checkpoint import (
     validate_xmodel1_checkpoint_metadata,
 )
 from training.cache_schema import (
+    KEQINGV4_EVENT_HISTORY_DIM,
+    KEQINGV4_EVENT_HISTORY_LEN,
     KEQINGV4_SUMMARY_DIM,
     XMODEL1_CANDIDATE_FEATURE_DIM,
     XMODEL1_CANDIDATE_FLAG_DIM,
@@ -127,24 +134,31 @@ class KeqingModelAdapter:
                 ),
             )
             return inst
-        c_tile = state_dict["input_proj.0.weight"].shape[1]
-        n_scalar = state_dict["scalar_proj.0.weight"].shape[1]
         if inferred_version == "keqingv4":
+            validate_keqingv4_checkpoint_metadata(
+                ckpt,
+                checkpoint_label=f"keqingv4 checkpoint {model_path}",
+            )
+            inferred_inputs = infer_keqingv4_input_dims(state_dict)
             features_mod = importlib.import_module("training.state_features")
             model_mod = importlib.import_module("keqingv4.model")
             preprocess_mod = importlib.import_module("keqingv4.preprocess_features")
             core_mod = importlib.import_module("keqing_core")
             model = model_mod.KeqingV4Model(
-                hidden_dim=int(cfg.get("hidden_dim", 320)),
-                num_res_blocks=int(cfg.get("num_res_blocks", 6)),
-                c_tile=c_tile,
-                n_scalar=n_scalar,
-                action_embed_dim=int(cfg.get("action_embed_dim", 64)),
-                context_dim=int(cfg.get("context_dim", 32)),
-                summary_dim=int(cfg.get("summary_dim", KEQINGV4_SUMMARY_DIM)),
-                dropout=float(cfg.get("dropout", 0.1)),
+                hidden_dim=int(ckpt["hidden_dim"]),
+                num_res_blocks=int(ckpt["num_res_blocks"]),
+                c_tile=int(inferred_inputs["c_tile"]),
+                n_scalar=int(inferred_inputs["n_scalar"]),
+                action_embed_dim=int(ckpt["action_embed_dim"]),
+                context_dim=int(ckpt["context_dim"]),
+                summary_dim=int(ckpt["summary_dim"]),
+                dropout=float(ckpt["dropout"]),
             )
-            model.load_state_dict(state_dict, strict=False)
+            load_keqingv4_checkpoint_state(
+                model,
+                state_dict,
+                checkpoint_label=f"keqingv4 checkpoint {model_path}",
+            )
             model.to(device)
             model.eval()
             inst = cls(
@@ -161,7 +175,10 @@ class KeqingModelAdapter:
                         raise
                     # Keep the Python path as an emergency mirror only when the
                     # Rust typed-summary bridge is unavailable.
-                    return preprocess_mod.build_typed_action_summaries(snapshot, actor, legal_actions)
+                    fallback = preprocess_mod.build_typed_action_summaries(snapshot, actor, legal_actions)
+                    if not isinstance(fallback, tuple) or len(fallback) < 3:
+                        raise RuntimeError("keqingv4 python summary fallback contract drifted")
+                    return fallback[:3]
             inst._runtime_v4_summary_builder = _build_runtime_v4_summaries
             return inst
 
@@ -264,8 +281,12 @@ class KeqingModelAdapter:
         if cached is not None:
             return cached
 
+        summary_snap = dict(snap)
+        # event_history is part of the keqingv4 model input contract, but the
+        # typed-summary builders still operate on the plain replay snapshot.
+        summary_snap.pop("event_history", None)
         discard_summary, call_summary, special_summary = self._runtime_v4_summary_builder(
-            snap,
+            summary_snap,
             actor,
             legal_actions,
         )
@@ -288,6 +309,18 @@ class KeqingModelAdapter:
         )
         self._runtime_v4_summary_cache[cache_key] = summaries
         return summaries  # type: ignore[return-value]
+
+    @staticmethod
+    def _resolve_v4_event_history(snap: dict) -> np.ndarray:
+        if "event_history" not in snap:
+            raise RuntimeError("keqingv4 runtime contract drift: snapshot is missing event_history")
+        arr = np.asarray(snap["event_history"], dtype=np.int16)
+        expected = (KEQINGV4_EVENT_HISTORY_LEN, KEQINGV4_EVENT_HISTORY_DIM)
+        if arr.shape != expected:
+            raise RuntimeError(
+                f"keqingv4 runtime event_history contract drift: expected shape {expected}, got {arr.shape}"
+            )
+        return arr
 
     def resolve_runtime_v4_summaries(
         self,
@@ -381,17 +414,20 @@ class KeqingModelAdapter:
                 )
             elif self.model_version == "keqingv4":
                 legal_actions = self._resolve_runtime_legal_actions(snap, actor)
+                event_history = self._resolve_v4_event_history(snap)
                 discard_summary, call_summary, special_summary = self._resolve_v4_runtime_summaries(
                     snap,
                     actor,
                     legal_actions,
                 )
+                event_history_t = torch.from_numpy(event_history).unsqueeze(0).to(self.device).long()
                 discard_summary_t = torch.from_numpy(discard_summary).unsqueeze(0).to(self.device)
                 call_summary_t = torch.from_numpy(call_summary).unsqueeze(0).to(self.device)
                 special_summary_t = torch.from_numpy(special_summary).unsqueeze(0).to(self.device)
                 policy_logits_t, value_t = self.model(
                     tile_t.float() if self.device.type != "cuda" else tile_t,
                     scalar_t.float() if self.device.type != "cuda" else scalar_t,
+                    event_history=event_history_t,
                     discard_summary=discard_summary_t.float(),
                     call_summary=call_summary_t.float(),
                     special_summary=special_summary_t.float(),

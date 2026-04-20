@@ -7,6 +7,7 @@ KEQINGV4_CALL_SUMMARY_SLOTS = 8
 KEQINGV4_SPECIAL_SUMMARY_SLOTS = 3
 KEQINGV4_EVENT_HISTORY_LEN = 48
 KEQINGV4_EVENT_HISTORY_DIM = 5
+KEQINGV4_OPPORTUNITY_DIM = 3
 KEQINGV4_EXTRA_FIELDS = (
     "score_delta_target",
     "win_target",
@@ -15,6 +16,7 @@ KEQINGV4_EXTRA_FIELDS = (
     "pts_given_dealin_target",
     "opp_tenpai_target",
     "event_history",
+    "v4_opportunity",
     "v4_discard_summary",
     "v4_call_summary",
     "v4_special_summary",
@@ -80,6 +82,7 @@ __all__ = [
     "KEQINGV4_SPECIAL_SUMMARY_SLOTS",
     "KEQINGV4_EVENT_HISTORY_LEN",
     "KEQINGV4_EVENT_HISTORY_DIM",
+    "KEQINGV4_OPPORTUNITY_DIM",
     "KEQINGV4_EXTRA_FIELDS",
     "XMODEL1_SCHEMA_NAME",
     "XMODEL1_SCHEMA_VERSION",

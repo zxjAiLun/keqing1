@@ -144,6 +144,7 @@ def _run_export_gate(
         f"call_slots={sorted(inspected['call_summary_slots'])} "
         f"special_slots={sorted(inspected['special_summary_slots'])} "
         f"event_history_shapes={sorted(inspected['event_history_shapes'])} "
+        f"opportunity_shapes={sorted(inspected['opportunity_shapes'])} "
         f"opp_tenpai_shapes={sorted(inspected['opp_tenpai_shapes'])}",
         flush=True,
     )

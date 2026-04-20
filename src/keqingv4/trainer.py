@@ -8,6 +8,10 @@ from typing import Dict, List, Optional
 import torch
 import torch.nn.functional as F
 
+from keqingv4.checkpoint import (
+    build_keqingv4_checkpoint_payload,
+    restore_keqingv4_checkpoint,
+)
 from mahjong_env.action_space import HORA_IDX, NONE_IDX, REACH_IDX
 from keqingv4.cached_dataset import CachedMjaiDatasetV4
 from keqingv4.model import KeqingV4Model
@@ -32,6 +36,7 @@ def _unpack_v4_batch(batch, device: torch.device) -> Dict:
         opp_tenpai_available,
         event_history,
         event_history_available,
+        v4_opportunity,
         discard_summary,
         call_summary,
         special_summary,
@@ -53,6 +58,7 @@ def _unpack_v4_batch(batch, device: torch.device) -> Dict:
         "pts_given_win_available": to_device(pts_given_win_available),
         "pts_given_dealin_available": to_device(pts_given_dealin_available),
         "opp_tenpai_available": to_device(opp_tenpai_available),
+        "v4_opportunity": to_device(v4_opportunity),
         "model_kwargs": {
             "event_history": to_device(event_history),
             "discard_summary": to_float(discard_summary),
@@ -118,8 +124,7 @@ def _make_v4_task(cfg: Dict) -> TaskSpec:
         composed_ev = aux["composed_ev"].squeeze(-1)
         action_idx = batch_data["action_idx"]
         action_mask = batch_data["mask"] > 0
-        call_summary = batch_data["model_kwargs"]["call_summary"]
-        special_summary = batch_data["model_kwargs"]["special_summary"]
+        v4_opportunity = batch_data["v4_opportunity"].bool()
 
         win_pos_weight_t = torch.tensor(win_pos_weight, device=device)
         dealin_pos_weight_t = torch.tensor(dealin_pos_weight, device=device)
@@ -165,17 +170,15 @@ def _make_v4_task(cfg: Dict) -> TaskSpec:
 
         selected_logits = policy_logits.gather(1, action_idx.unsqueeze(1)).squeeze(1)
 
-        reach_opp_mask = special_summary[:, 0, 13] > 0.5
-        hora_opp_mask = special_summary[:, 1, 13] > 0.5
-        none_opp_mask = call_summary[:, 7, 13] > 0.5
-        call_slot_mask = call_summary[:, :7, 13] > 0.5
-        call_opp_mask = call_slot_mask.any(dim=1) & none_opp_mask
+        reach_opp_mask = v4_opportunity[:, 0]
+        hora_opp_mask = v4_opportunity[:, 1]
+        call_opp_mask = v4_opportunity[:, 2]
 
         discard_mask = action_mask[:, :34]
         best_discard_logits = _masked_best_logit(policy_logits[:, :34], discard_mask)
 
         call_family_mask = torch.zeros_like(policy_logits, dtype=torch.bool)
-        call_family_mask[:, 35:42] = call_slot_mask
+        call_family_mask[:, 35:42] = action_mask[:, 35:42]
         best_call_logits = _masked_best_logit(policy_logits, call_family_mask)
         none_logits = policy_logits[:, NONE_IDX]
         reach_logits = policy_logits[:, REACH_IDX]
@@ -409,4 +412,6 @@ def train(
         resume_path=resume_path,
         weights_only=weights_only,
         device_str=device_str,
+        checkpoint_payload_builder=build_keqingv4_checkpoint_payload,
+        checkpoint_loader=restore_keqingv4_checkpoint,
     )

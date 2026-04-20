@@ -3,6 +3,7 @@ from pathlib import Path
 import torch
 
 from inference.runtime_bot import RuntimeBot
+from keqingv4.checkpoint import build_keqingv4_checkpoint_metadata
 from keqingv4.model import KeqingV4Model
 from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
@@ -49,7 +50,17 @@ def test_runtime_bot_explicit_v4_checkpoint(tmp_path: Path):
                 "context_dim": 12,
                 "dropout": 0.0,
             },
-            "model_version": "keqingv4",
+            **build_keqingv4_checkpoint_metadata(
+                cfg={
+                    "model_name": "keqingv4",
+                    "hidden_dim": 64,
+                    "num_res_blocks": 2,
+                    "action_embed_dim": 16,
+                    "context_dim": 12,
+                    "dropout": 0.0,
+                },
+                model=model,
+            ),
         },
         ckpt,
     )

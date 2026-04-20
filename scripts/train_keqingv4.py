@@ -46,6 +46,7 @@ def main() -> None:
         assert_keqingv4_cached_contract,
         inspect_keqingv4_cached_contract,
     )
+    from keqingv4.checkpoint import keqingv4_checkpoint_contract_summary
     from keqingv4.cached_dataset import CachedMjaiDatasetV4, split_cached_files
     from keqingv4.model import KeqingV4Model
     from keqingv4.trainer import train
@@ -98,6 +99,7 @@ def main() -> None:
     inspected_dims = sorted(inspected["summary_dims"])
     call_slots = sorted(inspected["call_summary_slots"])
     special_slots = sorted(inspected["special_summary_slots"])
+    opportunity_shapes = sorted(inspected["opportunity_shapes"])
     print(
         "keqingv4 cache-inspect: "
         f"scanned={inspected['files_scanned']} "
@@ -107,7 +109,19 @@ def main() -> None:
         f"pts_win_files={inspected['pts_given_win_files']} "
         f"pts_dealin_files={inspected['pts_given_dealin_files']} "
         f"opp_tenpai_files={inspected['opp_tenpai_files']} "
-        f"event_history_files={inspected['event_history_files']}",
+        f"event_history_files={inspected['event_history_files']} "
+        f"opportunity_shapes={opportunity_shapes or ['unknown']}",
+        flush=True,
+    )
+    contract = keqingv4_checkpoint_contract_summary()
+    print(
+        "keqingv4 checkpoint-contract: "
+        f"{contract['schema_name']}@{contract['schema_version']} "
+        f"summary_dim={contract['summary_dim']} "
+        f"call_slots={contract['call_summary_slots']} "
+        f"special_slots={contract['special_summary_slots']} "
+        f"event_history=({contract['event_history_len']},{contract['event_history_dim']}) "
+        f"opportunity_dim={contract['opportunity_dim']} strict_load=True",
         flush=True,
     )
     if inspected["npz_problems"]:

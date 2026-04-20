@@ -4,6 +4,8 @@
 # - validate whether the new typed comparison + opportunity-aware weighting
 #   actually moves special-action behavior before any larger run
 # - keep cost small enough for fast iteration
+# - this probe keeps historical loss weights for comparison; it is not the
+#   current default keqingv4 training config
 
 data_dirs:
   - processed_v4/ds1

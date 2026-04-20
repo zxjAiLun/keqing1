@@ -2,8 +2,10 @@ from pathlib import Path
 import json
 
 import numpy as np
+import torch
 
 from keqingv4.cached_dataset import CachedMjaiDatasetV4
+from keqingv4.checkpoint import validate_keqingv4_checkpoint_metadata
 from keqingv4.model import KeqingV4Model
 from keqingv4.trainer import train
 from torch.utils.data import DataLoader
@@ -39,6 +41,8 @@ def test_keqingv4_training_smoke(tmp_path: Path):
         encode_module="training.state_features",
     )
     assert arrays is not None
+    assert "v4_opportunity" in arrays
+    assert np.any(arrays["event_history"][0, :, 1] != 0)
     data_root = tmp_path / "processed_v4" / "ds1"
     data_root.mkdir(parents=True)
     cache_path = data_root / "sample.npz"
@@ -72,13 +76,13 @@ def test_keqingv4_training_smoke(tmp_path: Path):
         "warmup_steps": 1,
         "steps_per_epoch": 2,
         "log_interval": 1,
-        "value_loss_weight": 0.2,
+        "value_loss_weight": 0.0,
         "win_loss_weight": 0.2,
         "dealin_loss_weight": 0.2,
         "pts_given_win_loss_weight": 0.3,
         "pts_given_dealin_loss_weight": 0.3,
         "opp_tenpai_loss_weight": 0.25,
-        "mc_reg_loss_weight": 0.05,
+        "mc_reg_loss_weight": 0.01,
     }
 
     out_dir = tmp_path / "v4_smoke"
@@ -98,6 +102,11 @@ def test_keqingv4_training_smoke(tmp_path: Path):
     )
 
     assert (out_dir / "last.pth").exists()
+    checkpoint = torch.load(out_dir / "last.pth", map_location="cpu", weights_only=False)
+    validate_keqingv4_checkpoint_metadata(
+        checkpoint,
+        checkpoint_label=f"keqingv4 smoke checkpoint {out_dir / 'last.pth'}",
+    )
     assert (out_dir / "train_log.jsonl").exists()
     rows = [
         json.loads(line)

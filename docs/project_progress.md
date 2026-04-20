@@ -1,14 +1,14 @@
 # Keqing1 Project Progress
 
-Updated: 2026-04-20
+Updated: 2026-04-21
 
 This is the primary status board for the repository.
 
 ## Executive Summary
 - The repository is in a model-window execution phase, not a legacy runtime maintenance phase.
 - `xmodel1` remains the only active mainline for the current training window, and its code-side public contract is frozen on `xmodel1_discard_v3`.
-- The current xmodel1 blocker is no longer architecture churn or schema uncertainty; it is the missing user-run evidence loop: full preprocess, smoke train, and slice review.
-- `keqingv4` remains a frozen backup line plus Rust-ownership repair path. Its near-term work is verification and boundary hardening, not opening a competing training window.
+- The current xmodel1 blocker is no longer architecture churn, schema uncertainty, or missing export availability; the current full export exists and the first real-cache smoke train is green, so the missing evidence has narrowed to slice review and broader train coverage.
+- `keqingv4` remains a frozen backup line plus Rust-ownership repair path. Its code-side contract closure is now complete, and the line stays out of the training window unless `xmodel1` hits kill criteria.
 - Shared Rust work should continue only insofar as it hardens public semantic ownership and fail-closed boundaries without consuming the mainline training window.
 - Replay/runtime/bot surfaces should be treated as compatibility layers around model work, not as independent product priorities.
 
@@ -25,7 +25,7 @@ This is the primary status board for the repository.
 ## Active Workstreams
 
 ### P0: xmodel1 Mainline
-- Goal: keep `xmodel1_discard_v3` as the only active xmodel1 contract, then reopen full preprocess, smoke train, slice review, and runtime validation on that frozen boundary.
+- Goal: keep `xmodel1_discard_v3` as the only active xmodel1 contract, then use the current full export for slice review, broader smoke/short-train evidence, and runtime validation on that frozen boundary.
 - Current code-side status:
   - Rust-first preprocess/cache path is in place.
   - Production preprocess ownership is fully in Rust via `scripts/preprocess_xmodel1.py` and `keqing_core.build_xmodel1_discard_records(...)`.
@@ -50,10 +50,13 @@ This is the primary status board for the repository.
       - `total_wall=53.048s`
       - `discard_candidate_analysis=545.964s`
   - Rust export now has env-gated stage profiling (`XMODEL1_EXPORT_PROFILE=1`) plus cooperative interrupt/resume work, so the next evidence loop can measure real wall-time and stop safely.
+  - The current full export is already present under `processed_xmodel1_v1b/ds1`, `ds2`, and `ds3`; the minimal real-cache smoke used that export directly rather than a synthetic fixture.
+  - A first real-cache smoke train is now green on a 3-file subset spanning `ds1 + ds2 + ds3`; the run completed end-to-end on CUDA with real cached batches, checkpoints, and rewritten logs/summary outputs.
+  - The xmodel1 smoke artifact summary now reads best-metric metadata from `best.pth`, so `training_summary.json` no longer reports stale `Infinity` after a successful first checkpoint save.
   - `src/xmodel1/preprocess.py` remains only as a Python parity oracle used by contract tests; it is not a production exporter.
 - User-owned execution remains:
-  - full preprocess on `ds1 + ds2 + ds3` only after the gate passes
-  - smoke train
+  - slice review on the current smoke artifacts
+  - broader smoke / first short real train on the current export once the user wants more than the minimal subset proof
   - review / slice acceptance / strength judgment
 
 ### P1: keqingv4 Backup
@@ -63,13 +66,18 @@ This is the primary status board for the repository.
   - shared-core and Rust semantic consolidation track
 - Current code-side status:
   - Phase A train-ready gate is green.
-  - Phase B is no longer only a direction note; part of the code-side landing is already in place.
+  - Phase B contract closure is complete and the current backup snapshot is frozen on that boundary.
   - Bounded future-truth has been wired into the keqingv4 summary/value path, with recursive strengthening capped at `shanten <= 2` and non-recursive behavior kept above that cutoff.
   - Shared Rust continuation helpers have landed for scenario construction, per-scenario scoring, and weighted aggregation; `src/inference/scoring.py` now prefers the Rust continuation path and keeps Python only as a missing-capability fallback.
   - Hora truth and continuation/scoring bridges are now fail-closed on unexpected native drift; Python emergency code is no longer allowed to silently absorb schema or semantic errors on those paths.
   - keqingv4 runtime/preprocess dependencies have been pulled off legacy `keqingv1` / `keqingv3` feature surfaces onto shared active surfaces such as `mahjong_env.action_space` and `training.state_features`.
-  - preprocess and evidence scripts have been updated alongside that shift, including legacy `workers` config compatibility in `scripts/preprocess_keqingv4.py`, a new random preflight gate that samples a few real `.mjson` files before full export, and calibration harnesses that now consume the shared action-space surface.
-  - Focused coverage exists on the active path: preprocess parity, inference adapter behavior, model/training smoke, and continuation-contract tests all have corresponding test surfaces in the current tree.
+  - `event_history` is now an explicit runtime + preprocess contract on the backup line: parity/smoke/export paths compute real history from replay events, and `DefaultDecisionContextBuilder` injects the same `(48, 5)` tensor into both `runtime_snap` and `model_snap`.
+  - Typed-rank opportunity tags are now an explicit `v4_opportunity[3]` contract (`reach`, `hora`, `call_or_none_family`). The old summary magic-channel convention is no longer part of the public contract.
+  - keqingv4 cache export/inspect/train paths are aligned on `keqingv4_cached_v1` schema version `6`, with `v4_opportunity` and `event_history` as required fields.
+  - keqingv4 checkpoints are now hard-cutover fail-closed: inference and resume both validate metadata, load with `strict=True`, and reject old metadata-less checkpoints.
+  - The current backup defaults are `value_loss_weight=0.0` and `mc_reg_loss_weight=0.01`, matching the intended weak-MC regularization regime.
+  - preprocess and evidence scripts have been updated alongside that shift, including legacy `workers` config compatibility in `scripts/preprocess_keqingv4.py`, a new random preflight gate that samples a few real `.mjson` files before full export, checkpoint-contract diagnostics in `scripts/train_keqingv4.py`, and calibration harnesses that now consume the shared action-space surface.
+  - Focused coverage exists on the active path: preprocess parity, inference adapter behavior, model/training smoke, train-script contract checks, and continuation-contract tests all have corresponding test surfaces in the current tree.
   - `keqingv4` can re-enter the training window if xmodel1 hits kill criteria, but it remains the backup line by default.
 
 ### P2: Shared Rust Core
@@ -121,30 +129,34 @@ This is the primary status board for the repository.
 ## Continuation Guidance
 - The next meaningful project-level state change should come from evidence, not from more structural churn.
 - Treat the following as the current acceptance chain for the mainline:
-  1. rerun full preprocess on `ds1 + ds2 + ds3` with the frozen v3 contract
-  2. run xmodel1 smoke train on the new export
-  3. review slice quality on `reach / call / none / hora`
-- Until those three steps complete, the correct global summary is "code-side mainline is ready for evidence collection", not "model quality is already proven".
+  1. review slice quality on the current xmodel1 smoke artifacts
+  2. run a broader non-strict smoke or first short real train on the current `processed_xmodel1_v1b` export
+  3. rerun full preprocess only if the v3 contract moves again or the current export is invalidated by evidence
+- Until those three steps complete, the correct global summary is "minimal real-cache training evidence is green, but model quality is not yet proven".
 - Any new Rust or backup-line work should be kept bounded enough that it does not delay that evidence chain.
 
 ## Current Risks
 - The user still needs to execute the real preprocess, train, and review loops; code-side gates alone do not prove model quality.
+- The current green smoke evidence is still only a minimal real-cache subset run; it proves loader/train/checkpoint integrity, not model quality or full-root throughput.
 - Existing `xmodel1` caches exported before the dedicated `hora` sample-type change do not contain those rows; metadata repair cannot synthesize them, so a real re-export is required before retraining.
 - `xmodel1_discard_v2` is no longer the rerun target. Any old v2 cache or checkpoint must now fail closed and be replaced rather than silently reused.
-- The new v3 contract is now aligned across Python loader/runtime/train surfaces, but a real full re-export is still mandatory before retraining because production preprocess remains Rust-owned and old caches cannot be upgraded in place.
+- The current `processed_xmodel1_v1b` export is usable on the frozen v3 contract, but any future contract move would still force a real full re-export because production preprocess remains Rust-owned and old caches cannot be upgraded in place.
+- `--strict-cache-scan` on the full `processed_xmodel1_v1b` root currently performs a linear validation pass over `72738` cache files before training begins; that is useful for deep validation, but it is an expensive startup path for smoke-triage runs.
 - Some historical docs still mention old model lines for comparison or historical context. They should not be treated as active runbooks.
 - Rust migration is not complete; the remaining work is no longer old-line compatibility, but shared semantic ownership and long-tail continuation/scoring cleanup.
+- keqingv4 checkpoints exported before the explicit metadata cutover are intentionally dead for both inference and resume; replace them instead of trying to bridge them.
 - `xmodel1` still carries a deliberate Python parity oracle for candidate arrays, and focused contract tests remain the place where real Rust/Python drift is measured.
-- The current local Python environment still lacks `torch`, which blocks some gateway/runtime focused tests here.
+- Gateway/runtime client coverage still depends on environment-specific endpoints and is not part of the current model-contract acceptance chain.
 
 ## Near-Term Next Actions
-1. Run the focused v3 contract suite plus the runtime-recompute consistency cases; do not reopen full preprocess before that is green.
-2. Rerun full preprocess on `ds1 + ds2 + ds3` on the current green `xmodel1_discard_v3` contract, then smoke train, then slice/review acceptance on `reach / call / none / hora`.
-3. Keep `XMODEL1_EXPORT_PROFILE=1` available for spot checks on resumed shards or any future preprocess regression report; the fixed-subset gate is no longer the blocker.
-4. Keep `keqingv4` on non-training Rust-ownership work by default; only switch it back into preprocess/train/eval if `xmodel1` hits kill criteria.
-5. For `keqingv4`, the next concrete code-side move is Phase B verification rather than new structure: rerun the focused preprocess/inference/special-calibration suites against the current Rust continuation/future-truth path, then freeze that as the current backup snapshot.
-6. Start the next shared Rust push from `plans/rust_ownership_push_2026_04_19.md`, but keep the first execution slice bounded to:
+1. Review slice quality on `reach / call / none / hora` from the current xmodel1 smoke artifacts before making any strength claim.
+2. Run a broader non-strict smoke or first short real train on the current `processed_xmodel1_v1b` export now that the minimal real-cache smoke is green.
+3. Decide whether full-root `--strict-cache-scan` should remain a separate overnight validation step rather than the default smoke entrypoint, because its startup cost scales with the full cache count.
+4. Keep `XMODEL1_EXPORT_PROFILE=1` available for spot checks on resumed shards or any future preprocess regression report; the fixed-subset gate is no longer the blocker.
+5. Keep `keqingv4` on non-training Rust-ownership work by default; only switch it back into preprocess/train/eval if `xmodel1` hits kill criteria.
+6. Keep `keqingv4` frozen on the explicit-contract backup snapshot; if that line is touched again, preserve `event_history` / `v4_opportunity` / metadata fail-closed behavior and rerun the focused suite before claiming progress.
+7. Start the next shared Rust push from `plans/rust_ownership_push_2026_04_19.md`, but keep the first remaining execution slice bounded to:
    - `S0` boundary freeze and guardrails
-   - `S1` keqingv4 fail-closed cleanup
    - `S2` legal action public-owner consolidation
-7. If `processed_v3.retired` stays unused after observation, delete it permanently in the next cleanup pass.
+   - `S3` state core caller migration preparation only if it does not delay mainline evidence collection
+8. If `processed_v3.retired` stays unused after observation, delete it permanently in the next cleanup pass.

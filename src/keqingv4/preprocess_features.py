@@ -34,6 +34,7 @@ from keqing_core import (
 )
 from training.cache_schema import (
     KEQINGV4_CALL_SUMMARY_SLOTS,
+    KEQINGV4_OPPORTUNITY_DIM,
     KEQINGV4_SPECIAL_SUMMARY_SLOTS,
     KEQINGV4_SUMMARY_DIM,
 )
@@ -53,6 +54,7 @@ _CALL_ACTION_TO_SLOT = {action_id: slot for slot, action_id in enumerate(_CALL_A
 
 _SPECIAL_ACTION_IDS = (REACH_IDX, HORA_IDX, RYUKYOKU_IDX)
 _SPECIAL_ACTION_TO_SLOT = {action_id: slot for slot, action_id in enumerate(_SPECIAL_ACTION_IDS)}
+_CALL_OR_NONE_ACTION_TYPES = {"chi", "pon", "daiminkan", "ankan", "kakan", "none"}
 
 _WIND_TILE_IDS = {"E": 27, "S": 28, "W": 29, "N": 30}
 _TILE34_STR = (
@@ -282,6 +284,19 @@ def _progress_key(progress) -> tuple[int, int, int, int]:
         int(progress.ukeire_type_count),
         int(progress.waits_count),
     )
+
+
+def build_v4_opportunity(legal_actions: list[dict]) -> np.ndarray:
+    opportunity = np.zeros((KEQINGV4_OPPORTUNITY_DIM,), dtype=np.uint8)
+    for action in legal_actions:
+        action_type = str(action.get("type", ""))
+        if action_type == "reach":
+            opportunity[0] = 1
+        elif action_type == "hora":
+            opportunity[1] = 1
+        elif action_type in _CALL_OR_NONE_ACTION_TYPES:
+            opportunity[2] = 1
+    return opportunity
 
 
 def _one_shanten_draw_analysis(
@@ -1338,10 +1353,11 @@ def build_typed_action_summaries(
     state: dict,
     actor: int,
     legal_actions: list[dict],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     discard_summary = np.zeros((34, KEQINGV4_SUMMARY_DIM), dtype=np.float32)
     call_summary = np.zeros((KEQINGV4_CALL_SUMMARY_SLOTS, KEQINGV4_SUMMARY_DIM), dtype=np.float32)
     special_summary = np.zeros((KEQINGV4_SPECIAL_SUMMARY_SLOTS, KEQINGV4_SUMMARY_DIM), dtype=np.float32)
+    opportunity = build_v4_opportunity(legal_actions)
 
     current_hand, visible_counts34, current_progress, current_open_hand, current_vector = _current_summary_context(state, actor)
     actor_melds = _actor_melds(state, actor)
@@ -1448,12 +1464,13 @@ def build_typed_action_summaries(
             else:
                 special_summary[slot] = current_vector
 
-    return discard_summary, call_summary, special_summary
+    return discard_summary, call_summary, special_summary, opportunity
 
 
 __all__ = [
     "KEQINGV4_SUMMARY_DIM",
     "KEQINGV4_CALL_SUMMARY_SLOTS",
     "KEQINGV4_SPECIAL_SUMMARY_SLOTS",
+    "build_v4_opportunity",
     "build_typed_action_summaries",
 ]

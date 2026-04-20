@@ -7,7 +7,7 @@ import math
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import torch
@@ -39,15 +39,38 @@ def _action_type_name(idx: int) -> str:
     return f"unknown_{idx}"
 
 
-def save_checkpoint(path: Path, model: nn.Module, optimizer, scheduler, epoch: int, step: int, best_val_loss: float):
-    torch.save({
+def save_checkpoint(
+    path: Path,
+    model: nn.Module,
+    optimizer,
+    scheduler,
+    epoch: int,
+    step: int,
+    best_val_loss: float,
+    *,
+    cfg: Optional[Dict[str, Any]] = None,
+    payload_builder=None,
+):
+    payload = {
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "epoch": epoch,
         "step": step,
         "best_val_loss": best_val_loss,
-    }, path)
+    }
+    if payload_builder is not None:
+        payload = payload_builder(
+            base_payload=payload,
+            cfg=cfg or {},
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=epoch,
+            step=step,
+            best_val_loss=best_val_loss,
+        )
+    torch.save(payload, path)
 
 
 def load_checkpoint(path: Path, model: nn.Module, optimizer, scheduler):
@@ -318,6 +341,8 @@ def train_model(
     resume_path: Optional[Path] = None,
     weights_only: bool = False,
     device_str: str = "cuda",
+    checkpoint_payload_builder=None,
+    checkpoint_loader=None,
 ) -> nn.Module:
     if train_loader is None and train_loader_factory is None:
         raise ValueError("train_loader or train_loader_factory is required")
@@ -348,12 +373,34 @@ def train_model(
     best_meld = -float("inf")
 
     if resume_path is not None and resume_path.exists():
+        checkpoint_label = f"checkpoint {resume_path}"
         if weights_only:
             ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
-            model.load_state_dict(ckpt["model"], strict=False)
+            if checkpoint_loader is not None:
+                checkpoint_loader(
+                    ckpt,
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    checkpoint_label=checkpoint_label,
+                    weights_only=True,
+                )
+            else:
+                model.load_state_dict(ckpt["model"], strict=False)
             print(f"Loaded weights from {resume_path} (optimizer/scheduler/epoch reset)")
         else:
-            start_epoch, global_step, best_metric = load_checkpoint(resume_path, model, optimizer, scheduler)
+            if checkpoint_loader is not None:
+                ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
+                start_epoch, global_step, best_metric = checkpoint_loader(
+                    ckpt,
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    checkpoint_label=checkpoint_label,
+                    weights_only=False,
+                )
+            else:
+                start_epoch, global_step, best_metric = load_checkpoint(resume_path, model, optimizer, scheduler)
             print(f"Resumed from {resume_path} (epoch={start_epoch}, step={global_step})")
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -413,6 +460,8 @@ def train_model(
         save_checkpoint(
             output_dir / "last.pth", model, optimizer, scheduler,
             epoch + 1, global_step, best_metric,
+            cfg=cfg,
+            payload_builder=checkpoint_payload_builder,
         )
 
         metric_value = val_stats[task.best_metric_name]
@@ -421,6 +470,8 @@ def train_model(
             save_checkpoint(
                 output_dir / "best.pth", model, optimizer, scheduler,
                 epoch + 1, global_step, best_metric,
+                cfg=cfg,
+                payload_builder=checkpoint_payload_builder,
             )
             print(f"  [best checkpoint saved, val_{task.best_metric_name}={best_metric:.4f}]")
 
@@ -430,6 +481,8 @@ def train_model(
             save_checkpoint(
                 output_dir / "best_meld.pth", model, optimizer, scheduler,
                 epoch + 1, global_step, best_meld,
+                cfg=cfg,
+                payload_builder=checkpoint_payload_builder,
             )
             print(f"  [best_meld checkpoint saved, val_meld={best_meld:.4f}]")
 

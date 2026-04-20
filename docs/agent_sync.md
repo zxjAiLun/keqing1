@@ -1,13 +1,13 @@
 # Keqing1 Agent Sync
 
-Updated: 2026-04-20
+Updated: 2026-04-21
 
 This document defines the minimum shared context for multi-agent work.
 
 ## Short Handoff Summary
 - The repository should currently be read as a model-building workspace with one active training-window line: `xmodel1`.
-- `xmodel1` is already through the current code-side contract freeze; the next missing evidence is user-run preprocess/train/review, not another schema redesign.
-- `keqingv4` is not competing for the training window. It is the backup snapshot and the safer place to continue Rust-ownership cleanup and fail-closed verification.
+- `xmodel1` is already through the current code-side contract freeze; the current full export is available and a first real-cache smoke train on that export is green, so the next missing evidence is slice/review plus broader train coverage, not another schema redesign.
+- `keqingv4` is not competing for the training window. It is the backup snapshot and the safer place to continue Rust-ownership cleanup under the now-closed explicit contract.
 - Shared Rust work is valuable only when it reduces semantic ambiguity or preprocess/runtime cost without reopening the xmodel1 boundary.
 
 ## Read Before Work
@@ -15,7 +15,7 @@ Before starting a task, read:
 1. `AGENTS.md`
 2. `docs/project_progress.md`
 3. `docs/agent_sync.md`
-4. the latest dated snapshot, currently `docs/todo_2026_04_20.md`
+4. the latest dated snapshot, currently `docs/todo_2026_04_22.md`
 5. `git status --short`
 
 If code reality and document wording disagree, trust the latest code and evidence first, then update the documents.
@@ -33,6 +33,9 @@ If code reality and document wording disagree, trust the latest code and evidenc
 - New xmodel1 checkpoints must carry full metadata; runtime may infer old no-`cfg` checkpoints for read-only loading, but resume across the v3 cutover is not allowed.
 - Current xmodel1 preprocess internals use decision-level discard-analysis reuse plus the v3 schema compression path; the latest pass also lowered discard-candidate semantics again by removing special-waits fallback, one-shanten draw metrics, and pinfu/iipeikou break tracking from the hot path. `legacy_kakan2` history drift is expected to be fixed at the normalized-event boundary, not tolerated by whitelist.
 - Public legal actions, replay snapshots, and hora-truth/scoring are now Rust-first public surfaces; Python fallback is allowed only for missing capability, not for unexpected bridge drift.
+- `keqingv4` runtime history is now explicit: `DefaultDecisionContextBuilder` injects Python-built `event_history(48, 5)` into both `runtime_snap` and `model_snap`, and parity/smoke paths build the same tensor from `sample.events` plus `sample.event_index`.
+- `keqingv4` opportunity tags are now explicit `v4_opportunity[3]` cache rows. Do not recover opportunity semantics from summary magic indices such as `[..., 13]`.
+- `keqingv4` checkpoints are now hard-cutover fail-closed: inference and resume both require metadata validation and `strict=True` state-dict loads; metadata-less checkpoints are intentionally rejected.
 - `.omx` is retired. Do not read from it, write to it, or treat it as memory.
 - Legacy model families have been removed from active runtime/training surfaces. Do not restore legacy aliases or compatibility imports.
 - Legacy runtime notes and deploy templates are archive-only surfaces now:
@@ -45,7 +48,10 @@ If code reality and document wording disagree, trust the latest code and evidenc
 - If a change alters `xmodel1` cache row semantics rather than only metadata, do not treat `scripts/repair_xmodel1_cache_schema.py` as sufficient evidence; document whether a real re-export is mandatory.
 - For xmodel1 preprocess work, treat any v3 contract change as re-export-required; do not create a pseudo-upgrade or mixed v2/v3 training path.
 - For xmodel1 checkpoint work, distinguish runtime legacy-read compatibility from training resume compatibility; inference may infer old shapes, training must still fail closed without full v3 metadata.
-- Full xmodel1 preprocess is now an allowed next step on the current v3 contract. Do not reopen any v2 path, and keep `XMODEL1_EXPORT_PROFILE=1` ready for resumed-shard or regression spot checks.
+- For keqingv4 runtime/preprocess work, keep parity aligned with production: do not add a padding fallback for missing `event_history`, and do not accept partial cache rows that omit `v4_opportunity`.
+- For keqingv4 trainer work, treat `v4_opportunity` as the only opportunity-label contract; if a summary field still carries an internal feature at index `13`, that is not a public trainer signal.
+- For keqingv4 checkpoint work, keep the hard cutover intact: no metadata means no inference load and no resume load.
+- The current xmodel1 full export is already available on the frozen v3 contract. Do not reopen any v2 path, and keep `XMODEL1_EXPORT_PROFILE=1` ready for resumed-shard or regression spot checks.
 - Do not overwrite user changes or unrelated dirty worktree changes.
 - Keep the xmodel1-mainline / keqingv4-backup boundary stable unless the status board and design docs are updated together.
 - Do not point active configs, scripts, or docs back at `processed_v3` or other retired preprocess roots.

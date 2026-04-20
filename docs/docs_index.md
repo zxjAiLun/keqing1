@@ -1,6 +1,6 @@
 # Keqing1 Docs Index
 
-Updated: 2026-04-20
+Updated: 2026-04-21
 
 This index lists the currently active documentation surfaces first and keeps historical material under a dedicated archive section.
 
@@ -8,7 +8,7 @@ This index lists the currently active documentation surfaces first and keeps his
 
 - `docs/project_progress.md` is the primary live status board.
 - `docs/agent_sync.md` is the coordination and handoff surface.
-- `docs/todo_2026_04_20.md` is the latest dated execution snapshot.
+- `docs/todo_2026_04_22.md` is the latest dated execution snapshot.
 - `docs/project_overview_current.md` is the current project summary.
 
 ## Active Model Surfaces

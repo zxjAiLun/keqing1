@@ -21,8 +21,13 @@ from mahjong_env.replay import (
     read_mjai_jsonl,
 )
 from mahjong_env.action_space import action_to_idx, build_legal_mask
+from mahjong_env.event_history import compute_event_history
 from training.state_features import encode
-from training.cache_schema import KEQINGV4_EVENT_HISTORY_DIM, KEQINGV4_EVENT_HISTORY_LEN
+from training.cache_schema import (
+    KEQINGV4_EVENT_HISTORY_DIM,
+    KEQINGV4_EVENT_HISTORY_LEN,
+    KEQINGV4_OPPORTUNITY_DIM,
+)
 
 _SUIT_PERMS = [
     (0, 1, 2),
@@ -132,6 +137,7 @@ class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
         "pts_given_dealin_target",
         "opp_tenpai_target",
         "event_history",
+        "v4_opportunity",
         "v4_discard_summary",
         "v4_call_summary",
         "v4_special_summary",
@@ -146,6 +152,7 @@ class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
             "pts_given_dealin_target": [],
             "opp_tenpai_target": [],
             "event_history": [],
+            "v4_opportunity": [],
             "v4_discard_summary": [],
             "v4_call_summary": [],
             "v4_special_summary": [],
@@ -155,11 +162,18 @@ class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
         del action_idx
         from keqingv4.preprocess_features import build_typed_action_summaries
 
-        event_history = np.zeros((KEQINGV4_EVENT_HISTORY_LEN, KEQINGV4_EVENT_HISTORY_DIM), dtype=np.int16)
-        event_history[:, 0] = 4
-        event_history[:, 2] = -1
+        if not getattr(sample, "events", None):
+            raise PreprocessBuildError(
+                "keqingv4 preprocess sample is missing normalized replay events required for event_history"
+            )
+        event_history = compute_event_history(sample.events, int(sample.event_index))
+        if event_history.shape != (KEQINGV4_EVENT_HISTORY_LEN, KEQINGV4_EVENT_HISTORY_DIM):
+            raise PreprocessBuildError(
+                "keqingv4 preprocess event_history shape drift: "
+                f"expected {(KEQINGV4_EVENT_HISTORY_LEN, KEQINGV4_EVENT_HISTORY_DIM)}, got {event_history.shape}"
+            )
 
-        discard_summary, call_summary, special_summary = build_typed_action_summaries(
+        discard_summary, call_summary, special_summary, v4_opportunity = build_typed_action_summaries(
             sample.state,
             sample.actor,
             sample.legal_actions,
@@ -175,6 +189,7 @@ class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
                 dtype=np.float32,
             ).reshape(3),
             "event_history": event_history,
+            "v4_opportunity": np.asarray(v4_opportunity, dtype=np.uint8).reshape(KEQINGV4_OPPORTUNITY_DIM),
             "v4_discard_summary": discard_summary.astype(np.float16),
             "v4_call_summary": call_summary.astype(np.float16),
             "v4_special_summary": special_summary.astype(np.float16),
@@ -189,6 +204,7 @@ class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
             "pts_given_dealin_target": np.array(rows["pts_given_dealin_target"], dtype=np.float32),
             "opp_tenpai_target": np.stack(rows["opp_tenpai_target"]).astype(np.float32),
             "event_history": np.stack(rows["event_history"]).astype(np.int16),
+            "v4_opportunity": np.stack(rows["v4_opportunity"]).astype(np.uint8),
             "v4_discard_summary": np.stack(rows["v4_discard_summary"]).astype(np.float16),
             "v4_call_summary": np.stack(rows["v4_call_summary"]).astype(np.float16),
             "v4_special_summary": np.stack(rows["v4_special_summary"]).astype(np.float16),

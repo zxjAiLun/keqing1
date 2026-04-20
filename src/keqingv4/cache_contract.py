@@ -11,12 +11,13 @@ from training.cache_schema import (
     KEQINGV4_CALL_SUMMARY_SLOTS,
     KEQINGV4_EVENT_HISTORY_DIM,
     KEQINGV4_EVENT_HISTORY_LEN,
+    KEQINGV4_OPPORTUNITY_DIM,
     KEQINGV4_SPECIAL_SUMMARY_SLOTS,
     KEQINGV4_SUMMARY_DIM,
 )
 
 KEQINGV4_SCHEMA_NAME = "keqingv4_cached_v1"
-KEQINGV4_SCHEMA_VERSION = 5
+KEQINGV4_SCHEMA_VERSION = 6
 KEQINGV4_EXPORT_MODE = "rust_semantic_core"
 
 
@@ -62,6 +63,7 @@ def validate_keqingv4_npz(
         "pts_given_dealin_target": (sample_count,),
         "opp_tenpai_target": (sample_count, 3),
         "event_history": (sample_count, KEQINGV4_EVENT_HISTORY_LEN, KEQINGV4_EVENT_HISTORY_DIM),
+        "v4_opportunity": (sample_count, KEQINGV4_OPPORTUNITY_DIM),
         "v4_discard_summary": (sample_count, 34, KEQINGV4_SUMMARY_DIM),
         "v4_call_summary": (sample_count, KEQINGV4_CALL_SUMMARY_SLOTS, KEQINGV4_SUMMARY_DIM),
         "v4_special_summary": (sample_count, KEQINGV4_SPECIAL_SUMMARY_SLOTS, KEQINGV4_SUMMARY_DIM),
@@ -125,6 +127,10 @@ def validate_keqingv4_manifest(manifest: dict[str, Any], *, path: Path | None = 
         problems.append(
             f"{label}: special_summary_slots mismatch, expected {KEQINGV4_SPECIAL_SUMMARY_SLOTS}, got {manifest.get('special_summary_slots')}"
         )
+    if int(manifest.get("opportunity_dim", -1)) != KEQINGV4_OPPORTUNITY_DIM:
+        problems.append(
+            f"{label}: opportunity_dim mismatch, expected {KEQINGV4_OPPORTUNITY_DIM}, got {manifest.get('opportunity_dim')}"
+        )
     if manifest.get("export_mode") != KEQINGV4_EXPORT_MODE:
         problems.append(
             f"{label}: export_mode mismatch, expected {KEQINGV4_EXPORT_MODE}, got {manifest.get('export_mode')}"
@@ -139,11 +145,13 @@ def inspect_keqingv4_cached_contract(file_paths: list[Path], *, max_files: int =
         "pts_given_dealin_files": 0,
         "opp_tenpai_files": 0,
         "event_history_files": 0,
+        "opportunity_files": 0,
         "summary_dims": set(),
         "call_summary_slots": set(),
         "special_summary_slots": set(),
         "event_history_shapes": set(),
         "opp_tenpai_shapes": set(),
+        "opportunity_shapes": set(),
         "npz_problems": [],
         "manifest_problems": [],
         "manifests": {},
@@ -162,11 +170,14 @@ def inspect_keqingv4_cached_contract(file_paths: list[Path], *, max_files: int =
                     summary["opp_tenpai_files"] += 1
                 if "event_history" in data:
                     summary["event_history_files"] += 1
+                if "v4_opportunity" in data:
+                    summary["opportunity_files"] += 1
                 discard_shape = _shape_of(data, "v4_discard_summary")
                 call_shape = _shape_of(data, "v4_call_summary")
                 special_shape = _shape_of(data, "v4_special_summary")
                 event_shape = _shape_of(data, "event_history")
                 opp_shape = _shape_of(data, "opp_tenpai_target")
+                opportunity_shape = _shape_of(data, "v4_opportunity")
                 if discard_shape and len(discard_shape) == 3:
                     summary["summary_dims"].add(discard_shape[-1])
                 if call_shape and len(call_shape) == 3:
@@ -177,6 +188,8 @@ def inspect_keqingv4_cached_contract(file_paths: list[Path], *, max_files: int =
                     summary["event_history_shapes"].add(event_shape[1:])
                 if opp_shape and len(opp_shape) == 2:
                     summary["opp_tenpai_shapes"].add(opp_shape[1:])
+                if opportunity_shape and len(opportunity_shape) == 2:
+                    summary["opportunity_shapes"].add(opportunity_shape[1:])
                 summary["npz_problems"].extend(validate_keqingv4_npz(data, path=path))
         except Exception as exc:
             summary["npz_problems"].append(f"{path}: failed to read npz: {exc}")
@@ -235,12 +248,20 @@ def assert_keqingv4_cached_contract(
     opp_shapes = sorted(inspected["opp_tenpai_shapes"])
     if opp_shapes != [(3,)]:
         problems.append(f"opp_tenpai_target shape mismatch: expected {(3,)}, got {opp_shapes or ['missing']}")
+    opportunity_shapes = sorted(inspected["opportunity_shapes"])
+    if opportunity_shapes != [(KEQINGV4_OPPORTUNITY_DIM,)]:
+        problems.append(
+            "v4_opportunity shape mismatch: expected "
+            f"{(KEQINGV4_OPPORTUNITY_DIM,)}, got {opportunity_shapes or ['missing']}"
+        )
     if inspected["pts_given_win_files"] == 0 or inspected["pts_given_dealin_files"] == 0:
         problems.append("pts_given_* targets are missing from scanned caches")
     if inspected["opp_tenpai_files"] == 0:
         problems.append("opp_tenpai_target is missing from scanned caches")
     if inspected["event_history_files"] == 0:
         problems.append("event_history is missing from scanned caches")
+    if inspected["opportunity_files"] == 0:
+        problems.append("v4_opportunity is missing from scanned caches")
 
     if problems:
         joined = "; ".join(problems)
