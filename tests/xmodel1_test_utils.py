@@ -10,10 +10,9 @@ from training.cache_schema import (
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_HISTORY_SUMMARY_DIM,
     XMODEL1_MAX_CANDIDATES,
-    XMODEL1_MAX_SPECIAL_CANDIDATES,
+    XMODEL1_MAX_RESPONSE_CANDIDATES,
     XMODEL1_SCHEMA_NAME,
     XMODEL1_SCHEMA_VERSION,
-    XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
 
 
@@ -28,13 +27,12 @@ def make_xmodel1_v3_payload(
     replay_ids: list[str] | None = None,
     sample_ids: list[str] | None = None,
 ) -> dict[str, np.ndarray]:
+    del chosen_special_candidate_idx
     candidate_mask = np.zeros((n, XMODEL1_MAX_CANDIDATES), dtype=np.uint8)
     candidate_mask[:, : max(0, min(candidate_active, XMODEL1_MAX_CANDIDATES))] = 1
     candidate_tile_id = np.full((n, XMODEL1_MAX_CANDIDATES), -1, dtype=np.int16)
     for slot in range(min(candidate_active, XMODEL1_MAX_CANDIDATES)):
         candidate_tile_id[:, slot] = slot
-    special_mask = np.zeros((n, XMODEL1_MAX_SPECIAL_CANDIDATES), dtype=np.uint8)
-    special_type_id = np.full((n, XMODEL1_MAX_SPECIAL_CANDIDATES), -1, dtype=np.int16)
     payload: dict[str, np.ndarray] = {
         "schema_name": np.array(XMODEL1_SCHEMA_NAME, dtype=np.str_),
         "schema_version": np.array(XMODEL1_SCHEMA_VERSION, dtype=np.int32),
@@ -57,24 +55,56 @@ def make_xmodel1_v3_payload(
         ),
         "candidate_quality_score": np.zeros((n, XMODEL1_MAX_CANDIDATES), dtype=np.float32),
         "candidate_hard_bad_flag": np.zeros((n, XMODEL1_MAX_CANDIDATES), dtype=np.uint8),
-        "special_candidate_feat": np.zeros(
-            (n, XMODEL1_MAX_SPECIAL_CANDIDATES, XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM),
+        "response_action_idx": np.full((n, XMODEL1_MAX_RESPONSE_CANDIDATES), -1, dtype=np.int16),
+        "response_action_mask": np.zeros((n, XMODEL1_MAX_RESPONSE_CANDIDATES), dtype=np.uint8),
+        "chosen_response_action_idx": np.full((n,), -1, dtype=np.int16),
+        "response_post_candidate_feat": np.zeros(
+            (
+                n,
+                XMODEL1_MAX_RESPONSE_CANDIDATES,
+                XMODEL1_MAX_CANDIDATES,
+                XMODEL1_CANDIDATE_FEATURE_DIM,
+            ),
             dtype=np.float16,
         ),
-        "special_candidate_type_id": special_type_id,
-        "special_candidate_mask": special_mask,
-        "special_candidate_quality_score": np.zeros((n, XMODEL1_MAX_SPECIAL_CANDIDATES), dtype=np.float32),
-        "special_candidate_hard_bad_flag": np.zeros((n, XMODEL1_MAX_SPECIAL_CANDIDATES), dtype=np.uint8),
-        "chosen_special_candidate_idx": (
-            np.full((n,), -1, dtype=np.int16)
-            if chosen_special_candidate_idx is None
-            else np.asarray(chosen_special_candidate_idx, dtype=np.int16)
+        "response_post_candidate_tile_id": np.full(
+            (n, XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES),
+            -1,
+            dtype=np.int16,
+        ),
+        "response_post_candidate_mask": np.zeros(
+            (n, XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES),
+            dtype=np.uint8,
+        ),
+        "response_post_candidate_flags": np.zeros(
+            (
+                n,
+                XMODEL1_MAX_RESPONSE_CANDIDATES,
+                XMODEL1_MAX_CANDIDATES,
+                XMODEL1_CANDIDATE_FLAG_DIM,
+            ),
+            dtype=np.uint8,
+        ),
+        "response_post_candidate_quality_score": np.zeros(
+            (n, XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES),
+            dtype=np.float32,
+        ),
+        "response_post_candidate_hard_bad_flag": np.zeros(
+            (n, XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES),
+            dtype=np.uint8,
+        ),
+        "response_teacher_discard_idx": np.full(
+            (n, XMODEL1_MAX_RESPONSE_CANDIDATES),
+            -1,
+            dtype=np.int16,
         ),
         "win_target": np.zeros((n,), dtype=np.float32),
         "dealin_target": np.zeros((n,), dtype=np.float32),
         "pts_given_win_target": np.zeros((n,), dtype=np.float32),
         "pts_given_dealin_target": np.zeros((n,), dtype=np.float32),
         "opp_tenpai_target": np.zeros((n, 3), dtype=np.float32),
+        "final_rank_target": np.zeros((n,), dtype=np.int8),
+        "final_score_delta_points_target": np.zeros((n,), dtype=np.int32),
         "history_summary": np.zeros((n, XMODEL1_HISTORY_SUMMARY_DIM), dtype=np.float16),
         "sample_type": (
             np.zeros((n,), dtype=np.int8)

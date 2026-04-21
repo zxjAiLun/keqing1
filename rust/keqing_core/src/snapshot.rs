@@ -19,6 +19,7 @@ pub fn snapshot_for_actor(state: &GameStateCore, actor: usize) -> SnapshotCore {
         ura_dora_markers: state.ura_dora_markers.clone(),
         actor,
         hand,
+        tsumo_pai: None,
         discards: state.players.iter().map(|p| p.discards.clone()).collect(),
         melds: state.players.iter().map(|p| p.melds.clone()).collect(),
         reached: state.players.iter().map(|p| p.reached).collect(),

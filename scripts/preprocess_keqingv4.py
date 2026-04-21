@@ -95,8 +95,8 @@ def _run_export_gate(
     jobs: int,
     force: bool,
     smoke: bool,
-    inspect_keqingv4_cached_contract,
-    assert_keqingv4_cached_contract,
+    inspect_keqingv4_contract,
+    assert_keqingv4_contract,
 ) -> None:
     cmd = [
         "cargo",
@@ -132,8 +132,8 @@ def _run_export_gate(
     cache_files = sorted(output_dir.glob("ds*/*.npz"))
     if not cache_files:
         raise RuntimeError(f"{label} gate: no exported cache files found under {output_dir}")
-    inspected = inspect_keqingv4_cached_contract(cache_files)
-    assert_keqingv4_cached_contract(
+    inspected = inspect_keqingv4_contract(cache_files)
+    assert_keqingv4_contract(
         inspected,
         smoke=smoke,
         allow_stale_cache=False,
@@ -157,8 +157,8 @@ def main() -> None:
     cfg_path = Path(args.config)
     cfg = _load_cfg(cfg_path if cfg_path.is_absolute() else root / cfg_path)
     from keqingv4.cache_contract import (
-        assert_keqingv4_cached_contract,
-        inspect_keqingv4_cached_contract,
+        assert_keqingv4_contract,
+        inspect_keqingv4_contract,
     )
 
     data_dirs = _resolve_paths(root, args.data_dirs or cfg.get("data_dirs", []))
@@ -207,8 +207,8 @@ def main() -> None:
                 jobs=jobs,
                 force=True,
                 smoke=False,
-                inspect_keqingv4_cached_contract=inspect_keqingv4_cached_contract,
-                assert_keqingv4_cached_contract=assert_keqingv4_cached_contract,
+                inspect_keqingv4_contract=inspect_keqingv4_contract,
+                assert_keqingv4_contract=assert_keqingv4_contract,
             )
     _run_export_gate(
         root=root,
@@ -219,8 +219,8 @@ def main() -> None:
         jobs=jobs,
         force=args.force,
         smoke=args.smoke,
-        inspect_keqingv4_cached_contract=inspect_keqingv4_cached_contract,
-        assert_keqingv4_cached_contract=assert_keqingv4_cached_contract,
+        inspect_keqingv4_contract=inspect_keqingv4_contract,
+        assert_keqingv4_contract=assert_keqingv4_contract,
     )
 
 

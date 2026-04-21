@@ -64,6 +64,7 @@ class RuntimeBot:
         score_delta_lambda: float = 0.20,
         win_prob_lambda: float = 0.20,
         dealin_prob_lambda: float = 0.25,
+        rank_pt_lambda: float = 0.0,
         model_version: Optional[str] = None,
     ):
         self.player_id = player_id
@@ -77,6 +78,7 @@ class RuntimeBot:
         self.score_delta_lambda = score_delta_lambda
         self.win_prob_lambda = win_prob_lambda
         self.dealin_prob_lambda = dealin_prob_lambda
+        self.rank_pt_lambda = rank_pt_lambda
 
         self._adapter = KeqingModelAdapter.from_checkpoint(
             model_path,
@@ -117,6 +119,7 @@ class RuntimeBot:
             score_delta_lambda=self.score_delta_lambda,
             win_prob_lambda=self.win_prob_lambda,
             dealin_prob_lambda=self.dealin_prob_lambda,
+            rank_pt_lambda=self.rank_pt_lambda,
         )
         self._review_exporter = DefaultRuntimeReviewExporter()
 

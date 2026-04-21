@@ -9,6 +9,21 @@ import numpy as np
 import torch
 
 from inference.contracts import ModelAuxOutputs, ModelForwardResult, Xmodel1RuntimeOutputs
+from inference.pt_map import placement_utility_from_outputs
+from mahjong_env.action_space import (
+    ANKAN_IDX,
+    CHI_HIGH_IDX,
+    CHI_LOW_IDX,
+    CHI_MID_IDX,
+    DAIMINKAN_IDX,
+    HORA_IDX,
+    KAKAN_IDX,
+    NONE_IDX,
+    PON_IDX,
+    REACH_IDX,
+    RYUKYOKU_IDX,
+    action_to_idx,
+)
 from mahjong_env.legal_actions import enumerate_legal_actions
 from keqingv4.checkpoint import (
     infer_keqingv4_input_dims,
@@ -29,8 +44,22 @@ from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_MAX_CANDIDATES,
+    XMODEL1_MAX_RESPONSE_CANDIDATES,
     XMODEL1_MAX_SPECIAL_CANDIDATES,
     XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+)
+from xmodel1.schema import (
+    XMODEL1_SPECIAL_TYPE_ANKAN,
+    XMODEL1_SPECIAL_TYPE_CHI_HIGH,
+    XMODEL1_SPECIAL_TYPE_CHI_LOW,
+    XMODEL1_SPECIAL_TYPE_CHI_MID,
+    XMODEL1_SPECIAL_TYPE_DAIMINKAN,
+    XMODEL1_SPECIAL_TYPE_HORA,
+    XMODEL1_SPECIAL_TYPE_KAKAN,
+    XMODEL1_SPECIAL_TYPE_NONE,
+    XMODEL1_SPECIAL_TYPE_PON,
+    XMODEL1_SPECIAL_TYPE_REACH,
+    XMODEL1_SPECIAL_TYPE_RYUKYOKU,
 )
 
 
@@ -51,6 +80,21 @@ class KeqingModelAdapter:
         self._runtime_special_candidate_builder = None
         self._runtime_v4_summary_builder = None
         self._runtime_v4_summary_cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._placement_rank_bonus: tuple[float, float, float, float] = (90.0, 45.0, 0.0, -135.0)
+        self._placement_rank_bonus_norm: float = 90.0
+        self._placement_rank_score_scale: float = 0.0
+
+    @staticmethod
+    def _resolve_placement_runtime_cfg(cfg: object) -> tuple[tuple[float, float, float, float], float, float]:
+        placement_cfg = cfg.get("placement", {}) if isinstance(cfg, dict) else {}
+        rank_bonus_raw = placement_cfg.get("rank_bonus", (90.0, 45.0, 0.0, -135.0))
+        if not isinstance(rank_bonus_raw, (list, tuple)) or len(rank_bonus_raw) != 4:
+            rank_bonus = (90.0, 45.0, 0.0, -135.0)
+        else:
+            rank_bonus = tuple(float(value) for value in rank_bonus_raw)
+        rank_bonus_norm = float(placement_cfg.get("rank_bonus_norm", 90.0))
+        rank_score_scale = float(placement_cfg.get("rank_score_scale", 0.0))
+        return rank_bonus, rank_bonus_norm, rank_score_scale
 
     @classmethod
     def from_checkpoint(
@@ -87,12 +131,6 @@ class KeqingModelAdapter:
                 state_scalar_dim=int(resolve_xmodel1_state_scalar_dim(cfg, state_dict)),
                 candidate_feature_dim=int(cfg.get("candidate_feature_dim", inferred_dims["candidate_feature_dim"])),
                 candidate_flag_dim=int(cfg.get("candidate_flag_dim", inferred_dims["candidate_flag_dim"])),
-                special_candidate_feature_dim=int(
-                    cfg.get(
-                        "special_candidate_feature_dim",
-                        inferred_dims["special_candidate_feature_dim"],
-                    )
-                ),
                 hidden_dim=int(cfg.get("hidden_dim", inferred_dims["hidden_dim"])),
                 num_res_blocks=int(cfg.get("num_res_blocks", inferred_dims["num_res_blocks"])),
                 dropout=float(cfg.get("dropout", inferred_dims["dropout"])),
@@ -110,6 +148,11 @@ class KeqingModelAdapter:
                 encode_fn=features_mod.encode,
                 device=device,
             )
+            (
+                inst._placement_rank_bonus,
+                inst._placement_rank_bonus_norm,
+                inst._placement_rank_score_scale,
+            ) = cls._resolve_placement_runtime_cfg(cfg)
             inst._runtime_candidate_builder = lambda snap, actor, legal_actions=None: features_mod.build_runtime_candidate_arrays(
                 snap,
                 actor,
@@ -118,20 +161,14 @@ class KeqingModelAdapter:
                 candidate_feature_dim=int(cfg.get("candidate_feature_dim", inferred_dims["candidate_feature_dim"])),
                 candidate_flag_dim=int(cfg.get("candidate_flag_dim", inferred_dims["candidate_flag_dim"])),
             )
-            # Stage 3 E:runtime 补上 special candidate 通道,与 preprocess
-            # 同源;此前 runtime 这块未 wire,forward 走 zero-default 导致
-            # reach/pon/kan/none 的 flat logit 只由 misc_action_head 投影。
-            inst._runtime_special_candidate_builder = lambda snap, actor, legal_actions=None: features_mod.build_runtime_special_candidate_arrays(
-                snap,
-                actor,
-                legal_actions,
-                max_candidates=int(cfg.get("max_special_candidates", XMODEL1_MAX_SPECIAL_CANDIDATES)),
-                feature_dim=int(
-                    cfg.get(
-                        "special_candidate_feature_dim",
-                        inferred_dims["special_candidate_feature_dim"],
-                    )
-                ),
+            inst._runtime_special_candidate_builder = (
+                lambda snap, actor, legal_actions=None: features_mod.build_runtime_special_candidate_arrays(
+                    snap,
+                    actor,
+                    legal_actions,
+                    max_candidates=XMODEL1_MAX_SPECIAL_CANDIDATES,
+                    feature_dim=XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+                )
             )
             return inst
         if inferred_version == "keqingv4":
@@ -167,6 +204,11 @@ class KeqingModelAdapter:
                 encode_fn=features_mod.encode,
                 device=device,
             )
+            (
+                inst._placement_rank_bonus,
+                inst._placement_rank_bonus_norm,
+                inst._placement_rank_score_scale,
+            ) = cls._resolve_placement_runtime_cfg(cfg)
             def _build_runtime_v4_summaries(snapshot: dict, actor: int, legal_actions: list[dict]):
                 try:
                     return core_mod.build_keqingv4_typed_summaries(snapshot, actor, legal_actions)
@@ -246,6 +288,62 @@ class KeqingModelAdapter:
                 f"keqingv4 {name} contract drift: expected shape {expected_shape}, got {arr.shape}"
             )
         return arr
+
+    @staticmethod
+    def _xmodel1_special_type_to_action_idx(special_type: int) -> int | None:
+        mapping = {
+            XMODEL1_SPECIAL_TYPE_REACH: REACH_IDX,
+            XMODEL1_SPECIAL_TYPE_CHI_LOW: CHI_LOW_IDX,
+            XMODEL1_SPECIAL_TYPE_CHI_MID: CHI_MID_IDX,
+            XMODEL1_SPECIAL_TYPE_CHI_HIGH: CHI_HIGH_IDX,
+            XMODEL1_SPECIAL_TYPE_PON: PON_IDX,
+            XMODEL1_SPECIAL_TYPE_DAIMINKAN: DAIMINKAN_IDX,
+            XMODEL1_SPECIAL_TYPE_ANKAN: ANKAN_IDX,
+            XMODEL1_SPECIAL_TYPE_KAKAN: KAKAN_IDX,
+            XMODEL1_SPECIAL_TYPE_HORA: HORA_IDX,
+            XMODEL1_SPECIAL_TYPE_RYUKYOKU: RYUKYOKU_IDX,
+            XMODEL1_SPECIAL_TYPE_NONE: NONE_IDX,
+        }
+        return mapping.get(int(special_type))
+
+    @staticmethod
+    def _xmodel1_special_candidate_bonus(features: np.ndarray) -> float:
+        feat = np.asarray(features, dtype=np.float32).reshape(-1)
+        if feat.size < 19:
+            return 0.0
+        risk_mean = float(np.mean(feat[13:16]))
+        return (
+            0.6 * float(feat[8])
+            + 0.35 * float(feat[9])
+            - 0.4 * float(feat[10])
+            - 0.35 * risk_mean
+            + 0.15 * float(feat[11])
+            + 0.15 * float(feat[12])
+            + 0.2 * float(feat[16])
+            + 0.1 * float(feat[17])
+            + 0.05 * float(feat[18])
+        )
+
+    @classmethod
+    def _xmodel1_special_action_bonus_map(
+        cls,
+        special_feat: np.ndarray,
+        special_type_id: np.ndarray,
+        special_mask: np.ndarray,
+        legal_actions: list[dict],
+    ) -> dict[int, float]:
+        legal_action_ids = {action_to_idx(action) for action in legal_actions}
+        bonuses: dict[int, float] = {}
+        for feat_row, type_value, mask_value in zip(special_feat, special_type_id, special_mask):
+            if int(mask_value) <= 0:
+                continue
+            action_idx = cls._xmodel1_special_type_to_action_idx(int(type_value))
+            if action_idx is None or action_idx not in legal_action_ids:
+                continue
+            bonus = cls._xmodel1_special_candidate_bonus(feat_row)
+            previous = bonuses.get(action_idx)
+            bonuses[action_idx] = bonus if previous is None else max(previous, bonus)
+        return bonuses
 
     def _resolve_v4_runtime_summaries(
         self,
@@ -353,19 +451,20 @@ class KeqingModelAdapter:
                 candidate_mask_t = torch.from_numpy(candidate_mask).unsqueeze(0).to(self.device)
                 candidate_flags_t = torch.from_numpy(candidate_flags).unsqueeze(0).to(self.device)
                 history_summary_t = torch.from_numpy(history_summary).unsqueeze(0).to(self.device).float()
-                if self._runtime_special_candidate_builder is not None:
-                    special_feat, special_type_id, special_mask = self._runtime_special_candidate_builder(
-                        snap,
-                        actor,
-                        legal_actions,
-                    )
-                    special_feat_t = torch.from_numpy(special_feat).unsqueeze(0).to(self.device)
-                    special_type_id_t = torch.from_numpy(special_type_id).unsqueeze(0).to(self.device).long()
-                    special_mask_t = torch.from_numpy(special_mask).unsqueeze(0).to(self.device)
-                else:
-                    special_feat_t = None
-                    special_type_id_t = None
-                    special_mask_t = None
+                runtime_payload = features_mod.resolve_runtime_tensor_payload(
+                    snap,
+                    actor,
+                    legal_actions,
+                    max_candidates=XMODEL1_MAX_CANDIDATES,
+                    candidate_feature_dim=int(getattr(self.model, "candidate_feature_dim", XMODEL1_CANDIDATE_FEATURE_DIM)),
+                    candidate_flag_dim=int(getattr(self.model, "candidate_flag_dim", XMODEL1_CANDIDATE_FLAG_DIM)),
+                )
+                response_action_idx_t = torch.from_numpy(runtime_payload["response_action_idx"]).unsqueeze(0).to(self.device).long()
+                response_action_mask_t = torch.from_numpy(runtime_payload["response_action_mask"]).unsqueeze(0).to(self.device)
+                response_post_candidate_feat_t = torch.from_numpy(runtime_payload["response_post_candidate_feat"]).unsqueeze(0).to(self.device)
+                response_post_candidate_tile_id_t = torch.from_numpy(runtime_payload["response_post_candidate_tile_id"]).unsqueeze(0).to(self.device).long()
+                response_post_candidate_mask_t = torch.from_numpy(runtime_payload["response_post_candidate_mask"]).unsqueeze(0).to(self.device)
+                response_post_candidate_flags_t = torch.from_numpy(runtime_payload["response_post_candidate_flags"]).unsqueeze(0).to(self.device)
                 out = self.model(
                     tile_t.float() if self.device.type != "cuda" else tile_t,
                     scalar_t.float() if self.device.type != "cuda" else scalar_t,
@@ -373,16 +472,37 @@ class KeqingModelAdapter:
                     candidate_tile_id_t,
                     candidate_flags_t.float(),
                     candidate_mask_t.float(),
-                    special_candidate_feat=(
-                        special_feat_t.float() if special_feat_t is not None and self.device.type != "cuda" else special_feat_t
+                    response_action_idx=response_action_idx_t,
+                    response_action_mask=(
+                        response_action_mask_t.float() if self.device.type != "cuda" else response_action_mask_t
                     ),
-                    special_candidate_type_id=special_type_id_t,
-                    special_candidate_mask=(
-                        special_mask_t.float() if special_mask_t is not None and self.device.type != "cuda" else special_mask_t
+                    response_post_candidate_feat=(
+                        response_post_candidate_feat_t.float() if self.device.type != "cuda" else response_post_candidate_feat_t
                     ),
+                    response_post_candidate_tile_id=response_post_candidate_tile_id_t,
+                    response_post_candidate_mask=(
+                        response_post_candidate_mask_t.float() if self.device.type != "cuda" else response_post_candidate_mask_t
+                    ),
+                    response_post_candidate_flags=response_post_candidate_flags_t.float(),
                     history_summary=history_summary_t,
                 )
-                policy_logits_t = out.action_logits
+                policy_logits_t = out.action_logits.clone()
+                if self._runtime_special_candidate_builder is not None:
+                    special_feat, special_type_id, special_mask = self._runtime_special_candidate_builder(
+                        snap,
+                        actor,
+                        legal_actions,
+                    )
+                    for action_idx, bonus in self._xmodel1_special_action_bonus_map(
+                        special_feat,
+                        special_type_id,
+                        special_mask,
+                        legal_actions,
+                    ).items():
+                        policy_logits_t[:, action_idx] = (
+                            policy_logits_t[:, action_idx]
+                            + policy_logits_t.new_tensor(float(bonus))
+                        )
                 # Stage 1:删除 MC 形态的 global_value,runtime value 由分解 EV
                 # 组合出;Stage 3 runtime 直通后会进一步替换为 per-candidate rerank。
                 win_prob_t = torch.sigmoid(out.win_logit.float())
@@ -395,16 +515,14 @@ class KeqingModelAdapter:
                     discard_logits=out.discard_logits.squeeze(0).detach().cpu().numpy(),
                     candidate_tile_id=candidate_tile_id_t.squeeze(0).detach().cpu().numpy(),
                     candidate_mask=candidate_mask_t.squeeze(0).detach().cpu().numpy(),
-                    special_logits=out.special_logits.squeeze(0).detach().cpu().numpy(),
-                    special_type_id=(
-                        special_type_id_t.squeeze(0).detach().cpu().numpy()
-                        if special_type_id_t is not None
-                        else np.full((XMODEL1_MAX_SPECIAL_CANDIDATES,), -1, dtype=np.int16)
-                    ),
-                    special_mask=(
-                        special_mask_t.squeeze(0).detach().cpu().numpy()
-                        if special_mask_t is not None
-                        else np.zeros((XMODEL1_MAX_SPECIAL_CANDIDATES,), dtype=np.uint8)
+                    response_logits=out.response_logits.squeeze(0).detach().cpu().numpy(),
+                    response_action_idx=response_action_idx_t.squeeze(0).detach().cpu().numpy(),
+                    response_action_mask=response_action_mask_t.squeeze(0).detach().cpu().numpy(),
+                    response_post_candidate_feat=response_post_candidate_feat_t.squeeze(0).detach().cpu().numpy(),
+                    response_post_candidate_mask=response_post_candidate_mask_t.squeeze(0).detach().cpu().numpy(),
+                    response_teacher_discard_idx=runtime_payload.get(
+                        "response_teacher_discard_idx",
+                        np.full((XMODEL1_MAX_RESPONSE_CANDIDATES,), -1, dtype=np.int16),
                     ),
                     win_prob=float(win_prob_t.squeeze().detach().cpu().item()),
                     dealin_prob=float(dealin_prob_t.squeeze().detach().cpu().item()),
@@ -459,10 +577,34 @@ class KeqingModelAdapter:
             score_like = aux.get("composed_ev")
         if score_like is None:
             score_like = aux.get("global_value")
-        if score_like is None:
-            return ModelAuxOutputs()
+        score_delta = 0.0 if score_like is None else float(score_like.squeeze().detach().cpu().item())
+        win_prob = 0.0
+        if "win_prob" in aux:
+            win_prob = float(torch.sigmoid(aux["win_prob"].squeeze()).detach().cpu().item())
+        dealin_prob = 0.0
+        if "dealin_prob" in aux:
+            dealin_prob = float(torch.sigmoid(aux["dealin_prob"].squeeze()).detach().cpu().item())
+        rank_probs = (0.0, 0.0, 0.0, 0.0)
+        if "rank_logits" in aux:
+            rank_probs_t = torch.softmax(aux["rank_logits"].float(), dim=-1).reshape(-1, 4)[0]
+            rank_probs = tuple(float(value) for value in rank_probs_t.detach().cpu().tolist())
+        final_score_delta = 0.0
+        if "final_score_delta" in aux:
+            final_score_delta = float(aux["final_score_delta"].squeeze().detach().cpu().item())
+        rank_pt_value = 0.0
+        if "rank_logits" in aux:
+            rank_pt_value = placement_utility_from_outputs(
+                rank_probs,
+                final_score_delta=final_score_delta,
+                rank_bonus=self._placement_rank_bonus,
+                rank_bonus_norm=self._placement_rank_bonus_norm,
+                rank_score_scale=self._placement_rank_score_scale,
+            )
         return ModelAuxOutputs(
-            score_delta=float(score_like.squeeze().detach().cpu().item()),
-            win_prob=float(torch.sigmoid(aux["win_prob"].squeeze()).detach().cpu().item()),
-            dealin_prob=float(torch.sigmoid(aux["dealin_prob"].squeeze()).detach().cpu().item()),
+            score_delta=score_delta,
+            win_prob=win_prob,
+            dealin_prob=dealin_prob,
+            rank_probs=rank_probs,
+            final_score_delta=final_score_delta,
+            rank_pt_value=rank_pt_value,
         )

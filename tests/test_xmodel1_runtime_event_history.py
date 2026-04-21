@@ -17,6 +17,8 @@ from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_HISTORY_SUMMARY_DIM,
+    XMODEL1_SCHEMA_NAME,
+    XMODEL1_SCHEMA_VERSION,
 )
 from xmodel1.features import compute_history_summary as xmodel1_compute_history_summary
 from xmodel1.model import Xmodel1Model
@@ -322,14 +324,14 @@ def test_keqing_adapter_xmodel1_forward_passes_history_summary(tmp_path: Path, m
                 "state_scalar_dim": 56,
                 "candidate_feature_dim": XMODEL1_CANDIDATE_FEATURE_DIM,
                 "candidate_flag_dim": XMODEL1_CANDIDATE_FLAG_DIM,
-                "schema_name": "xmodel1_discard_v3",
-                "schema_version": 3,
+                "schema_name": XMODEL1_SCHEMA_NAME,
+                "schema_version": XMODEL1_SCHEMA_VERSION,
                 "hidden_dim": 32,
                 "num_res_blocks": 1,
             },
             "model_version": "xmodel1",
-            "schema_name": "xmodel1_discard_v3",
-            "schema_version": 3,
+            "schema_name": XMODEL1_SCHEMA_NAME,
+            "schema_version": XMODEL1_SCHEMA_VERSION,
         },
         ckpt,
     )

@@ -40,6 +40,8 @@ def _unpack_v4_batch(batch, device: torch.device) -> Dict:
         discard_summary,
         call_summary,
         special_summary,
+        final_rank_target,
+        final_score_delta_points_target,
     ) = batch
     to_float = lambda tensor: tensor.to(device, non_blocking=True).float()
     to_device = lambda tensor: tensor.to(device, non_blocking=True)
@@ -59,6 +61,8 @@ def _unpack_v4_batch(batch, device: torch.device) -> Dict:
         "pts_given_dealin_available": to_device(pts_given_dealin_available),
         "opp_tenpai_available": to_device(opp_tenpai_available),
         "v4_opportunity": to_device(v4_opportunity),
+        "final_rank_target": final_rank_target.to(device, non_blocking=True).long(),
+        "final_score_delta_points_target": final_score_delta_points_target.to(device, non_blocking=True),
         "model_kwargs": {
             "event_history": to_device(event_history),
             "discard_summary": to_float(discard_summary),
@@ -75,6 +79,35 @@ def _make_v4_task(cfg: Dict) -> TaskSpec:
     pts_given_dealin_loss_weight = float(cfg.get("pts_given_dealin_loss_weight", 0.0))
     opp_tenpai_loss_weight = float(cfg.get("opp_tenpai_loss_weight", 0.0))
     mc_reg_loss_weight = float(cfg.get("mc_reg_loss_weight", 0.05))
+    placement_cfg = cfg.get("placement", {})
+    final_rank_loss_weight = float(
+        placement_cfg.get("rank_loss_weight", cfg.get("final_rank_loss_weight", 0.05))
+    )
+    final_score_delta_loss_weight = float(
+        placement_cfg.get(
+            "final_score_delta_loss_weight",
+            cfg.get("final_score_delta_loss_weight", 0.05),
+        )
+    )
+    rank_pt_loss_weight = float(
+        placement_cfg.get(
+            "rank_pt_value_loss_weight",
+            cfg.get("rank_pt_value_loss_weight", 0.0),
+        )
+    )
+    rank_bonus = placement_cfg.get(
+        "rank_bonus",
+        cfg.get("rank_bonus", [90.0, 45.0, 0.0, -135.0]),
+    )
+    rank_bonus_norm = float(
+        placement_cfg.get("rank_bonus_norm", cfg.get("rank_bonus_norm", 90.0))
+    )
+    rank_score_scale = float(
+        placement_cfg.get("rank_score_scale", cfg.get("rank_score_scale", 0.0))
+    )
+    score_norm = float(
+        placement_cfg.get("score_norm", cfg.get("score_norm", 30000.0))
+    )
     typed_rank_loss_weight = float(cfg.get("typed_rank_loss_weight", 0.15))
     typed_rank_margin = float(cfg.get("typed_rank_margin", 0.20))
     reach_opportunity_weight = float(cfg.get("reach_opportunity_weight", 1.5))
@@ -121,13 +154,21 @@ def _make_v4_task(cfg: Dict) -> TaskSpec:
         pts_given_win_pred = aux["pts_given_win"].squeeze(-1)
         pts_given_dealin_pred = aux["pts_given_dealin"].squeeze(-1)
         opp_tenpai_logits = aux["opp_tenpai_logits"]
+        rank_logits = aux["rank_logits"]
+        final_score_delta_pred = aux["final_score_delta"].squeeze(-1)
         composed_ev = aux["composed_ev"].squeeze(-1)
         action_idx = batch_data["action_idx"]
         action_mask = batch_data["mask"] > 0
         v4_opportunity = batch_data["v4_opportunity"].bool()
+        final_rank_target = batch_data["final_rank_target"]
+        final_score_delta_target = batch_data["final_score_delta_points_target"].float() / score_norm
 
         win_pos_weight_t = torch.tensor(win_pos_weight, device=device)
         dealin_pos_weight_t = torch.tensor(dealin_pos_weight, device=device)
+        rank_bonus_t = (
+            torch.tensor(rank_bonus, dtype=torch.float32, device=device)
+            / max(rank_bonus_norm, 1e-6)
+        )
         win_loss = F.binary_cross_entropy_with_logits(
             win_logits,
             batch_data["win_target"],
@@ -166,6 +207,22 @@ def _make_v4_task(cfg: Dict) -> TaskSpec:
             ).mean(dim=-1),
             opp_tenpai_mask,
         )
+        final_rank_loss = F.cross_entropy(rank_logits.float(), final_rank_target)
+        final_score_delta_loss = F.smooth_l1_loss(
+            final_score_delta_pred.float(),
+            final_score_delta_target,
+        )
+        rank_probs = F.softmax(rank_logits.float(), dim=-1)
+        rank_pt_pred = (
+            (rank_probs * rank_bonus_t.unsqueeze(0)).sum(dim=-1)
+            + rank_score_scale * final_score_delta_pred.float()
+        )
+        rank_pt_target = (
+            rank_bonus_t[final_rank_target]
+            + rank_score_scale * final_score_delta_target
+        )
+        rank_pt_loss = F.smooth_l1_loss(rank_pt_pred, rank_pt_target)
+        final_rank_acc = (rank_logits.argmax(dim=-1) == final_rank_target).float().mean()
         mc_reg_loss = F.smooth_l1_loss(composed_ev, batch_data["value_target"])
 
         selected_logits = policy_logits.gather(1, action_idx.unsqueeze(1)).squeeze(1)
@@ -277,6 +334,9 @@ def _make_v4_task(cfg: Dict) -> TaskSpec:
             + pts_given_win_loss_weight * pts_given_win_loss
             + pts_given_dealin_loss_weight * pts_given_dealin_loss
             + opp_tenpai_loss_weight * opp_tenpai_loss
+            + final_rank_loss_weight * final_rank_loss
+            + final_score_delta_loss_weight * final_score_delta_loss
+            + rank_pt_loss_weight * rank_pt_loss
             + mc_reg_loss_weight * mc_reg_loss
             + typed_rank_loss_weight * typed_rank_loss
         )
@@ -286,12 +346,19 @@ def _make_v4_task(cfg: Dict) -> TaskSpec:
             "pts_given_win_loss": float(pts_given_win_loss.item()),
             "pts_given_dealin_loss": float(pts_given_dealin_loss.item()),
             "opp_tenpai_loss": float(opp_tenpai_loss.item()),
+            "final_rank_loss": float(final_rank_loss.item()),
+            "final_score_delta_loss": float(final_score_delta_loss.item()),
+            "rank_pt_loss": float(rank_pt_loss.item()),
             "mc_reg_loss": float(mc_reg_loss.item()),
             "reach_rank_loss": float(reach_rank_loss.item()),
             "call_rank_loss": float(call_rank_loss.item()),
             "hora_rank_loss": float(hora_rank_loss.item()),
             "typed_rank_loss": float(typed_rank_loss.item()),
             "composed_ev_mean": float(composed_ev.mean().item()),
+            "final_rank_acc": float(final_rank_acc.item()),
+            "rank1_prob_mean": float(rank_probs[:, 0].mean().item()),
+            "final_score_delta_mean": float(final_score_delta_pred.float().mean().item()),
+            "rank_pt_value_mean": float(rank_pt_pred.mean().item()),
             "win_prob_mean": float(torch.sigmoid(win_logits).mean().item()),
             "dealin_prob_mean": float(torch.sigmoid(dealin_logits).mean().item()),
             "pts_given_win_mean": float(pts_given_win_pred.mean().item()),
@@ -320,12 +387,19 @@ def _make_v4_task(cfg: Dict) -> TaskSpec:
             "pts_given_win_loss",
             "pts_given_dealin_loss",
             "opp_tenpai_loss",
+            "final_rank_loss",
+            "final_score_delta_loss",
+            "rank_pt_loss",
             "mc_reg_loss",
             "reach_rank_loss",
             "call_rank_loss",
             "hora_rank_loss",
             "typed_rank_loss",
             "composed_ev_mean",
+            "final_rank_acc",
+            "rank1_prob_mean",
+            "final_score_delta_mean",
+            "rank_pt_value_mean",
             "win_prob_mean",
             "dealin_prob_mean",
             "pts_given_win_mean",

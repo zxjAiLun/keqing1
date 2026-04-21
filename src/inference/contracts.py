@@ -11,6 +11,9 @@ class ModelAuxOutputs:
     score_delta: float = 0.0
     win_prob: float = 0.0
     dealin_prob: float = 0.0
+    rank_probs: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    final_score_delta: float = 0.0
+    rank_pt_value: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -18,9 +21,12 @@ class Xmodel1RuntimeOutputs:
     discard_logits: np.ndarray
     candidate_tile_id: np.ndarray
     candidate_mask: np.ndarray
-    special_logits: np.ndarray
-    special_type_id: np.ndarray
-    special_mask: np.ndarray
+    response_logits: np.ndarray
+    response_action_idx: np.ndarray
+    response_action_mask: np.ndarray
+    response_post_candidate_feat: np.ndarray
+    response_post_candidate_mask: np.ndarray
+    response_teacher_discard_idx: np.ndarray
     win_prob: float
     dealin_prob: float
     pts_given_win: float

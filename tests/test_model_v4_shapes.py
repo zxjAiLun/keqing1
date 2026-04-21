@@ -38,6 +38,8 @@ def test_keqingv4_forward_shapes():
     assert aux["pts_given_win"].shape == (3, 1)
     assert aux["pts_given_dealin"].shape == (3, 1)
     assert aux["opp_tenpai_logits"].shape == (3, 3)
+    assert aux["rank_logits"].shape == (3, 4)
+    assert aux["final_score_delta"].shape == (3, 1)
 
 
 def test_keqingv4_forward_under_cuda_autocast_keeps_logit_assignment_safe():

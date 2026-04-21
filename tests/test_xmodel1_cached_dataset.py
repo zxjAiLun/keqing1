@@ -12,10 +12,9 @@ from training.cache_schema import (
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_HISTORY_SUMMARY_DIM,
     XMODEL1_MAX_CANDIDATES,
-    XMODEL1_MAX_SPECIAL_CANDIDATES,
+    XMODEL1_MAX_RESPONSE_CANDIDATES,
     XMODEL1_SCHEMA_NAME,
     XMODEL1_SCHEMA_VERSION,
-    XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
 from tests.xmodel1_test_utils import make_xmodel1_v3_payload, write_xmodel1_v3_npz
 from xmodel1.cached_dataset import (
@@ -45,11 +44,18 @@ def test_xmodel1_cached_dataset_iterates_and_collates(tmp_path: Path):
     assert batch["candidate_flags"].shape == (2, 14, XMODEL1_CANDIDATE_FLAG_DIM)
     assert batch["candidate_mask"].shape == (2, 14)
     assert batch["action_idx_target"].shape == (2,)
-    assert batch["special_candidate_feat"].shape == (2, 12, XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM)
-    assert batch["special_candidate_mask"].shape == (2, 12)
+    assert batch["response_action_idx"].shape == (2, XMODEL1_MAX_RESPONSE_CANDIDATES)
+    assert batch["response_post_candidate_feat"].shape == (
+        2,
+        XMODEL1_MAX_RESPONSE_CANDIDATES,
+        XMODEL1_MAX_CANDIDATES,
+        XMODEL1_CANDIDATE_FEATURE_DIM,
+    )
     assert batch["history_summary"].shape == (2, XMODEL1_HISTORY_SUMMARY_DIM)
     assert batch["pts_given_win_target"].shape == (2,)
     assert batch["pts_given_dealin_target"].shape == (2,)
+    assert batch["final_rank_target"].shape == (2,)
+    assert batch["final_score_delta_points_target"].shape == (2,)
     assert float(batch["pts_given_win_target"].sum()) == 0.0
     assert float(batch["pts_given_dealin_target"].sum()) == 0.0
     assert batch["replay_id"] == ["sample", "sample"]
@@ -66,8 +72,6 @@ def test_xmodel1_infer_cached_dimensions_reads_real_shapes(tmp_path: Path):
         "candidate_feature_dim": XMODEL1_CANDIDATE_FEATURE_DIM,
         "candidate_flag_dim": XMODEL1_CANDIDATE_FLAG_DIM,
         "max_candidates": 14,
-        "special_candidate_feature_dim": XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
-        "max_special_candidates": 12,
     }
 
 

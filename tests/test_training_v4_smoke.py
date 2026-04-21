@@ -83,6 +83,15 @@ def test_keqingv4_training_smoke(tmp_path: Path):
         "pts_given_dealin_loss_weight": 0.3,
         "opp_tenpai_loss_weight": 0.25,
         "mc_reg_loss_weight": 0.01,
+        "placement": {
+            "rank_loss_weight": 0.05,
+            "final_score_delta_loss_weight": 0.05,
+            "rank_pt_value_loss_weight": 0.01,
+            "rank_bonus": [90.0, 45.0, 0.0, -135.0],
+            "rank_bonus_norm": 90.0,
+            "rank_score_scale": 0.0,
+            "score_norm": 30000.0,
+        },
     }
 
     out_dir = tmp_path / "v4_smoke"
@@ -117,6 +126,12 @@ def test_keqingv4_training_smoke(tmp_path: Path):
     last = rows[-1]
     assert "train_typed_rank_loss" in last
     assert "val_typed_rank_loss" in last
+    assert "train_final_rank_loss" in last
+    assert "val_final_rank_loss" in last
+    assert "train_final_score_delta_loss" in last
+    assert "val_rank_pt_loss" in last
+    assert "train_final_rank_acc" in last
+    assert "val_rank1_prob_mean" in last
     assert "train_mc_reg_loss" in last
     assert "val_composed_ev_mean" in last
     assert "train_reach_opp_rate" in last

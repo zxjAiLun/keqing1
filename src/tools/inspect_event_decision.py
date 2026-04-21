@@ -36,6 +36,7 @@ def inspect_event_decision(
     project_root: str | Path,
     device: str,
     model_version: str | None = None,
+    rank_pt_lambda: float = 0.0,
     context_before: int = 8,
     context_after: int = 8,
 ) -> dict[str, Any]:
@@ -57,6 +58,7 @@ def inspect_event_decision(
         player_id=int(actor),
         model_path=checkpoint,
         device=device,
+        rank_pt_lambda=rank_pt_lambda,
         model_version=model_version or bot_name,
     )
 
@@ -79,6 +81,7 @@ def inspect_event_decision(
         "model_version": model_version or bot_name,
         "model_path": str(checkpoint),
         "device": device,
+        "rank_pt_lambda": rank_pt_lambda,
         "actor": actor,
         "target_event": target_event,
         "predicted_action": predicted_action,
@@ -98,6 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-path", default="", help="Explicit checkpoint path")
     parser.add_argument("--project-root", default=".", help="Project root for default checkpoint resolution")
     parser.add_argument("--device", default="cpu", help="Inference device")
+    parser.add_argument("--rank-pt-lambda", type=float, default=0.0, help="Runtime placement rerank scale")
     parser.add_argument("--context-before", type=int, default=8, help="How many prior events to print")
     parser.add_argument("--context-after", type=int, default=8, help="How many later events to print")
     return parser
@@ -114,6 +118,7 @@ def main() -> None:
         project_root=args.project_root,
         device=args.device,
         model_version=args.model_version or None,
+        rank_pt_lambda=args.rank_pt_lambda,
         context_before=args.context_before,
         context_after=args.context_after,
     )

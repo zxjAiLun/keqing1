@@ -862,6 +862,13 @@ class BattleManager:
 
     def get_state_for_player(self, room: BattleRoom, player_id: int) -> Dict:
         snap = self.get_snap_with_shanten(room, player_id)
+        tsumo_pai = room.state.last_tsumo[player_id]
+        visible_hand = list(snap["hand"])
+        if tsumo_pai is not None:
+            try:
+                visible_hand.remove(tsumo_pai)
+            except ValueError:
+                pass
 
         # 响应弃牌时（last_discard 来自他家），保留 none（skip）
         # 自己摸牌打牌回合，none 无意义，过滤掉
@@ -923,8 +930,8 @@ class BattleManager:
             "actor_to_move": room.state.actor_to_move,
             "last_discard": snap["last_discard"],
             "last_kakan": snap.get("last_kakan"),
-            "hand": snap["hand"],
-            "tsumo_pai": room.state.last_tsumo[player_id],
+            "hand": visible_hand,
+            "tsumo_pai": tsumo_pai,
             "discards": [p.discards[:] for p in room.state.players],
             "melds": [p.melds[:] for p in room.state.players],
             "reached": [p.reached for p in room.state.players],

@@ -36,14 +36,24 @@ def _inject_shanten_waits_stub(snap, *, hand_list, melds_list, model_version):
 
 
 def test_inference_contract_dataclasses_roundtrip():
-    aux = ModelAuxOutputs(score_delta=0.2, win_prob=0.4, dealin_prob=0.1)
+    aux = ModelAuxOutputs(
+        score_delta=0.2,
+        win_prob=0.4,
+        dealin_prob=0.1,
+        rank_probs=(0.1, 0.2, 0.3, 0.4),
+        final_score_delta=-0.25,
+        rank_pt_value=-0.4,
+    )
     xmodel1 = Xmodel1RuntimeOutputs(
         discard_logits=np.array([1.0], dtype=np.float32),
         candidate_tile_id=np.array([0], dtype=np.int16),
         candidate_mask=np.array([1], dtype=np.uint8),
-        special_logits=np.array([0.5], dtype=np.float32),
-        special_type_id=np.array([11], dtype=np.int16),
-        special_mask=np.array([1], dtype=np.uint8),
+        response_logits=np.array([0.5], dtype=np.float32),
+        response_action_idx=np.array([11], dtype=np.int16),
+        response_action_mask=np.array([1], dtype=np.uint8),
+        response_post_candidate_feat=np.zeros((1, 1), dtype=np.float32),
+        response_post_candidate_mask=np.array([1], dtype=np.uint8),
+        response_teacher_discard_idx=np.array([0], dtype=np.int16),
         win_prob=0.4,
         dealin_prob=0.1,
         pts_given_win=0.3,
@@ -76,6 +86,7 @@ def test_inference_contract_dataclasses_roundtrip():
     assert ctx.model_snap["tsumo_pai"] == "5mr"
     assert result.candidates[0].final_score == 0.5
     assert result.model_aux.win_prob == 0.4
+    assert result.model_aux.rank_probs == (0.1, 0.2, 0.3, 0.4)
     assert forward.xmodel1 is not None
 
 
@@ -127,6 +138,22 @@ class _FakeAdapter:
         return self.forwards.pop(0)
 
 
+class _FakeV4Adapter(_FakeAdapter):
+    model_version = "keqingv4"
+
+    def resolve_runtime_v4_summaries(self, snap, actor, legal_actions=None):
+        del snap, actor, legal_actions
+        return (
+            np.zeros((34, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+            np.zeros((8, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+            np.zeros((3, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+        )
+
+
+class _FakeXmodel1Adapter(_FakeAdapter):
+    model_version = "xmodel1"
+
+
 def _policy_with_scores(scores: dict[tuple[str, str | None], float]):
     import numpy as np
 
@@ -166,14 +193,39 @@ def test_rust_continuation_scenario_scorer_matches_followup_formula():
         score_delta=0.4,
         win_prob=0.2,
         dealin_prob=0.1,
+        rank_pt_value=1.5,
         beam_lambda=1.0,
         score_delta_lambda=0.5,
         win_prob_lambda=0.25,
         dealin_prob_lambda=0.75,
+        rank_pt_lambda=0.2,
     )
 
-    expected = 1.25 + 0.5 * 0.4 + 0.25 * 0.2 - 0.75 * 0.1
+    expected = 1.25 + 0.5 * 0.4 + 0.25 * 0.2 - 0.75 * 0.1 + 0.2 * 1.5
     assert payload["best_action"]["pai"] == "9m"
+    assert float(payload["score"]) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("continuation_kind", ["reach_declaration", "state_value"])
+def test_rust_continuation_scenario_state_value_path_includes_placement_bonus(continuation_kind: str):
+    payload = score_keqingv4_continuation_scenario(
+        continuation_kind,
+        _empty_policy(),
+        [],
+        value=0.8,
+        score_delta=0.2,
+        win_prob=0.1,
+        dealin_prob=0.4,
+        rank_pt_value=2.0,
+        beam_lambda=0.5,
+        score_delta_lambda=1.0,
+        win_prob_lambda=0.5,
+        dealin_prob_lambda=0.25,
+        rank_pt_lambda=0.3,
+    )
+
+    expected = 0.5 * 0.8 + 1.0 * 0.2 + 0.5 * 0.1 - 0.25 * 0.4 + 0.3 * 2.0
+    assert payload["best_action"] is None
     assert float(payload["score"]) == pytest.approx(expected)
 
 
@@ -1518,7 +1570,14 @@ def test_runtime_review_exporter_builds_decision_entry():
             )
         ],
         model_value=0.3,
-        model_aux=ModelAuxOutputs(score_delta=0.1, win_prob=0.2, dealin_prob=0.05),
+        model_aux=ModelAuxOutputs(
+            score_delta=0.1,
+            win_prob=0.2,
+            dealin_prob=0.05,
+            rank_probs=(0.5, 0.3, 0.15, 0.05),
+            final_score_delta=0.2,
+            rank_pt_value=0.65,
+        ),
     )
 
     entry = exporter.build_decision_entry(
@@ -1534,6 +1593,9 @@ def test_runtime_review_exporter_builds_decision_entry():
     assert entry["chosen"]["type"] == "reach"
     assert entry["candidates"][0]["reach_discard"]["pai"] == "4m"
     assert entry["aux_outputs"]["win_prob"] == 0.2
+    assert entry["aux_outputs"]["rank_probs"] == [0.5, 0.3, 0.15, 0.05]
+    assert entry["aux_outputs"]["final_score_delta"] == 0.2
+    assert entry["aux_outputs"]["rank_pt_value"] == 0.65
 
 
 def test_runtime_review_exporter_candidate_score_priority():
@@ -1649,3 +1711,442 @@ def test_summarize_reach_followup_returns_none_for_non_reach():
             "consumed": ["5p", "6p"],
         },
     ) is True
+
+
+def test_default_action_scorer_rank_pt_disabled_preserves_dahai_behavior(monkeypatch):
+    monkeypatch.setattr(
+        inference_scoring,
+        "_score_actions_with_runtime_placement",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("placement path must stay disabled")),
+    )
+
+    adapter = _FakeV4Adapter(
+        [
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({("dahai", "1m"): 0.2, ("dahai", "2m"): 0.1}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_empty_policy(),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+        rank_pt_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "tsumo", "actor": 0, "pai": "2m"},
+        runtime_snap={"hand": ["1m", "2m"], "discards": [[], [], [], []], "melds": [[], [], [], []]},
+        model_snap={"hand": ["1m"], "tsumo_pai": "2m"},
+        legal_actions=[
+            {"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False},
+            {"type": "dahai", "actor": 0, "pai": "2m", "tsumogiri": True},
+        ],
+    )
+
+    result = scorer.score(ctx)
+
+    assert result.chosen["pai"] == "1m"
+    assert [candidate.action["pai"] for candidate in result.candidates] == ["1m", "2m"]
+    assert [candidate.final_score for candidate in result.candidates] == pytest.approx([0.2, 0.1])
+
+
+def test_default_action_scorer_rank_pt_disabled_preserves_meld_none_behavior(monkeypatch):
+    chi_action = {"type": "chi", "actor": 0, "target": 3, "pai": "5m", "consumed": ["6m", "7m"]}
+    none_action = {"type": "none"}
+    monkeypatch.setattr(
+        inference_scoring,
+        "_score_actions_with_runtime_placement",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("placement path must stay disabled")),
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_resolve_continuation_scenarios",
+        lambda snap, actor, action: [
+            {
+                "projected_snapshot": {"marker": "chi_followup"},
+                "legal_actions": [{"type": "dahai", "actor": actor, "pai": "9m", "tsumogiri": False}],
+                "weight": 1.0,
+                "continuation_kind": "post_meld_followup",
+                "declaration_action": None,
+            }
+        ]
+        if action == chi_action
+        else [],
+    )
+
+    logits = _empty_policy()
+    logits[action_to_idx(chi_action)] = 0.2
+    logits[action_to_idx(none_action)] = 0.3
+    adapter = _FakeV4Adapter(
+        [
+            ModelForwardResult(policy_logits=logits, value=0.0, aux=ModelAuxOutputs()),
+            ModelForwardResult(policy_logits=_empty_policy(), value=0.0, aux=ModelAuxOutputs()),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({("dahai", "9m"): 0.0}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+        rank_pt_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "dahai", "actor": 3, "pai": "5m"},
+        runtime_snap={"hand": ["5mr", "6m", "7m", "9m"], "discards": [[], [], [], []], "melds": [[], [], [], []]},
+        model_snap={"hand": ["5mr", "6m", "7m", "9m"]},
+        legal_actions=[chi_action, none_action],
+    )
+
+    result = scorer.score(ctx)
+
+    assert result.chosen["type"] == "none"
+    assert [candidate.action["type"] for candidate in result.candidates] == ["none", "chi"]
+    assert [candidate.final_score for candidate in result.candidates] == pytest.approx([0.3, 0.2])
+
+
+def test_default_action_scorer_rank_pt_disabled_preserves_reach_discard_behavior(monkeypatch):
+    reach_action = {"type": "reach", "actor": 0}
+    discard_reach = {"type": "dahai", "actor": 0, "pai": "4m", "tsumogiri": False}
+    discard_alt = {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": False}
+    monkeypatch.setattr(
+        inference_scoring,
+        "_score_actions_with_runtime_placement",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("placement path must stay disabled")),
+    )
+    monkeypatch.setattr(
+        inference_scoring,
+        "_resolve_continuation_scenarios",
+        lambda snap, actor, action: [
+            {
+                "projected_snapshot": {"marker": "reach_followup"},
+                "legal_actions": [{"type": "none"}],
+                "weight": 1.0,
+                "continuation_kind": "reach_declaration",
+                "declaration_action": discard_reach,
+            }
+        ]
+        if action == reach_action
+        else [],
+    )
+
+    adapter = _FakeV4Adapter(
+        [
+            ModelForwardResult(
+                policy_logits=_policy_with_scores(
+                    {("reach", None): 0.1, ("dahai", "4m"): 0.05, ("dahai", "9m"): 0.2}
+                ),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_empty_policy(),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+        rank_pt_lambda=0.0,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "tsumo", "actor": 0, "pai": "9m"},
+        runtime_snap={"hand": ["4m", "9m"], "discards": [[], [], [], []], "melds": [[], [], [], []]},
+        model_snap={"hand": ["4m"], "tsumo_pai": "9m"},
+        legal_actions=[reach_action, discard_reach, discard_alt],
+    )
+
+    result = scorer.score(ctx)
+
+    assert result.chosen["pai"] == "9m"
+    assert [candidate.action.get("pai", candidate.action["type"]) for candidate in result.candidates] == ["9m", "reach", "4m"]
+    assert [candidate.final_score for candidate in result.candidates] == pytest.approx([0.2, 0.15, 0.05])
+    reach_candidate = next(candidate for candidate in result.candidates if candidate.action["type"] == "reach")
+    assert reach_candidate.meta["reach_discard"]["pai"] == "4m"
+
+
+def test_default_action_scorer_runtime_placement_reranks_all_discards():
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "tsumo", "actor": 0, "pai": "2m"},
+        runtime_snap={"hand": ["1m", "2m"], "discards": [[], [], [], []], "melds": [[], [], [], []]},
+        model_snap={"hand": ["1m"], "tsumo_pai": "2m"},
+        legal_actions=[
+            {"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False},
+            {"type": "dahai", "actor": 0, "pai": "2m", "tsumogiri": True},
+        ],
+    )
+
+    base_adapter = _FakeV4Adapter(
+        [
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({("dahai", "1m"): 0.2, ("dahai", "2m"): 0.1}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(policy_logits=_empty_policy(), value=0.0, aux=ModelAuxOutputs()),
+        ]
+    )
+    base_scorer = DefaultActionScorer(
+        adapter=base_adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+        rank_pt_lambda=0.0,
+    )
+    base_result = base_scorer.score(ctx)
+
+    placement_adapter = _FakeV4Adapter(
+        [
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({("dahai", "1m"): 0.2, ("dahai", "2m"): 0.1}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+            ModelForwardResult(
+                policy_logits=_empty_policy(),
+                value=0.0,
+                aux=ModelAuxOutputs(rank_pt_value=0.0),
+            ),
+            ModelForwardResult(
+                policy_logits=_empty_policy(),
+                value=0.0,
+                aux=ModelAuxOutputs(rank_pt_value=5.0),
+            ),
+        ]
+    )
+    placement_scorer = DefaultActionScorer(
+        adapter=placement_adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+        rank_pt_lambda=0.1,
+    )
+    placement_result = placement_scorer.score(ctx)
+
+    assert base_result.chosen["pai"] == "1m"
+    assert placement_result.chosen["pai"] == "2m"
+    assert [candidate.action["pai"] for candidate in placement_result.candidates] == ["2m", "1m"]
+    for candidate in placement_result.candidates:
+        assert candidate.meta["placement_source"] == "after_discard"
+        assert "placement_rank_pt_value" in candidate.meta
+        assert "placement_bonus" in candidate.meta
+
+
+def test_default_action_scorer_runtime_placement_reranks_meld_over_none(monkeypatch):
+    chi_action = {"type": "chi", "actor": 0, "target": 3, "pai": "5m", "consumed": ["6m", "7m"]}
+    none_action = {"type": "none"}
+    monkeypatch.setattr(
+        inference_scoring,
+        "_resolve_continuation_scenarios",
+        lambda snap, actor, action: [
+            {
+                "projected_snapshot": {"marker": "chi_followup"},
+                "legal_actions": [{"type": "dahai", "actor": actor, "pai": "9m", "tsumogiri": False}],
+                "weight": 1.0,
+                "continuation_kind": "post_meld_followup",
+                "declaration_action": None,
+            }
+        ]
+        if action == chi_action
+        else [],
+    )
+    logits = _empty_policy()
+    logits[action_to_idx(chi_action)] = 0.2
+    logits[action_to_idx(none_action)] = 0.3
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "dahai", "actor": 3, "pai": "5m"},
+        runtime_snap={"hand": ["5mr", "6m", "7m", "9m"], "discards": [[], [], [], []], "melds": [[], [], [], []]},
+        model_snap={"hand": ["5mr", "6m", "7m", "9m"]},
+        legal_actions=[chi_action, none_action],
+    )
+
+    base_adapter = _FakeV4Adapter(
+        [
+            ModelForwardResult(policy_logits=logits, value=0.0, aux=ModelAuxOutputs()),
+            ModelForwardResult(policy_logits=_empty_policy(), value=0.0, aux=ModelAuxOutputs()),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({("dahai", "9m"): 0.0}),
+                value=0.0,
+                aux=ModelAuxOutputs(rank_pt_value=0.0),
+            ),
+        ]
+    )
+    base_result = DefaultActionScorer(
+        adapter=base_adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+        rank_pt_lambda=0.0,
+    ).score(ctx)
+
+    placement_adapter = _FakeV4Adapter(
+        [
+            ModelForwardResult(policy_logits=logits, value=0.0, aux=ModelAuxOutputs(rank_pt_value=0.0)),
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({("dahai", "9m"): 0.0}),
+                value=0.0,
+                aux=ModelAuxOutputs(rank_pt_value=5.0),
+            ),
+        ]
+    )
+    placement_result = DefaultActionScorer(
+        adapter=placement_adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+        rank_pt_lambda=0.1,
+    ).score(ctx)
+
+    assert base_result.chosen["type"] == "none"
+    assert placement_result.chosen["type"] == "chi"
+    chi_candidate = next(candidate for candidate in placement_result.candidates if candidate.action["type"] == "chi")
+    assert chi_candidate.meta["placement_source"] == "meld_continuation"
+    assert chi_candidate.meta["placement_bonus"] == pytest.approx(0.5)
+
+
+def test_default_action_scorer_runtime_placement_reranks_reach_over_discard(monkeypatch):
+    reach_action = {"type": "reach", "actor": 0}
+    discard_reach = {"type": "dahai", "actor": 0, "pai": "4m", "tsumogiri": False}
+    discard_alt = {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": False}
+    monkeypatch.setattr(
+        inference_scoring,
+        "_resolve_continuation_scenarios",
+        lambda snap, actor, action: [
+            {
+                "projected_snapshot": {"marker": "reach_followup"},
+                "legal_actions": [{"type": "none"}],
+                "weight": 1.0,
+                "continuation_kind": "reach_declaration",
+                "declaration_action": discard_reach,
+            }
+        ]
+        if action == reach_action
+        else [],
+    )
+    primary_logits = _policy_with_scores(
+        {("reach", None): 0.1, ("dahai", "4m"): 0.05, ("dahai", "9m"): 0.2}
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "tsumo", "actor": 0, "pai": "9m"},
+        runtime_snap={"hand": ["4m", "9m"], "discards": [[], [], [], []], "melds": [[], [], [], []]},
+        model_snap={"hand": ["4m"], "tsumo_pai": "9m"},
+        legal_actions=[reach_action, discard_reach, discard_alt],
+    )
+
+    base_adapter = _FakeV4Adapter(
+        [
+            ModelForwardResult(policy_logits=primary_logits, value=0.0, aux=ModelAuxOutputs()),
+            ModelForwardResult(policy_logits=_empty_policy(), value=0.0, aux=ModelAuxOutputs(rank_pt_value=0.0)),
+        ]
+    )
+    base_result = DefaultActionScorer(
+        adapter=base_adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+        rank_pt_lambda=0.0,
+    ).score(ctx)
+
+    placement_adapter = _FakeV4Adapter(
+        [
+            ModelForwardResult(policy_logits=primary_logits, value=0.0, aux=ModelAuxOutputs(rank_pt_value=0.0)),
+            ModelForwardResult(policy_logits=_empty_policy(), value=0.0, aux=ModelAuxOutputs(rank_pt_value=0.0)),
+            ModelForwardResult(policy_logits=_empty_policy(), value=0.0, aux=ModelAuxOutputs(rank_pt_value=0.0)),
+            ModelForwardResult(policy_logits=_empty_policy(), value=0.0, aux=ModelAuxOutputs(rank_pt_value=5.0)),
+        ]
+    )
+    placement_result = DefaultActionScorer(
+        adapter=placement_adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+        rank_pt_lambda=0.1,
+    ).score(ctx)
+
+    assert base_result.chosen["pai"] == "9m"
+    assert placement_result.chosen["type"] == "reach"
+    reach_candidate = next(candidate for candidate in placement_result.candidates if candidate.action["type"] == "reach")
+    assert reach_candidate.meta["reach_discard"]["pai"] == "4m"
+    assert reach_candidate.meta["placement_source"] == "reach_continuation"
+    assert reach_candidate.meta["placement_bonus"] == pytest.approx(0.5)
+
+
+def test_default_action_scorer_runtime_placement_fails_closed_for_xmodel1():
+    adapter = _FakeXmodel1Adapter(
+        [
+            ModelForwardResult(
+                policy_logits=_policy_with_scores({("dahai", "1m"): 0.2}),
+                value=0.0,
+                aux=ModelAuxOutputs(),
+            ),
+        ]
+    )
+    scorer = DefaultActionScorer(
+        adapter=adapter,
+        beam_k=1,
+        beam_lambda=1.0,
+        style_lambda=0.0,
+        score_delta_lambda=0.0,
+        win_prob_lambda=0.0,
+        dealin_prob_lambda=0.0,
+        rank_pt_lambda=0.1,
+    )
+    ctx = DecisionContext(
+        actor=0,
+        event={"type": "tsumo", "actor": 0, "pai": "1m"},
+        runtime_snap={"hand": ["1m"], "discards": [[], [], [], []], "melds": [[], [], [], []]},
+        model_snap={"hand": [], "tsumo_pai": "1m"},
+        legal_actions=[{"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": True}],
+    )
+
+    with pytest.raises(RuntimeError, match="only supported for keqingv4"):
+        scorer.score(ctx)

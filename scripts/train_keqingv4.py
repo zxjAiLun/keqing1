@@ -43,8 +43,8 @@ def main() -> None:
     sys.path.insert(0, str(root / "src"))
 
     from keqingv4.cache_contract import (
-        assert_keqingv4_cached_contract,
-        inspect_keqingv4_cached_contract,
+        assert_keqingv4_contract,
+        inspect_keqingv4_contract,
     )
     from keqingv4.checkpoint import keqingv4_checkpoint_contract_summary
     from keqingv4.cached_dataset import CachedMjaiDatasetV4, split_cached_files
@@ -95,7 +95,7 @@ def main() -> None:
     elif not train_files or not val_files:
         raise RuntimeError(f"insufficient cached files: train={len(train_files)} val={len(val_files)}")
 
-    inspected = inspect_keqingv4_cached_contract(train_files + [p for p in val_files if p not in train_files])
+    inspected = inspect_keqingv4_contract(train_files + [p for p in val_files if p not in train_files])
     inspected_dims = sorted(inspected["summary_dims"])
     call_slots = sorted(inspected["call_summary_slots"])
     special_slots = sorted(inspected["special_summary_slots"])
@@ -132,7 +132,7 @@ def main() -> None:
         print("keqingv4 cache warning: manifest issues detected:", flush=True)
         for problem in inspected["manifest_problems"]:
             print(f"  - {problem}", flush=True)
-    assert_keqingv4_cached_contract(
+    assert_keqingv4_contract(
         inspected,
         smoke=args.smoke,
         allow_stale_cache=args.allow_stale_cache,

@@ -7,22 +7,9 @@ from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_HISTORY_SUMMARY_DIM,
+    XMODEL1_MAX_RESPONSE_CANDIDATES,
 )
 from xmodel1.model import Xmodel1Model
-from xmodel1.schema import (
-    XMODEL1_SPECIAL_TYPE_ANKAN,
-    XMODEL1_SPECIAL_TYPE_CHI_HIGH,
-    XMODEL1_SPECIAL_TYPE_CHI_LOW,
-    XMODEL1_SPECIAL_TYPE_CHI_MID,
-    XMODEL1_SPECIAL_TYPE_DAIMINKAN,
-    XMODEL1_SPECIAL_TYPE_DAMA,
-    XMODEL1_SPECIAL_TYPE_HORA,
-    XMODEL1_SPECIAL_TYPE_KAKAN,
-    XMODEL1_SPECIAL_TYPE_NONE,
-    XMODEL1_SPECIAL_TYPE_PON,
-    XMODEL1_SPECIAL_TYPE_REACH,
-    XMODEL1_SPECIAL_TYPE_RYUKYOKU,
-)
 
 
 def test_xmodel1_model_forward_shapes():
@@ -46,13 +33,20 @@ def test_xmodel1_model_forward_shapes():
         history_summary=torch.zeros(batch_size, XMODEL1_HISTORY_SUMMARY_DIM, dtype=torch.float32),
     )
     assert out.discard_logits.shape == (batch_size, max_candidates)
-    assert out.special_logits.shape == (batch_size, 12)
+    assert out.response_logits.shape == (batch_size, XMODEL1_MAX_RESPONSE_CANDIDATES)
+    assert out.response_post_logits.shape == (
+        batch_size,
+        XMODEL1_MAX_RESPONSE_CANDIDATES,
+        max_candidates,
+    )
     assert out.action_logits.shape == (batch_size, 45)
     assert out.win_logit.shape == (batch_size, 1)
     assert out.dealin_logit.shape == (batch_size, 1)
     assert out.pts_given_win.shape == (batch_size, 1)
     assert out.pts_given_dealin.shape == (batch_size, 1)
     assert out.opp_tenpai_logits.shape == (batch_size, 3)
+    assert out.rank_logits.shape == (batch_size, 4)
+    assert out.final_score_delta.shape == (batch_size, 1)
 
 
 def test_xmodel1_model_event_history_changes_state_encoding():
@@ -86,44 +80,44 @@ def test_xmodel1_model_event_history_changes_state_encoding():
     assert not torch.allclose(out_pad.discard_logits, out_active.discard_logits)
 
 
-def test_xmodel1_action_logits_use_special_candidate_path_for_reach_and_none():
+def test_xmodel1_action_logits_use_response_candidate_path_for_reach_and_none():
     model = Xmodel1Model(57, 64, XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM, hidden_dim=32, num_res_blocks=1)
     discard_logits = torch.zeros(1, 14)
     candidate_tile_id = torch.full((1, 14), -1, dtype=torch.long)
     candidate_mask = torch.zeros(1, 14, dtype=torch.uint8)
-    special_logits = torch.tensor([[3.5, 1.0, -1e4, -1e4, -1e4, -1e4, -1e4, -1e4, -1e4, -1e4, -1e4, 2.25]])
-    special_type_id = torch.tensor([[XMODEL1_SPECIAL_TYPE_REACH, XMODEL1_SPECIAL_TYPE_DAMA, -1, -1, -1, -1, -1, -1, -1, -1, -1, XMODEL1_SPECIAL_TYPE_NONE]])
-    special_mask = torch.tensor([[1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]], dtype=torch.uint8)
+    response_logits = torch.tensor([[3.5, -1e4, 2.25, -1e4, -1e4, -1e4, -1e4, -1e4]])
+    response_action_idx = torch.tensor([[34, -1, 44, -1, -1, -1, -1, -1]])
+    response_mask = torch.tensor([[1, 0, 1, 0, 0, 0, 0, 0]], dtype=torch.uint8)
 
     action_logits = model.to_action_logits(
         discard_logits,
         candidate_tile_id,
         candidate_mask,
-        special_logits,
-        special_type_id,
-        special_mask,
+        response_logits,
+        response_action_idx,
+        response_mask,
     )
 
     assert float(action_logits[0, 34]) == 3.5
     assert float(action_logits[0, 44]) == 2.25
 
 
-def test_xmodel1_action_logits_use_special_candidate_path_for_call_families():
+def test_xmodel1_action_logits_use_response_candidate_path_for_call_families():
     model = Xmodel1Model(57, 64, XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM, hidden_dim=32, num_res_blocks=1)
     discard_logits = torch.zeros(1, 14)
     candidate_tile_id = torch.full((1, 14), -1, dtype=torch.long)
     candidate_mask = torch.zeros(1, 14, dtype=torch.uint8)
-    special_logits = torch.tensor([[-1e4, -1e4, -1e4, 1.75, 0.5, 0.25, 2.5, 1.1, 0.8, 0.6, -1e4, -1e4]])
-    special_type_id = torch.tensor([[-1, -1, -1, XMODEL1_SPECIAL_TYPE_CHI_LOW, XMODEL1_SPECIAL_TYPE_CHI_MID, XMODEL1_SPECIAL_TYPE_CHI_HIGH, XMODEL1_SPECIAL_TYPE_PON, XMODEL1_SPECIAL_TYPE_DAIMINKAN, XMODEL1_SPECIAL_TYPE_ANKAN, XMODEL1_SPECIAL_TYPE_KAKAN, -1, -1]])
-    special_mask = torch.tensor([[0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0]], dtype=torch.uint8)
+    response_logits = torch.tensor([[-1e4, 1.75, 0.5, 0.25, 2.5, 1.1, 0.8, 0.6]])
+    response_action_idx = torch.tensor([[-1, 35, 36, 37, 38, 39, 40, 41]])
+    response_mask = torch.tensor([[0, 1, 1, 1, 1, 1, 1, 1]], dtype=torch.uint8)
 
     action_logits = model.to_action_logits(
         discard_logits,
         candidate_tile_id,
         candidate_mask,
-        special_logits,
-        special_type_id,
-        special_mask,
+        response_logits,
+        response_action_idx,
+        response_mask,
     )
 
     assert float(action_logits[0, 35]) == 1.75
@@ -135,22 +129,22 @@ def test_xmodel1_action_logits_use_special_candidate_path_for_call_families():
     assert float(action_logits[0, 41]) == pytest.approx(0.6)
 
 
-def test_xmodel1_action_logits_use_special_candidate_path_for_hora_and_ryukyoku():
+def test_xmodel1_action_logits_use_response_candidate_path_for_hora_and_ryukyoku():
     model = Xmodel1Model(57, 64, XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM, hidden_dim=32, num_res_blocks=1)
     discard_logits = torch.zeros(1, 14)
     candidate_tile_id = torch.full((1, 14), -1, dtype=torch.long)
     candidate_mask = torch.zeros(1, 14, dtype=torch.uint8)
-    special_logits = torch.tensor([[-1e4, -1e4, 4.0, -1e4, -1e4, -1e4, -1e4, -1e4, -1e4, -1e4, 1.25, -1e4]])
-    special_type_id = torch.tensor([[-1, -1, XMODEL1_SPECIAL_TYPE_HORA, -1, -1, -1, -1, -1, -1, -1, XMODEL1_SPECIAL_TYPE_RYUKYOKU, -1]])
-    special_mask = torch.tensor([[0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0]], dtype=torch.uint8)
+    response_logits = torch.tensor([[-1e4, 4.0, 1.25, -1e4, -1e4, -1e4, -1e4, -1e4]])
+    response_action_idx = torch.tensor([[-1, 42, 43, -1, -1, -1, -1, -1]])
+    response_mask = torch.tensor([[0, 1, 1, 0, 0, 0, 0, 0]], dtype=torch.uint8)
 
     action_logits = model.to_action_logits(
         discard_logits,
         candidate_tile_id,
         candidate_mask,
-        special_logits,
-        special_type_id,
-        special_mask,
+        response_logits,
+        response_action_idx,
+        response_mask,
     )
 
     assert float(action_logits[0, 42]) == 4.0

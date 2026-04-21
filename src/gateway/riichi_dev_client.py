@@ -13,17 +13,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import torch
 import websockets
 from dotenv import load_dotenv
 from websockets.exceptions import ConnectionClosed
 from riichienv import Observation, Observation3P, RiichiEnv
 
-from inference.contracts import DecisionContext, DecisionResult
-from inference.keqing_adapter import KeqingModelAdapter
-from inference.scoring import DefaultActionScorer
 from mahjong_env.action_space import IDX_TO_TILE_NAME
 from mahjong.tile import FIVE_RED_MAN, FIVE_RED_PIN, FIVE_RED_SOU
+
+torch = None
+DecisionContext = None
+DecisionResult = None
+
+
+class _KeqingModelAdapterPlaceholder:
+    @classmethod
+    def from_checkpoint(cls, *args, **kwargs):
+        raise RuntimeError("KeqingModelAdapter is not loaded")
+
+
+KeqingModelAdapter = _KeqingModelAdapterPlaceholder
+DefaultActionScorer = None
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -39,6 +49,45 @@ _MELD_TYPE_MAP = {
     "ClosedKan": "ankan",
     "AddedKan": "kakan",
 }
+
+
+def _ensure_model_runtime_imports() -> None:
+    global torch, DecisionContext, DecisionResult, KeqingModelAdapter, DefaultActionScorer
+    if torch is None:
+        import torch as _torch
+
+        torch = _torch
+    if DecisionContext is None or DecisionResult is None:
+        from inference.contracts import (
+            DecisionContext as _DecisionContext,
+            DecisionResult as _DecisionResult,
+        )
+
+        if DecisionContext is None:
+            DecisionContext = _DecisionContext
+        if DecisionResult is None:
+            DecisionResult = _DecisionResult
+    placeholder_from_checkpoint = getattr(
+        _KeqingModelAdapterPlaceholder.from_checkpoint,
+        "__func__",
+        _KeqingModelAdapterPlaceholder.from_checkpoint,
+    )
+    current_from_checkpoint = getattr(
+        KeqingModelAdapter.from_checkpoint,
+        "__func__",
+        KeqingModelAdapter.from_checkpoint,
+    )
+    if (
+        KeqingModelAdapter is _KeqingModelAdapterPlaceholder
+        and current_from_checkpoint is placeholder_from_checkpoint
+    ):
+        from inference.keqing_adapter import KeqingModelAdapter as _KeqingModelAdapter
+
+        KeqingModelAdapter = _KeqingModelAdapter
+    if DefaultActionScorer is None:
+        from inference.scoring import DefaultActionScorer as _DefaultActionScorer
+
+        DefaultActionScorer = _DefaultActionScorer
 
 
 def _resolve_ws_url(base_url: str, queue: str) -> str:
@@ -547,6 +596,7 @@ class DecisionAgentSpec:
     score_delta_lambda: float = 0.20
     win_prob_lambda: float = 0.20
     dealin_prob_lambda: float = 0.25
+    rank_pt_lambda: float = 0.0
 
 
 DEFAULT_DECISION_AGENT_SPEC = DecisionAgentSpec(model_version="xmodel1")
@@ -617,6 +667,89 @@ class ValidationSafeAgent(RiichiDevDecisionAgent):
         return {"type": "none"}
 
 
+class RulebaseObservationAgent(RiichiDevDecisionAgent):
+    def __init__(self) -> None:
+        self._pending_reach_discard: dict[str, Any] | None = None
+
+    def reset(self) -> None:
+        self._pending_reach_discard = None
+
+    def _remember_reach_followup(
+        self,
+        *,
+        snap: dict[str, Any],
+        actor: int,
+        legal_actions: list[dict[str, Any]],
+        chosen: dict[str, Any],
+    ) -> None:
+        self._pending_reach_discard = None
+        if chosen.get("type") != "reach":
+            return
+
+        import keqing_core
+
+        followup_legal_actions = [
+            action for action in legal_actions if action.get("type") != "reach"
+        ]
+        if not followup_legal_actions:
+            return
+        followup = keqing_core.choose_rulebase_action(
+            snap,
+            actor,
+            followup_legal_actions,
+        )
+        if followup and followup.get("type") == "dahai":
+            self._pending_reach_discard = _sanitize_action(followup, actor)
+
+    def choose_mjai_action(
+        self,
+        *,
+        snap: dict[str, Any],
+        legal_actions: list[dict[str, Any]],
+        actor: int,
+    ) -> dict[str, Any]:
+        import keqing_core
+
+        if not legal_actions:
+            self._pending_reach_discard = None
+            return {"type": "none"}
+        chosen = keqing_core.choose_rulebase_action(snap, actor, legal_actions)
+        if chosen is None:
+            self._pending_reach_discard = None
+            return {"type": "none"}
+        self._remember_reach_followup(
+            snap=snap,
+            actor=actor,
+            legal_actions=legal_actions,
+            chosen=chosen,
+        )
+        return _sanitize_action(chosen, actor)
+
+    def select_action(self, message: dict[str, Any], seat: int | None) -> dict[str, Any]:
+        mtype = message.get("type")
+        if mtype != "request_action":
+            if (
+                mtype == "reach"
+                and seat is not None
+                and message.get("actor") == seat
+                and self._pending_reach_discard is not None
+            ):
+                discard = self._pending_reach_discard
+                self._pending_reach_discard = None
+                return discard
+            return {"type": "none"}
+        _obs, snap = _decode_observation(message)
+        legal_actions = list(message.get("possible_actions") or [])
+        actor = seat if seat is not None else int(snap.get("actor", 0))
+        if not legal_actions:
+            legal_actions = [{"type": "none"}]
+        return self.choose_mjai_action(
+            snap=snap,
+            legal_actions=[_action_to_mjai_dict(action) for action in legal_actions],
+            actor=actor,
+        )
+
+
 class ObservationScoringAgent(RiichiDevDecisionAgent):
     def __init__(
         self,
@@ -630,8 +763,10 @@ class ObservationScoringAgent(RiichiDevDecisionAgent):
         score_delta_lambda: float = 0.20,
         win_prob_lambda: float = 0.20,
         dealin_prob_lambda: float = 0.25,
+        rank_pt_lambda: float = 0.0,
         model_version: str | None = "xmodel1",
     ):
+        _ensure_model_runtime_imports()
         resolved_device = torch.device(
             device if device == "cpu" or torch.cuda.is_available() else "cpu"
         )
@@ -650,6 +785,7 @@ class ObservationScoringAgent(RiichiDevDecisionAgent):
             score_delta_lambda=score_delta_lambda,
             win_prob_lambda=win_prob_lambda,
             dealin_prob_lambda=dealin_prob_lambda,
+            rank_pt_lambda=rank_pt_lambda,
         )
         self._pending_reach_discard: dict[str, Any] | None = None
 
@@ -734,16 +870,20 @@ def create_riichi_dev_agent(
     device: str,
     verbose: bool,
     model_version: str | None = None,
+    rank_pt_lambda: float | None = None,
     validation_safe: bool = False,
 ) -> RiichiDevDecisionAgent:
     if validation_safe:
         return ValidationSafeAgent()
     if bot_name == "rulebase":
-        raise ValueError("rulebase is not supported by the riichi.dev observation gateway")
+        return RulebaseObservationAgent()
     spec = DECISION_AGENT_SPECS.get(model_version or bot_name)
     if spec is None:
         inferred_version = model_version or bot_name
         spec = DecisionAgentSpec(model_version=inferred_version)
+    effective_rank_pt_lambda = (
+        spec.rank_pt_lambda if rank_pt_lambda is None else float(rank_pt_lambda)
+    )
     resolved_model_path = (
         Path(model_path)
         if model_path is not None
@@ -759,6 +899,7 @@ def create_riichi_dev_agent(
         score_delta_lambda=spec.score_delta_lambda,
         win_prob_lambda=spec.win_prob_lambda,
         dealin_prob_lambda=spec.dealin_prob_lambda,
+        rank_pt_lambda=effective_rank_pt_lambda,
         model_version=spec.model_version,
     )
 
@@ -774,6 +915,7 @@ class RiichiDevClientConfig:
     model_path: Path | None = None
     project_root: Path = Path.cwd()
     device: str = "cuda"
+    rank_pt_lambda: float | None = None
     verbose: bool = False
     origin: str | None = None
     user_agent: str = "keqing1-riichi-dev-client/0.1"
@@ -805,6 +947,7 @@ class RiichiDevBotClient:
             device=config.device,
             verbose=config.verbose,
             model_version=config.model_version,
+            rank_pt_lambda=config.rank_pt_lambda,
             validation_safe=False,
         )
         self.seat: int | None = None
@@ -1046,7 +1189,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--bot-name",
         default="xmodel1",
-        help="bot family / checkpoint namespace to run (xmodel1, keqingv4)",
+        help="bot family / checkpoint namespace to run (xmodel1, keqingv4, rulebase)",
     )
     parser.add_argument(
         "--model-version",
@@ -1101,6 +1244,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="inference device preference",
     )
     parser.add_argument(
+        "--rank-pt-lambda",
+        type=float,
+        default=0.0,
+        help="keqingv4 runtime placement rerank scale; default disabled",
+    )
+    parser.add_argument(
         "--origin",
         default=os.getenv("RIICHI_BOT_ORIGIN", ""),
         help="optional Origin header for the WebSocket handshake",
@@ -1145,6 +1294,7 @@ async def _async_main(args: argparse.Namespace) -> None:
             device=args.device,
             verbose=args.verbose,
             model_version=args.model_version or None,
+            rank_pt_lambda=args.rank_pt_lambda,
             validation_safe=args.validation_safe,
         )
         result = run_local_game(
@@ -1186,6 +1336,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         device=args.device,
         verbose=args.verbose,
         model_version=args.model_version or None,
+        rank_pt_lambda=args.rank_pt_lambda,
         validation_safe=args.validation_safe,
     )
 
@@ -1199,6 +1350,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         model_path=explicit_model_path,
         project_root=project_root,
         device=args.device,
+        rank_pt_lambda=args.rank_pt_lambda,
         verbose=args.verbose,
         origin=args.origin or None,
         user_agent=args.user_agent,

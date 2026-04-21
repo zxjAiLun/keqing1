@@ -39,6 +39,7 @@ from training.cache_schema import (
     KEQINGV4_SPECIAL_SUMMARY_SLOTS,
     KEQINGV4_SUMMARY_DIM,
 )
+from mahjong_env.final_rank import FINAL_RANK_DIM
 
 _DISCARD_TILE_IDS = tuple(range(34))
 _CALL_ACTION_IDS = (
@@ -196,6 +197,7 @@ class KeqingV4Model(nn.Module):
 
         self.offense_stream = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.Mish())
         self.defense_stream = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.Mish())
+        self.placement_stream = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.Mish())
 
         self.discard_summary_pool = _SummaryPool(summary_dim, hidden_dim)
         self.call_summary_pool = _SummaryPool(summary_dim, hidden_dim)
@@ -236,6 +238,8 @@ class KeqingV4Model(nn.Module):
         self.dealin_head = _Head(hidden_dim, 1)
         self.pts_given_dealin_head = _Head(hidden_dim, 1)
         self.opp_tenpai_head = _Head(hidden_dim, 3)
+        self.rank_logits_head = _Head(hidden_dim, FINAL_RANK_DIM)
+        self.final_score_delta_head = _Head(hidden_dim, 1)
 
         self._discard_action_ids = torch.tensor(_DISCARD_TILE_IDS, dtype=torch.long)
         self._call_action_ids = torch.tensor(_CALL_ACTION_IDS, dtype=torch.long)
@@ -303,6 +307,7 @@ class KeqingV4Model(nn.Module):
         return shared, {
             "offense": self.offense_stream(shared),
             "defense": self.defense_stream(shared),
+            "placement": self.placement_stream(shared),
         }
 
     def _typed_state_repr(
@@ -369,6 +374,8 @@ class KeqingV4Model(nn.Module):
         dealin_logit = self.dealin_head(fields["defense"])
         pts_given_dealin = self.pts_given_dealin_head(fields["defense"])
         opp_tenpai_logits = self.opp_tenpai_head(fields["defense"])
+        rank_logits = self.rank_logits_head(fields["placement"])
+        final_score_delta = self.final_score_delta_head(fields["placement"])
 
         win_prob = torch.sigmoid(win_logit.float())
         dealin_prob = torch.sigmoid(dealin_logit.float())
@@ -384,6 +391,8 @@ class KeqingV4Model(nn.Module):
             "pts_given_win": pts_given_win,
             "pts_given_dealin": pts_given_dealin,
             "opp_tenpai_logits": opp_tenpai_logits,
+            "rank_logits": rank_logits,
+            "final_score_delta": final_score_delta,
         }
         return logits, composed_ev
 

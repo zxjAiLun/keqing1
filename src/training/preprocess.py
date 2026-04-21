@@ -136,6 +136,8 @@ class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
         "pts_given_win_target",
         "pts_given_dealin_target",
         "opp_tenpai_target",
+        "final_rank_target",
+        "final_score_delta_points_target",
         "event_history",
         "v4_opportunity",
         "v4_discard_summary",
@@ -151,6 +153,8 @@ class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
             "pts_given_win_target": [],
             "pts_given_dealin_target": [],
             "opp_tenpai_target": [],
+            "final_rank_target": [],
+            "final_score_delta_points_target": [],
             "event_history": [],
             "v4_opportunity": [],
             "v4_discard_summary": [],
@@ -188,6 +192,8 @@ class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
                 getattr(sample, "opp_tenpai_target", (0.0, 0.0, 0.0)),
                 dtype=np.float32,
             ).reshape(3),
+            "final_rank_target": int(getattr(sample, "final_rank_target", 0)),
+            "final_score_delta_points_target": int(getattr(sample, "final_score_delta_points_target", 0)),
             "event_history": event_history,
             "v4_opportunity": np.asarray(v4_opportunity, dtype=np.uint8).reshape(KEQINGV4_OPPORTUNITY_DIM),
             "v4_discard_summary": discard_summary.astype(np.float16),
@@ -203,11 +209,66 @@ class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
             "pts_given_win_target": np.array(rows["pts_given_win_target"], dtype=np.float32),
             "pts_given_dealin_target": np.array(rows["pts_given_dealin_target"], dtype=np.float32),
             "opp_tenpai_target": np.stack(rows["opp_tenpai_target"]).astype(np.float32),
+            "final_rank_target": np.array(rows["final_rank_target"], dtype=np.int8),
+            "final_score_delta_points_target": np.array(rows["final_score_delta_points_target"], dtype=np.int32),
             "event_history": np.stack(rows["event_history"]).astype(np.int16),
             "v4_opportunity": np.stack(rows["v4_opportunity"]).astype(np.uint8),
             "v4_discard_summary": np.stack(rows["v4_discard_summary"]).astype(np.float16),
             "v4_call_summary": np.stack(rows["v4_call_summary"]).astype(np.float16),
             "v4_special_summary": np.stack(rows["v4_special_summary"]).astype(np.float16),
+        }
+
+
+class Xmodel2PreprocessAdapter(BasePreprocessAdapter):
+    extra_field_names = (
+        "score_delta_target",
+        "win_target",
+        "dealin_target",
+        "pts_given_win_target",
+        "pts_given_dealin_target",
+        "opp_tenpai_target",
+        "final_rank_target",
+        "final_score_delta_points_target",
+    )
+
+    def init_rows(self) -> Dict[str, list]:
+        return {
+            "score_delta_target": [],
+            "win_target": [],
+            "dealin_target": [],
+            "pts_given_win_target": [],
+            "pts_given_dealin_target": [],
+            "opp_tenpai_target": [],
+            "final_rank_target": [],
+            "final_score_delta_points_target": [],
+        }
+
+    def sample_extras(self, sample, action_idx: int) -> Dict[str, object]:
+        del action_idx
+        return {
+            "score_delta_target": float(np.clip(sample.score_delta_target, -1.0, 1.0)),
+            "win_target": float(sample.win_target),
+            "dealin_target": float(sample.dealin_target),
+            "pts_given_win_target": float(getattr(sample, "pts_given_win_target", 0.0)),
+            "pts_given_dealin_target": float(getattr(sample, "pts_given_dealin_target", 0.0)),
+            "opp_tenpai_target": np.asarray(
+                getattr(sample, "opp_tenpai_target", (0.0, 0.0, 0.0)),
+                dtype=np.float32,
+            ).reshape(3),
+            "final_rank_target": int(getattr(sample, "final_rank_target", 0)),
+            "final_score_delta_points_target": int(getattr(sample, "final_score_delta_points_target", 0)),
+        }
+
+    def finalize_result_extras(self, rows: Dict[str, list]) -> Dict[str, np.ndarray]:
+        return {
+            "score_delta_target": np.array(rows["score_delta_target"], dtype=np.float32),
+            "win_target": np.array(rows["win_target"], dtype=np.float32),
+            "dealin_target": np.array(rows["dealin_target"], dtype=np.float32),
+            "pts_given_win_target": np.array(rows["pts_given_win_target"], dtype=np.float32),
+            "pts_given_dealin_target": np.array(rows["pts_given_dealin_target"], dtype=np.float32),
+            "opp_tenpai_target": np.stack(rows["opp_tenpai_target"]).astype(np.float32),
+            "final_rank_target": np.array(rows["final_rank_target"], dtype=np.int8),
+            "final_score_delta_points_target": np.array(rows["final_score_delta_points_target"], dtype=np.int32),
         }
 
 
@@ -217,6 +278,8 @@ def create_preprocess_adapter(name: str) -> BasePreprocessAdapter:
         return BasePreprocessAdapter()
     if normalized == "keqingv4_aux":
         return KeqingV4PreprocessAdapter()
+    if normalized == "xmodel2_aux":
+        return Xmodel2PreprocessAdapter()
     raise ValueError(f"unknown preprocess adapter: {name}")
 
 
@@ -702,6 +765,7 @@ __all__ = [
     "BasePreprocessAdapter",
     "create_preprocess_adapter",
     "KeqingV4PreprocessAdapter",
+    "Xmodel2PreprocessAdapter",
     "events_to_cached_arrays",
     "save_events_to_cache_file",
     "run_preprocess",

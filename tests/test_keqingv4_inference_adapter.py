@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from inference.keqing_adapter import KeqingModelAdapter
+from inference.pt_map import placement_utility_from_outputs
 from keqingv4.checkpoint import build_keqingv4_checkpoint_metadata
 from mahjong_env.replay import build_replay_samples_mc_return
 from mahjong_env.event_history import compute_event_history
@@ -44,7 +45,13 @@ def _sample_discard_state():
     return snap, sample.actor
 
 
-def _write_keqingv4_checkpoint(path: Path, model: KeqingV4Model, *, metadata: bool = True) -> None:
+def _write_keqingv4_checkpoint(
+    path: Path,
+    model: KeqingV4Model,
+    *,
+    metadata: bool = True,
+    placement_cfg: dict | None = None,
+) -> None:
     cfg = {
         "model_name": "keqingv4",
         "hidden_dim": 64,
@@ -53,6 +60,8 @@ def _write_keqingv4_checkpoint(path: Path, model: KeqingV4Model, *, metadata: bo
         "context_dim": 12,
         "dropout": 0.0,
     }
+    if placement_cfg is not None:
+        cfg["placement"] = dict(placement_cfg)
     payload = {
         "model": model.state_dict(),
         "cfg": cfg,
@@ -79,6 +88,63 @@ def test_keqingv4_keqing_adapter_forward_with_checkpoint(tmp_path: Path):
     result = adapter.forward(snap, actor)
     assert adapter.model_version == "keqingv4"
     assert result.policy_logits.shape == (45,)
+
+
+def test_keqingv4_keqing_adapter_exposes_placement_aux_outputs(tmp_path: Path):
+    ckpt = tmp_path / "keqingv4_aux_outputs_test.pth"
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
+    _write_keqingv4_checkpoint(ckpt, model)
+    snap, actor = _sample_discard_state()
+    adapter = KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
+
+    result = adapter.forward(snap, actor)
+
+    assert len(result.aux.rank_probs) == 4
+    assert sum(result.aux.rank_probs) == pytest.approx(1.0, abs=1e-5)
+    assert isinstance(result.aux.final_score_delta, float)
+    assert result.aux.rank_pt_value == pytest.approx(
+        placement_utility_from_outputs(
+            result.aux.rank_probs,
+            final_score_delta=result.aux.final_score_delta,
+        )
+    )
+
+
+def test_keqingv4_keqing_adapter_derives_rank_pt_value_from_checkpoint_placement_cfg(tmp_path: Path):
+    ckpt = tmp_path / "keqingv4_aux_cfg_test.pth"
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
+    placement_cfg = {
+        "rank_bonus": [120.0, 30.0, -10.0, -140.0],
+        "rank_bonus_norm": 120.0,
+        "rank_score_scale": 0.25,
+    }
+    _write_keqingv4_checkpoint(ckpt, model, placement_cfg=placement_cfg)
+    snap, actor = _sample_discard_state()
+    adapter = KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
+
+    result = adapter.forward(snap, actor)
+
+    assert result.aux.rank_pt_value == pytest.approx(
+        placement_utility_from_outputs(
+            result.aux.rank_probs,
+            final_score_delta=result.aux.final_score_delta,
+            rank_bonus=tuple(placement_cfg["rank_bonus"]),
+            rank_bonus_norm=placement_cfg["rank_bonus_norm"],
+            rank_score_scale=placement_cfg["rank_score_scale"],
+        )
+    )
 
 
 def test_keqingv4_keqing_adapter_reuses_runtime_summary_cache(tmp_path: Path):

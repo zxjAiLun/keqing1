@@ -3,18 +3,12 @@ from __future__ import annotations
 import pytest
 import torch
 
-from xmodel1.schema import (
-    XMODEL1_SPECIAL_TYPE_CHI_LOW,
-    XMODEL1_SPECIAL_TYPE_DAMA,
-    XMODEL1_SPECIAL_TYPE_NONE,
-    XMODEL1_SPECIAL_TYPE_PON,
-    XMODEL1_SPECIAL_TYPE_REACH,
-)
 from xmodel1.trainer import (
     _chosen_action_targets,
     _masked_mean,
+    _response_candidate_ce_loss,
+    _response_post_teacher_ce_loss,
     _resolve_pts_given_targets,
-    _special_comparison_losses,
 )
 
 
@@ -41,84 +35,48 @@ def test_chosen_action_targets_rejects_invalid_selected_padding_tile():
         _chosen_action_targets(candidate_tile_id, chosen_idx)
 
 
-def test_special_comparison_losses_reward_reach_over_dama_and_pon_over_none():
-    special_logits = torch.tensor(
+def test_response_candidate_ce_ignores_rows_without_valid_choice():
+    logits = torch.tensor([[1.5, -1e4], [0.1, 0.3]], dtype=torch.float32)
+    chosen = torch.tensor([0, -1], dtype=torch.long)
+    mask = torch.tensor([[1, 0], [0, 0]], dtype=torch.uint8)
+
+    loss = _response_candidate_ce_loss(logits, chosen, mask)
+
+    assert float(loss) >= 0.0
+
+
+def test_response_post_teacher_ce_uses_chosen_response_slot_teacher():
+    response_post_logits = torch.tensor(
         [
-            [2.0, 0.5, -1e4, -1e4, -1e4, -1e4],
-            [-1e4, -1e4, -1e4, 1.5, -1e4, 0.25],
+            [
+                [1.2, 0.1, -1e4],
+                [0.0, 2.0, 0.1],
+            ]
         ],
         dtype=torch.float32,
     )
-    special_type_id = torch.tensor(
+    chosen_response_idx = torch.tensor([1], dtype=torch.long)
+    response_teacher_discard_idx = torch.tensor([[0, 1]], dtype=torch.long)
+    response_action_mask = torch.tensor([[1, 1]], dtype=torch.uint8)
+    response_post_candidate_mask = torch.tensor(
         [
-            [XMODEL1_SPECIAL_TYPE_REACH, XMODEL1_SPECIAL_TYPE_DAMA, -1, -1, -1, -1],
-            [-1, -1, -1, XMODEL1_SPECIAL_TYPE_PON, -1, XMODEL1_SPECIAL_TYPE_NONE],
-        ],
-        dtype=torch.long,
-    )
-    special_mask = torch.tensor(
-        [
-            [1, 1, 0, 0, 0, 0],
-            [0, 0, 0, 1, 0, 1],
+            [
+                [1, 1, 0],
+                [1, 1, 1],
+            ]
         ],
         dtype=torch.uint8,
     )
-    chosen_special_idx = torch.tensor([0, 3], dtype=torch.long)
-    hard_bad = torch.zeros_like(special_logits)
 
-    reach_loss, call_loss = _special_comparison_losses(
-        special_logits,
-        special_type_id,
-        special_mask,
-        chosen_special_idx,
-        hard_bad,
-        margin=0.25,
+    loss = _response_post_teacher_ce_loss(
+        response_post_logits,
+        chosen_response_idx,
+        response_teacher_discard_idx,
+        response_action_mask,
+        response_post_candidate_mask,
     )
 
-    assert float(reach_loss) == 0.0
-    assert float(call_loss) == 0.0
-
-
-def test_special_comparison_losses_penalize_reach_margin_violation():
-    special_logits = torch.tensor([[0.1, 0.3, -1e4]], dtype=torch.float32)
-    special_type_id = torch.tensor(
-        [[XMODEL1_SPECIAL_TYPE_REACH, XMODEL1_SPECIAL_TYPE_DAMA, -1]],
-        dtype=torch.long,
-    )
-    special_mask = torch.tensor([[1, 1, 0]], dtype=torch.uint8)
-    chosen_special_idx = torch.tensor([0], dtype=torch.long)
-    hard_bad = torch.zeros_like(special_logits)
-
-    reach_loss, call_loss = _special_comparison_losses(
-        special_logits,
-        special_type_id,
-        special_mask,
-        chosen_special_idx,
-        hard_bad,
-        margin=0.25,
-    )
-
-    assert float(reach_loss) > 0.0
-    assert float(call_loss) == 0.0
-
-
-def test_special_comparison_losses_penalize_none_only_when_best_call_is_hard_bad():
-    special_logits = torch.tensor([[-1e4, -1e4, 1.0, -1e4, -1e4, 0.2]], dtype=torch.float32)
-    special_type_id = torch.tensor([[-1, -1, XMODEL1_SPECIAL_TYPE_CHI_LOW, -1, -1, XMODEL1_SPECIAL_TYPE_NONE]], dtype=torch.long)
-    special_mask = torch.tensor([[0, 0, 1, 0, 0, 1]], dtype=torch.uint8)
-    chosen_special_idx = torch.tensor([5], dtype=torch.long)
-    hard_bad = torch.tensor([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
-
-    _, call_loss = _special_comparison_losses(
-        special_logits,
-        special_type_id,
-        special_mask,
-        chosen_special_idx,
-        hard_bad,
-        margin=0.25,
-    )
-
-    assert float(call_loss) > 0.0
+    assert float(loss) > 0.0
 
 
 def test_masked_mean_ignores_invalid_rows():

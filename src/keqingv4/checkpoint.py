@@ -115,7 +115,7 @@ def validate_keqingv4_checkpoint_metadata(
         raise RuntimeError(
             f"{checkpoint_label} targets {checkpoint.get('schema_name')!r}@{checkpoint.get('schema_version')!r}, "
             f"but the current keqingv4 runtime requires {KEQINGV4_SCHEMA_NAME}@{KEQINGV4_SCHEMA_VERSION}. "
-            "Old keqingv4 checkpoints are not load-compatible with the explicit-opportunity contract cutover."
+            "Old keqingv4 checkpoints are not load-compatible with the active keqingv4 contract cutover."
         )
     if int(checkpoint.get("summary_dim", -1)) != KEQINGV4_SUMMARY_DIM:
         raise RuntimeError(f"{checkpoint_label} summary_dim metadata drifted from the active keqingv4 contract")

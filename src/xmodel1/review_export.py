@@ -56,6 +56,26 @@ def special_type_to_action_label(special_type: int) -> str:
     return "padding"
 
 
+def action_idx_to_action_label(action_idx: int) -> str:
+    action_idx = int(action_idx)
+    if 0 <= action_idx < 34:
+        return tile34_to_action_label(action_idx)
+    mapping = {
+        34: "reach",
+        35: "chi_low",
+        36: "chi_mid",
+        37: "chi_high",
+        38: "pon",
+        39: "daiminkan",
+        40: "ankan",
+        41: "kakan",
+        42: "hora",
+        43: "ryukyoku",
+        44: "none",
+    }
+    return mapping.get(action_idx, "padding")
+
+
 def _topk_from_candidates(
     *,
     scores: Sequence[float],
@@ -128,12 +148,34 @@ def topk_special_candidates_from_row(
     )
 
 
+def topk_response_candidates_from_row(
+    *,
+    scores: Sequence[float],
+    response_action_idx: Sequence[int],
+    response_mask: Sequence[int],
+    quality_scores: Sequence[float] | None = None,
+    hard_bad_flags: Sequence[int] | None = None,
+    k: int = 3,
+) -> tuple[ReviewCandidate, ...]:
+    return _topk_from_candidates(
+        scores=scores,
+        labels=[action_idx_to_action_label(int(action_idx)) for action_idx in response_action_idx],
+        mask=response_mask,
+        quality_scores=quality_scores,
+        rank_buckets=None,
+        hard_bad_flags=hard_bad_flags,
+        k=k,
+    )
+
+
 __all__ = [
     "ReviewCandidate",
     "ReviewRecord",
+    "action_idx_to_action_label",
     "export_review_records",
     "special_type_to_action_label",
     "tile34_to_action_label",
     "topk_candidates_from_row",
+    "topk_response_candidates_from_row",
     "topk_special_candidates_from_row",
 ]

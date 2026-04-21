@@ -20,6 +20,7 @@ pub mod progress_summary;
 pub mod py_module;
 pub mod replay_export_core;
 pub mod replay_samples;
+pub mod rulebase;
 pub mod score_rules;
 pub mod scoring_pool;
 pub mod shanten;

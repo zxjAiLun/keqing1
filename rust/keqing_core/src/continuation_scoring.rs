@@ -134,6 +134,10 @@ fn aux_bonus(
     score_delta_lambda * score_delta + win_prob_lambda * win_prob - dealin_prob_lambda * dealin_prob
 }
 
+fn placement_bonus(rank_pt_value: f32, rank_pt_lambda: f32) -> f32 {
+    rank_pt_lambda * rank_pt_value
+}
+
 fn legal_score(
     policy_logits: &[f32],
     action: &Value,
@@ -159,10 +163,12 @@ pub(crate) fn score_continuation_scenario(
     score_delta: f32,
     win_prob: f32,
     dealin_prob: f32,
+    rank_pt_value: f32,
     beam_lambda: f32,
     score_delta_lambda: f32,
     win_prob_lambda: f32,
     dealin_prob_lambda: f32,
+    rank_pt_lambda: f32,
 ) -> Value {
     debug_assert!(policy_logits.len() >= ACTION_SPACE);
     let scenario_aux_bonus = aux_bonus(
@@ -173,10 +179,11 @@ pub(crate) fn score_continuation_scenario(
         win_prob_lambda,
         dealin_prob_lambda,
     );
+    let scenario_placement_bonus = placement_bonus(rank_pt_value, rank_pt_lambda);
     if matches!(continuation_kind, "reach_declaration" | "state_value") {
         return json!({
             "best_action": Value::Null,
-            "score": beam_lambda * value + scenario_aux_bonus,
+            "score": beam_lambda * value + scenario_aux_bonus + scenario_placement_bonus,
         });
     }
 
@@ -188,9 +195,11 @@ pub(crate) fn score_continuation_scenario(
     }
 
     let mut best_action = legal_actions[0].clone();
-    let mut best_score = legal_score(policy_logits, &best_action, value, 0.0, scenario_aux_bonus);
+    let mut best_score = legal_score(policy_logits, &best_action, value, 0.0, scenario_aux_bonus)
+        + scenario_placement_bonus;
     for action in legal_actions.iter().skip(1) {
-        let score = legal_score(policy_logits, action, value, 0.0, scenario_aux_bonus);
+        let score = legal_score(policy_logits, action, value, 0.0, scenario_aux_bonus)
+            + scenario_placement_bonus;
         if score > best_score {
             best_score = score;
             best_action = action.clone();
@@ -309,10 +318,12 @@ mod tests {
             0.4,
             0.2,
             0.1,
+            0.0,
             1.0,
             0.5,
             0.25,
             0.75,
+            0.0,
         );
         assert_eq!(scored["best_action"]["pai"], json!("9m"));
         let expected = 1.25 + 0.5 * 0.4 + 0.25 * 0.2 - 0.75 * 0.1;

@@ -346,3 +346,70 @@ def test_train_xmodel1_script_auto_derives_steps_per_epoch_from_sampled_files(tm
         if line.strip()
     ]
     assert rows[-1]["train"]["num_batches"] == 4
+
+
+def test_train_xmodel1_script_reads_limit_files_from_config(tmp_path: Path):
+    data_root = tmp_path / "processed_xmodel1"
+    ds1 = data_root / "ds1"
+    ds1.mkdir(parents=True)
+    for name in ["a.npz", "b.npz", "c.npz", "d.npz"]:
+        _write_sample_npz(ds1 / name)
+    write_xmodel1_v3_manifest(data_root, shard_file_counts={"ds1": 4}, shard_sample_counts={"ds1": 32})
+
+    cfg_path = tmp_path / "limit_files.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "data_dirs:",
+                f"  - {data_root}",
+                f"output_dir: {tmp_path / 'model_out'}",
+                "device: cpu",
+                "limit_files: 2",
+                "state_tile_channels: 57",
+                "state_scalar_dim: 56",
+                "candidate_feature_dim: 22",
+                "candidate_flag_dim: 8",
+                "special_candidate_feature_dim: 19",
+                "hidden_dim: 32",
+                "num_res_blocks: 1",
+                "dropout: 0.1",
+                "num_epochs: 1",
+                "batch_size: 4",
+                "learning_rate: 0.0003",
+                "weight_decay: 0.0001",
+                "warmup_steps: 4",
+                "steps_per_epoch: 1",
+                "val_steps_per_epoch: 1",
+                "files_per_epoch_ratio: 1.0",
+                "files_per_epoch_count: 0",
+                "val_ratio: 0.5",
+                "num_workers: 0",
+                "pin_memory: false",
+                "persistent_workers: false",
+                "buffer_size: 16",
+                "log_interval: 1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "train_xmodel1.py"),
+            "--config",
+            str(cfg_path),
+            "--device",
+            "cpu",
+        ],
+        cwd=str(REPO_ROOT),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "limit_files=2" in result.stdout
+    train_inputs = json.loads(((tmp_path / "model_out") / "train_inputs.json").read_text(encoding="utf-8"))
+    assert train_inputs["dataset_summary"]["selected"]["num_files"] == 2
+    assert train_inputs["dataset_summary"]["selected"]["num_samples"] == 16

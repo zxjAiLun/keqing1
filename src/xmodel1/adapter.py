@@ -24,17 +24,16 @@ from xmodel1.features import (
 from xmodel1.model import Xmodel1Model
 from xmodel1.review_export import (
     ReviewCandidate,
-    special_type_to_action_label,
+    action_idx_to_action_label,
     tile34_to_action_label,
     topk_candidates_from_row,
-    topk_special_candidates_from_row,
+    topk_response_candidates_from_row,
 )
 from xmodel1.schema import (
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_MAX_CANDIDATES,
-    XMODEL1_MAX_SPECIAL_CANDIDATES,
+    XMODEL1_MAX_RESPONSE_CANDIDATES,
     XMODEL1_SAMPLE_TYPE_DISCARD,
-    XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
 
 
@@ -95,12 +94,6 @@ class Xmodel1Adapter:
             state_scalar_dim=state_scalar_dim,
             candidate_feature_dim=candidate_feature_dim,
             candidate_flag_dim=candidate_flag_dim,
-            special_candidate_feature_dim=int(
-                cfg.get(
-                    "special_candidate_feature_dim",
-                    inferred_dims["special_candidate_feature_dim"],
-                )
-            ),
             hidden_dim=int(cfg.get("hidden_dim", inferred_dims["hidden_dim"])),
             num_res_blocks=int(cfg.get("num_res_blocks", inferred_dims["num_res_blocks"])),
             dropout=float(cfg.get("dropout", inferred_dims["dropout"])),
@@ -128,14 +121,18 @@ class Xmodel1Adapter:
                 moved["candidate_tile_id"],
                 moved["candidate_flags"],
                 moved["candidate_mask"],
-                moved.get("special_candidate_feat"),
-                moved.get("special_candidate_type_id"),
-                moved.get("special_candidate_mask"),
+                moved.get("response_action_idx"),
+                moved.get("response_action_mask"),
+                moved.get("response_post_candidate_feat"),
+                moved.get("response_post_candidate_tile_id"),
+                moved.get("response_post_candidate_mask"),
+                moved.get("response_post_candidate_flags"),
                 history_summary=moved.get("history_summary"),
             )
         return {
             "discard_logits": out.discard_logits.detach().cpu(),
-            "special_logits": out.special_logits.detach().cpu(),
+            "response_logits": out.response_logits.detach().cpu(),
+            "response_post_logits": out.response_post_logits.detach().cpu(),
             "action_logits": out.action_logits.detach().cpu(),
             "win_logit": out.win_logit.detach().cpu(),
             "dealin_logit": out.dealin_logit.detach().cpu(),
@@ -148,11 +145,12 @@ class Xmodel1Adapter:
             "candidate_quality_score": batch["candidate_quality_score"].detach().cpu(),
             "candidate_hard_bad_flag": batch["candidate_hard_bad_flag"].detach().cpu(),
             "sample_type": batch["sample_type"].detach().cpu(),
-            "special_candidate_type_id": batch["special_candidate_type_id"].detach().cpu(),
-            "special_candidate_mask": batch["special_candidate_mask"].detach().cpu(),
-            "special_candidate_quality_score": batch["special_candidate_quality_score"].detach().cpu(),
-            "special_candidate_hard_bad_flag": batch["special_candidate_hard_bad_flag"].detach().cpu(),
-            "chosen_special_candidate_idx": batch["chosen_special_candidate_idx"].detach().cpu(),
+            "response_action_idx": batch["response_action_idx"].detach().cpu(),
+            "response_action_mask": batch["response_action_mask"].detach().cpu(),
+            "response_post_candidate_quality_score": batch["response_post_candidate_quality_score"].detach().cpu(),
+            "response_post_candidate_hard_bad_flag": batch["response_post_candidate_hard_bad_flag"].detach().cpu(),
+            "chosen_response_action_idx": batch["chosen_response_action_idx"].detach().cpu(),
+            "response_teacher_discard_idx": batch["response_teacher_discard_idx"].detach().cpu(),
             "history_summary": batch["history_summary"].detach().cpu(),
             "replay_id": list(batch.get("replay_id", [])),
             "sample_id": list(batch.get("sample_id", [])),
@@ -182,32 +180,60 @@ class Xmodel1Adapter:
                 snap,
                 actor,
                 snap.get("legal_actions", []),
-                max_special_candidates=XMODEL1_MAX_SPECIAL_CANDIDATES,
-                special_feature_dim=self.model.special_candidate_feature_dim,
             )
-            special_candidate_feat = runtime_payload["special_candidate_feat"]
-            special_candidate_type_id = runtime_payload["special_candidate_type_id"]
-            special_candidate_mask = runtime_payload["special_candidate_mask"]
-            special_candidate_quality_score = runtime_payload["special_candidate_quality_score"]
-            special_candidate_hard_bad_flag = runtime_payload["special_candidate_hard_bad_flag"]
+            response_action_idx = runtime_payload["response_action_idx"]
+            response_action_mask = runtime_payload["response_action_mask"]
+            response_post_candidate_feat = runtime_payload["response_post_candidate_feat"]
+            response_post_candidate_tile_id = runtime_payload["response_post_candidate_tile_id"]
+            response_post_candidate_mask = runtime_payload["response_post_candidate_mask"]
+            response_post_candidate_flags = runtime_payload["response_post_candidate_flags"]
+            response_post_candidate_quality_score = runtime_payload["response_post_candidate_quality_score"]
+            response_post_candidate_hard_bad_flag = runtime_payload["response_post_candidate_hard_bad_flag"]
+            response_teacher_discard_idx = runtime_payload["response_teacher_discard_idx"]
         else:
-            special_candidate_feat = np.zeros(
-                (XMODEL1_MAX_SPECIAL_CANDIDATES, self.model.special_candidate_feature_dim),
-                dtype=np.float32,
-            )
-            special_candidate_type_id = np.full(
-                (XMODEL1_MAX_SPECIAL_CANDIDATES,),
+            response_action_idx = np.full(
+                (XMODEL1_MAX_RESPONSE_CANDIDATES,),
                 -1,
                 dtype=np.int16,
             )
-            special_candidate_mask = np.zeros((XMODEL1_MAX_SPECIAL_CANDIDATES,), dtype=np.uint8)
-            special_candidate_quality_score = np.zeros(
-                (XMODEL1_MAX_SPECIAL_CANDIDATES,),
+            response_action_mask = np.zeros((XMODEL1_MAX_RESPONSE_CANDIDATES,), dtype=np.uint8)
+            response_post_candidate_feat = np.zeros(
+                (
+                    XMODEL1_MAX_RESPONSE_CANDIDATES,
+                    XMODEL1_MAX_CANDIDATES,
+                    self.model.candidate_feature_dim,
+                ),
                 dtype=np.float32,
             )
-            special_candidate_hard_bad_flag = np.zeros(
-                (XMODEL1_MAX_SPECIAL_CANDIDATES,),
+            response_post_candidate_tile_id = np.full(
+                (XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES),
+                -1,
+                dtype=np.int16,
+            )
+            response_post_candidate_mask = np.zeros(
+                (XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES),
                 dtype=np.uint8,
+            )
+            response_post_candidate_flags = np.zeros(
+                (
+                    XMODEL1_MAX_RESPONSE_CANDIDATES,
+                    XMODEL1_MAX_CANDIDATES,
+                    self.model.candidate_flag_dim,
+                ),
+                dtype=np.uint8,
+            )
+            response_post_candidate_quality_score = np.zeros(
+                (XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES),
+                dtype=np.float32,
+            )
+            response_post_candidate_hard_bad_flag = np.zeros(
+                (XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES),
+                dtype=np.uint8,
+            )
+            response_teacher_discard_idx = np.full(
+                (XMODEL1_MAX_RESPONSE_CANDIDATES,),
+                -1,
+                dtype=np.int16,
             )
         from xmodel1.features import encode
 
@@ -229,12 +255,16 @@ class Xmodel1Adapter:
             "chosen_candidate_idx": torch.tensor([chosen_idx], dtype=torch.long),
             "candidate_quality_score": torch.zeros((1, XMODEL1_MAX_CANDIDATES), dtype=torch.float32),
             "candidate_hard_bad_flag": torch.zeros((1, XMODEL1_MAX_CANDIDATES), dtype=torch.float32),
-            "special_candidate_feat": torch.from_numpy(special_candidate_feat).unsqueeze(0),
-            "special_candidate_type_id": torch.from_numpy(special_candidate_type_id).unsqueeze(0),
-            "special_candidate_mask": torch.from_numpy(special_candidate_mask).unsqueeze(0),
-            "special_candidate_quality_score": torch.from_numpy(special_candidate_quality_score).unsqueeze(0),
-            "special_candidate_hard_bad_flag": torch.from_numpy(special_candidate_hard_bad_flag).unsqueeze(0),
-            "chosen_special_candidate_idx": torch.tensor([-1], dtype=torch.long),
+            "response_action_idx": torch.from_numpy(response_action_idx).unsqueeze(0),
+            "response_action_mask": torch.from_numpy(response_action_mask).unsqueeze(0),
+            "chosen_response_action_idx": torch.tensor([-1], dtype=torch.long),
+            "response_post_candidate_feat": torch.from_numpy(response_post_candidate_feat).unsqueeze(0),
+            "response_post_candidate_tile_id": torch.from_numpy(response_post_candidate_tile_id).unsqueeze(0),
+            "response_post_candidate_mask": torch.from_numpy(response_post_candidate_mask).unsqueeze(0),
+            "response_post_candidate_flags": torch.from_numpy(response_post_candidate_flags).unsqueeze(0),
+            "response_post_candidate_quality_score": torch.from_numpy(response_post_candidate_quality_score).unsqueeze(0),
+            "response_post_candidate_hard_bad_flag": torch.from_numpy(response_post_candidate_hard_bad_flag).unsqueeze(0),
+            "response_teacher_discard_idx": torch.from_numpy(response_teacher_discard_idx).unsqueeze(0),
             "history_summary": torch.from_numpy(history_summary).unsqueeze(0).float(),
         }
 
@@ -261,23 +291,39 @@ class Xmodel1Adapter:
                 else "padding"
             )
         else:
-            special_logits = scored["special_logits"][row_index].tolist()
-            special_type_ids = scored["special_candidate_type_id"][row_index].tolist()
-            special_mask = scored["special_candidate_mask"][row_index].tolist()
-            special_quality = scored["special_candidate_quality_score"][row_index].tolist()
-            special_hard_bad = scored["special_candidate_hard_bad_flag"][row_index].tolist()
-            top_k = topk_special_candidates_from_row(
-                scores=special_logits,
-                special_type_ids=special_type_ids,
-                special_mask=special_mask,
-                quality_scores=special_quality,
-                hard_bad_flags=special_hard_bad,
+            response_logits = scored["response_logits"][row_index].tolist()
+            response_action_idx = scored["response_action_idx"][row_index].tolist()
+            response_mask = scored["response_action_mask"][row_index].tolist()
+            response_quality = []
+            response_hard_bad = []
+            for slot, active in enumerate(response_mask):
+                if int(active) <= 0:
+                    response_quality.append(0.0)
+                    response_hard_bad.append(0)
+                    continue
+                teacher_idx = int(scored["response_teacher_discard_idx"][row_index, slot].item())
+                if teacher_idx >= 0:
+                    response_quality.append(
+                        float(scored["response_post_candidate_quality_score"][row_index, slot, teacher_idx].item())
+                    )
+                    response_hard_bad.append(
+                        int(scored["response_post_candidate_hard_bad_flag"][row_index, slot, teacher_idx].item())
+                    )
+                else:
+                    response_quality.append(0.0)
+                    response_hard_bad.append(0)
+            top_k = topk_response_candidates_from_row(
+                scores=response_logits,
+                response_action_idx=response_action_idx,
+                response_mask=response_mask,
+                quality_scores=response_quality,
+                hard_bad_flags=response_hard_bad,
                 k=k,
             )
-            chosen_idx = int(scored["chosen_special_candidate_idx"][row_index].item())
+            chosen_idx = int(scored["chosen_response_action_idx"][row_index].item())
             chosen_action = (
-                special_type_to_action_label(int(special_type_ids[chosen_idx]))
-                if 0 <= chosen_idx < len(special_type_ids)
+                action_idx_to_action_label(int(response_action_idx[chosen_idx]))
+                if 0 <= chosen_idx < len(response_action_idx)
                 else "padding"
             )
         win_prob = float(torch.sigmoid(scored["win_logit"][row_index]).item())

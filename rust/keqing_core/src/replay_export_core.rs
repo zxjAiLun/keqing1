@@ -110,6 +110,7 @@ pub struct RoundState {
     pub honba: i8,
     pub kyotaku: i8,
     pub oya: i8,
+    pub game_start_oya: i8,
     pub scores: [i32; 4],
     pub dora_markers: Vec<String>,
     pub players: Vec<PlayerState>,
@@ -130,6 +131,7 @@ impl Default for RoundState {
             honba: 0,
             kyotaku: 0,
             oya: 0,
+            game_start_oya: -1,
             scores: [25000, 25000, 25000, 25000],
             dora_markers: Vec::new(),
             players: vec![
@@ -423,6 +425,9 @@ pub fn start_new_round(state: &mut RoundState, event: &Value) {
     state.honba = value_i8(event, "honba", 0);
     state.kyotaku = value_i8(event, "kyotaku", 0);
     state.oya = value_i8(event, "oya", 0);
+    if state.game_start_oya < 0 {
+        state.game_start_oya = state.oya;
+    }
     if let Some(scores) = event.get("scores").and_then(Value::as_array) {
         for (idx, score) in scores.iter().take(4).enumerate() {
             state.scores[idx] = score.as_i64().unwrap_or(25000) as i32;
@@ -471,6 +476,7 @@ pub fn apply_event_round_state(state: &mut RoundState, event: &Value) {
     match et {
         "start_game" => {
             state.in_game = true;
+            state.game_start_oya = -1;
         }
         "start_kyoku" => start_new_round(state, event),
         "tsumo" => {

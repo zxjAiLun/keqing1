@@ -19,6 +19,7 @@ def create_runtime_bot(
     verbose: bool = False,
     beam_k: int = 3,
     beam_lambda: float = 1.0,
+    rank_pt_lambda: float = 0.0,
 ) -> Any:
     if bot_name == "rulebase":
         return RulebaseBot(player_id=player_id, verbose=verbose)
@@ -36,5 +37,6 @@ def create_runtime_bot(
         verbose=verbose,
         beam_k=beam_k,
         beam_lambda=beam_lambda,
+        rank_pt_lambda=rank_pt_lambda,
         model_version=bot_name,
     )

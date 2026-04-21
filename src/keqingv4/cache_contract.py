@@ -16,8 +16,8 @@ from training.cache_schema import (
     KEQINGV4_SUMMARY_DIM,
 )
 
-KEQINGV4_SCHEMA_NAME = "keqingv4_cached_v1"
-KEQINGV4_SCHEMA_VERSION = 6
+KEQINGV4_SCHEMA_NAME = "keqingv4"
+KEQINGV4_SCHEMA_VERSION = 7
 KEQINGV4_EXPORT_MODE = "rust_semantic_core"
 
 
@@ -62,6 +62,8 @@ def validate_keqingv4_npz(
         "pts_given_win_target": (sample_count,),
         "pts_given_dealin_target": (sample_count,),
         "opp_tenpai_target": (sample_count, 3),
+        "final_rank_target": (sample_count,),
+        "final_score_delta_points_target": (sample_count,),
         "event_history": (sample_count, KEQINGV4_EVENT_HISTORY_LEN, KEQINGV4_EVENT_HISTORY_DIM),
         "v4_opportunity": (sample_count, KEQINGV4_OPPORTUNITY_DIM),
         "v4_discard_summary": (sample_count, 34, KEQINGV4_SUMMARY_DIM),
@@ -111,9 +113,9 @@ def validate_keqingv4_manifest(manifest: dict[str, Any], *, path: Path | None = 
             f"{label}: schema_name mismatch, expected {KEQINGV4_SCHEMA_NAME}, got {manifest.get('schema_name')}"
         )
     version = manifest.get("schema_version")
-    if version is None or int(version) < KEQINGV4_SCHEMA_VERSION:
+    if version is None or int(version) != KEQINGV4_SCHEMA_VERSION:
         problems.append(
-            f"{label}: schema_version mismatch, expected >= {KEQINGV4_SCHEMA_VERSION}, got {version}"
+            f"{label}: schema_version mismatch, expected {KEQINGV4_SCHEMA_VERSION}, got {version}"
         )
     if int(manifest.get("summary_dim", -1)) != KEQINGV4_SUMMARY_DIM:
         problems.append(
@@ -138,7 +140,7 @@ def validate_keqingv4_manifest(manifest: dict[str, Any], *, path: Path | None = 
     return problems
 
 
-def inspect_keqingv4_cached_contract(file_paths: list[Path], *, max_files: int = 16) -> dict[str, Any]:
+def inspect_keqingv4_contract(file_paths: list[Path], *, max_files: int = 16) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "files_scanned": 0,
         "pts_given_win_files": 0,
@@ -207,7 +209,7 @@ def inspect_keqingv4_cached_contract(file_paths: list[Path], *, max_files: int =
     return summary
 
 
-def assert_keqingv4_cached_contract(
+def assert_keqingv4_contract(
     inspected: dict[str, Any],
     *,
     smoke: bool,
@@ -275,8 +277,8 @@ __all__ = [
     "KEQINGV4_EXPORT_MODE",
     "KEQINGV4_SCHEMA_NAME",
     "KEQINGV4_SCHEMA_VERSION",
-    "assert_keqingv4_cached_contract",
-    "inspect_keqingv4_cached_contract",
+    "assert_keqingv4_contract",
+    "inspect_keqingv4_contract",
     "load_keqingv4_manifest",
     "validate_keqingv4_manifest",
     "validate_keqingv4_npz",

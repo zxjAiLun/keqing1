@@ -32,6 +32,7 @@ use crate::progress_batch::{
 use crate::progress_delta::{calc_discard_deltas, calc_draw_deltas, calc_required_tiles};
 use crate::progress_summary::{summarize_3n1, summarize_one_shanten_draw_metrics};
 use crate::replay_samples::build_replay_decision_records_mc_return;
+use crate::rulebase::choose_rulebase_action;
 use crate::score_rules::{
     build_hora_result_payload, compute_hora_deltas, prepare_hora_tile_allocation,
 };
@@ -346,10 +347,12 @@ fn build_keqingv4_continuation_scenarios_json_py(
     score_delta,
     win_prob,
     dealin_prob,
+    rank_pt_value,
     beam_lambda,
     score_delta_lambda,
     win_prob_lambda,
-    dealin_prob_lambda
+    dealin_prob_lambda,
+    rank_pt_lambda
 ))]
 fn score_keqingv4_continuation_scenario_json_py(
     continuation_kind: &str,
@@ -359,10 +362,12 @@ fn score_keqingv4_continuation_scenario_json_py(
     score_delta: f32,
     win_prob: f32,
     dealin_prob: f32,
+    rank_pt_value: f32,
     beam_lambda: f32,
     score_delta_lambda: f32,
     win_prob_lambda: f32,
     dealin_prob_lambda: f32,
+    rank_pt_lambda: f32,
 ) -> PyResult<String> {
     let policy_logits: Vec<f32> = serde_json::from_str(policy_logits_json)
         .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
@@ -376,10 +381,12 @@ fn score_keqingv4_continuation_scenario_json_py(
         score_delta,
         win_prob,
         dealin_prob,
+        rank_pt_value,
         beam_lambda,
         score_delta_lambda,
         win_prob_lambda,
         dealin_prob_lambda,
+        rank_pt_lambda,
     );
     serde_json::to_string(&payload).map_err(|err| PyRuntimeError::new_err(err.to_string()))
 }
@@ -679,6 +686,25 @@ fn evaluate_hora_truth_from_prepared_json_py(prepared_json: &str) -> PyResult<St
     serde_json::to_string(&truth).map_err(|err| PyRuntimeError::new_err(err.to_string()))
 }
 
+#[pyfunction]
+fn choose_rulebase_action_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    legal_actions_json: &str,
+) -> PyResult<Option<String>> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let legal_actions: Vec<serde_json::Value> = serde_json::from_str(legal_actions_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let chosen = choose_rulebase_action(&snapshot, actor, &legal_actions)
+        .map_err(PyRuntimeError::new_err)?;
+    chosen
+        .map(|value| {
+            serde_json::to_string(&value).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+        })
+        .transpose()
+}
+
 #[pymodule]
 pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     ensure_init();
@@ -767,6 +793,7 @@ pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         evaluate_hora_truth_from_prepared_json_py,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(choose_rulebase_action_json_py, m)?)?;
     m.add("TILE_COUNT", TILE_COUNT)?;
     m.add("XMODEL1_SCHEMA_NAME", XMODEL1_SCHEMA_NAME)?;
     m.add("XMODEL1_SCHEMA_VERSION", XMODEL1_SCHEMA_VERSION)?;

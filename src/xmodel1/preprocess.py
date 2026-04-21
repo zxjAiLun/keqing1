@@ -15,19 +15,18 @@ import numpy as np
 from mahjong_env.action_space import action_to_idx
 from keqing_core import validate_xmodel1_discard_record, xmodel1_schema_info
 from mahjong_env.replay import build_replay_samples_mc_return
-from mahjong_env.replay_normalizer import normalize_replay_events
+from mahjong_env.replay_normalizer import normalize_replay_events, replay_label_matches_legal
 from mahjong_env.tiles import tile_to_34
 from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_HISTORY_SUMMARY_DIM,
     XMODEL1_MAX_CANDIDATES,
-    XMODEL1_MAX_SPECIAL_CANDIDATES,
-    XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+    XMODEL1_MAX_RESPONSE_CANDIDATES,
 )
+from xmodel1.call_response import build_response_action_states
 from xmodel1.candidate_quality import (
     build_candidate_features,
-    build_special_candidate_arrays,
     iter_legal_discards,
 )
 from xmodel1.features import compute_history_summary, encode
@@ -37,6 +36,102 @@ from xmodel1.schema import (
     XMODEL1_SAMPLE_TYPE_HORA,
     XMODEL1_SAMPLE_TYPE_RIICHI,
 )
+
+
+def _build_response_semantics(sample) -> dict[str, np.ndarray]:
+    response_action_idx = np.full((XMODEL1_MAX_RESPONSE_CANDIDATES,), -1, dtype=np.int16)
+    response_action_mask = np.zeros((XMODEL1_MAX_RESPONSE_CANDIDATES,), dtype=np.uint8)
+    chosen_response_action_idx = np.int16(-1)
+    response_post_candidate_feat = np.zeros(
+        (
+            XMODEL1_MAX_RESPONSE_CANDIDATES,
+            XMODEL1_MAX_CANDIDATES,
+            XMODEL1_CANDIDATE_FEATURE_DIM,
+        ),
+        dtype=np.float16,
+    )
+    response_post_candidate_tile_id = np.full(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES),
+        -1,
+        dtype=np.int16,
+    )
+    response_post_candidate_mask = np.zeros(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES),
+        dtype=np.uint8,
+    )
+    response_post_candidate_flags = np.zeros(
+        (
+            XMODEL1_MAX_RESPONSE_CANDIDATES,
+            XMODEL1_MAX_CANDIDATES,
+            XMODEL1_CANDIDATE_FLAG_DIM,
+        ),
+        dtype=np.uint8,
+    )
+    response_post_candidate_quality_score = np.zeros(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES),
+        dtype=np.float32,
+    )
+    response_post_candidate_hard_bad_flag = np.zeros(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES),
+        dtype=np.uint8,
+    )
+    response_teacher_discard_idx = np.full(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES,),
+        -1,
+        dtype=np.int16,
+    )
+
+    response_states = build_response_action_states(
+        sample.state,
+        sample.actor,
+        sample.legal_actions,
+    )
+    for response_idx, response_state in enumerate(
+        response_states[:XMODEL1_MAX_RESPONSE_CANDIDATES]
+    ):
+        response_action_idx[response_idx] = np.int16(response_state.action_idx)
+        response_action_mask[response_idx] = 1
+        if replay_label_matches_legal(sample.label_action, [response_state.action]):
+            chosen_response_action_idx = np.int16(response_idx)
+        if response_state.after_snapshot is None:
+            continue
+        best_teacher_idx = -1
+        best_teacher_quality = -1e9
+        for discard_idx, action in enumerate(
+            response_state.post_discard_actions[:XMODEL1_MAX_CANDIDATES]
+        ):
+            feat, flags, quality, _rank_bucket, hard_bad = build_candidate_features(
+                response_state.after_snapshot,
+                sample.actor,
+                action,
+            )
+            response_post_candidate_feat[response_idx, discard_idx] = feat.astype(
+                np.float16
+            )
+            response_post_candidate_tile_id[response_idx, discard_idx] = int(
+                tile_to_34(action["pai"])
+            )
+            response_post_candidate_mask[response_idx, discard_idx] = 1
+            response_post_candidate_flags[response_idx, discard_idx] = flags
+            response_post_candidate_quality_score[response_idx, discard_idx] = quality
+            response_post_candidate_hard_bad_flag[response_idx, discard_idx] = hard_bad
+            if quality > best_teacher_quality:
+                best_teacher_quality = float(quality)
+                best_teacher_idx = discard_idx
+        response_teacher_discard_idx[response_idx] = np.int16(best_teacher_idx)
+
+    return {
+        "response_action_idx": response_action_idx,
+        "response_action_mask": response_action_mask,
+        "chosen_response_action_idx": np.array(chosen_response_action_idx, dtype=np.int16),
+        "response_post_candidate_feat": response_post_candidate_feat,
+        "response_post_candidate_tile_id": response_post_candidate_tile_id,
+        "response_post_candidate_mask": response_post_candidate_mask,
+        "response_post_candidate_flags": response_post_candidate_flags,
+        "response_post_candidate_quality_score": response_post_candidate_quality_score,
+        "response_post_candidate_hard_bad_flag": response_post_candidate_hard_bad_flag,
+        "response_teacher_discard_idx": response_teacher_discard_idx,
+    }
 
 
 def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np.ndarray]]:
@@ -51,12 +146,16 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         "chosen_candidate_idx": [],
         "candidate_quality_score": [],
         "candidate_hard_bad_flag": [],
-        "special_candidate_feat": [],
-        "special_candidate_type_id": [],
-        "special_candidate_mask": [],
-        "special_candidate_quality_score": [],
-        "special_candidate_hard_bad_flag": [],
-        "chosen_special_candidate_idx": [],
+        "response_action_idx": [],
+        "response_action_mask": [],
+        "chosen_response_action_idx": [],
+        "response_post_candidate_feat": [],
+        "response_post_candidate_tile_id": [],
+        "response_post_candidate_mask": [],
+        "response_post_candidate_flags": [],
+        "response_post_candidate_quality_score": [],
+        "response_post_candidate_hard_bad_flag": [],
+        "response_teacher_discard_idx": [],
         "win_target": [],
         "dealin_target": [],
         "pts_given_win_target": [],
@@ -64,6 +163,8 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         # Stage 2 Python 原型:3 家对手的 tenpai 标签 (1.0 表示该对手当前向听 ≤ 0)。
         # 相对 actor 顺序为 (actor+1,actor+2,actor+3)%4。Rust preprocess 迁移后保持同样含义。
         "opp_tenpai_target": [],
+        "final_rank_target": [],
+        "final_score_delta_points_target": [],
         "history_summary": [],
         "sample_type": [],
         "action_idx_target": [],
@@ -82,6 +183,7 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         event_index = int(getattr(sample, "event_index", sample_index))
         tile_feat, scalar = encode(sample.state, sample.actor, state_scalar_dim=56)
         label_type = sample.label_action.get("type")
+        legal_discards = iter_legal_discards(sample.legal_actions)
 
         candidate_feat = np.zeros((XMODEL1_MAX_CANDIDATES, XMODEL1_CANDIDATE_FEATURE_DIM), dtype=np.float16)
         candidate_tile_id = np.full((XMODEL1_MAX_CANDIDATES,), -1, dtype=np.int16)
@@ -89,32 +191,13 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         candidate_flags = np.zeros((XMODEL1_MAX_CANDIDATES, XMODEL1_CANDIDATE_FLAG_DIM), dtype=np.uint8)
         candidate_quality = np.zeros((XMODEL1_MAX_CANDIDATES,), dtype=np.float32)
         candidate_hard_bad = np.zeros((XMODEL1_MAX_CANDIDATES,), dtype=np.uint8)
-        (
-            special_candidate_feat,
-            special_candidate_type_id,
-            special_candidate_mask,
-            special_candidate_quality,
-            _special_candidate_rank,
-            special_candidate_hard_bad,
-            chosen_special_idx,
-        ) = build_special_candidate_arrays(
-            sample.state,
-            sample.actor,
-            sample.legal_actions,
-            sample.label_action,
-            max_candidates=XMODEL1_MAX_SPECIAL_CANDIDATES,
-            feature_dim=XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
-            include_terminal_actions=True,
-        )
+        response_semantics = _build_response_semantics(sample)
 
         chosen_idx = None
         action_idx_target = int(action_to_idx(sample.label_action))
         sample_type = XMODEL1_SAMPLE_TYPE_DISCARD
 
-        if label_type == "dahai":
-            legal_discards = iter_legal_discards(sample.legal_actions)
-            if not legal_discards:
-                continue
+        if legal_discards:
             for cidx, action in enumerate(legal_discards[:XMODEL1_MAX_CANDIDATES]):
                 feat, flags, quality, _rank_bucket, hard_bad = build_candidate_features(
                     sample.state,
@@ -127,25 +210,28 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
                 candidate_flags[cidx] = flags
                 candidate_quality[cidx] = quality
                 candidate_hard_bad[cidx] = hard_bad
-                if action == sample.label_action:
+                if label_type == "dahai" and action == sample.label_action:
                     chosen_idx = cidx
+        if label_type == "dahai":
+            if not legal_discards:
+                continue
             if chosen_idx is None:
                 continue
             validate_xmodel1_discard_record(chosen_idx, candidate_mask.tolist(), candidate_tile_id.tolist())
         elif label_type == "reach":
             sample_type = XMODEL1_SAMPLE_TYPE_RIICHI
             chosen_idx = -1
-            if chosen_special_idx < 0:
+            if int(response_semantics["chosen_response_action_idx"]) < 0:
                 continue
         elif label_type == "hora":
             sample_type = XMODEL1_SAMPLE_TYPE_HORA
             chosen_idx = -1
-            if chosen_special_idx < 0:
+            if int(response_semantics["chosen_response_action_idx"]) < 0:
                 continue
         elif label_type in {"chi", "pon", "daiminkan", "ankan", "kakan", "none"}:
             sample_type = XMODEL1_SAMPLE_TYPE_CALL
             chosen_idx = -1
-            if chosen_special_idx < 0:
+            if int(response_semantics["chosen_response_action_idx"]) < 0:
                 continue
         else:
             continue
@@ -159,12 +245,32 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         rows["chosen_candidate_idx"].append(np.int16(chosen_idx if chosen_idx is not None else -1))
         rows["candidate_quality_score"].append(candidate_quality)
         rows["candidate_hard_bad_flag"].append(candidate_hard_bad)
-        rows["special_candidate_feat"].append(special_candidate_feat.astype(np.float16))
-        rows["special_candidate_type_id"].append(special_candidate_type_id)
-        rows["special_candidate_mask"].append(special_candidate_mask)
-        rows["special_candidate_quality_score"].append(special_candidate_quality)
-        rows["special_candidate_hard_bad_flag"].append(special_candidate_hard_bad)
-        rows["chosen_special_candidate_idx"].append(np.int16(chosen_special_idx))
+        rows["response_action_idx"].append(response_semantics["response_action_idx"])
+        rows["response_action_mask"].append(response_semantics["response_action_mask"])
+        rows["chosen_response_action_idx"].append(
+            response_semantics["chosen_response_action_idx"]
+        )
+        rows["response_post_candidate_feat"].append(
+            response_semantics["response_post_candidate_feat"]
+        )
+        rows["response_post_candidate_tile_id"].append(
+            response_semantics["response_post_candidate_tile_id"]
+        )
+        rows["response_post_candidate_mask"].append(
+            response_semantics["response_post_candidate_mask"]
+        )
+        rows["response_post_candidate_flags"].append(
+            response_semantics["response_post_candidate_flags"]
+        )
+        rows["response_post_candidate_quality_score"].append(
+            response_semantics["response_post_candidate_quality_score"]
+        )
+        rows["response_post_candidate_hard_bad_flag"].append(
+            response_semantics["response_post_candidate_hard_bad_flag"]
+        )
+        rows["response_teacher_discard_idx"].append(
+            response_semantics["response_teacher_discard_idx"]
+        )
         rows["win_target"].append(np.float32(sample.win_target))
         rows["dealin_target"].append(np.float32(sample.dealin_target))
         rows["pts_given_win_target"].append(np.float32(sample.pts_given_win_target))
@@ -172,6 +278,12 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         opp_tenpai = getattr(sample, "opp_tenpai_target", (0.0, 0.0, 0.0))
         rows["opp_tenpai_target"].append(
             np.asarray(opp_tenpai, dtype=np.float32).reshape(3)
+        )
+        rows["final_rank_target"].append(
+            np.int8(getattr(sample, "final_rank_target", 0))
+        )
+        rows["final_score_delta_points_target"].append(
+            np.int32(getattr(sample, "final_score_delta_points_target", 0))
         )
         rows["history_summary"].append(
             compute_history_summary(normalized_events, event_index, sample.actor)
@@ -199,11 +311,15 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         "candidate_flags",
         "candidate_quality_score",
         "candidate_hard_bad_flag",
-        "special_candidate_feat",
-        "special_candidate_type_id",
-        "special_candidate_mask",
-        "special_candidate_quality_score",
-        "special_candidate_hard_bad_flag",
+        "response_action_idx",
+        "response_action_mask",
+        "response_post_candidate_feat",
+        "response_post_candidate_tile_id",
+        "response_post_candidate_mask",
+        "response_post_candidate_flags",
+        "response_post_candidate_quality_score",
+        "response_post_candidate_hard_bad_flag",
+        "response_teacher_discard_idx",
         "opp_tenpai_target",
         "history_summary",
     }

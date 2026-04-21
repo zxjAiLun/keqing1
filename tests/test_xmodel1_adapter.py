@@ -9,7 +9,8 @@ import torch
 from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
     XMODEL1_CANDIDATE_FLAG_DIM,
-    XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+    XMODEL1_SCHEMA_NAME,
+    XMODEL1_SCHEMA_VERSION,
 )
 from tests.xmodel1_test_utils import write_xmodel1_v3_npz
 from xmodel1.adapter import Xmodel1Adapter
@@ -18,7 +19,6 @@ from xmodel1.model import Xmodel1Model
 from xmodel1.schema import (
     XMODEL1_SAMPLE_TYPE_CALL,
     XMODEL1_SAMPLE_TYPE_DISCARD,
-    XMODEL1_SPECIAL_TYPE_NONE,
 )
 
 
@@ -30,16 +30,11 @@ def _write_fixture(path: Path, n: int = 2) -> None:
     candidate_tile_id[:, 0] = 0
     candidate_tile_id[:, 1] = 1
     candidate_tile_id[:, 2] = 27
-    special_mask = np.zeros((n, 12), dtype=np.uint8)
-    special_mask[1, 0] = 1
-    special_type_id = np.full((n, 12), -1, dtype=np.int16)
-    special_type_id[1, 0] = XMODEL1_SPECIAL_TYPE_NONE
     payload = write_xmodel1_v3_npz(
         path,
         n=n,
         sample_type=np.array([XMODEL1_SAMPLE_TYPE_DISCARD, XMODEL1_SAMPLE_TYPE_CALL], dtype=np.int8),
         chosen_candidate_idx=np.array([0, -1], dtype=np.int16),
-        chosen_special_candidate_idx=np.array([-1, 0], dtype=np.int16),
         replay_ids=["r0", "r1"],
         sample_ids=["r0:0", "r1:1"],
     )
@@ -49,9 +44,9 @@ def _write_fixture(path: Path, n: int = 2) -> None:
     payload["candidate_tile_id"][:] = candidate_tile_id
     payload["candidate_mask"][:] = candidate_mask
     payload["candidate_quality_score"][:] = np.random.randn(n, k).astype(np.float32)
-    payload["special_candidate_feat"][:] = np.zeros((n, 12, XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM), dtype=np.float16)
-    payload["special_candidate_type_id"][:] = special_type_id
-    payload["special_candidate_mask"][:] = special_mask
+    payload["response_action_idx"][1, 0] = 44
+    payload["response_action_mask"][1, 0] = 1
+    payload["chosen_response_action_idx"][1] = 0
     np.savez(path, **payload)
 
 
@@ -82,7 +77,7 @@ def test_xmodel1_adapter_scores_batch_and_returns_discard_review_row(tmp_path: P
     assert scored["replay_id"] == ["r0", "r1"]
 
 
-def test_xmodel1_adapter_returns_special_review_row_for_call_samples(tmp_path: Path):
+def test_xmodel1_adapter_returns_response_review_row_for_call_samples(tmp_path: Path):
     fixture = tmp_path / "sample.npz"
     _write_fixture(fixture)
     ds = Xmodel1DiscardDataset([fixture], shuffle=False)
@@ -123,14 +118,14 @@ def test_xmodel1_adapter_rejects_partial_checkpoint_load(tmp_path: Path):
                 "state_scalar_dim": 56,
                 "candidate_feature_dim": XMODEL1_CANDIDATE_FEATURE_DIM,
                 "candidate_flag_dim": XMODEL1_CANDIDATE_FLAG_DIM,
-                "schema_name": "xmodel1_discard_v3",
-                "schema_version": 3,
+                "schema_name": XMODEL1_SCHEMA_NAME,
+                "schema_version": XMODEL1_SCHEMA_VERSION,
                 "hidden_dim": 32,
                 "num_res_blocks": 1,
                 "dropout": 0.1,
             },
-            "schema_name": "xmodel1_discard_v3",
-            "schema_version": 3,
+            "schema_name": XMODEL1_SCHEMA_NAME,
+            "schema_version": XMODEL1_SCHEMA_VERSION,
         },
         ckpt,
     )

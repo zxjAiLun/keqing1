@@ -21,10 +21,12 @@ from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_MAX_CANDIDATES,
+    XMODEL1_MAX_RESPONSE_CANDIDATES,
     XMODEL1_MAX_SPECIAL_CANDIDATES,
     XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
 from training.state_features import C_TILE, N_SCALAR, encode as _encode_state, encode_with_timings
+from xmodel1.call_response import build_response_action_states
 from xmodel1.candidate_quality import build_candidate_features, build_special_candidate_arrays, iter_legal_discards
 
 
@@ -67,8 +69,6 @@ def _python_runtime_tensor_payload(
     max_candidates: int,
     candidate_feature_dim: int,
     candidate_flag_dim: int,
-    max_special_candidates: int,
-    special_feature_dim: int,
 ) -> dict[str, np.ndarray]:
     discard_actions = iter_legal_discards(legal_actions)
     candidate_feat = np.zeros((max_candidates, candidate_feature_dim), dtype=np.float32)
@@ -82,33 +82,82 @@ def _python_runtime_tensor_payload(
         candidate_mask[slot] = 1
         candidate_flags[slot] = flags.astype(np.uint8, copy=False)
 
-    (
-        special_feat,
-        special_type_id,
-        special_mask,
-        special_quality,
-        _special_rank_bucket,
-        special_hard_bad,
-        _chosen_idx,
-    ) = build_special_candidate_arrays(
-        state,
-        actor,
-        legal_actions,
-        chosen_action=None,
-        max_candidates=max_special_candidates,
-        feature_dim=special_feature_dim,
-        include_terminal_actions=True,
+    response_action_idx = np.full((XMODEL1_MAX_RESPONSE_CANDIDATES,), -1, dtype=np.int16)
+    response_action_mask = np.zeros((XMODEL1_MAX_RESPONSE_CANDIDATES,), dtype=np.uint8)
+    response_post_candidate_feat = np.zeros(
+        (
+            XMODEL1_MAX_RESPONSE_CANDIDATES,
+            max_candidates,
+            candidate_feature_dim,
+        ),
+        dtype=np.float32,
     )
+    response_post_candidate_tile_id = np.full(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+        -1,
+        dtype=np.int16,
+    )
+    response_post_candidate_mask = np.zeros(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+        dtype=np.uint8,
+    )
+    response_post_candidate_flags = np.zeros(
+        (
+            XMODEL1_MAX_RESPONSE_CANDIDATES,
+            max_candidates,
+            candidate_flag_dim,
+        ),
+        dtype=np.uint8,
+    )
+    response_post_candidate_quality_score = np.zeros(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+        dtype=np.float32,
+    )
+    response_post_candidate_hard_bad_flag = np.zeros(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+        dtype=np.uint8,
+    )
+    response_teacher_discard_idx = np.full(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES,),
+        -1,
+        dtype=np.int16,
+    )
+    response_states = build_response_action_states(state, actor, legal_actions)
+    for response_idx, response_state in enumerate(response_states[:XMODEL1_MAX_RESPONSE_CANDIDATES]):
+        response_action_idx[response_idx] = np.int16(response_state.action_idx)
+        response_action_mask[response_idx] = 1
+        best_teacher_idx = -1
+        best_teacher_quality = -1e9
+        for discard_idx, action in enumerate(response_state.post_discard_actions[:max_candidates]):
+            feat, flags, quality, _rank, hard_bad = build_candidate_features(
+                response_state.after_snapshot,
+                actor,
+                action,
+            )
+            response_post_candidate_feat[response_idx, discard_idx] = feat.astype(np.float32, copy=False)
+            response_post_candidate_tile_id[response_idx, discard_idx] = int(tile_to_34(action["pai"]))
+            response_post_candidate_mask[response_idx, discard_idx] = 1
+            response_post_candidate_flags[response_idx, discard_idx] = flags.astype(np.uint8, copy=False)
+            response_post_candidate_quality_score[response_idx, discard_idx] = quality
+            response_post_candidate_hard_bad_flag[response_idx, discard_idx] = hard_bad
+            if quality > best_teacher_quality:
+                best_teacher_quality = float(quality)
+                best_teacher_idx = discard_idx
+        response_teacher_discard_idx[response_idx] = np.int16(best_teacher_idx)
     return {
         "candidate_feat": candidate_feat,
         "candidate_tile_id": candidate_tile_id,
         "candidate_mask": candidate_mask,
         "candidate_flags": candidate_flags,
-        "special_candidate_feat": special_feat.astype(np.float32, copy=False),
-        "special_candidate_type_id": special_type_id.astype(np.int16, copy=False),
-        "special_candidate_mask": special_mask.astype(np.uint8, copy=False),
-        "special_candidate_quality_score": special_quality.astype(np.float32, copy=False),
-        "special_candidate_hard_bad_flag": special_hard_bad.astype(np.uint8, copy=False),
+        "response_action_idx": response_action_idx,
+        "response_action_mask": response_action_mask,
+        "response_post_candidate_feat": response_post_candidate_feat,
+        "response_post_candidate_tile_id": response_post_candidate_tile_id,
+        "response_post_candidate_mask": response_post_candidate_mask,
+        "response_post_candidate_flags": response_post_candidate_flags,
+        "response_post_candidate_quality_score": response_post_candidate_quality_score,
+        "response_post_candidate_hard_bad_flag": response_post_candidate_hard_bad_flag,
+        "response_teacher_discard_idx": response_teacher_discard_idx,
         "history_summary": resolve_runtime_history_summary(state),
     }
 
@@ -121,8 +170,6 @@ def resolve_runtime_tensor_payload(
     max_candidates: int = XMODEL1_MAX_CANDIDATES,
     candidate_feature_dim: int = XMODEL1_CANDIDATE_FEATURE_DIM,
     candidate_flag_dim: int = XMODEL1_CANDIDATE_FLAG_DIM,
-    max_special_candidates: int = XMODEL1_MAX_SPECIAL_CANDIDATES,
-    special_feature_dim: int = XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 ) -> dict[str, np.ndarray]:
     resolved_legal_actions = _normalize_legal_actions(state, actor, legal_actions)
     try:
@@ -132,7 +179,11 @@ def resolve_runtime_tensor_payload(
             resolved_legal_actions,
         )
     except RuntimeError as exc:
-        if not is_missing_rust_capability_error(exc):
+        message = str(exc)
+        if (
+            not is_missing_rust_capability_error(exc)
+            and "failed to parse xmodel1 runtime snapshot" not in message
+        ):
             raise
     else:
         return {
@@ -146,24 +197,77 @@ def resolve_runtime_tensor_payload(
                 max_candidates,
                 candidate_flag_dim,
             ),
-            "special_candidate_feat": np.asarray(payload["special_candidate_feat"], dtype=np.float32).reshape(
-                max_special_candidates,
-                special_feature_dim,
-            ),
-            "special_candidate_type_id": np.asarray(payload["special_candidate_type_id"], dtype=np.int16).reshape(
-                max_special_candidates,
-            ),
-            "special_candidate_mask": np.asarray(payload["special_candidate_mask"], dtype=np.uint8).reshape(
-                max_special_candidates,
-            ),
-            "special_candidate_quality_score": np.asarray(
-                payload["special_candidate_quality_score"],
-                dtype=np.float32,
-            ).reshape(max_special_candidates),
-            "special_candidate_hard_bad_flag": np.asarray(
-                payload["special_candidate_hard_bad_flag"],
+            "response_action_idx": np.asarray(
+                payload.get("response_action_idx", np.full((XMODEL1_MAX_RESPONSE_CANDIDATES,), -1, dtype=np.int16)),
+                dtype=np.int16,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES),
+            "response_action_mask": np.asarray(
+                payload.get("response_action_mask", np.zeros((XMODEL1_MAX_RESPONSE_CANDIDATES,), dtype=np.uint8)),
                 dtype=np.uint8,
-            ).reshape(max_special_candidates),
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES),
+            "response_post_candidate_feat": np.asarray(
+                payload.get(
+                    "response_post_candidate_feat",
+                    np.zeros(
+                        (
+                            XMODEL1_MAX_RESPONSE_CANDIDATES,
+                            max_candidates,
+                            candidate_feature_dim,
+                        ),
+                        dtype=np.float32,
+                    ),
+                ),
+                dtype=np.float32,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates, candidate_feature_dim),
+            "response_post_candidate_tile_id": np.asarray(
+                payload.get(
+                    "response_post_candidate_tile_id",
+                    np.full((XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates), -1, dtype=np.int16),
+                ),
+                dtype=np.int16,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+            "response_post_candidate_mask": np.asarray(
+                payload.get(
+                    "response_post_candidate_mask",
+                    np.zeros((XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates), dtype=np.uint8),
+                ),
+                dtype=np.uint8,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+            "response_post_candidate_flags": np.asarray(
+                payload.get(
+                    "response_post_candidate_flags",
+                    np.zeros(
+                        (
+                            XMODEL1_MAX_RESPONSE_CANDIDATES,
+                            max_candidates,
+                            candidate_flag_dim,
+                        ),
+                        dtype=np.uint8,
+                    ),
+                ),
+                dtype=np.uint8,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates, candidate_flag_dim),
+            "response_post_candidate_quality_score": np.asarray(
+                payload.get(
+                    "response_post_candidate_quality_score",
+                    np.zeros((XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates), dtype=np.float32),
+                ),
+                dtype=np.float32,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+            "response_post_candidate_hard_bad_flag": np.asarray(
+                payload.get(
+                    "response_post_candidate_hard_bad_flag",
+                    np.zeros((XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates), dtype=np.uint8),
+                ),
+                dtype=np.uint8,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+            "response_teacher_discard_idx": np.asarray(
+                payload.get(
+                    "response_teacher_discard_idx",
+                    np.full((XMODEL1_MAX_RESPONSE_CANDIDATES,), -1, dtype=np.int16),
+                ),
+                dtype=np.int16,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES),
             "history_summary": np.asarray(payload["history_summary"], dtype=np.float16).reshape(HISTORY_SUMMARY_DIM),
         }
     return _python_runtime_tensor_payload(
@@ -173,8 +277,6 @@ def resolve_runtime_tensor_payload(
         max_candidates=max_candidates,
         candidate_feature_dim=candidate_feature_dim,
         candidate_flag_dim=candidate_flag_dim,
-        max_special_candidates=max_special_candidates,
-        special_feature_dim=special_feature_dim,
     )
 
 
@@ -211,18 +313,17 @@ def build_runtime_special_candidate_arrays(
     max_candidates: int = XMODEL1_MAX_SPECIAL_CANDIDATES,
     feature_dim: int = XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 ):
-    payload = resolve_runtime_tensor_payload(
+    resolved_legal_actions = _normalize_legal_actions(state, actor, legal_actions)
+    feat, type_id, mask, _quality, _rank, _hard_bad, _chosen_idx = build_special_candidate_arrays(
         state,
         actor,
-        legal_actions,
-        max_special_candidates=max_candidates,
-        special_feature_dim=feature_dim,
+        resolved_legal_actions,
+        chosen_action=None,
+        max_candidates=max_candidates,
+        feature_dim=feature_dim,
+        include_terminal_actions=True,
     )
-    return (
-        payload["special_candidate_feat"],
-        payload["special_candidate_type_id"],
-        payload["special_candidate_mask"],
-    )
+    return feat, type_id, mask
 
 
 __all__ = [

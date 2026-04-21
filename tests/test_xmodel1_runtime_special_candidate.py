@@ -22,6 +22,8 @@ from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_MAX_SPECIAL_CANDIDATES,
+    XMODEL1_SCHEMA_NAME,
+    XMODEL1_SCHEMA_VERSION,
     XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
 from xmodel1.features import build_runtime_special_candidate_arrays
@@ -102,12 +104,12 @@ def _make_xmodel1_checkpoint(tmp_path: Path) -> Path:
                 "candidate_flag_dim": XMODEL1_CANDIDATE_FLAG_DIM,
                 "hidden_dim": 32,
                 "num_res_blocks": 1,
-                "schema_name": "xmodel1_discard_v3",
-                "schema_version": 3,
+                "schema_name": XMODEL1_SCHEMA_NAME,
+                "schema_version": XMODEL1_SCHEMA_VERSION,
             },
             "model_version": "xmodel1",
-            "schema_name": "xmodel1_discard_v3",
-            "schema_version": 3,
+            "schema_name": XMODEL1_SCHEMA_NAME,
+            "schema_version": XMODEL1_SCHEMA_VERSION,
         },
         ckpt,
     )

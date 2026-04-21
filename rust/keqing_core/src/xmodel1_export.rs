@@ -25,6 +25,7 @@ use crate::export_common::{
     read_npy_first_dim_from_zip, temp_npz_path, write_json_manifest, write_npy_f16, write_npy_f32,
     write_npy_i16, write_npy_i32, write_npy_i8, write_npy_u8, write_npy_unicode_scalar,
 };
+use crate::keqingv4_summary::project_keqingv4_call_snapshot;
 use crate::progress_summary::{summarize_3n1, summarize_like_python, Summary3n1};
 use crate::replay_export_core as replay_core;
 use crate::replay_export_core::{normalize_tile_repr, strip_aka, tile34_from_pai};
@@ -37,12 +38,12 @@ use crate::value_proxy::{
 };
 use crate::xmodel1_schema::{
     validate_candidate_mask_and_choice, XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM,
-    XMODEL1_MAX_CANDIDATES, XMODEL1_MAX_SPECIAL_CANDIDATES, XMODEL1_SCHEMA_NAME,
-    XMODEL1_SCHEMA_VERSION, XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM, XMODEL1_SPECIAL_TYPE_ANKAN,
-    XMODEL1_SPECIAL_TYPE_CHI_HIGH, XMODEL1_SPECIAL_TYPE_CHI_LOW, XMODEL1_SPECIAL_TYPE_CHI_MID,
-    XMODEL1_SPECIAL_TYPE_DAIMINKAN, XMODEL1_SPECIAL_TYPE_DAMA, XMODEL1_SPECIAL_TYPE_HORA,
-    XMODEL1_SPECIAL_TYPE_KAKAN, XMODEL1_SPECIAL_TYPE_NONE, XMODEL1_SPECIAL_TYPE_PON,
-    XMODEL1_SPECIAL_TYPE_REACH, XMODEL1_SPECIAL_TYPE_RYUKYOKU,
+    XMODEL1_MAX_CANDIDATES, XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_SPECIAL_CANDIDATES,
+    XMODEL1_SCHEMA_NAME, XMODEL1_SCHEMA_VERSION, XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+    XMODEL1_SPECIAL_TYPE_ANKAN, XMODEL1_SPECIAL_TYPE_CHI_HIGH, XMODEL1_SPECIAL_TYPE_CHI_LOW,
+    XMODEL1_SPECIAL_TYPE_CHI_MID, XMODEL1_SPECIAL_TYPE_DAIMINKAN, XMODEL1_SPECIAL_TYPE_DAMA,
+    XMODEL1_SPECIAL_TYPE_HORA, XMODEL1_SPECIAL_TYPE_KAKAN, XMODEL1_SPECIAL_TYPE_NONE,
+    XMODEL1_SPECIAL_TYPE_PON, XMODEL1_SPECIAL_TYPE_REACH, XMODEL1_SPECIAL_TYPE_RYUKYOKU,
 };
 
 const XMODEL1_STATE_TILE_CHANNELS: usize = 57;
@@ -415,6 +416,13 @@ fn runtime_build_round_state_from_snapshot(
         .iter()
         .map(|tile| normalize_tile_repr(tile))
         .collect();
+    if actor_tracker.hand_tiles.len() % 3 == 1 {
+        if let Some(tsumo_pai) = snapshot.tsumo_pai.as_deref() {
+            actor_tracker
+                .hand_tiles
+                .push(normalize_tile_repr(tsumo_pai));
+        }
+    }
     for tile in actor_tracker.hand_tiles.clone() {
         if let Some(tile34) = tile34_from_pai(&tile).map(|value| value as usize) {
             runtime_apply_hand_count_delta(&mut actor_tracker, tile34, 1);
@@ -495,24 +503,23 @@ pub fn build_xmodel1_runtime_tensors(
         candidate_mask[slot] = 1;
     }
 
-    let special = encode_special_candidate_arrays_with_legal_actions(
-        &round_state,
-        actor,
-        legal_actions,
-        &json!({"type":"dahai"}),
-        &decision_ctx,
-    );
+    let response =
+        encode_response_candidate_arrays(snapshot, actor, legal_actions, &json!({"type":"dahai"}))?;
 
     Ok(json!({
         "candidate_feat": f16_bits_to_f32_vec(&candidate_feat),
         "candidate_tile_id": candidate_tile_id,
         "candidate_mask": candidate_mask,
         "candidate_flags": candidate_flags,
-        "special_candidate_feat": f16_bits_to_f32_vec(&special.feat),
-        "special_candidate_type_id": special.type_id,
-        "special_candidate_mask": special.mask,
-        "special_candidate_quality_score": special.quality,
-        "special_candidate_hard_bad_flag": special.hard_bad,
+        "response_action_idx": response.action_idx,
+        "response_action_mask": response.mask,
+        "response_post_candidate_feat": f16_bits_to_f32_vec(&response.post_candidate_feat),
+        "response_post_candidate_tile_id": response.post_candidate_tile_id,
+        "response_post_candidate_mask": response.post_candidate_mask,
+        "response_post_candidate_flags": response.post_candidate_flags,
+        "response_post_candidate_quality_score": response.post_candidate_quality,
+        "response_post_candidate_hard_bad_flag": response.post_candidate_hard_bad,
+        "response_teacher_discard_idx": response.teacher_discard_idx,
         "history_summary": history_summary,
     }))
 }
@@ -559,13 +566,16 @@ struct FullRecord {
     candidate_quality: Vec<f32>,
     candidate_rank: Vec<i8>,
     candidate_hard_bad: Vec<u8>,
-    special_candidate_feat: Vec<u16>,
-    special_candidate_type_id: Vec<i16>,
-    special_candidate_mask: Vec<u8>,
-    special_candidate_quality: Vec<f32>,
-    special_candidate_rank: Vec<i8>,
-    special_candidate_hard_bad: Vec<u8>,
-    chosen_special_candidate_idx: i16,
+    response_action_idx: Vec<i16>,
+    response_action_mask: Vec<u8>,
+    chosen_response_action_idx: i16,
+    response_post_candidate_feat: Vec<u16>,
+    response_post_candidate_tile_id: Vec<i16>,
+    response_post_candidate_mask: Vec<u8>,
+    response_post_candidate_flags: Vec<u8>,
+    response_post_candidate_quality: Vec<f32>,
+    response_post_candidate_hard_bad: Vec<u8>,
+    response_teacher_discard_idx: Vec<i16>,
     action_idx_target: i16,
     global_value_target: f32,
     score_delta_target: f32,
@@ -581,10 +591,76 @@ struct FullRecord {
     offense_quality_target: f32,
     sample_type: i8,
     actor: i8,
+    score_before_action: i32,
+    final_score_delta_points_target: i32,
+    final_rank_target: u8,
     event_index: i32,
     kyoku: i8,
     honba: i8,
     is_open_hand: u8,
+}
+
+fn tie_break_order(game_start_oya: usize, actor: usize) -> usize {
+    (actor + 4 - game_start_oya) % 4
+}
+
+fn final_rank_targets(scores: &[i32; 4], game_start_oya: usize) -> [u8; 4] {
+    let mut ordered = [0usize, 1, 2, 3];
+    ordered.sort_by(|lhs, rhs| {
+        scores[*rhs].cmp(&scores[*lhs]).then_with(|| {
+            tie_break_order(game_start_oya, *lhs).cmp(&tie_break_order(game_start_oya, *rhs))
+        })
+    });
+    let mut out = [0u8; 4];
+    for (rank, actor) in ordered.iter().enumerate() {
+        out[*actor] = rank as u8;
+    }
+    out
+}
+
+fn last_scores_from_events(events: &[Value]) -> Option<[i32; 4]> {
+    let mut last: Option<[i32; 4]> = None;
+    for event in events {
+        let Some(scores) = event.get("scores").and_then(Value::as_array) else {
+            continue;
+        };
+        if scores.len() < 4 {
+            continue;
+        }
+        let mut out = [0i32; 4];
+        for (idx, value) in scores.iter().take(4).enumerate() {
+            out[idx] = value.as_i64().unwrap_or(0) as i32;
+        }
+        last = Some(out);
+    }
+    last
+}
+
+fn game_start_oya_from_events(events: &[Value]) -> usize {
+    for event in events {
+        if event.get("type").and_then(Value::as_str) != Some("start_kyoku") {
+            continue;
+        }
+        return event
+            .get("oya")
+            .and_then(Value::as_i64)
+            .map(|value| value.clamp(0, 3) as usize)
+            .unwrap_or(0);
+    }
+    0
+}
+
+fn apply_final_game_targets(records: &mut [FullRecord], events: &[Value]) {
+    let Some(final_scores) = last_scores_from_events(events) else {
+        return;
+    };
+    let game_start_oya = game_start_oya_from_events(events);
+    let rank_targets = final_rank_targets(&final_scores, game_start_oya);
+    for record in records {
+        let actor = record.actor.clamp(0, 3) as usize;
+        record.final_score_delta_points_target = final_scores[actor] - record.score_before_action;
+        record.final_rank_target = rank_targets[actor];
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -649,6 +725,20 @@ struct SpecialCandidateArrays {
     rank: Vec<i8>,
     hard_bad: Vec<u8>,
     chosen_idx: i16,
+}
+
+#[derive(Debug, Clone)]
+struct ResponseCandidateArrays {
+    action_idx: Vec<i16>,
+    mask: Vec<u8>,
+    chosen_idx: i16,
+    post_candidate_feat: Vec<u16>,
+    post_candidate_tile_id: Vec<i16>,
+    post_candidate_mask: Vec<u8>,
+    post_candidate_flags: Vec<u8>,
+    post_candidate_quality: Vec<f32>,
+    post_candidate_hard_bad: Vec<u8>,
+    teacher_discard_idx: Vec<i16>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1610,6 +1700,258 @@ fn special_type_from_action(action: &Value, include_terminal_actions: bool) -> O
     }
 }
 
+fn is_response_action(action: &Value) -> bool {
+    matches!(
+        action.get("type").and_then(Value::as_str).unwrap_or("none"),
+        "reach" | "hora" | "chi" | "pon" | "daiminkan" | "ankan" | "kakan" | "ryukyoku" | "none"
+    )
+}
+
+fn response_action_requires_post_discard(action: &Value) -> bool {
+    matches!(
+        action.get("type").and_then(Value::as_str).unwrap_or("none"),
+        "reach" | "chi" | "pon" | "daiminkan"
+    )
+}
+
+fn response_action_sort_key(action: &Value) -> (i16, String, Vec<String>) {
+    let mut consumed = action
+        .get("consumed")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(normalize_tile_repr)
+        .collect::<Vec<_>>();
+    consumed.sort_unstable();
+    (
+        action_idx_from_action(action),
+        action
+            .get("pai")
+            .and_then(Value::as_str)
+            .map(normalize_tile_repr)
+            .unwrap_or_default(),
+        consumed,
+    )
+}
+
+fn normalized_consumed_tiles(action: &Value) -> Vec<String> {
+    let mut consumed = action
+        .get("consumed")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(normalize_tile_repr)
+        .collect::<Vec<_>>();
+    consumed.sort_unstable();
+    consumed
+}
+
+fn response_actions_equivalent(left: &Value, right: &Value) -> bool {
+    let left_type = left.get("type").and_then(Value::as_str).unwrap_or("none");
+    let right_type = right.get("type").and_then(Value::as_str).unwrap_or("none");
+    if left_type != right_type {
+        return false;
+    }
+    if matches!(left_type, "none" | "ryukyoku" | "reach") {
+        return true;
+    }
+    if left_type == "hora" {
+        let left_target = left.get("target").and_then(Value::as_i64);
+        let right_target = right.get("target").and_then(Value::as_i64);
+        if left_target != right_target {
+            return false;
+        }
+        let left_pai = left
+            .get("pai")
+            .and_then(Value::as_str)
+            .map(normalize_tile_repr);
+        let right_pai = right
+            .get("pai")
+            .and_then(Value::as_str)
+            .map(normalize_tile_repr);
+        return left_pai == right_pai || left_pai.is_none() || right_pai.is_none();
+    }
+    let left_target = left.get("target").and_then(Value::as_i64);
+    let right_target = right.get("target").and_then(Value::as_i64);
+    if left_target != right_target {
+        return false;
+    }
+    let left_pai = left
+        .get("pai")
+        .and_then(Value::as_str)
+        .map(normalize_tile_repr);
+    let right_pai = right
+        .get("pai")
+        .and_then(Value::as_str)
+        .map(normalize_tile_repr);
+    if left_pai != right_pai {
+        return false;
+    }
+    normalized_consumed_tiles(left) == normalized_consumed_tiles(right)
+}
+
+fn empty_response_candidate_arrays() -> ResponseCandidateArrays {
+    ResponseCandidateArrays {
+        action_idx: vec![-1i16; XMODEL1_MAX_RESPONSE_CANDIDATES],
+        mask: vec![0u8; XMODEL1_MAX_RESPONSE_CANDIDATES],
+        chosen_idx: -1,
+        post_candidate_feat: vec![
+            0u16;
+            XMODEL1_MAX_RESPONSE_CANDIDATES
+                * XMODEL1_MAX_CANDIDATES
+                * XMODEL1_CANDIDATE_FEATURE_DIM
+        ],
+        post_candidate_tile_id: vec![
+            -1i16;
+            XMODEL1_MAX_RESPONSE_CANDIDATES * XMODEL1_MAX_CANDIDATES
+        ],
+        post_candidate_mask: vec![0u8; XMODEL1_MAX_RESPONSE_CANDIDATES * XMODEL1_MAX_CANDIDATES],
+        post_candidate_flags: vec![
+            0u8;
+            XMODEL1_MAX_RESPONSE_CANDIDATES
+                * XMODEL1_MAX_CANDIDATES
+                * XMODEL1_CANDIDATE_FLAG_DIM
+        ],
+        post_candidate_quality: vec![
+            0.0f32;
+            XMODEL1_MAX_RESPONSE_CANDIDATES * XMODEL1_MAX_CANDIDATES
+        ],
+        post_candidate_hard_bad: vec![
+            0u8;
+            XMODEL1_MAX_RESPONSE_CANDIDATES * XMODEL1_MAX_CANDIDATES
+        ],
+        teacher_discard_idx: vec![-1i16; XMODEL1_MAX_RESPONSE_CANDIDATES],
+    }
+}
+
+fn discard_actions_from_legal_actions(legal_actions: &[Value]) -> Vec<Value> {
+    legal_actions
+        .iter()
+        .filter(|action| action.get("type").and_then(Value::as_str) == Some("dahai"))
+        .cloned()
+        .collect()
+}
+
+fn populate_response_post_discard_arrays(
+    out: &mut ResponseCandidateArrays,
+    slot: usize,
+    snapshot_value: &Value,
+    actor: usize,
+    discard_actions: &[Value],
+    context: &str,
+) -> Result<(), String> {
+    let snapshot_core: SnapshotCore =
+        serde_json::from_value(snapshot_value.clone()).map_err(|err| {
+            format!("failed to parse {context} response snapshot for actor {actor}: {err}")
+        })?;
+    let round_state = runtime_build_round_state_from_snapshot(&snapshot_core, actor)?;
+    let decision_ctx = DecisionAnalysisContext::new(&round_state, actor, true);
+    let mut best_teacher_idx = -1i16;
+    let mut best_teacher_quality = f32::NEG_INFINITY;
+    for (candidate_slot, discard_action) in discard_actions
+        .iter()
+        .take(XMODEL1_MAX_CANDIDATES)
+        .enumerate()
+    {
+        let Some(discard_tile) = discard_action.get("pai").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(analysis) = analyze_discard_candidate(discard_tile, &decision_ctx) else {
+            continue;
+        };
+        let flat_index = slot * XMODEL1_MAX_CANDIDATES + candidate_slot;
+        let feat_offset = flat_index * XMODEL1_CANDIDATE_FEATURE_DIM;
+        for (idx, value) in analysis.feat.iter().enumerate() {
+            out.post_candidate_feat[feat_offset + idx] = f16::from_f32(*value).to_bits();
+        }
+        let flags_offset = flat_index * XMODEL1_CANDIDATE_FLAG_DIM;
+        out.post_candidate_flags[flags_offset..flags_offset + XMODEL1_CANDIDATE_FLAG_DIM]
+            .copy_from_slice(&analysis.flags);
+        out.post_candidate_tile_id[flat_index] = analysis.tile34;
+        out.post_candidate_mask[flat_index] = 1;
+        out.post_candidate_quality[flat_index] = analysis.metrics.quality;
+        out.post_candidate_hard_bad[flat_index] = analysis.metrics.hard_bad;
+        if analysis.metrics.quality > best_teacher_quality {
+            best_teacher_quality = analysis.metrics.quality;
+            best_teacher_idx = candidate_slot as i16;
+        }
+    }
+    out.teacher_discard_idx[slot] = best_teacher_idx;
+    Ok(())
+}
+
+fn encode_response_candidate_arrays(
+    snapshot_value: &Value,
+    actor: usize,
+    legal_actions: &[Value],
+    chosen_action: &Value,
+) -> Result<ResponseCandidateArrays, String> {
+    let mut out = empty_response_candidate_arrays();
+    let mut response_actions = legal_actions
+        .iter()
+        .filter(|action| is_response_action(action))
+        .cloned()
+        .collect::<Vec<_>>();
+    if is_response_action(chosen_action)
+        && !response_actions
+            .iter()
+            .any(|action| response_actions_equivalent(chosen_action, action))
+    {
+        response_actions.push(chosen_action.clone());
+    }
+    response_actions.sort_by_key(response_action_sort_key);
+    for (slot, action) in response_actions
+        .iter()
+        .take(XMODEL1_MAX_RESPONSE_CANDIDATES)
+        .enumerate()
+    {
+        let action_type = action.get("type").and_then(Value::as_str).unwrap_or("none");
+        out.action_idx[slot] = action_idx_from_action(action);
+        out.mask[slot] = 1;
+        if response_actions_equivalent(chosen_action, action) {
+            out.chosen_idx = slot as i16;
+        }
+        if !response_action_requires_post_discard(action) {
+            continue;
+        }
+        if action_type == "reach" {
+            let discard_actions = discard_actions_from_legal_actions(legal_actions);
+            populate_response_post_discard_arrays(
+                &mut out,
+                slot,
+                snapshot_value,
+                actor,
+                &discard_actions,
+                "reach",
+            )?;
+            continue;
+        }
+        let projected_snapshot = match action_type {
+            "chi" | "pon" | "daiminkan" => {
+                project_keqingv4_call_snapshot(snapshot_value, actor, action)
+            }
+            _ => None,
+        };
+        let Some(projected_snapshot) = projected_snapshot else {
+            continue;
+        };
+        let projected_legal_actions =
+            public_legal_actions_for_snapshot(&projected_snapshot, actor)?;
+        let discard_actions = discard_actions_from_legal_actions(&projected_legal_actions);
+        populate_response_post_discard_arrays(
+            &mut out,
+            slot,
+            &projected_snapshot,
+            actor,
+            &discard_actions,
+            action_type,
+        )?;
+    }
+    Ok(out)
+}
+
 fn special_action_bonus_metrics(
     action: &Value,
     yakuhai: &[bool; TILE_KIND_COUNT],
@@ -2287,14 +2629,18 @@ fn encode_special_candidate_arrays(
 
 fn encode_special_sample_record(
     round_state: &RoundState,
+    core_state: &GameStateCore,
     actor: usize,
-    legal_actions: &[Value],
+    _legal_actions: &[Value],
     chosen_action: &Value,
     sample_type: i8,
     event_index: i32,
     history_summary: [f32; replay_core::HISTORY_SUMMARY_DIM],
 ) -> Result<FullRecord, String> {
-    let include_candidate_analyses = legal_actions
+    let response_snapshot = serde_json::to_value(snapshot_for_actor(core_state, actor))
+        .map_err(|err| format!("failed to serialize response snapshot for actor {actor}: {err}"))?;
+    let response_legal_actions = public_legal_actions_for_snapshot(&response_snapshot, actor)?;
+    let include_candidate_analyses = response_legal_actions
         .iter()
         .any(|action| action.get("type").and_then(Value::as_str) == Some("dahai"));
     let decision_ctx = DecisionAnalysisContext::new(round_state, actor, include_candidate_analyses);
@@ -2310,16 +2656,43 @@ fn encode_special_sample_record(
         &decision_ctx.before_progress,
         &decision_ctx.before_visible34,
     )?;
-    let special = encode_special_candidate_arrays_with_legal_actions(
-        round_state,
-        actor,
-        legal_actions,
-        chosen_action,
-        &decision_ctx,
-    );
+    let mut candidate_feat = vec![0u16; XMODEL1_MAX_CANDIDATES * XMODEL1_CANDIDATE_FEATURE_DIM];
+    let mut candidate_tile_id = vec![-1i16; XMODEL1_MAX_CANDIDATES];
+    let mut candidate_mask = vec![0u8; XMODEL1_MAX_CANDIDATES];
+    let mut candidate_flags = vec![0u8; XMODEL1_MAX_CANDIDATES * XMODEL1_CANDIDATE_FLAG_DIM];
+    let mut candidate_quality = vec![0.0f32; XMODEL1_MAX_CANDIDATES];
+    let mut candidate_rank = vec![0i8; XMODEL1_MAX_CANDIDATES];
+    let mut candidate_hard_bad = vec![0u8; XMODEL1_MAX_CANDIDATES];
+    for (slot, analysis) in decision_ctx.candidate_analyses.iter().enumerate() {
+        let feat_offset = slot * XMODEL1_CANDIDATE_FEATURE_DIM;
+        for (idx, value) in analysis.feat.iter().enumerate() {
+            candidate_feat[feat_offset + idx] = f16::from_f32(*value).to_bits();
+        }
+        let flags_offset = slot * XMODEL1_CANDIDATE_FLAG_DIM;
+        candidate_flags[flags_offset..flags_offset + XMODEL1_CANDIDATE_FLAG_DIM]
+            .copy_from_slice(&analysis.flags);
+        candidate_tile_id[slot] = analysis.tile34;
+        candidate_mask[slot] = 1;
+        candidate_quality[slot] = analysis.metrics.quality;
+        candidate_rank[slot] = analysis.metrics.rank_bucket;
+        candidate_hard_bad[slot] = analysis.metrics.hard_bad;
+    }
     let action_idx_target = action_idx_from_action(chosen_action);
-    let offense_quality_target = if special.chosen_idx >= 0 {
-        special.quality[special.chosen_idx as usize]
+    let response = encode_response_candidate_arrays(
+        &response_snapshot,
+        actor,
+        &response_legal_actions,
+        chosen_action,
+    )?;
+    let offense_quality_target = if response.chosen_idx >= 0 {
+        let chosen_slot = response.chosen_idx as usize;
+        let teacher_idx = response.teacher_discard_idx[chosen_slot];
+        if teacher_idx >= 0 {
+            response.post_candidate_quality
+                [chosen_slot * XMODEL1_MAX_CANDIDATES + teacher_idx as usize]
+        } else {
+            0.0
+        }
     } else {
         0.0
     };
@@ -2328,21 +2701,24 @@ fn encode_special_sample_record(
     Ok(FullRecord {
         state_tile_feat,
         state_scalar,
-        candidate_feat: vec![0u16; XMODEL1_MAX_CANDIDATES * XMODEL1_CANDIDATE_FEATURE_DIM],
-        candidate_tile_id: vec![-1i16; XMODEL1_MAX_CANDIDATES],
-        candidate_mask: vec![0u8; XMODEL1_MAX_CANDIDATES],
-        candidate_flags: vec![0u8; XMODEL1_MAX_CANDIDATES * XMODEL1_CANDIDATE_FLAG_DIM],
+        candidate_feat,
+        candidate_tile_id,
+        candidate_mask,
+        candidate_flags,
         chosen_candidate_idx: -1,
-        candidate_quality: vec![0.0f32; XMODEL1_MAX_CANDIDATES],
-        candidate_rank: vec![0i8; XMODEL1_MAX_CANDIDATES],
-        candidate_hard_bad: vec![0u8; XMODEL1_MAX_CANDIDATES],
-        special_candidate_feat: special.feat,
-        special_candidate_type_id: special.type_id,
-        special_candidate_mask: special.mask,
-        special_candidate_quality: special.quality,
-        special_candidate_rank: special.rank,
-        special_candidate_hard_bad: special.hard_bad,
-        chosen_special_candidate_idx: special.chosen_idx,
+        candidate_quality,
+        candidate_rank,
+        candidate_hard_bad,
+        response_action_idx: response.action_idx,
+        response_action_mask: response.mask,
+        chosen_response_action_idx: response.chosen_idx,
+        response_post_candidate_feat: response.post_candidate_feat,
+        response_post_candidate_tile_id: response.post_candidate_tile_id,
+        response_post_candidate_mask: response.post_candidate_mask,
+        response_post_candidate_flags: response.post_candidate_flags,
+        response_post_candidate_quality: response.post_candidate_quality,
+        response_post_candidate_hard_bad: response.post_candidate_hard_bad,
+        response_teacher_discard_idx: response.teacher_discard_idx,
         action_idx_target,
         global_value_target: 0.0,
         score_delta_target: 0.0,
@@ -2355,6 +2731,9 @@ fn encode_special_sample_record(
         offense_quality_target,
         sample_type,
         actor: actor as i8,
+        score_before_action: round_state.scores[actor],
+        final_score_delta_points_target: 0,
+        final_rank_target: 0,
         event_index,
         kyoku: round_state.kyoku,
         honba: round_state.honba,
@@ -2424,13 +2803,12 @@ fn encode_candidate_features(
     let snapshot_value = serde_json::to_value(&snapshot)
         .map_err(|err| format!("failed to serialize discard snapshot for actor {actor}: {err}"))?;
     let legal_actions = public_legal_actions_for_snapshot(&snapshot_value, actor)?;
-    let special = encode_special_candidate_arrays_with_legal_actions(
-        round_state,
+    let response = encode_response_candidate_arrays(
+        &snapshot_value,
         actor,
         &legal_actions,
         &json!({"type":"dahai", "pai": chosen_tile}),
-        &decision_ctx,
-    );
+    )?;
 
     Ok(FullRecord {
         state_tile_feat,
@@ -2443,13 +2821,16 @@ fn encode_candidate_features(
         candidate_quality,
         candidate_rank,
         candidate_hard_bad,
-        special_candidate_feat: special.feat,
-        special_candidate_type_id: special.type_id,
-        special_candidate_mask: special.mask,
-        special_candidate_quality: special.quality,
-        special_candidate_rank: special.rank,
-        special_candidate_hard_bad: special.hard_bad,
-        chosen_special_candidate_idx: special.chosen_idx,
+        response_action_idx: response.action_idx,
+        response_action_mask: response.mask,
+        chosen_response_action_idx: response.chosen_idx,
+        response_post_candidate_feat: response.post_candidate_feat,
+        response_post_candidate_tile_id: response.post_candidate_tile_id,
+        response_post_candidate_mask: response.post_candidate_mask,
+        response_post_candidate_flags: response.post_candidate_flags,
+        response_post_candidate_quality: response.post_candidate_quality,
+        response_post_candidate_hard_bad: response.post_candidate_hard_bad,
+        response_teacher_discard_idx: response.teacher_discard_idx,
         action_idx_target: tile34_from_pai(chosen_tile).unwrap_or(0),
         global_value_target: 0.0,
         score_delta_target: 0.0,
@@ -2466,6 +2847,9 @@ fn encode_candidate_features(
         offense_quality_target: chosen_quality,
         sample_type: XMODEL1_SAMPLE_TYPE_DISCARD,
         actor: actor as i8,
+        score_before_action: round_state.scores[actor],
+        final_score_delta_points_target: 0,
+        final_rank_target: 0,
         event_index,
         kyoku: round_state.kyoku,
         honba: round_state.honba,
@@ -3020,7 +3404,7 @@ fn collect_records_from_mjson(path: &str) -> Result<Vec<FullRecord>, String> {
     })?;
     // v3: history_summary 统一由 normalized events 计算并贯穿 preprocess/runtime/parity。
     let events_slice: &[Value] = events.as_slice();
-    with_export_stage_timing(ExportStage::RecordDrive, || {
+    let mut records = with_export_stage_timing(ExportStage::RecordDrive, || {
         replay_core::drive_export_records(
             &events,
             SCORE_NORM,
@@ -3042,6 +3426,7 @@ fn collect_records_from_mjson(path: &str) -> Result<Vec<FullRecord>, String> {
                 );
                 encode_special_sample_record(
                     decision.decision.event.state,
+                    decision.decision.event.core_state,
                     decision.decision.event.actor,
                     &decision.decision.legal_actions,
                     &decision.chosen_action,
@@ -3079,6 +3464,7 @@ fn collect_records_from_mjson(path: &str) -> Result<Vec<FullRecord>, String> {
                 );
                 encode_special_sample_record(
                     reaction.reaction.state,
+                    reaction.reaction.core_state,
                     reaction.reaction.actor,
                     reaction.reaction.legal_actions,
                     &reaction.chosen_action,
@@ -3091,7 +3477,9 @@ fn collect_records_from_mjson(path: &str) -> Result<Vec<FullRecord>, String> {
             apply_round_target_updates,
             |event_index| poll_cancel(&format!("while scanning {path} at event {event_index}")),
         )
-    })
+    })?;
+    apply_final_game_targets(&mut records, events_slice);
+    Ok(records)
 }
 
 fn write_full_npz(path: &Path, records: &[FullRecord]) -> Result<(), String> {
@@ -3114,20 +3502,37 @@ fn write_full_npz(path: &Path, records: &[FullRecord]) -> Result<(), String> {
         let mut chosen_candidate_idx = Vec::with_capacity(n);
         let mut candidate_quality = Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES);
         let mut candidate_hard_bad = Vec::with_capacity(n * XMODEL1_MAX_CANDIDATES);
-        let mut special_candidate_feat = Vec::with_capacity(
-            n * XMODEL1_MAX_SPECIAL_CANDIDATES * XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+        let mut response_action_idx = Vec::with_capacity(n * XMODEL1_MAX_RESPONSE_CANDIDATES);
+        let mut response_action_mask = Vec::with_capacity(n * XMODEL1_MAX_RESPONSE_CANDIDATES);
+        let mut chosen_response_action_idx = Vec::with_capacity(n);
+        let mut response_post_candidate_feat = Vec::with_capacity(
+            n * XMODEL1_MAX_RESPONSE_CANDIDATES
+                * XMODEL1_MAX_CANDIDATES
+                * XMODEL1_CANDIDATE_FEATURE_DIM,
         );
-        let mut special_candidate_type_id = Vec::with_capacity(n * XMODEL1_MAX_SPECIAL_CANDIDATES);
-        let mut special_candidate_mask = Vec::with_capacity(n * XMODEL1_MAX_SPECIAL_CANDIDATES);
-        let mut special_candidate_quality = Vec::with_capacity(n * XMODEL1_MAX_SPECIAL_CANDIDATES);
-        let mut special_candidate_hard_bad = Vec::with_capacity(n * XMODEL1_MAX_SPECIAL_CANDIDATES);
-        let mut chosen_special_candidate_idx = Vec::with_capacity(n);
+        let mut response_post_candidate_tile_id =
+            Vec::with_capacity(n * XMODEL1_MAX_RESPONSE_CANDIDATES * XMODEL1_MAX_CANDIDATES);
+        let mut response_post_candidate_mask =
+            Vec::with_capacity(n * XMODEL1_MAX_RESPONSE_CANDIDATES * XMODEL1_MAX_CANDIDATES);
+        let mut response_post_candidate_flags = Vec::with_capacity(
+            n * XMODEL1_MAX_RESPONSE_CANDIDATES
+                * XMODEL1_MAX_CANDIDATES
+                * XMODEL1_CANDIDATE_FLAG_DIM,
+        );
+        let mut response_post_candidate_quality =
+            Vec::with_capacity(n * XMODEL1_MAX_RESPONSE_CANDIDATES * XMODEL1_MAX_CANDIDATES);
+        let mut response_post_candidate_hard_bad =
+            Vec::with_capacity(n * XMODEL1_MAX_RESPONSE_CANDIDATES * XMODEL1_MAX_CANDIDATES);
+        let mut response_teacher_discard_idx =
+            Vec::with_capacity(n * XMODEL1_MAX_RESPONSE_CANDIDATES);
         let mut action_idx_target = Vec::with_capacity(n);
         let mut win_target = Vec::with_capacity(n);
         let mut dealin_target = Vec::with_capacity(n);
         let mut pts_given_win_target = Vec::with_capacity(n);
         let mut pts_given_dealin_target = Vec::with_capacity(n);
         let mut opp_tenpai_target: Vec<f32> = Vec::with_capacity(n * 3);
+        let mut final_rank_target = Vec::with_capacity(n);
+        let mut final_score_delta_points_target = Vec::with_capacity(n);
         let mut history_summary = Vec::with_capacity(n * replay_core::HISTORY_SUMMARY_DIM);
         let mut sample_type = Vec::with_capacity(n);
         let mut actor = Vec::with_capacity(n);
@@ -3149,18 +3554,27 @@ fn write_full_npz(path: &Path, records: &[FullRecord]) -> Result<(), String> {
             chosen_candidate_idx.push(record.chosen_candidate_idx);
             candidate_quality.extend_from_slice(&record.candidate_quality);
             candidate_hard_bad.extend_from_slice(&record.candidate_hard_bad);
-            special_candidate_feat.extend_from_slice(&record.special_candidate_feat);
-            special_candidate_type_id.extend_from_slice(&record.special_candidate_type_id);
-            special_candidate_mask.extend_from_slice(&record.special_candidate_mask);
-            special_candidate_quality.extend_from_slice(&record.special_candidate_quality);
-            special_candidate_hard_bad.extend_from_slice(&record.special_candidate_hard_bad);
-            chosen_special_candidate_idx.push(record.chosen_special_candidate_idx);
+            response_action_idx.extend_from_slice(&record.response_action_idx);
+            response_action_mask.extend_from_slice(&record.response_action_mask);
+            chosen_response_action_idx.push(record.chosen_response_action_idx);
+            response_post_candidate_feat.extend_from_slice(&record.response_post_candidate_feat);
+            response_post_candidate_tile_id
+                .extend_from_slice(&record.response_post_candidate_tile_id);
+            response_post_candidate_mask.extend_from_slice(&record.response_post_candidate_mask);
+            response_post_candidate_flags.extend_from_slice(&record.response_post_candidate_flags);
+            response_post_candidate_quality
+                .extend_from_slice(&record.response_post_candidate_quality);
+            response_post_candidate_hard_bad
+                .extend_from_slice(&record.response_post_candidate_hard_bad);
+            response_teacher_discard_idx.extend_from_slice(&record.response_teacher_discard_idx);
             action_idx_target.push(record.action_idx_target);
             win_target.push(record.win_target);
             dealin_target.push(record.dealin_target);
             pts_given_win_target.push(record.pts_given_win_target);
             pts_given_dealin_target.push(record.pts_given_dealin_target);
             opp_tenpai_target.extend_from_slice(&record.opp_tenpai_target);
+            final_rank_target.push(record.final_rank_target as i8);
+            final_score_delta_points_target.push(record.final_score_delta_points_target);
             for value in record.history_summary.iter() {
                 history_summary.push(f16::from_f32(*value).to_bits());
             }
@@ -3234,45 +3648,75 @@ fn write_full_npz(path: &Path, records: &[FullRecord]) -> Result<(), String> {
             &[n, XMODEL1_MAX_CANDIDATES],
             &candidate_hard_bad,
         )?;
-        write_npy_f16(
-            &mut zip,
-            "special_candidate_feat.npy",
-            &[
-                n,
-                XMODEL1_MAX_SPECIAL_CANDIDATES,
-                XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
-            ],
-            &special_candidate_feat,
-        )?;
         write_npy_i16(
             &mut zip,
-            "special_candidate_type_id.npy",
-            &[n, XMODEL1_MAX_SPECIAL_CANDIDATES],
-            &special_candidate_type_id,
+            "response_action_idx.npy",
+            &[n, XMODEL1_MAX_RESPONSE_CANDIDATES],
+            &response_action_idx,
         )?;
         write_npy_u8(
             &mut zip,
-            "special_candidate_mask.npy",
-            &[n, XMODEL1_MAX_SPECIAL_CANDIDATES],
-            &special_candidate_mask,
+            "response_action_mask.npy",
+            &[n, XMODEL1_MAX_RESPONSE_CANDIDATES],
+            &response_action_mask,
+        )?;
+        write_npy_i16(
+            &mut zip,
+            "chosen_response_action_idx.npy",
+            &[n],
+            &chosen_response_action_idx,
+        )?;
+        write_npy_f16(
+            &mut zip,
+            "response_post_candidate_feat.npy",
+            &[
+                n,
+                XMODEL1_MAX_RESPONSE_CANDIDATES,
+                XMODEL1_MAX_CANDIDATES,
+                XMODEL1_CANDIDATE_FEATURE_DIM,
+            ],
+            &response_post_candidate_feat,
+        )?;
+        write_npy_i16(
+            &mut zip,
+            "response_post_candidate_tile_id.npy",
+            &[n, XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES],
+            &response_post_candidate_tile_id,
+        )?;
+        write_npy_u8(
+            &mut zip,
+            "response_post_candidate_mask.npy",
+            &[n, XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES],
+            &response_post_candidate_mask,
+        )?;
+        write_npy_u8(
+            &mut zip,
+            "response_post_candidate_flags.npy",
+            &[
+                n,
+                XMODEL1_MAX_RESPONSE_CANDIDATES,
+                XMODEL1_MAX_CANDIDATES,
+                XMODEL1_CANDIDATE_FLAG_DIM,
+            ],
+            &response_post_candidate_flags,
         )?;
         write_npy_f32(
             &mut zip,
-            "special_candidate_quality_score.npy",
-            &[n, XMODEL1_MAX_SPECIAL_CANDIDATES],
-            &special_candidate_quality,
+            "response_post_candidate_quality_score.npy",
+            &[n, XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES],
+            &response_post_candidate_quality,
         )?;
         write_npy_u8(
             &mut zip,
-            "special_candidate_hard_bad_flag.npy",
-            &[n, XMODEL1_MAX_SPECIAL_CANDIDATES],
-            &special_candidate_hard_bad,
+            "response_post_candidate_hard_bad_flag.npy",
+            &[n, XMODEL1_MAX_RESPONSE_CANDIDATES, XMODEL1_MAX_CANDIDATES],
+            &response_post_candidate_hard_bad,
         )?;
         write_npy_i16(
             &mut zip,
-            "chosen_special_candidate_idx.npy",
-            &[n],
-            &chosen_special_candidate_idx,
+            "response_teacher_discard_idx.npy",
+            &[n, XMODEL1_MAX_RESPONSE_CANDIDATES],
+            &response_teacher_discard_idx,
         )?;
         write_npy_i16(&mut zip, "action_idx_target.npy", &[n], &action_idx_target)?;
         write_npy_f32(&mut zip, "win_target.npy", &[n], &win_target)?;
@@ -3294,6 +3738,18 @@ fn write_full_npz(path: &Path, records: &[FullRecord]) -> Result<(), String> {
             "opp_tenpai_target.npy",
             &[n, 3],
             &opp_tenpai_target,
+        )?;
+        write_npy_i8(
+            &mut zip,
+            "final_rank_target.npy",
+            &[n],
+            &final_rank_target,
+        )?;
+        write_npy_i32(
+            &mut zip,
+            "final_score_delta_points_target.npy",
+            &[n],
+            &final_score_delta_points_target,
         )?;
         write_npy_f16(
             &mut zip,

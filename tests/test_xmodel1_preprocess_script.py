@@ -8,6 +8,7 @@ import signal
 import time
 
 import numpy as np
+from training.cache_schema import XMODEL1_SCHEMA_NAME, XMODEL1_SCHEMA_VERSION
 
 
 REPO_ROOT = "/media/bailan/DISK1/AUbuntuProject/project/keqing1"
@@ -154,8 +155,8 @@ def test_preprocess_xmodel1_script_rebuilds_existing_output_missing_schema_metad
     assert manifest["skipped_existing_file_count"] == 0
     assert "xmodel1 preprocess complete:" in result.stdout
     with np.load(stale_output, allow_pickle=False) as data:
-        assert data["schema_name"].item() == "xmodel1_discard_v3"
-        assert int(data["schema_version"].item()) == 3
+        assert data["schema_name"].item() == XMODEL1_SCHEMA_NAME
+        assert int(data["schema_version"].item()) == XMODEL1_SCHEMA_VERSION
         assert data["state_tile_feat"].shape[0] >= 1
 
 
@@ -219,6 +220,51 @@ def test_preprocess_xmodel1_script_limit_files_does_not_require_all_requested_sh
     assert "xmodel1 preprocess complete:" in result.stdout
 
 
+def test_preprocess_xmodel1_script_reads_limit_files_from_config(tmp_path: Path):
+    input_dir = tmp_path / "converted" / "ds3"
+    input_dir.mkdir(parents=True)
+    _write_mjson(input_dir / "sample_a.mjson")
+    _write_mjson(input_dir / "sample_b.mjson")
+    output_dir = tmp_path / "processed"
+    cfg_path = tmp_path / "preprocess_probe.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "data_dirs:",
+                f"  - {input_dir}",
+                f"output_dir: {output_dir}",
+                "limit_files: 1",
+                "jobs: 1",
+                "progress_every: 1",
+                "preflight_files_per_shard: 0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "scripts/preprocess_xmodel1.py",
+            "--config",
+            str(cfg_path),
+            "--skip-preflight",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    manifest = json.loads((output_dir / "xmodel1_export_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["processed_file_count"] == 1
+    assert manifest["exported_file_count"] == 1
+    assert "limit_files=1" in result.stdout
+
+
 def test_preprocess_xmodel1_script_handles_sigint_and_resume(tmp_path: Path):
     input_dir = tmp_path / "converted" / "ds1"
     input_dir.mkdir(parents=True)
@@ -275,7 +321,7 @@ def test_preprocess_xmodel1_script_handles_sigint_and_resume(tmp_path: Path):
     manifest_path = output_dir / "xmodel1_export_manifest.json"
     assert manifest_path.exists()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["schema_name"] == "xmodel1_discard_v3"
+    assert manifest["schema_name"] == XMODEL1_SCHEMA_NAME
     partial_files = sorted((output_dir / "ds1").glob("*.npz"))
     assert partial_files
     assert not list((output_dir / "ds1").glob("*.tmp"))

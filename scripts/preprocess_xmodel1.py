@@ -181,6 +181,15 @@ def main() -> None:
         if args.jobs is not None
         else int(cfg.get("jobs", 0))
     )
+    limit_files = (
+        args.limit_files
+        if args.limit_files is not None
+        else (
+            int(cfg["limit_files"])
+            if cfg.get("limit_files") is not None
+            else None
+        )
+    )
     preflight_files = (
         args.preflight_files
         if args.preflight_files is not None
@@ -238,7 +247,7 @@ def main() -> None:
             output_dir=output_dir,
             progress_every=progress_every,
             jobs=jobs,
-            limit_files=args.limit_files,
+            limit_files=limit_files,
             smoke=args.smoke,
             resume=(not args.force) and (not args.smoke),
             discover_cached_files=discover_cached_files,

@@ -1,4 +1,4 @@
-"""Strict Xmodel1 v3 cached dataset loader."""
+"""Strict Xmodel1 cached dataset loader."""
 
 from __future__ import annotations
 
@@ -14,12 +14,16 @@ from torch.utils.data import IterableDataset
 
 from xmodel1.schema import (
     XMODEL1_DISCARD_REQUIRED_FIELDS,
-    XMODEL1_MAX_SPECIAL_CANDIDATES,
+    XMODEL1_MAX_RESPONSE_CANDIDATES,
     XMODEL1_SCHEMA_NAME,
     XMODEL1_SCHEMA_VERSION,
-    XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
-from training.cache_schema import XMODEL1_HISTORY_SUMMARY_DIM
+from training.cache_schema import (
+    XMODEL1_CANDIDATE_FEATURE_DIM,
+    XMODEL1_CANDIDATE_FLAG_DIM,
+    XMODEL1_HISTORY_SUMMARY_DIM,
+    XMODEL1_MAX_CANDIDATES,
+)
 
 DEFAULT_BUFFER_SIZE = 512
 _MANIFEST_NAME = "xmodel1_export_manifest.json"
@@ -51,26 +55,77 @@ def _validate_xmodel1_cache_contract(data: np.lib.npyio.NpzFile, path: Path) -> 
     missing = [field for field in XMODEL1_DISCARD_REQUIRED_FIELDS if field not in data]
     if missing:
         raise ValueError(f"Xmodel1 cache missing required fields {missing} in {path}; rerun preprocess")
-    if tuple(data["special_candidate_feat"].shape[1:]) != (
-        XMODEL1_MAX_SPECIAL_CANDIDATES,
-        XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
-    ):
-        raise ValueError(
-            f"special_candidate_feat shape {data['special_candidate_feat'].shape} incompatible with "
-            f"v3 contract ({XMODEL1_MAX_SPECIAL_CANDIDATES}, {XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM}) in {path}; "
-            f"rerun preprocess for {XMODEL1_SCHEMA_NAME}"
-        )
-    for field in (
-        "special_candidate_type_id",
-        "special_candidate_mask",
-        "special_candidate_quality_score",
-        "special_candidate_hard_bad_flag",
-    ):
-        if int(data[field].shape[1]) != XMODEL1_MAX_SPECIAL_CANDIDATES:
-            raise ValueError(f"{field} shape {data[field].shape} incompatible with v3 special slots in {path}")
     if tuple(data["history_summary"].shape[1:]) != (XMODEL1_HISTORY_SUMMARY_DIM,):
         raise ValueError(
             f"history_summary shape {data['history_summary'].shape} != ({XMODEL1_HISTORY_SUMMARY_DIM},) in {path}; rerun preprocess"
+        )
+    if len(data["final_rank_target"].shape) != 1:
+        raise ValueError(
+            f"final_rank_target shape {data['final_rank_target'].shape} incompatible in {path}"
+        )
+    if len(data["final_score_delta_points_target"].shape) != 1:
+        raise ValueError(
+            f"final_score_delta_points_target shape {data['final_score_delta_points_target'].shape} incompatible in {path}"
+        )
+    if tuple(data["response_action_idx"].shape[1:]) != (XMODEL1_MAX_RESPONSE_CANDIDATES,):
+        raise ValueError(
+            f"response_action_idx shape {data['response_action_idx'].shape} incompatible with "
+            f"v4 response slots ({XMODEL1_MAX_RESPONSE_CANDIDATES},) in {path}"
+        )
+    if tuple(data["response_action_mask"].shape[1:]) != (XMODEL1_MAX_RESPONSE_CANDIDATES,):
+        raise ValueError(
+            f"response_action_mask shape {data['response_action_mask'].shape} incompatible with "
+            f"v4 response slots ({XMODEL1_MAX_RESPONSE_CANDIDATES},) in {path}"
+        )
+    if tuple(data["response_post_candidate_feat"].shape[1:]) != (
+        XMODEL1_MAX_RESPONSE_CANDIDATES,
+        XMODEL1_MAX_CANDIDATES,
+        XMODEL1_CANDIDATE_FEATURE_DIM,
+    ):
+        raise ValueError(
+            f"response_post_candidate_feat shape {data['response_post_candidate_feat'].shape} incompatible in {path}"
+        )
+    if tuple(data["response_post_candidate_tile_id"].shape[1:]) != (
+        XMODEL1_MAX_RESPONSE_CANDIDATES,
+        XMODEL1_MAX_CANDIDATES,
+    ):
+        raise ValueError(
+            f"response_post_candidate_tile_id shape {data['response_post_candidate_tile_id'].shape} incompatible in {path}"
+        )
+    if tuple(data["response_post_candidate_mask"].shape[1:]) != (
+        XMODEL1_MAX_RESPONSE_CANDIDATES,
+        XMODEL1_MAX_CANDIDATES,
+    ):
+        raise ValueError(
+            f"response_post_candidate_mask shape {data['response_post_candidate_mask'].shape} incompatible in {path}"
+        )
+    if tuple(data["response_post_candidate_flags"].shape[1:]) != (
+        XMODEL1_MAX_RESPONSE_CANDIDATES,
+        XMODEL1_MAX_CANDIDATES,
+        XMODEL1_CANDIDATE_FLAG_DIM,
+    ):
+        raise ValueError(
+            f"response_post_candidate_flags shape {data['response_post_candidate_flags'].shape} incompatible in {path}"
+        )
+    if tuple(data["response_post_candidate_quality_score"].shape[1:]) != (
+        XMODEL1_MAX_RESPONSE_CANDIDATES,
+        XMODEL1_MAX_CANDIDATES,
+    ):
+        raise ValueError(
+            f"response_post_candidate_quality_score shape {data['response_post_candidate_quality_score'].shape} incompatible in {path}"
+        )
+    if tuple(data["response_post_candidate_hard_bad_flag"].shape[1:]) != (
+        XMODEL1_MAX_RESPONSE_CANDIDATES,
+        XMODEL1_MAX_CANDIDATES,
+    ):
+        raise ValueError(
+            f"response_post_candidate_hard_bad_flag shape {data['response_post_candidate_hard_bad_flag'].shape} incompatible in {path}"
+        )
+    if tuple(data["response_teacher_discard_idx"].shape[1:]) != (
+        XMODEL1_MAX_RESPONSE_CANDIDATES,
+    ):
+        raise ValueError(
+            f"response_teacher_discard_idx shape {data['response_teacher_discard_idx'].shape} incompatible in {path}"
         )
 
 
@@ -129,6 +184,12 @@ def probe_cached_samples(
                 raise ValueError(f"pts_given_win_target shape {data['pts_given_win_target'].shape} incompatible in {path}")
             if len(data["pts_given_dealin_target"].shape) != 1:
                 raise ValueError(f"pts_given_dealin_target shape {data['pts_given_dealin_target'].shape} incompatible in {path}")
+            if len(data["final_rank_target"].shape) != 1:
+                raise ValueError(f"final_rank_target shape {data['final_rank_target'].shape} incompatible in {path}")
+            if len(data["final_score_delta_points_target"].shape) != 1:
+                raise ValueError(
+                    f"final_score_delta_points_target shape {data['final_score_delta_points_target'].shape} incompatible in {path}"
+                )
     dims = infer_cached_dimensions(selected)
     return {
         "num_files": len(selected),
@@ -224,8 +285,6 @@ def infer_cached_dimensions(file_paths: List[Path], *, strict: bool = False) -> 
                     "candidate_feature_dim": int(data["candidate_feat"].shape[2]),
                     "candidate_flag_dim": int(data["candidate_flags"].shape[2]),
                     "max_candidates": int(data["candidate_mask"].shape[1]),
-                    "special_candidate_feature_dim": int(data["special_candidate_feat"].shape[2]),
-                    "max_special_candidates": int(data["special_candidate_feat"].shape[1]),
                 }
                 if skipped_errors:
                     print(
@@ -249,10 +308,10 @@ def infer_cached_dimensions(file_paths: List[Path], *, strict: bool = False) -> 
             continue
     if skipped_errors:
         raise FileNotFoundError(
-            "no readable Xmodel1 v3 cache files were found; skipped errors: "
+            "no readable Xmodel1 cache files were found; skipped errors: "
             + " | ".join(skipped_errors)
         )
-    raise FileNotFoundError("no readable Xmodel1 v3 cache files were found")
+    raise FileNotFoundError("no readable Xmodel1 cache files were found")
 
 
 class Xmodel1DiscardDataset(IterableDataset):
@@ -287,17 +346,23 @@ class Xmodel1DiscardDataset(IterableDataset):
             action_idx_target = data["action_idx_target"]
             candidate_quality_score = data["candidate_quality_score"]
             candidate_hard_bad_flag = data["candidate_hard_bad_flag"]
-            special_candidate_feat = data["special_candidate_feat"]
-            special_candidate_type_id = data["special_candidate_type_id"]
-            special_candidate_mask = data["special_candidate_mask"]
-            special_candidate_quality_score = data["special_candidate_quality_score"]
-            special_candidate_hard_bad_flag = data["special_candidate_hard_bad_flag"]
-            chosen_special_candidate_idx = data["chosen_special_candidate_idx"]
+            response_action_idx = data["response_action_idx"]
+            response_action_mask = data["response_action_mask"]
+            chosen_response_action_idx = data["chosen_response_action_idx"]
+            response_post_candidate_feat = data["response_post_candidate_feat"]
+            response_post_candidate_tile_id = data["response_post_candidate_tile_id"]
+            response_post_candidate_mask = data["response_post_candidate_mask"]
+            response_post_candidate_flags = data["response_post_candidate_flags"]
+            response_post_candidate_quality_score = data["response_post_candidate_quality_score"]
+            response_post_candidate_hard_bad_flag = data["response_post_candidate_hard_bad_flag"]
+            response_teacher_discard_idx = data["response_teacher_discard_idx"]
             win_target = data["win_target"]
             dealin_target = data["dealin_target"]
             pts_given_win_target = data["pts_given_win_target"]
             pts_given_dealin_target = data["pts_given_dealin_target"]
             opp_tenpai_target = data["opp_tenpai_target"]
+            final_rank_target = data["final_rank_target"]
+            final_score_delta_points_target = data["final_score_delta_points_target"]
             history_summary = data["history_summary"]
             event_index = data["event_index"]
             replay_id = data["replay_id"] if "replay_id" in data else None
@@ -322,17 +387,23 @@ class Xmodel1DiscardDataset(IterableDataset):
                     int(action_idx_target[i]),
                     candidate_quality_score[i],
                     candidate_hard_bad_flag[i],
-                    special_candidate_feat[i],
-                    special_candidate_type_id[i],
-                    special_candidate_mask[i],
-                    special_candidate_quality_score[i],
-                    special_candidate_hard_bad_flag[i],
-                    int(chosen_special_candidate_idx[i]),
+                    response_action_idx[i],
+                    response_action_mask[i],
+                    int(chosen_response_action_idx[i]),
+                    response_post_candidate_feat[i],
+                    response_post_candidate_tile_id[i],
+                    response_post_candidate_mask[i],
+                    response_post_candidate_flags[i],
+                    response_post_candidate_quality_score[i],
+                    response_post_candidate_hard_bad_flag[i],
+                    response_teacher_discard_idx[i],
                     np.float32(win_target[i]),
                     np.float32(dealin_target[i]),
                     np.float32(pts_given_win_target[i]),
                     np.float32(pts_given_dealin_target[i]),
                     np.asarray(opp_tenpai_target[i], dtype=np.float32).reshape(3),
+                    np.int8(final_rank_target[i]),
+                    np.int32(final_score_delta_points_target[i]),
                     np.asarray(history_summary[i], dtype=np.float16).reshape(XMODEL1_HISTORY_SUMMARY_DIM),
                     replay_id_value,
                     sample_id_value,
@@ -378,17 +449,23 @@ class Xmodel1DiscardDataset(IterableDataset):
             action_idx_target,
             candidate_quality_score,
             candidate_hard_bad_flag,
-            special_candidate_feat,
-            special_candidate_type_id,
-            special_candidate_mask,
-            special_candidate_quality_score,
-            special_candidate_hard_bad_flag,
-            chosen_special_candidate_idx,
+            response_action_idx,
+            response_action_mask,
+            chosen_response_action_idx,
+            response_post_candidate_feat,
+            response_post_candidate_tile_id,
+            response_post_candidate_mask,
+            response_post_candidate_flags,
+            response_post_candidate_quality_score,
+            response_post_candidate_hard_bad_flag,
+            response_teacher_discard_idx,
             win_target,
             dealin_target,
             pts_given_win_target,
             pts_given_dealin_target,
             opp_tenpai_target,
+            final_rank_target,
+            final_score_delta_points_target,
             history_summary,
             replay_id,
             sample_id,
@@ -405,17 +482,26 @@ class Xmodel1DiscardDataset(IterableDataset):
             "action_idx_target": torch.tensor(action_idx_target, dtype=torch.long),
             "candidate_quality_score": torch.from_numpy(np.stack(candidate_quality_score)).float(),
             "candidate_hard_bad_flag": torch.from_numpy(np.stack(candidate_hard_bad_flag)).float(),
-            "special_candidate_feat": torch.from_numpy(np.stack(special_candidate_feat)),
-            "special_candidate_type_id": torch.from_numpy(np.stack(special_candidate_type_id)).long(),
-            "special_candidate_mask": torch.from_numpy(np.stack(special_candidate_mask)),
-            "special_candidate_quality_score": torch.from_numpy(np.stack(special_candidate_quality_score)).float(),
-            "special_candidate_hard_bad_flag": torch.from_numpy(np.stack(special_candidate_hard_bad_flag)).float(),
-            "chosen_special_candidate_idx": torch.tensor(chosen_special_candidate_idx, dtype=torch.long),
+            "response_action_idx": torch.from_numpy(np.stack(response_action_idx)).long(),
+            "response_action_mask": torch.from_numpy(np.stack(response_action_mask)),
+            "chosen_response_action_idx": torch.tensor(chosen_response_action_idx, dtype=torch.long),
+            "response_post_candidate_feat": torch.from_numpy(np.stack(response_post_candidate_feat)),
+            "response_post_candidate_tile_id": torch.from_numpy(np.stack(response_post_candidate_tile_id)).long(),
+            "response_post_candidate_mask": torch.from_numpy(np.stack(response_post_candidate_mask)),
+            "response_post_candidate_flags": torch.from_numpy(np.stack(response_post_candidate_flags)),
+            "response_post_candidate_quality_score": torch.from_numpy(np.stack(response_post_candidate_quality_score)).float(),
+            "response_post_candidate_hard_bad_flag": torch.from_numpy(np.stack(response_post_candidate_hard_bad_flag)).float(),
+            "response_teacher_discard_idx": torch.from_numpy(np.stack(response_teacher_discard_idx)).long(),
             "win_target": torch.tensor(win_target, dtype=torch.float32),
             "dealin_target": torch.tensor(dealin_target, dtype=torch.float32),
             "pts_given_win_target": torch.tensor(pts_given_win_target, dtype=torch.float32),
             "pts_given_dealin_target": torch.tensor(pts_given_dealin_target, dtype=torch.float32),
             "opp_tenpai_target": torch.from_numpy(np.stack(opp_tenpai_target)).float(),
+            "final_rank_target": torch.tensor(final_rank_target, dtype=torch.long),
+            "final_score_delta_points_target": torch.tensor(
+                final_score_delta_points_target,
+                dtype=torch.int32,
+            ),
             "history_summary": torch.from_numpy(np.stack(history_summary)).float(),
             "replay_id": list(replay_id),
             "sample_id": list(sample_id),

@@ -20,11 +20,17 @@ import warnings as _warnings
 from riichienv import calculate_shanten as _riichienv_shanten
 
 try:
-    from training.cache_schema import KEQINGV4_SUMMARY_DIM
+    from training.cache_schema import (
+        KEQINGV4_SUMMARY_DIM,
+        XMODEL1_SCHEMA_NAME as _PY_XMODEL1_SCHEMA_NAME,
+        XMODEL1_SCHEMA_VERSION as _PY_XMODEL1_SCHEMA_VERSION,
+    )
 except ModuleNotFoundError:
     # Keep subprocess/import smoke checks working when only ``keqing_core`` is on
     # the import path. The shared schema constant is currently fixed at 28.
     KEQINGV4_SUMMARY_DIM = 28
+    _PY_XMODEL1_SCHEMA_NAME = None
+    _PY_XMODEL1_SCHEMA_VERSION = None
 
 _USE_RUST = False
 _RUST_AVAILABLE = False
@@ -70,7 +76,9 @@ _RUST_ENUMERATE_KEQINGV4_POST_MELD_DISCARDS_JSON = None
 _RUST_ENUMERATE_KEQINGV4_LIVE_DRAW_WEIGHTS_JSON = None
 _RUST_ENUMERATE_KEQINGV4_REACH_DISCARDS_JSON = None
 _RUST_PROJECT_KEQINGV4_REACH_SNAPSHOT_JSON = None
+_RUST_CHOOSE_RULEBASE_ACTION_JSON = None
 _RUST_IMPORT_ERROR = None
+_RUST_XMODEL1_SCHEMA_MISMATCH = None
 
 
 def _json_default(value):
@@ -163,6 +171,51 @@ def _load_native_module():
             first_error = exc
 
     return None, first_error
+
+
+def _disable_stale_xmodel1_native_if_needed() -> None:
+    global _RUST_BUILD_XMODEL1_DISCARD_RECORDS
+    global _RUST_XMODEL1_SCHEMA_INFO
+    global _RUST_VALIDATE_XMODEL1_DISCARD_RECORD
+    global _RUST_BUILD_XMODEL1_RUNTIME_TENSORS_JSON
+    global _RUST_XMODEL1_SCHEMA_MISMATCH
+
+    if (
+        _PY_XMODEL1_SCHEMA_NAME is None
+        or _PY_XMODEL1_SCHEMA_VERSION is None
+        or _RUST_XMODEL1_SCHEMA_INFO is None
+    ):
+        return
+    try:
+        native_name, native_version, *_ = _RUST_XMODEL1_SCHEMA_INFO()
+    except Exception as exc:
+        _warnings.warn(
+            "keqing_core native extension exposed xmodel1 schema metadata but it "
+            f"could not be queried cleanly: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+    native_name = str(native_name)
+    native_version = int(native_version)
+    if (
+        native_name == _PY_XMODEL1_SCHEMA_NAME
+        and native_version == _PY_XMODEL1_SCHEMA_VERSION
+    ):
+        return
+    native_path = getattr(_rust_ext, "__file__", "<unknown>")
+    _RUST_XMODEL1_SCHEMA_MISMATCH = (
+        "Rust Xmodel1 native capability is unavailable because the loaded "
+        f"keqing_core extension at {native_path} exposes {native_name}@{native_version}, "
+        f"but the source tree requires {_PY_XMODEL1_SCHEMA_NAME}@{_PY_XMODEL1_SCHEMA_VERSION}. "
+        "Rebuild and reinstall rust/keqing_core before running xmodel1 preprocess "
+        "or runtime export."
+    )
+    _warnings.warn(_RUST_XMODEL1_SCHEMA_MISMATCH, RuntimeWarning, stacklevel=2)
+    _RUST_BUILD_XMODEL1_DISCARD_RECORDS = None
+    _RUST_XMODEL1_SCHEMA_INFO = None
+    _RUST_VALIDATE_XMODEL1_DISCARD_RECORD = None
+    _RUST_BUILD_XMODEL1_RUNTIME_TENSORS_JSON = None
 
 
 _rust_ext, _RUST_IMPORT_ERROR = _load_native_module()
@@ -265,7 +318,11 @@ if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
     _RUST_PROJECT_KEQINGV4_REACH_SNAPSHOT_JSON = getattr(
         _rust_ext, "project_keqingv4_reach_snapshot_json_py", None
     )
+    _RUST_CHOOSE_RULEBASE_ACTION_JSON = getattr(
+        _rust_ext, "choose_rulebase_action_json_py", None
+    )
     _USE_RUST = True
+    _disable_stale_xmodel1_native_if_needed()
 
 
 def counts34_to_ids(counts34):
@@ -475,6 +532,8 @@ def build_xmodel1_discard_records(
     resume: bool | None = None,
 ):
     if not (_USE_RUST and _RUST_AVAILABLE and _RUST_BUILD_XMODEL1_DISCARD_RECORDS is not None):
+        if _RUST_XMODEL1_SCHEMA_MISMATCH is not None:
+            raise RuntimeError(_RUST_XMODEL1_SCHEMA_MISMATCH)
         raise RuntimeError("Rust Xmodel1 discard export is not available")
     data_dirs = list(data_dirs or [])
     try:
@@ -583,6 +642,8 @@ def build_xmodel1_runtime_tensors(snapshot: dict, actor: int, legal_actions: lis
         and _RUST_AVAILABLE
         and _RUST_BUILD_XMODEL1_RUNTIME_TENSORS_JSON is not None
     ):
+        if _RUST_XMODEL1_SCHEMA_MISMATCH is not None:
+            raise RuntimeError(_RUST_XMODEL1_SCHEMA_MISMATCH)
         raise RuntimeError("Rust xmodel1 runtime tensor capability is not available")
     return _json.loads(
         _RUST_BUILD_XMODEL1_RUNTIME_TENSORS_JSON(
@@ -620,6 +681,22 @@ def enumerate_public_legal_action_specs(state_snapshot, actor: int):
         raise RuntimeError("Rust public legal action capability is not available")
     payload = _json.dumps(state_snapshot, ensure_ascii=False)
     return _json.loads(_RUST_ENUMERATE_PUBLIC_LEGAL_ACTION_SPECS_JSON(payload, int(actor)))
+
+
+def choose_rulebase_action(state_snapshot, actor: int, legal_actions: list[dict]):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_CHOOSE_RULEBASE_ACTION_JSON is not None
+    ):
+        raise RuntimeError("Rust rulebase capability is not available")
+    payload = _json.dumps(state_snapshot, ensure_ascii=False, default=_json_default)
+    chosen = _RUST_CHOOSE_RULEBASE_ACTION_JSON(
+        payload,
+        int(actor),
+        _json.dumps(legal_actions, ensure_ascii=False, default=_json_default),
+    )
+    return None if chosen is None else _json.loads(chosen)
 
 
 def enumerate_hora_candidates(state_snapshot, actor: int):
@@ -859,10 +936,12 @@ def score_keqingv4_continuation_scenario(
     score_delta: float,
     win_prob: float,
     dealin_prob: float,
+    rank_pt_value: float,
     beam_lambda: float,
     score_delta_lambda: float,
     win_prob_lambda: float,
     dealin_prob_lambda: float,
+    rank_pt_lambda: float,
 ):
     if not (
         _USE_RUST
@@ -880,10 +959,12 @@ def score_keqingv4_continuation_scenario(
             float(score_delta),
             float(win_prob),
             float(dealin_prob),
+            float(rank_pt_value),
             float(beam_lambda),
             float(score_delta_lambda),
             float(win_prob_lambda),
             float(dealin_prob_lambda),
+            float(rank_pt_lambda),
         )
     )
 
@@ -1091,6 +1172,7 @@ __all__ = [
     "replay_state_snapshot",
     "enumerate_legal_action_specs_structural",
     "enumerate_public_legal_action_specs",
+    "choose_rulebase_action",
     "enumerate_hora_candidates",
     "can_hora_shape_from_snapshot",
     "prepare_hora_evaluation_from_snapshot",

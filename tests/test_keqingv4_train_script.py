@@ -6,6 +6,7 @@ import subprocess
 import numpy as np
 import torch
 
+from keqingv4.cache_contract import KEQINGV4_SCHEMA_NAME, KEQINGV4_SCHEMA_VERSION
 from mahjong_env.action_space import ACTION_SPACE
 from keqingv4.model import KeqingV4Model
 from training.state_features import C_TILE, N_SCALAR
@@ -55,6 +56,8 @@ def _write_keqingv4_contract_npz(path: Path) -> None:
         pts_given_win_target=np.zeros((n,), dtype=np.float32),
         pts_given_dealin_target=np.zeros((n,), dtype=np.float32),
         opp_tenpai_target=np.zeros((n, 3), dtype=np.float32),
+        final_rank_target=np.zeros((n,), dtype=np.int8),
+        final_score_delta_points_target=np.zeros((n,), dtype=np.int32),
         event_history=np.zeros((n, KEQINGV4_EVENT_HISTORY_LEN, KEQINGV4_EVENT_HISTORY_DIM), dtype=np.int16),
         v4_opportunity=np.zeros((n, KEQINGV4_OPPORTUNITY_DIM), dtype=np.uint8),
         v4_discard_summary=np.zeros((n, 34, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
@@ -182,14 +185,14 @@ def test_train_keqingv4_script_rejects_manifest_contract_mismatch(tmp_path: Path
     _write_keqingv4_contract_npz(ds2 / "b.npz")
     (data_root / "keqingv4_export_manifest.json").write_text(
         """{
-  "schema_name": "keqingv4_cached_v1",
-  "schema_version": 6,
+  "schema_name": "%s",
+  "schema_version": %d,
   "summary_dim": 28,
   "call_summary_slots": 8,
   "special_summary_slots": 3,
   "opportunity_dim": 3,
   "export_mode": "python_fallback"
-}""",
+}""" % (KEQINGV4_SCHEMA_NAME, KEQINGV4_SCHEMA_VERSION),
         encoding="utf-8",
     )
 

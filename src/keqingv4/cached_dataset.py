@@ -40,6 +40,8 @@ class KeqingV4CacheAdapter(BaseCacheAdapter):
         pts_given_win = data["pts_given_win_target"]
         pts_given_dealin = data["pts_given_dealin_target"]
         opp_tenpai = data["opp_tenpai_target"]
+        final_rank = data["final_rank_target"]
+        final_score_delta_points = data["final_score_delta_points_target"]
         event_history = data["event_history"]
         v4_opportunity = data["v4_opportunity"]
         discard = data["v4_discard_summary"]
@@ -52,6 +54,10 @@ class KeqingV4CacheAdapter(BaseCacheAdapter):
             "pts_given_win_target": np.asarray(pts_given_win, dtype=np.float32),
             "pts_given_dealin_target": np.asarray(pts_given_dealin, dtype=np.float32),
             "opp_tenpai_target": np.asarray(opp_tenpai, dtype=np.float32).reshape(sample_count, 3),
+            "final_rank_target": np.asarray(final_rank, dtype=np.int8).reshape(sample_count),
+            "final_score_delta_points_target": np.asarray(final_score_delta_points, dtype=np.int32).reshape(
+                sample_count
+            ),
             "pts_given_win_available": np.ones((sample_count,), dtype=bool),
             "pts_given_dealin_available": np.ones((sample_count,), dtype=bool),
             "opp_tenpai_available": np.ones((sample_count,), dtype=bool),
@@ -97,6 +103,8 @@ class KeqingV4CacheAdapter(BaseCacheAdapter):
             np.asarray(row_extra.get("v4_discard_summary"), dtype=np.float16),
             np.asarray(row_extra.get("v4_call_summary"), dtype=np.float16),
             np.asarray(row_extra.get("v4_special_summary"), dtype=np.float16),
+            np.int8(row_extra.get("final_rank_target", 0)),
+            np.int32(row_extra.get("final_score_delta_points_target", 0)),
         )
 
     def permute_row_extra(self, row_extra: Dict[str, object], perm: tuple, action_idx: int) -> Dict[str, object]:
@@ -122,6 +130,8 @@ class KeqingV4CacheAdapter(BaseCacheAdapter):
             "v4_discard_summary": discard,
             "v4_call_summary": np.asarray(row_extra.get("v4_call_summary"), dtype=np.float16),
             "v4_special_summary": np.asarray(row_extra.get("v4_special_summary"), dtype=np.float16),
+            "final_rank_target": np.int8(row_extra.get("final_rank_target", 0)),
+            "final_score_delta_points_target": np.int32(row_extra.get("final_score_delta_points_target", 0)),
         }
 
     @staticmethod
@@ -147,6 +157,8 @@ class KeqingV4CacheAdapter(BaseCacheAdapter):
             discard_summary,
             call_summary,
             special_summary,
+            final_rank_target,
+            final_score_delta_points_target,
         ) = zip(*batch)
         return (
             torch.from_numpy(np.stack(tile_feats)),
@@ -169,6 +181,8 @@ class KeqingV4CacheAdapter(BaseCacheAdapter):
             torch.from_numpy(np.stack(discard_summary)),
             torch.from_numpy(np.stack(call_summary)),
             torch.from_numpy(np.stack(special_summary)),
+            torch.tensor(final_rank_target, dtype=torch.long),
+            torch.tensor(final_score_delta_points_target, dtype=torch.int32),
         )
 
 

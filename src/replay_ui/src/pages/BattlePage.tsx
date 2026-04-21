@@ -22,6 +22,11 @@ export function BattlePage() {
   const [noMeld, setNoMeld] = useState(false);           // 不响应附露，默认关
   const [autoTsumogiri, setAutoTsumogiri] = useState(false); // 自动摸切，默认关
   const pendingActionRef = useRef(false);
+  const humanPlayerId = state?.human_player_id ?? 0;
+  const forcedAutoTsumogiri =
+    Boolean(state?.reached?.[humanPlayerId]) &&
+    !Boolean(state?.pending_reach?.[humanPlayerId]);
+  const effectiveAutoTsumogiri = autoTsumogiri || forcedAutoTsumogiri;
 
   const startNewGame = useCallback(async () => {
     setLoading(true);
@@ -75,11 +80,20 @@ export function BattlePage() {
     }
   }, [gameId]);
 
-  const { isMyTurn, legalActions, hasHora, hasMeld, hasDahai, onlyNoneResponse, needsDecision } = useAutoActions({
+  const {
+    isMyTurn,
+    legalActions,
+    willAutoPassOnlyNone,
+    willAutoHora,
+    willAutoDeclineMeld,
+    willAutoTsumogiri,
+    willAutoResolve,
+    needsDecision,
+  } = useAutoActions({
     state,
     autoHora,
     noMeld,
-    autoTsumogiri,
+    autoTsumogiri: effectiveAutoTsumogiri,
   });
 
   useEffect(() => {
@@ -91,23 +105,19 @@ export function BattlePage() {
   // 自动化：自动胡牌 / 不响应附露 / 自动摸切
   useEffect(() => {
     if (!isMyTurn || !gameId || pendingActionRef.current) return;
-    if (onlyNoneResponse) {
+    if (willAutoPassOnlyNone || willAutoDeclineMeld) {
       const noneAction = legalActions.find(a => a.type === "none");
       if (noneAction) { handleAction(noneAction); return; }
     }
-    if (autoHora && hasHora) {
+    if (willAutoHora) {
       const horaAction = legalActions.find(a => a.type === "hora");
       if (horaAction) { handleAction(horaAction); return; }
     }
-    if (noMeld && hasMeld && !hasHora) {
-      const noneAction = legalActions.find(a => a.type === "none");
-      if (noneAction) { handleAction(noneAction); return; }
-    }
-    if (autoTsumogiri && hasDahai) {
+    if (willAutoTsumogiri) {
       const tsumogiriAction = legalActions.find(a => a.type === "dahai" && a.tsumogiri);
       if (tsumogiriAction) { handleAction(tsumogiriAction); return; }
     }
-  }, [isMyTurn, gameId, state?.legal_actions, autoHora, noMeld, autoTsumogiri, hasHora, hasMeld, hasDahai, onlyNoneResponse, legalActions, handleAction]);
+  }, [isMyTurn, gameId, state?.legal_actions, willAutoPassOnlyNone, willAutoHora, willAutoDeclineMeld, willAutoTsumogiri, legalActions, handleAction]);
 
   useBattlePolling({
     gameId,
@@ -436,6 +446,7 @@ export function BattlePage() {
         autoHora={autoHora} setAutoHora={setAutoHora}
         noMeld={noMeld} setNoMeld={setNoMeld}
         autoTsumogiri={autoTsumogiri} setAutoTsumogiri={setAutoTsumogiri}
+        suppressActionBar={willAutoResolve}
         actionPending={loading}
       />
 

@@ -50,12 +50,13 @@ def test_keqing_agent_scores_request_action_from_observation(monkeypatch) -> Non
             assert ctx.model_snap["actor"] == 2
             return type("Decision", (), {"chosen": {"type": "none"}})()
 
+    class FakeAdapter:
+        @classmethod
+        def from_checkpoint(cls, *args, **kwargs):
+            return object()
+
     monkeypatch.setattr(rdc, "_decode_observation", fake_decode)
-    monkeypatch.setattr(
-        rdc.KeqingModelAdapter,
-        "from_checkpoint",
-        classmethod(lambda cls, *args, **kwargs: object()),
-    )
+    monkeypatch.setattr(rdc, "KeqingModelAdapter", FakeAdapter)
     monkeypatch.setattr(rdc, "DefaultActionScorer", lambda **kwargs: FakeScorer())
 
     agent = rdc.ObservationScoringAgent(model_path=Path("fake.pth"), device="cpu")
@@ -197,11 +198,12 @@ def test_agent_converts_string_device_before_building_adapter(monkeypatch) -> No
         def score(self, ctx):
             return type("Decision", (), {"chosen": {"type": "none"}})()
 
-    monkeypatch.setattr(
-        rdc.KeqingModelAdapter,
-        "from_checkpoint",
-        classmethod(fake_from_checkpoint),
-    )
+    class FakeAdapter:
+        @classmethod
+        def from_checkpoint(cls, *args, **kwargs):
+            return fake_from_checkpoint(cls, *args, **kwargs)
+
+    monkeypatch.setattr(rdc, "KeqingModelAdapter", FakeAdapter)
     monkeypatch.setattr(rdc, "DefaultActionScorer", lambda **kwargs: FakeScorer())
 
     rdc.ObservationScoringAgent(model_path=Path("fake.pth"), device="cpu")
@@ -295,21 +297,40 @@ def test_create_agent_supports_keqingv4_spec(monkeypatch) -> None:
     assert created["model_version"] == "keqingv4"
     assert created["hidden_dim"] == 320
     assert created["num_res_blocks"] == 6
+    assert created["rank_pt_lambda"] == 0.0
 
 
-def test_create_agent_rejects_rulebase() -> None:
-    try:
-        rdc.create_riichi_dev_agent(
-            bot_name="rulebase",
-            project_root=Path("."),
-            model_path=None,
-            device="cpu",
-            verbose=False,
-        )
-    except ValueError as exc:
-        assert "rulebase" in str(exc)
-    else:
-        raise AssertionError("expected rulebase to be rejected")
+def test_create_agent_allows_rank_pt_lambda_override(monkeypatch) -> None:
+    created = {}
+
+    class FakeObservationAgent:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+
+    monkeypatch.setattr(rdc, "ObservationScoringAgent", FakeObservationAgent)
+    agent = rdc.create_riichi_dev_agent(
+        bot_name="keqingv4",
+        project_root=Path("."),
+        model_path=None,
+        device="cpu",
+        verbose=False,
+        rank_pt_lambda=0.1,
+    )
+
+    assert isinstance(agent, FakeObservationAgent)
+    assert created["rank_pt_lambda"] == 0.1
+
+
+def test_create_agent_supports_rulebase() -> None:
+    agent = rdc.create_riichi_dev_agent(
+        bot_name="rulebase",
+        project_root=Path("."),
+        model_path=None,
+        device="cpu",
+        verbose=False,
+    )
+
+    assert isinstance(agent, rdc.RulebaseObservationAgent)
 
 
 def test_local_game_returns_summary(monkeypatch) -> None:
@@ -360,6 +381,55 @@ def test_local_game_returns_summary(monkeypatch) -> None:
     assert result["step_count"] == 1
 
 
+def test_rulebase_agent_replies_with_pending_reach_discard(monkeypatch) -> None:
+    fake_obs = FakeObservation(player_id=2)
+
+    def fake_decode(message):
+        assert message["observation"] == "encoded"
+        snap = fake_obs.to_dict()
+        snap["actor"] = 2
+        return fake_obs, snap
+
+    class FakeRulebaseModule:
+        def __init__(self):
+            self.calls = 0
+
+        def choose_rulebase_action(self, snap, actor, legal_actions):
+            self.calls += 1
+            if any(action.get("type") == "reach" for action in legal_actions):
+                return {"type": "reach", "actor": actor}
+            return {"type": "dahai", "actor": actor, "pai": "7p", "tsumogiri": False}
+
+    import sys
+    import types
+
+    fake_module = FakeRulebaseModule()
+    monkeypatch.setattr(rdc, "_decode_observation", fake_decode)
+    monkeypatch.setitem(
+        sys.modules,
+        "keqing_core",
+        types.SimpleNamespace(choose_rulebase_action=fake_module.choose_rulebase_action),
+    )
+
+    agent = rdc.RulebaseObservationAgent()
+    action = agent.select_action(
+        {
+            "type": "request_action",
+            "observation": "encoded",
+            "possible_actions": [
+                {"type": "reach", "actor": 2},
+                {"type": "dahai", "actor": 2, "pai": "7p", "tsumogiri": False},
+            ],
+        },
+        seat=2,
+    )
+    followup = agent.select_action({"type": "reach", "actor": 2}, seat=2)
+
+    assert action == {"type": "reach", "actor": 2}
+    assert followup == {"type": "dahai", "actor": 2, "pai": "7p", "tsumogiri": False}
+    assert fake_module.calls == 2
+
+
 def test_create_agent_passes_model_version_and_weights(monkeypatch) -> None:
     captured = {}
 
@@ -386,6 +456,49 @@ def test_create_agent_passes_model_version_and_weights(monkeypatch) -> None:
     assert captured["score_delta_lambda"] == rdc.DEFAULT_DECISION_AGENT_SPEC.score_delta_lambda
     assert captured["win_prob_lambda"] == rdc.DEFAULT_DECISION_AGENT_SPEC.win_prob_lambda
     assert captured["dealin_prob_lambda"] == rdc.DEFAULT_DECISION_AGENT_SPEC.dealin_prob_lambda
+
+
+def test_riichi_dev_client_leaves_rank_pt_lambda_unset_when_config_omits_override(monkeypatch) -> None:
+    captured = {}
+
+    def fake_create_agent(**kwargs):
+        captured.update(kwargs)
+        return StubAgent({"type": "none"})
+
+    monkeypatch.setattr(rdc, "create_riichi_dev_agent", fake_create_agent)
+
+    client = rdc.RiichiDevBotClient(
+        rdc.RiichiDevClientConfig(
+            token="t",
+            bot_name="keqingv4",
+            model_path=Path("fake.pth"),
+        )
+    )
+
+    assert isinstance(client.agent, StubAgent)
+    assert captured["rank_pt_lambda"] is None
+
+
+def test_riichi_dev_client_config_rank_pt_lambda_overrides_spec(monkeypatch) -> None:
+    captured = {}
+
+    def fake_create_agent(**kwargs):
+        captured.update(kwargs)
+        return StubAgent({"type": "none"})
+
+    monkeypatch.setattr(rdc, "create_riichi_dev_agent", fake_create_agent)
+
+    client = rdc.RiichiDevBotClient(
+        rdc.RiichiDevClientConfig(
+            token="t",
+            bot_name="keqingv4",
+            model_path=Path("fake.pth"),
+            rank_pt_lambda=0.25,
+        )
+    )
+
+    assert isinstance(client.agent, StubAgent)
+    assert captured["rank_pt_lambda"] == 0.25
 
 
 def test_audit_logger_writes_jsonl(tmp_path: Path) -> None:
@@ -529,12 +642,13 @@ def test_observation_agent_reuses_cached_reach_discard(monkeypatch) -> None:
                 model_aux=ModelAuxOutputs(),
             )
 
+    class FakeAdapter:
+        @classmethod
+        def from_checkpoint(cls, *args, **kwargs):
+            return object()
+
     monkeypatch.setattr(rdc, "_decode_observation", fake_decode)
-    monkeypatch.setattr(
-        rdc.KeqingModelAdapter,
-        "from_checkpoint",
-        classmethod(lambda cls, *args, **kwargs: object()),
-    )
+    monkeypatch.setattr(rdc, "KeqingModelAdapter", FakeAdapter)
     monkeypatch.setattr(rdc, "DefaultActionScorer", lambda **kwargs: FakeScorer())
 
     agent = rdc.ObservationScoringAgent(model_path=Path("fake.pth"), device="cpu")

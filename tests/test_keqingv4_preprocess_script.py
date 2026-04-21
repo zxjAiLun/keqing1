@@ -9,6 +9,7 @@ import sys
 
 import numpy as np
 import pytest
+from keqingv4.cache_contract import KEQINGV4_SCHEMA_NAME, KEQINGV4_SCHEMA_VERSION
 from training.cache_schema import KEQINGV4_OPPORTUNITY_DIM, KEQINGV4_SUMMARY_DIM
 
 
@@ -79,6 +80,8 @@ def test_preprocess_keqingv4_script_runs_rust_orchestrator(tmp_path: Path):
         assert "pts_given_win_target" in data.files
         assert "pts_given_dealin_target" in data.files
         assert "opp_tenpai_target" in data.files
+        assert "final_rank_target" in data.files
+        assert "final_score_delta_points_target" in data.files
         assert "event_history" in data.files
         assert "v4_opportunity" in data.files
         assert data["v4_discard_summary"].shape[1:] == (34, KEQINGV4_SUMMARY_DIM)
@@ -88,9 +91,10 @@ def test_preprocess_keqingv4_script_runs_rust_orchestrator(tmp_path: Path):
         assert data["event_history"].shape[1:] == (48, 5)
         assert data["v4_opportunity"].shape[1:] == (KEQINGV4_OPPORTUNITY_DIM,)
     manifest = json.loads((output_dir / "keqingv4_export_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["schema_name"] == KEQINGV4_SCHEMA_NAME
     assert manifest["export_mode"] == "rust_semantic_core"
     assert manifest["used_python_semantics"] is False
-    assert manifest["schema_version"] == 6
+    assert manifest["schema_version"] == KEQINGV4_SCHEMA_VERSION
     assert manifest["opportunity_dim"] == 3
     assert manifest["processed_file_count"] == 1
     assert manifest["skipped_existing_file_count"] == 0
@@ -163,8 +167,8 @@ def test_preprocess_keqingv4_script_accepts_legacy_workers_config(tmp_path: Path
         (current_output / "keqingv4_export_manifest.json").write_text(
             json.dumps(
                 {
-                    "schema_name": "keqingv4_cached_v1",
-                    "schema_version": 6,
+                    "schema_name": KEQINGV4_SCHEMA_NAME,
+                    "schema_version": KEQINGV4_SCHEMA_VERSION,
                     "summary_dim": KEQINGV4_SUMMARY_DIM,
                     "call_summary_slots": 8,
                     "special_summary_slots": 3,
@@ -236,8 +240,8 @@ def test_preprocess_keqingv4_script_runs_preflight_before_full_export(tmp_path: 
         (current_output / "keqingv4_export_manifest.json").write_text(
             json.dumps(
                 {
-                    "schema_name": "keqingv4_cached_v1",
-                    "schema_version": 6,
+                    "schema_name": KEQINGV4_SCHEMA_NAME,
+                    "schema_version": KEQINGV4_SCHEMA_VERSION,
                     "summary_dim": KEQINGV4_SUMMARY_DIM,
                     "call_summary_slots": 8,
                     "special_summary_slots": 3,
@@ -289,6 +293,8 @@ def _write_contract_npz(path: Path) -> None:
         pts_given_win_target=np.zeros((n,), dtype=np.float32),
         pts_given_dealin_target=np.zeros((n,), dtype=np.float32),
         opp_tenpai_target=np.zeros((n, 3), dtype=np.float32),
+        final_rank_target=np.zeros((n,), dtype=np.int8),
+        final_score_delta_points_target=np.zeros((n,), dtype=np.int32),
         event_history=np.zeros((n, 48, 5), dtype=np.int16),
         v4_opportunity=np.zeros((n, KEQINGV4_OPPORTUNITY_DIM), dtype=np.uint8),
         v4_discard_summary=np.zeros((n, 34, KEQINGV4_SUMMARY_DIM), dtype=np.float16),

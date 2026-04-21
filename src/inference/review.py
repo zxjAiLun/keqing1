@@ -195,6 +195,9 @@ class DefaultRuntimeReviewExporter:
                 "score_delta": decision.model_aux.score_delta,
                 "win_prob": decision.model_aux.win_prob,
                 "dealin_prob": decision.model_aux.dealin_prob,
+                "rank_probs": list(decision.model_aux.rank_probs),
+                "final_score_delta": decision.model_aux.final_score_delta,
+                "rank_pt_value": decision.model_aux.rank_pt_value,
             },
             "gt_action": gt_action,
         }

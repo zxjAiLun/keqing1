@@ -5,14 +5,15 @@
 //! small so the Python and Rust layers can converge on the same field contract
 //! before the export logic is filled in.
 
-pub const XMODEL1_SCHEMA_NAME: &str = "xmodel1_discard_v3";
-pub const XMODEL1_SCHEMA_VERSION: u32 = 3;
+pub const XMODEL1_SCHEMA_NAME: &str = "xmodel1_discard_v6";
+pub const XMODEL1_SCHEMA_VERSION: u32 = 6;
 pub const XMODEL1_MAX_CANDIDATES: usize = 14;
 pub const XMODEL1_CANDIDATE_FEATURE_DIM: usize = 22;
 pub const XMODEL1_CANDIDATE_FLAG_DIM: usize = 8;
 pub const XMODEL1_MAX_SPECIAL_CANDIDATES: usize = 12;
 pub const XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM: usize = 19;
 pub const XMODEL1_HISTORY_SUMMARY_DIM: usize = 20;
+pub const XMODEL1_MAX_RESPONSE_CANDIDATES: usize = 8;
 
 pub const XMODEL1_SPECIAL_TYPE_REACH: i16 = 0;
 pub const XMODEL1_SPECIAL_TYPE_DAMA: i16 = 1;

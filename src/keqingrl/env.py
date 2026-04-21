@@ -1,0 +1,640 @@
+"""Discard-only Mahjong env scaffolding for keqingrl."""
+
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass
+from typing import Sequence
+
+import keqing_core
+import torch
+
+from gateway.battle import BattleConfig, BattleManager, BattleRoom
+from keqingrl.actions import (
+    ACTION_FLAG_TSUMOGIRI,
+    ActionSpec,
+    ActionType,
+    action_from_mahjong_spec,
+    bind_reach_discard,
+    encode_action_id,
+)
+from keqingrl.contracts import ObsTensorBatch, PolicyInput
+from keqingrl.rewards import (
+    DEFAULT_PT_MAP,
+    build_rule_context,
+    terminal_rank_rewards,
+)
+from mahjong_env.feature_tracker import SnapshotFeatureTracker
+from mahjong_env.final_rank import final_ranks
+from mahjong_env.legal_actions import enumerate_legal_action_specs
+from mahjong_env.tiles import tile_to_34
+from mahjong_env.types import ActionSpec as MahjongActionSpec
+from training.state_features import encode as encode_state_features
+
+_SUPPORTED_SELF_TURN_ACTION_TYPES = frozenset(
+    {
+        ActionType.DISCARD,
+        ActionType.REACH_DISCARD,
+        ActionType.TSUMO,
+        ActionType.ANKAN,
+        ActionType.KAKAN,
+        ActionType.RYUKYOKU,
+    }
+)
+_SUPPORTED_RESPONSE_ACTION_TYPES = frozenset(
+    {
+        ActionType.RON,
+        ActionType.CHI,
+        ActionType.PON,
+        ActionType.DAIMINKAN,
+        ActionType.PASS,
+    }
+)
+
+
+@dataclass(frozen=True)
+class EnvState:
+    game_id: str
+    bakaze: str
+    kyoku: int
+    honba: int
+    kyotaku: int
+    scores: tuple[int, int, int, int]
+    current_actor: int | None
+    done: bool
+    kyokus_completed: int
+
+
+@dataclass(frozen=True)
+class StepResult:
+    reward: float
+    done: bool
+    next_actor: int | None
+    state: EnvState
+    terminal_rewards: tuple[float, float, float, float] | None = None
+    final_ranks: tuple[int, int, int, int] | None = None
+    scores: tuple[int, int, int, int] | None = None
+
+
+@dataclass(frozen=True)
+class _TurnContext:
+    actor: int
+    snapshot: dict[str, object]
+    legal_actions: tuple[ActionSpec, ...]
+    dispatch_actions: tuple[tuple[dict[str, object], ...], ...]
+
+
+class DiscardOnlyMahjongEnv:
+    """A conservative interactive env where the policy controls a bounded action subset."""
+
+    def __init__(
+        self,
+        *,
+        pt_map: Sequence[int | float] = DEFAULT_PT_MAP,
+        rank_score_scale: float = 0.0,
+        max_kyokus: int | None = None,
+        manager: BattleManager | None = None,
+        self_turn_action_types: tuple[ActionType, ...] = (ActionType.DISCARD,),
+        response_action_types: tuple[ActionType, ...] = (),
+    ) -> None:
+        self.manager = manager or BattleManager()
+        self.pt_map = tuple(float(value) for value in pt_map)
+        self.rank_score_scale = float(rank_score_scale)
+        self.max_kyokus = max_kyokus
+        configured_action_types = tuple(ActionType(value) for value in self_turn_action_types)
+        if ActionType.DISCARD not in configured_action_types:
+            raise ValueError("self_turn_action_types must include ActionType.DISCARD")
+        unsupported_action_types = [
+            action_type
+            for action_type in configured_action_types
+            if action_type not in _SUPPORTED_SELF_TURN_ACTION_TYPES
+        ]
+        if unsupported_action_types:
+            unsupported = ", ".join(action_type.name for action_type in unsupported_action_types)
+            raise ValueError(f"unsupported self-turn action types for this slice: {unsupported}")
+        configured_response_action_types = tuple(ActionType(value) for value in response_action_types)
+        unsupported_response_action_types = [
+            action_type
+            for action_type in configured_response_action_types
+            if action_type not in _SUPPORTED_RESPONSE_ACTION_TYPES
+        ]
+        if unsupported_response_action_types:
+            unsupported = ", ".join(action_type.name for action_type in unsupported_response_action_types)
+            raise ValueError(f"unsupported response action types for this slice: {unsupported}")
+        self.self_turn_action_types = configured_action_types
+        self._self_turn_action_type_set = set(configured_action_types)
+        self.response_action_types = configured_response_action_types
+        self._response_action_type_set = set(configured_response_action_types)
+        self.rule_context = build_rule_context(
+            self.pt_map,
+            rank_score_scale=self.rank_score_scale,
+            is_hanchan=max_kyokus is None or max_kyokus > 1,
+        )
+        self.room: BattleRoom | None = None
+        self._turn: _TurnContext | None = None
+        self._base_seed: int | None = None
+        self._seed_cursor = 0
+        self._done = False
+        self._completed_kyokus = 0
+        self._game_start_oya = 0
+
+    def reset(self, seed: int | None = None) -> EnvState:
+        if self.room is not None:
+            self.manager.close_room(self.room.game_id)
+
+        self._base_seed = seed
+        self._seed_cursor = 0
+        self._done = False
+        self._completed_kyokus = 0
+        self._turn = None
+        self.room = self.manager.create_room(_default_battle_config())
+        self.manager.start_kyoku(self.room, seed=self._next_seed())
+        self._game_start_oya = int(self.room.state.oya)
+        self._advance_until_decision()
+        return self.state()
+
+    def state(self) -> EnvState:
+        room = self._require_room()
+        return EnvState(
+            game_id=room.game_id,
+            bakaze=room.state.bakaze,
+            kyoku=room.state.kyoku,
+            honba=room.state.honba,
+            kyotaku=room.state.kyotaku,
+            scores=tuple(int(score) for score in room.state.scores),  # type: ignore[arg-type]
+            current_actor=None if self._done or self._turn is None else self._turn.actor,
+            done=self._done,
+            kyokus_completed=self._completed_kyokus,
+        )
+
+    def current_actor(self) -> int | None:
+        return self.state().current_actor
+
+    def is_done(self) -> bool:
+        return self._done
+
+    def legal_actions(self, actor: int) -> tuple[ActionSpec, ...]:
+        turn = self._require_turn(actor)
+        return turn.legal_actions
+
+    def observe(self, actor: int) -> PolicyInput:
+        turn = self._require_turn(actor)
+        tile_obs_np, scalar_obs_np = encode_state_features(turn.snapshot, actor)
+
+        tile_obs = torch.from_numpy(tile_obs_np).float().unsqueeze(0)
+        scalar_obs = torch.from_numpy(scalar_obs_np).float().unsqueeze(0)
+        legal_action_ids = torch.tensor(
+            [[encode_action_id(spec) for spec in turn.legal_actions]],
+            dtype=torch.long,
+        )
+        legal_action_features = torch.tensor(
+            [[self._action_features(turn.snapshot, spec) for spec in turn.legal_actions]],
+            dtype=torch.float32,
+        )
+        legal_action_mask = torch.ones((1, len(turn.legal_actions)), dtype=torch.bool)
+        return PolicyInput(
+            obs=ObsTensorBatch(tile_obs=tile_obs, scalar_obs=scalar_obs),
+            legal_action_ids=legal_action_ids,
+            legal_action_features=legal_action_features,
+            legal_action_mask=legal_action_mask,
+            rule_context=self.rule_context.unsqueeze(0).clone(),
+            legal_actions=(turn.legal_actions,),
+        )
+
+    def step(self, actor: int, action_spec: ActionSpec) -> StepResult:
+        room = self._require_room()
+        turn = self._require_turn(actor)
+        action_index = self._resolve_action_index(turn, action_spec)
+        for dispatch_action in turn.dispatch_actions[action_index]:
+            self._dispatch_manager_action(room, actor, dispatch_action)
+        self._turn = None
+        self._advance_until_decision()
+
+        terminal_rewards = None
+        reward = 0.0
+        final_rank_targets = None
+        scores = None
+        if self._done:
+            terminal_rewards = self.terminal_rewards()
+            reward = float(terminal_rewards[actor])
+            final_rank_targets = self.final_ranks()
+            scores = tuple(int(score) for score in room.state.scores)  # type: ignore[arg-type]
+
+        next_actor = self.current_actor()
+        return StepResult(
+            reward=reward,
+            done=self._done,
+            next_actor=next_actor,
+            state=self.state(),
+            terminal_rewards=terminal_rewards,
+            final_ranks=final_rank_targets,
+            scores=scores,
+        )
+
+    def terminal_rewards(self) -> tuple[float, float, float, float]:
+        room = self._require_room()
+        if not self._done:
+            raise RuntimeError("terminal_rewards() requires a finished episode")
+        return terminal_rank_rewards(
+            room.state.scores,
+            self.pt_map,
+            initial_oya=self._game_start_oya,
+            normalize=True,
+        )
+
+    def final_ranks(self) -> tuple[int, int, int, int]:
+        room = self._require_room()
+        if not self._done:
+            raise RuntimeError("final_ranks() requires a finished episode")
+        return final_ranks(room.state.scores, initial_oya=self._game_start_oya)
+
+    def _advance_until_decision(self) -> None:
+        room = self._require_room()
+        self._turn = None
+
+        while not self._done:
+            if room.phase == "ended":
+                self._completed_kyokus += 1
+                if self.max_kyokus is not None and self._completed_kyokus >= self.max_kyokus:
+                    self._mark_done()
+                    return
+                if self.manager.is_game_ended(room) or not self.manager.next_kyoku(room):
+                    self._mark_done()
+                    return
+                self.manager.start_kyoku(room, seed=self._next_seed())
+                continue
+
+            actor = room.state.actor_to_move
+            if actor is None:
+                self._mark_done()
+                return
+
+            self.manager.prepare_turn(room, actor)
+            if room.phase == "ended":
+                continue
+
+            actor = room.state.actor_to_move
+            if actor is None:
+                self._mark_done()
+                return
+
+            snapshot = self._snapshot_with_rl_fields(actor)
+            raw_legal_actions = tuple(enumerate_legal_action_specs(snapshot, actor))
+            if self._is_response_window(actor):
+                controlled_response_pairs = self._collect_controlled_response_actions(raw_legal_actions)
+                auto_response = self._auto_response_action(
+                    raw_legal_actions,
+                    has_controlled_actions=bool(controlled_response_pairs),
+                )
+                if auto_response is not None:
+                    self._dispatch_manager_action(room, actor, auto_response.to_mjai())
+                    continue
+                if not controlled_response_pairs:
+                    raise RuntimeError(f"keqingrl env found no controllable response action for actor {actor}")
+                self._turn = _TurnContext(
+                    actor=actor,
+                    snapshot=snapshot,
+                    legal_actions=tuple(action for action, _ in controlled_response_pairs),
+                    dispatch_actions=tuple(dispatch for _, dispatch in controlled_response_pairs),
+                )
+                return
+
+            controlled_pairs = self._collect_controlled_self_turn_actions(snapshot, raw_legal_actions)
+            auto_action = self._auto_self_action(
+                raw_legal_actions,
+                has_controlled_actions=bool(controlled_pairs),
+            )
+            if auto_action is not None:
+                self._dispatch_manager_action(room, actor, auto_action.to_mjai())
+                continue
+
+            if not controlled_pairs:
+                raise RuntimeError(f"keqingrl env found no controllable self-turn action for actor {actor}")
+
+            self._turn = _TurnContext(
+                actor=actor,
+                snapshot=snapshot,
+                legal_actions=tuple(action for action, _ in controlled_pairs),
+                dispatch_actions=tuple(dispatch for _, dispatch in controlled_pairs),
+            )
+            return
+
+    def _is_response_window(self, actor: int) -> bool:
+        room = self._require_room()
+        is_discard_response = bool(
+            room.state.last_discard and room.state.last_discard.get("actor") != actor
+        )
+        is_kakan_response = bool(
+            room.state.last_kakan and room.state.last_kakan.get("actor") != actor
+        )
+        return is_discard_response or is_kakan_response
+
+    def _auto_response_action(
+        self,
+        raw_legal_actions: Sequence[MahjongActionSpec],
+        *,
+        has_controlled_actions: bool,
+    ) -> MahjongActionSpec | None:
+        if has_controlled_actions:
+            return None
+        return next(
+            (
+                spec
+                for spec in raw_legal_actions
+                if spec.type in {"hora", "none"}
+            ),
+            None,
+        )
+
+    def _auto_self_action(
+        self,
+        raw_legal_actions: Sequence[MahjongActionSpec],
+        *,
+        has_controlled_actions: bool,
+    ) -> MahjongActionSpec | None:
+        if ActionType.TSUMO not in self._self_turn_action_type_set:
+            tsumo_action = next(
+                (spec for spec in raw_legal_actions if self._is_self_turn_hora(spec)),
+                None,
+            )
+            if tsumo_action is not None:
+                return tsumo_action
+
+        if has_controlled_actions:
+            return None
+
+        for action_type in ("hora", "ryukyoku", "none"):
+            if action_type == "hora":
+                chosen = next(
+                    (spec for spec in raw_legal_actions if self._is_self_turn_hora(spec)),
+                    None,
+                )
+            else:
+                chosen = next(
+                    (spec for spec in raw_legal_actions if spec.type == action_type),
+                    None,
+                )
+            if chosen is not None:
+                return chosen
+        return None
+
+    def _convert_supported_self_turn_raw_action(
+        self,
+        raw_spec: MahjongActionSpec,
+    ) -> ActionSpec | None:
+        if raw_spec.type == "dahai":
+            action_spec = action_from_mahjong_spec(raw_spec)
+        elif raw_spec.type == "hora":
+            if not self._is_self_turn_hora(raw_spec):
+                return None
+            action_spec = action_from_mahjong_spec(raw_spec)
+        elif raw_spec.type in {"ankan", "kakan"}:
+            action_spec = action_from_mahjong_spec(raw_spec)
+        elif raw_spec.type == "ryukyoku":
+            action_spec = action_from_mahjong_spec(raw_spec)
+        else:
+            return None
+
+        if action_spec.action_type not in self._self_turn_action_type_set:
+            return None
+        return action_spec
+
+    def _collect_controlled_self_turn_actions(
+        self,
+        snapshot: dict[str, object],
+        raw_legal_actions: Sequence[MahjongActionSpec],
+    ) -> list[tuple[ActionSpec, tuple[dict[str, object], ...]]]:
+        controlled_pairs: list[tuple[ActionSpec, tuple[dict[str, object], ...]]] = []
+        for raw_spec in raw_legal_actions:
+            if raw_spec.type == "reach":
+                if ActionType.REACH_DISCARD in self._self_turn_action_type_set:
+                    controlled_pairs.extend(
+                        self._collect_reach_discard_actions(snapshot, raw_legal_actions)
+                    )
+                continue
+            action_spec = self._convert_supported_self_turn_raw_action(raw_spec)
+            if action_spec is not None:
+                controlled_pairs.append((action_spec, (raw_spec.to_mjai(),)))
+        return controlled_pairs
+
+    def _convert_supported_response_raw_action(
+        self,
+        raw_spec: MahjongActionSpec,
+    ) -> ActionSpec | None:
+        if raw_spec.type == "hora":
+            if self._is_self_turn_hora(raw_spec):
+                return None
+            action_spec = action_from_mahjong_spec(raw_spec)
+        elif raw_spec.type in {"chi", "pon", "daiminkan", "none"}:
+            action_spec = action_from_mahjong_spec(raw_spec)
+        else:
+            return None
+
+        if action_spec.action_type not in self._response_action_type_set:
+            return None
+        return action_spec
+
+    def _collect_controlled_response_actions(
+        self,
+        raw_legal_actions: Sequence[MahjongActionSpec],
+    ) -> list[tuple[ActionSpec, tuple[dict[str, object], ...]]]:
+        controlled_pairs: list[tuple[ActionSpec, tuple[dict[str, object], ...]]] = []
+        for raw_spec in raw_legal_actions:
+            action_spec = self._convert_supported_response_raw_action(raw_spec)
+            if action_spec is not None:
+                controlled_pairs.append((action_spec, (raw_spec.to_mjai(),)))
+        return controlled_pairs
+
+    def _collect_reach_discard_actions(
+        self,
+        snapshot: dict[str, object],
+        raw_legal_actions: Sequence[MahjongActionSpec],
+    ) -> list[tuple[ActionSpec, tuple[dict[str, object], ...]]]:
+        actor = int(snapshot["actor"])
+        candidate_keys = set(self._enumerate_reach_discard_candidates(snapshot, actor))
+        if not candidate_keys:
+            return []
+
+        bindings: list[tuple[ActionSpec, tuple[dict[str, object], ...]]] = []
+        seen_keys: set[tuple[str, bool]] = set()
+        for raw_spec in raw_legal_actions:
+            if raw_spec.type != "dahai":
+                continue
+            key = (str(raw_spec.pai), bool(raw_spec.tsumogiri))
+            if key in seen_keys or key not in candidate_keys:
+                continue
+            discard_action = action_from_mahjong_spec(raw_spec)
+            bindings.append(
+                (
+                    bind_reach_discard(discard_action),
+                    (
+                        {"type": "reach", "actor": actor},
+                        raw_spec.to_mjai(),
+                    ),
+                )
+            )
+            seen_keys.add(key)
+        return bindings
+
+    def _enumerate_reach_discard_candidates(
+        self,
+        snapshot: dict[str, object],
+        actor: int,
+    ) -> list[tuple[str, bool]]:
+        try:
+            return list(keqing_core.enumerate_keqingv4_reach_discards(snapshot, actor))
+        except RuntimeError as exc:
+            if not keqing_core.is_missing_rust_capability_error(exc):
+                raise
+        return self._python_reach_discard_candidates(snapshot, actor)
+
+    def _python_reach_discard_candidates(
+        self,
+        snapshot: dict[str, object],
+        actor: int,
+    ) -> list[tuple[str, bool]]:
+        hand_raw = snapshot.get("hand", [])
+        hand_list = (
+            list(hand_raw)
+            if isinstance(hand_raw, list)
+            else [str(tile) for tile, count in dict(hand_raw).items() for _ in range(int(count))]
+        )
+        hand = Counter(hand_list)
+        last_tsumo_all = snapshot.get("last_tsumo", [None, None, None, None])
+        last_tsumo_raw_all = snapshot.get("last_tsumo_raw", [None, None, None, None])
+        last_tsumo = last_tsumo_all[actor] if actor < len(last_tsumo_all) else None
+        last_tsumo_raw = last_tsumo_raw_all[actor] if actor < len(last_tsumo_raw_all) else None
+
+        counts34 = [0] * 34
+        for tile, count in hand.items():
+            tile34 = tile_to_34(tile)
+            if 0 <= tile34 < 34:
+                counts34[tile34] += int(count)
+
+        candidates: list[tuple[str, bool]] = []
+        seen: set[tuple[str, bool]] = set()
+        for tile in list(hand.keys()):
+            discard_tile = tile
+            tsumogiri = last_tsumo == tile
+            if tsumogiri and last_tsumo_raw is not None:
+                discard_tile = str(last_tsumo_raw)
+            tile34 = tile_to_34(tile)
+            if not (0 <= tile34 < 34) or counts34[tile34] <= 0:
+                continue
+            counts34[tile34] -= 1
+            if keqing_core.calc_standard_shanten(tuple(counts34)) == 0:
+                key = (str(discard_tile), bool(tsumogiri))
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append(key)
+            counts34[tile34] += 1
+        return candidates
+
+    def _is_self_turn_hora(self, raw_spec: MahjongActionSpec) -> bool:
+        return raw_spec.type == "hora" and (
+            raw_spec.target is None or raw_spec.target == raw_spec.actor
+        )
+
+    def _resolve_action_index(self, turn: _TurnContext, action_spec: ActionSpec) -> int:
+        identity_matches = [
+            index for index, candidate in enumerate(turn.legal_actions) if candidate is action_spec
+        ]
+        if len(identity_matches) == 1:
+            return identity_matches[0]
+        if len(identity_matches) > 1:
+            raise RuntimeError("identity-resolved action matched multiple legal entries")
+
+        value_matches = [
+            index for index, candidate in enumerate(turn.legal_actions) if candidate == action_spec
+        ]
+        if len(value_matches) == 1:
+            return value_matches[0]
+        if len(value_matches) > 1:
+            raise ValueError(
+                "ambiguous action_spec match; pass back the exact ActionSpec instance from legal_actions"
+            )
+        raise ValueError("action_spec is not part of the current ordered legal-action list")
+
+    def _dispatch_manager_action(
+        self,
+        room: BattleRoom,
+        actor: int,
+        action: dict[str, object],
+    ) -> None:
+        if action.get("type") == "ryukyoku":
+            self.manager.ryukyoku(room)
+            return
+        self.manager.apply_action(room, actor, action)
+
+    def _action_features(self, snapshot: dict[str, object], spec: ActionSpec) -> list[float]:
+        tracker = SnapshotFeatureTracker.from_state(snapshot, actor=int(snapshot["actor"]))
+        tile = -1 if spec.tile is None else int(spec.tile)
+        tile_norm = 0.0 if tile < 0 else float(tile) / 33.0
+        hand_count = 0.0 if tile < 0 else float(tracker.hand_counts34[tile]) / 4.0
+        visible = 0.0 if tile < 0 else float(tracker.visible_counts34[tile]) / 4.0
+        is_honor = 1.0 if tile >= 27 else 0.0
+        is_terminal = 1.0 if 0 <= tile < 27 and tile % 9 in (0, 8) else 0.0
+        return [
+            float(spec.action_type) / float(max(1, len(ActionType) - 1)),
+            tile_norm,
+            1.0 if spec.flags & ACTION_FLAG_TSUMOGIRI else 0.0,
+            hand_count,
+            visible,
+            is_honor,
+            is_terminal,
+            float(self._require_room().remaining_wall()) / 70.0,
+        ]
+
+    def _snapshot_with_rl_fields(self, actor: int) -> dict[str, object]:
+        room = self._require_room()
+        snapshot = self.manager.get_snap_with_shanten(room, actor)
+        snapshot["actor"] = actor
+        snapshot["tsumo_pai"] = room.state.last_tsumo_raw[actor] or room.state.last_tsumo[actor]
+        snapshot["_hora_is_haitei"] = room.remaining_wall() == 0
+        snapshot["_hora_is_houtei"] = room.remaining_wall() == 0
+        snapshot["_hora_is_rinshan"] = room.state.players[actor].rinshan_tsumo
+        snapshot["_hora_is_chankan"] = bool(
+            room.state.last_kakan and room.state.last_kakan.get("actor") != actor
+        )
+        return snapshot
+
+    def _next_seed(self) -> int | None:
+        if self._base_seed is None:
+            return None
+        seed = self._base_seed + self._seed_cursor
+        self._seed_cursor += 1
+        return seed
+
+    def _mark_done(self) -> None:
+        room = self._require_room()
+        if not room.events or room.events[-1].get("type") != "end_game":
+            room.events.append({"type": "end_game"})
+        self._done = True
+        self._turn = None
+
+    def _require_room(self) -> BattleRoom:
+        if self.room is None:
+            raise RuntimeError("env.reset(...) must be called before using the environment")
+        return self.room
+
+    def _require_turn(self, actor: int) -> _TurnContext:
+        if self._done:
+            raise RuntimeError("the episode is finished")
+        if self._turn is None:
+            raise RuntimeError("environment is not positioned at a controllable decision")
+        if self._turn.actor != actor:
+            raise ValueError(f"expected actor {self._turn.actor}, got {actor}")
+        return self._turn
+
+
+def _default_battle_config() -> BattleConfig:
+    return BattleConfig(
+        player_count=4,
+        players=[
+            {"id": seat, "name": f"RL{seat}", "type": "bot"}
+            for seat in range(4)
+        ],
+    )
+
+
+__all__ = ["DiscardOnlyMahjongEnv", "EnvState", "StepResult"]

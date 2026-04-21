@@ -21,7 +21,7 @@ from keqing_core import (
     project_keqingv4_reach_snapshot,
     project_keqingv4_rinshan_draw_snapshot,
 )
-from keqingv4.cached_dataset import CachedMjaiDatasetV4
+from keqingv4.cached_dataset import CachedMjaiDatasetV4, KeqingV4CacheAdapter
 from keqingv4.preprocess_features import (
     _best_discard_summary_vector,
     _call_action_slot,
@@ -849,12 +849,16 @@ def test_keqingv4_events_to_arrays_and_cached_dataset_smoke(tmp_path: Path):
     assert "pts_given_win_target" in arrays
     assert "pts_given_dealin_target" in arrays
     assert "opp_tenpai_target" in arrays
+    assert "final_rank_target" in arrays
+    assert "final_score_delta_points_target" in arrays
     assert "event_history" in arrays
     assert "v4_opportunity" in arrays
     assert arrays["v4_discard_summary"].shape[1:] == (34, KEQINGV4_SUMMARY_DIM)
     assert arrays["v4_call_summary"].shape[1:] == (8, KEQINGV4_SUMMARY_DIM)
     assert arrays["v4_special_summary"].shape[1:] == (3, KEQINGV4_SUMMARY_DIM)
     assert arrays["opp_tenpai_target"].shape[1:] == (3,)
+    assert arrays["final_rank_target"].ndim == 1
+    assert arrays["final_score_delta_points_target"].dtype == np.int32
     assert arrays["event_history"].shape[1:] == (48, 5)
     assert arrays["v4_opportunity"].shape[1:] == (KEQINGV4_OPPORTUNITY_DIM,)
     assert np.any(arrays["event_history"][0, :, 1] != 0)
@@ -866,6 +870,8 @@ def test_keqingv4_events_to_arrays_and_cached_dataset_smoke(tmp_path: Path):
     assert sample[8].shape == ()
     assert sample[9].shape == ()
     assert sample[10].shape == (3,)
+    assert sample[20].shape == ()
+    assert sample[21].shape == ()
     assert sample[14].shape == (48, 5)
     assert sample[16].shape == (KEQINGV4_OPPORTUNITY_DIM,)
     assert sample[17].shape == (34, KEQINGV4_SUMMARY_DIM)
@@ -888,6 +894,8 @@ def test_keqingv4_cached_dataset_fails_fast_on_contract_mismatch(tmp_path: Path)
         pts_given_win_target=np.zeros((1,), dtype=np.float32),
         pts_given_dealin_target=np.zeros((1,), dtype=np.float32),
         opp_tenpai_target=np.zeros((1, 3), dtype=np.float32),
+        final_rank_target=np.zeros((1,), dtype=np.int8),
+        final_score_delta_points_target=np.zeros((1,), dtype=np.int32),
         event_history=np.zeros((1, 48, 5), dtype=np.int16),
         v4_opportunity=np.zeros((1, KEQINGV4_OPPORTUNITY_DIM), dtype=np.uint8),
         v4_discard_summary=np.zeros((1, 34, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
@@ -897,6 +905,32 @@ def test_keqingv4_cached_dataset_fails_fast_on_contract_mismatch(tmp_path: Path)
     dataset = CachedMjaiDatasetV4([broken], shuffle=False, buffer_size=1, seed=7, aug_perms=0)
     with pytest.raises(ValueError, match="v4_call_summary shape mismatch"):
         next(iter(dataset))
+
+
+def test_keqingv4_cache_adapter_keeps_scalar_placement_targets_under_perm():
+    adapter = KeqingV4CacheAdapter()
+    row_extra = {
+        "score_delta_target": np.float32(0.1),
+        "win_target": np.float32(1.0),
+        "dealin_target": np.float32(0.0),
+        "pts_given_win_target": np.float32(0.3),
+        "pts_given_dealin_target": np.float32(0.0),
+        "opp_tenpai_target": np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
+        "final_rank_target": np.int8(2),
+        "final_score_delta_points_target": np.int32(-4300),
+        "pts_given_win_available": np.bool_(True),
+        "pts_given_dealin_available": np.bool_(False),
+        "opp_tenpai_available": np.bool_(True),
+        "event_history": np.zeros((48, 5), dtype=np.int16),
+        "event_history_available": np.bool_(True),
+        "v4_opportunity": np.asarray([1, 0, 1], dtype=np.uint8),
+        "v4_discard_summary": np.zeros((34, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
+        "v4_call_summary": np.zeros((8, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
+        "v4_special_summary": np.zeros((3, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
+    }
+    permuted = adapter.permute_row_extra(row_extra, (1, 0, 2), 7)
+    assert int(permuted["final_rank_target"]) == 2
+    assert int(permuted["final_score_delta_points_target"]) == -4300
 
 
 def test_call_summary_uses_best_post_meld_discard_projection():

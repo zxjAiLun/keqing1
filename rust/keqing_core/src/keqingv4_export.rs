@@ -12,7 +12,8 @@ use zip::ZipWriter;
 
 use crate::export_common::{
     collect_mjson_files, finalize_temp_npz, output_npz_path, print_export_progress, temp_npz_path,
-    write_json_manifest, write_npy_f16, write_npy_f32, write_npy_i16, write_npy_u8,
+    write_json_manifest, write_npy_f16, write_npy_f32, write_npy_i16, write_npy_i32, write_npy_i8,
+    write_npy_u8,
 };
 use crate::keqingv4_summary::{
     build_keqingv4_call_summary, build_keqingv4_discard_summary, build_keqingv4_special_summary,
@@ -24,8 +25,8 @@ use crate::xmodel1_export::{
     action_idx_from_action, encode_state_features_for_actor, ExportRunOptions,
 };
 
-const KEQINGV4_SCHEMA_NAME: &str = "keqingv4_cached_v1";
-const KEQINGV4_SCHEMA_VERSION: u32 = 6;
+const KEQINGV4_SCHEMA_NAME: &str = "keqingv4";
+const KEQINGV4_SCHEMA_VERSION: u32 = 7;
 const KEQINGV4_SUMMARY_DIM: usize = 28;
 const KEQINGV4_CALL_SUMMARY_SLOTS: usize = 8;
 const KEQINGV4_SPECIAL_SUMMARY_SLOTS: usize = 3;
@@ -78,6 +79,7 @@ struct JobResult {
 
 #[derive(Debug, Clone)]
 struct KeqingV4Record {
+    actor: usize,
     tile_feat: Vec<u16>,
     scalar: Vec<u16>,
     mask: Vec<u8>,
@@ -89,11 +91,32 @@ struct KeqingV4Record {
     pts_given_win_target: f32,
     pts_given_dealin_target: f32,
     opp_tenpai_target: [f32; 3],
+    score_before_action: i32,
+    final_score_delta_points_target: i32,
+    final_rank_target: u8,
     event_history: [[i16; replay_core::EVENT_HISTORY_FEATURE_DIM]; replay_core::EVENT_HISTORY_LEN],
     v4_opportunity: [u8; KEQINGV4_OPPORTUNITY_DIM],
     discard_summary: Vec<u16>,
     call_summary: Vec<u16>,
     special_summary: Vec<u16>,
+}
+
+fn tie_break_order(game_start_oya: usize, actor: usize) -> usize {
+    (actor + 4 - game_start_oya) % 4
+}
+
+fn final_rank_targets(scores: &[i32; 4], game_start_oya: usize) -> [u8; 4] {
+    let mut ordered = [0usize, 1, 2, 3];
+    ordered.sort_by(|lhs, rhs| {
+        scores[*rhs].cmp(&scores[*lhs]).then_with(|| {
+            tie_break_order(game_start_oya, *lhs).cmp(&tie_break_order(game_start_oya, *rhs))
+        })
+    });
+    let mut out = [0u8; 4];
+    for (rank, actor) in ordered.iter().enumerate() {
+        out[*actor] = rank as u8;
+    }
+    out
 }
 
 fn load_events(path: &Path) -> Result<Vec<Value>, String> {
@@ -169,6 +192,7 @@ fn encode_record(
     let v4_opportunity = build_v4_opportunity(legal_actions);
 
     Ok(KeqingV4Record {
+        actor,
         tile_feat,
         scalar,
         mask,
@@ -180,6 +204,9 @@ fn encode_record(
         pts_given_win_target: 0.0,
         pts_given_dealin_target: 0.0,
         opp_tenpai_target,
+        score_before_action: round_state.scores[actor],
+        final_score_delta_points_target: 0,
+        final_rank_target: 0,
         event_history,
         v4_opportunity,
         discard_summary: f16_bits_vec(&discard_summary),
@@ -205,7 +232,7 @@ fn apply_round_target_updates(
 fn collect_records_from_mjson(path: &Path) -> Result<Vec<KeqingV4Record>, String> {
     let events = load_events(path)?;
     let events_slice: &[Value] = events.as_slice();
-    replay_core::drive_export_records(
+    let mut records = replay_core::drive_export_records(
         &events,
         SCORE_NORM,
         MC_RETURN_GAMMA,
@@ -245,7 +272,26 @@ fn collect_records_from_mjson(path: &Path) -> Result<Vec<KeqingV4Record>, String
         },
         apply_round_target_updates,
         |_| Ok(()),
-    )
+    )?;
+
+    let mut terminal_round_state = RoundState::default();
+    for event in events_slice {
+        replay_core::apply_event_round_state(&mut terminal_round_state, event);
+    }
+    let game_start_oya = terminal_round_state.game_start_oya.clamp(0, 3) as usize;
+    let final_rank_targets = final_rank_targets(&terminal_round_state.scores, game_start_oya);
+    for record in &mut records {
+        if record.actor < 4 {
+            record.final_score_delta_points_target =
+                terminal_round_state.scores[record.actor] - record.score_before_action;
+            record.final_rank_target = final_rank_targets[record.actor];
+        } else {
+            record.final_score_delta_points_target = 0;
+            record.final_rank_target = 0;
+        }
+    }
+
+    Ok(records)
 }
 
 fn write_npz(path: &Path, records: &[KeqingV4Record]) -> Result<(), String> {
@@ -266,6 +312,8 @@ fn write_npz(path: &Path, records: &[KeqingV4Record]) -> Result<(), String> {
     let mut pts_given_win = Vec::with_capacity(n);
     let mut pts_given_dealin = Vec::with_capacity(n);
     let mut opp_tenpai = Vec::with_capacity(n * 3);
+    let mut final_rank = Vec::with_capacity(n);
+    let mut final_score_delta_points = Vec::with_capacity(n);
     let mut event_history = Vec::with_capacity(
         n * replay_core::EVENT_HISTORY_LEN * replay_core::EVENT_HISTORY_FEATURE_DIM,
     );
@@ -288,6 +336,8 @@ fn write_npz(path: &Path, records: &[KeqingV4Record]) -> Result<(), String> {
         pts_given_win.push(record.pts_given_win_target);
         pts_given_dealin.push(record.pts_given_dealin_target);
         opp_tenpai.extend_from_slice(&record.opp_tenpai_target);
+        final_rank.push(record.final_rank_target as i8);
+        final_score_delta_points.push(record.final_score_delta_points_target);
         for row in record.event_history.iter() {
             event_history.extend_from_slice(row);
         }
@@ -318,6 +368,13 @@ fn write_npz(path: &Path, records: &[KeqingV4Record]) -> Result<(), String> {
         &pts_given_dealin,
     )?;
     write_npy_f32(&mut zip, "opp_tenpai_target.npy", &[n, 3], &opp_tenpai)?;
+    write_npy_i8(&mut zip, "final_rank_target.npy", &[n], &final_rank)?;
+    write_npy_i32(
+        &mut zip,
+        "final_score_delta_points_target.npy",
+        &[n],
+        &final_score_delta_points,
+    )?;
     write_npy_i16(
         &mut zip,
         "event_history.npy",

@@ -38,6 +38,7 @@ def create_runtime_bot_for_gateway(**kwargs):
         model_path=resolved_model_path,
         device=kwargs.get("device", "cuda"),
         verbose=kwargs.get("verbose", False),
+        rank_pt_lambda=kwargs.get("rank_pt_lambda", 0.0),
         model_version=bot_name,
     )
 
@@ -53,6 +54,7 @@ class BotClientConfig:
     model_path: Path | None = None
     device: str = "cuda"
     verbose: bool = False
+    rank_pt_lambda: float = 0.0
 
     def resolved_model_path(self) -> Path | None:
         if self.bot_name == "rulebase":
@@ -89,6 +91,7 @@ class GatewayBotClient:
             model_path=self.config.resolved_model_path(),
             device=self.config.device,
             verbose=self.config.verbose,
+            rank_pt_lambda=self.config.rank_pt_lambda,
         )
         self._seat = seat
         self._pending_public_tsumo.clear()

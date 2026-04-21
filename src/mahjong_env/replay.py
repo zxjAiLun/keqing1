@@ -378,6 +378,9 @@ class ReplaySample:
     # Stage 2 Python 原型:这个字段曾由旧 replay sample builder 在样本产出时通过 _calc_shanten_waits
     # 对上帝视角下的对手手牌直接计算;Stage 2 Rust 迁移后改由 Rust preprocess emit。
     opp_tenpai_target: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    score_before_action: int = 0
+    final_score_delta_points_target: int = 0
+    final_rank_target: int = 0
     # 触发该监督样本的原始 replay 事件索引。xmodel1 preprocess 构造 event_history
     # 时必须使用真实事件位置，而不是样本序号。
     event_index: int = 0
@@ -498,6 +501,9 @@ def build_replay_samples_mc_return(
                 pts_given_dealin_target=float(record.get("pts_given_dealin_target", 0.0)),
                 ryukyoku_tenpai_target=float(record.get("ryukyoku_tenpai_target", 0.0)),
                 opp_tenpai_target=tuple(float(v) for v in record.get("opp_tenpai_target", (0.0, 0.0, 0.0))),
+                score_before_action=int(record.get("score_before_action", snapshot.get("scores", [0, 0, 0, 0])[actor])),
+                final_score_delta_points_target=int(record.get("final_score_delta_points_target", 0)),
+                final_rank_target=int(record.get("final_rank_target", 0)),
                 event_index=int(record.get("event_index", 0)),
                 events=events,
             )
@@ -525,4 +531,3 @@ def extract_actor_names(events: Sequence[MjaiEvent]) -> List[str]:
         ):
             return [str(x) for x in e["names"]]
     return ["p0", "p1", "p2", "p3"]
-

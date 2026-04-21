@@ -10,11 +10,10 @@ from training.cache_schema import (
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_SCHEMA_NAME,
     XMODEL1_SCHEMA_VERSION,
-    XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
 from training.state_features import N_SCALAR
 
-_REQUIRED_V3_METADATA_KEYS = (
+_REQUIRED_XMODEL1_METADATA_KEYS = (
     "model_version",
     "cfg",
     "schema_name",
@@ -23,7 +22,6 @@ _REQUIRED_V3_METADATA_KEYS = (
     "state_scalar_dim",
     "candidate_feature_dim",
     "candidate_flag_dim",
-    "special_candidate_feature_dim",
     "hidden_dim",
     "num_res_blocks",
     "dropout",
@@ -49,8 +47,6 @@ def infer_xmodel1_model_dims(
     state_proj_shape = _shape_of(state_dict, "state_proj.0.weight")
     scalar_proj_shape = _shape_of(state_dict, "scalar_proj.0.weight")
     candidate_proj_shape = _shape_of(state_dict, "candidate_proj.0.weight")
-    special_proj_shape = _shape_of(state_dict, "special_proj.0.weight")
-
     if state_proj_shape is None or scalar_proj_shape is None or candidate_proj_shape is None:
         raise RuntimeError(
             "xmodel1 checkpoint is missing required projection weights for legacy shape inference"
@@ -73,16 +69,6 @@ def infer_xmodel1_model_dims(
             f"candidate_flag_dim={candidate_flag_dim}: shape={candidate_proj_shape}"
         )
 
-    special_candidate_feature_dim = int(
-        cfg.get("special_candidate_feature_dim", XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM)
-        if cfg is not None
-        else XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM
-    )
-    if special_proj_shape is not None:
-        inferred_special_dim = int(special_proj_shape[1]) - 8
-        if inferred_special_dim > 0:
-            special_candidate_feature_dim = inferred_special_dim
-
     num_res_blocks = len(
         {
             key.split(".")[1]
@@ -101,7 +87,6 @@ def infer_xmodel1_model_dims(
         "state_scalar_dim": state_scalar_dim,
         "candidate_feature_dim": candidate_feature_dim,
         "candidate_flag_dim": candidate_flag_dim,
-        "special_candidate_feature_dim": special_candidate_feature_dim,
         "hidden_dim": hidden_dim,
         "num_res_blocks": num_res_blocks,
         "dropout": dropout,
@@ -168,10 +153,6 @@ def assert_xmodel1_metadata_matches_weights(
         "state_scalar_dim": checkpoint.get("state_scalar_dim", cfg.get("state_scalar_dim") if isinstance(cfg, Mapping) else None),
         "candidate_feature_dim": checkpoint.get("candidate_feature_dim", cfg.get("candidate_feature_dim") if isinstance(cfg, Mapping) else None),
         "candidate_flag_dim": checkpoint.get("candidate_flag_dim", cfg.get("candidate_flag_dim") if isinstance(cfg, Mapping) else None),
-        "special_candidate_feature_dim": checkpoint.get(
-            "special_candidate_feature_dim",
-            cfg.get("special_candidate_feature_dim") if isinstance(cfg, Mapping) else None,
-        ),
         "hidden_dim": checkpoint.get("hidden_dim", cfg.get("hidden_dim") if isinstance(cfg, Mapping) else None),
         "num_res_blocks": checkpoint.get("num_res_blocks", cfg.get("num_res_blocks") if isinstance(cfg, Mapping) else None),
     }
@@ -211,8 +192,8 @@ def validate_xmodel1_checkpoint_metadata(
         raise RuntimeError(
             f"{checkpoint_label} targets {schema_name!r}@{schema_version!r}, "
             f"but the current xmodel1 runtime requires {XMODEL1_SCHEMA_NAME}@{XMODEL1_SCHEMA_VERSION}. "
-            "Old xmodel1 checkpoints are not load-compatible with the v3 schema cutover; "
-            "rerun train for xmodel1_discard_v3."
+            "Old xmodel1 checkpoints are not load-compatible with the placement-auxiliary v6 schema cutover; "
+            "rerun train for xmodel1_discard_v6."
         )
 
     inferred = assert_xmodel1_metadata_matches_weights(
@@ -222,12 +203,12 @@ def validate_xmodel1_checkpoint_metadata(
     if not require_complete_metadata:
         return
 
-    missing = [key for key in _REQUIRED_V3_METADATA_KEYS if checkpoint.get(key) is None]
+    missing = [key for key in _REQUIRED_XMODEL1_METADATA_KEYS if checkpoint.get(key) is None]
     if cfg is None:
         missing.append("cfg")
     if missing:
         raise RuntimeError(
-            f"{checkpoint_label} is missing required xmodel1 v3 checkpoint metadata {sorted(set(missing))}"
+            f"{checkpoint_label} is missing required xmodel1 checkpoint metadata {sorted(set(missing))}"
         )
     if checkpoint.get("model_version") not in {None, "xmodel1"}:
         raise RuntimeError(
@@ -251,9 +232,6 @@ def build_xmodel1_checkpoint_metadata(
         "state_scalar_dim": int(getattr(model, "state_scalar_dim")),
         "candidate_feature_dim": int(getattr(model, "candidate_feature_dim", XMODEL1_CANDIDATE_FEATURE_DIM)),
         "candidate_flag_dim": int(getattr(model, "candidate_flag_dim", XMODEL1_CANDIDATE_FLAG_DIM)),
-        "special_candidate_feature_dim": int(
-            getattr(model, "special_candidate_feature_dim", XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM)
-        ),
         "hidden_dim": int(getattr(model, "hidden_dim")),
         "num_res_blocks": int(len(getattr(model, "state_blocks"))),
         "dropout": float(cfg.get("dropout", 0.1)),

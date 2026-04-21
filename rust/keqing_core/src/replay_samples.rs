@@ -27,7 +27,28 @@ pub struct ReplayDecisionRecord {
     pub pts_given_dealin_target: f32,
     pub ryukyoku_tenpai_target: f32,
     pub opp_tenpai_target: [f32; 3],
+    pub score_before_action: i32,
+    pub final_score_delta_points_target: i32,
+    pub final_rank_target: u8,
     pub event_index: i32,
+}
+
+fn tie_break_order(game_start_oya: usize, actor: usize) -> usize {
+    (actor + 4 - game_start_oya) % 4
+}
+
+fn final_rank_targets(scores: &[i32; 4], game_start_oya: usize) -> [u8; 4] {
+    let mut ordered = [0usize, 1, 2, 3];
+    ordered.sort_by(|lhs, rhs| {
+        scores[*rhs].cmp(&scores[*lhs]).then_with(|| {
+            tie_break_order(game_start_oya, *lhs).cmp(&tie_break_order(game_start_oya, *rhs))
+        })
+    });
+    let mut out = [0u8; 4];
+    for (rank, actor) in ordered.iter().enumerate() {
+        out[*actor] = rank as u8;
+    }
+    out
 }
 
 fn next_meaningful_event<'a>(events: &'a [Value], event_index: usize) -> Option<&'a Value> {
@@ -232,6 +253,9 @@ fn build_actor_record(
             actor,
             &actor_visible_counts(sample_round_state, actor),
         ),
+        score_before_action: sample_round_state.scores[actor],
+        final_score_delta_points_target: 0,
+        final_rank_target: 0,
         event_index,
     }))
 }
@@ -275,6 +299,9 @@ fn build_reaction_none_record(
             actor,
             &actor_visible_counts(round_state, actor),
         ),
+        score_before_action: round_state.scores[actor],
+        final_score_delta_points_target: 0,
+        final_rank_target: 0,
         event_index,
     }))
 }
@@ -426,6 +453,19 @@ pub fn build_replay_decision_records_mc_return(
         0.99,
     ) {
         apply_round_target_updates(&mut records, &updates);
+    }
+
+    let game_start_oya = round_state.game_start_oya.clamp(0, 3) as usize;
+    let final_rank_targets = final_rank_targets(&round_state.scores, game_start_oya);
+    for record in &mut records {
+        if record.actor < 4 {
+            record.final_score_delta_points_target =
+                round_state.scores[record.actor] - record.score_before_action;
+            record.final_rank_target = final_rank_targets[record.actor];
+        } else {
+            record.final_score_delta_points_target = 0;
+            record.final_rank_target = 0;
+        }
     }
 
     Ok(records)

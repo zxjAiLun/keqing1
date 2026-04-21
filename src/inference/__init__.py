@@ -21,6 +21,14 @@ from inference.review import (
     summarize_reach_followup,
 )
 from inference.scoring import ActionScorer, DefaultActionScorer
+from inference.pt_map import (
+    expected_pt_for_all_seats,
+    expected_pt_for_scores,
+    expected_pt_from_rank_probs,
+    placement_utility_from_outputs,
+    pt_for_rank,
+    validate_pt_map,
+)
 
 __all__ = [
     "ActionScorer",
@@ -30,6 +38,10 @@ __all__ = [
     "DefaultDecisionContextBuilder",
     "DefaultRuntimeReviewExporter",
     "DefaultActionScorer",
+    "expected_pt_for_all_seats",
+    "expected_pt_for_scores",
+    "expected_pt_from_rank_probs",
+    "placement_utility_from_outputs",
     "InferenceAdapter",
     "KeqingModelAdapter",
     "ModelAuxOutputs",
@@ -44,4 +56,6 @@ __all__ = [
     "same_action",
     "summarize_decision_matches",
     "summarize_reach_followup",
+    "pt_for_rank",
+    "validate_pt_map",
 ]

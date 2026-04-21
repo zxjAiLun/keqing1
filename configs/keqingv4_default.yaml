@@ -40,6 +40,14 @@ opp_tenpai_loss_weight: 0.25
 mc_reg_loss_weight: 0.01
 typed_rank_loss_weight: 0.15
 typed_rank_margin: 0.20
+placement:
+  rank_loss_weight: 0.05
+  final_score_delta_loss_weight: 0.05
+  rank_pt_value_loss_weight: 0.0
+  rank_bonus: [90.0, 45.0, 0.0, -135.0]
+  rank_bonus_norm: 90.0
+  rank_score_scale: 0.0
+  score_norm: 30000.0
 reach_opportunity_weight: 1.5
 call_opportunity_weight: 1.5
 hora_opportunity_weight: 2.0

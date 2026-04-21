@@ -15,23 +15,7 @@ import torch.nn as nn
 
 from mahjong_env.action_space import ACTION_SPACE
 from training.cache_schema import XMODEL1_HISTORY_SUMMARY_DIM
-from xmodel1.schema import (
-    XMODEL1_CHI_SPECIAL_TYPES,
-    XMODEL1_KAN_SPECIAL_TYPES,
-    XMODEL1_MAX_SPECIAL_CANDIDATES,
-    XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
-    XMODEL1_SPECIAL_TYPE_ANKAN,
-    XMODEL1_SPECIAL_TYPE_CHI_HIGH,
-    XMODEL1_SPECIAL_TYPE_CHI_LOW,
-    XMODEL1_SPECIAL_TYPE_CHI_MID,
-    XMODEL1_SPECIAL_TYPE_DAIMINKAN,
-    XMODEL1_SPECIAL_TYPE_HORA,
-    XMODEL1_SPECIAL_TYPE_KAKAN,
-    XMODEL1_SPECIAL_TYPE_NONE,
-    XMODEL1_SPECIAL_TYPE_PON,
-    XMODEL1_SPECIAL_TYPE_REACH,
-    XMODEL1_SPECIAL_TYPE_RYUKYOKU,
-)
+from xmodel1.schema import XMODEL1_MAX_RESPONSE_CANDIDATES
 
 
 @dataclass
@@ -47,13 +31,16 @@ class Xmodel1Output:
     """
 
     discard_logits: torch.Tensor
-    special_logits: torch.Tensor
+    response_logits: torch.Tensor
+    response_post_logits: torch.Tensor
     action_logits: torch.Tensor
     win_logit: torch.Tensor
     dealin_logit: torch.Tensor
     pts_given_win: torch.Tensor
     pts_given_dealin: torch.Tensor
     opp_tenpai_logits: torch.Tensor
+    rank_logits: torch.Tensor
+    final_score_delta: torch.Tensor
 
 
 class ResidualBlock(nn.Module):
@@ -81,7 +68,6 @@ class Xmodel1Model(nn.Module):
         state_scalar_dim: int,
         candidate_feature_dim: int,
         candidate_flag_dim: int,
-        special_candidate_feature_dim: int = XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
         hidden_dim: int = 256,
         num_res_blocks: int = 4,
         dropout: float = 0.1,
@@ -91,7 +77,6 @@ class Xmodel1Model(nn.Module):
         self.state_scalar_dim = state_scalar_dim
         self.candidate_feature_dim = candidate_feature_dim
         self.candidate_flag_dim = candidate_flag_dim
-        self.special_candidate_feature_dim = special_candidate_feature_dim
         self.hidden_dim = hidden_dim
         self.action_space = ACTION_SPACE
 
@@ -134,15 +119,15 @@ class Xmodel1Model(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, 1),
         )
-        self.special_type_embed = nn.Embedding(13, 8, padding_idx=0)
-        special_in_dim = special_candidate_feature_dim + 8
-        self.special_proj = nn.Sequential(
-            nn.Linear(special_in_dim, hidden_dim // 2),
+        self.response_action_embed = nn.Embedding(46, 16, padding_idx=0)
+        response_in_dim = 16 + hidden_dim // 2 + 4
+        self.response_proj = nn.Sequential(
+            nn.Linear(response_in_dim, hidden_dim // 2),
             nn.Mish(),
             nn.Linear(hidden_dim // 2, hidden_dim // 2),
             nn.Mish(),
         )
-        self.special_score_head = nn.Sequential(
+        self.response_score_head = nn.Sequential(
             nn.Linear(hidden_dim + hidden_dim // 2 + hidden_dim // 2, hidden_dim),
             nn.Mish(),
             nn.Dropout(dropout),
@@ -178,6 +163,20 @@ class Xmodel1Model(nn.Module):
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.Mish(),
             nn.Linear(hidden_dim // 2, 3),
+        )
+        self.placement_stream = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Mish(),
+        )
+        self.rank_logits_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Mish(),
+            nn.Linear(hidden_dim // 2, 4),
+        )
+        self.final_score_delta_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Mish(),
+            nn.Linear(hidden_dim // 2, 1),
         )
 
         self._init_weights()
@@ -235,9 +234,12 @@ class Xmodel1Model(nn.Module):
         candidate_tile_id: torch.Tensor | None = None,
         candidate_flags: torch.Tensor | None = None,
         candidate_mask: torch.Tensor | None = None,
-        special_candidate_feat: torch.Tensor | None = None,
-        special_candidate_type_id: torch.Tensor | None = None,
-        special_candidate_mask: torch.Tensor | None = None,
+        response_action_idx: torch.Tensor | None = None,
+        response_action_mask: torch.Tensor | None = None,
+        response_post_candidate_feat: torch.Tensor | None = None,
+        response_post_candidate_tile_id: torch.Tensor | None = None,
+        response_post_candidate_mask: torch.Tensor | None = None,
+        response_post_candidate_flags: torch.Tensor | None = None,
         history_summary: torch.Tensor | None = None,
     ) -> Xmodel1Output:
         # Legacy 5-arg path:
@@ -287,51 +289,182 @@ class Xmodel1Model(nn.Module):
         score_input = torch.cat([state_expand, candidate_embed, interaction], dim=-1)
         discard_logits = self.score_head(score_input).squeeze(-1)
         discard_logits = discard_logits.masked_fill(candidate_mask <= 0, -1e4)
-        if (
-            special_candidate_feat is None
-            or special_candidate_type_id is None
-            or special_candidate_mask is None
-        ):
-            batch_size = state_embed.shape[0]
-            device = state_embed.device
-            special_candidate_feat = torch.zeros(
-                (batch_size, XMODEL1_MAX_SPECIAL_CANDIDATES, self.special_candidate_feature_dim),
-                device=device,
-                dtype=state_embed.dtype,
-            )
-            special_candidate_type_id = torch.full(
-                (batch_size, XMODEL1_MAX_SPECIAL_CANDIDATES),
+        batch_size = state_embed.shape[0]
+        device = state_embed.device
+        if response_action_idx is None or response_action_mask is None:
+            response_action_idx = torch.full(
+                (batch_size, XMODEL1_MAX_RESPONSE_CANDIDATES),
                 -1,
                 device=device,
                 dtype=torch.long,
             )
-            special_candidate_mask = torch.zeros((batch_size, XMODEL1_MAX_SPECIAL_CANDIDATES), device=device, dtype=torch.uint8)
-        special_type_ids = special_candidate_type_id.long().clamp(min=-1, max=11) + 1
-        special_type_embed = self.special_type_embed(special_type_ids)
-        special_input = torch.cat([special_candidate_feat, special_type_embed], dim=-1)
-        special_embed = self.special_proj(special_input)
-        special_state_expand = state_embed.unsqueeze(1).expand(
-            special_embed.shape[0],
-            special_embed.shape[1],
+            response_action_mask = torch.zeros(
+                (batch_size, XMODEL1_MAX_RESPONSE_CANDIDATES),
+                device=device,
+                dtype=torch.uint8,
+            )
+        if response_post_candidate_feat is None:
+            response_post_candidate_feat = torch.zeros(
+                (
+                    batch_size,
+                    XMODEL1_MAX_RESPONSE_CANDIDATES,
+                    candidate_feat.shape[1],
+                    self.candidate_feature_dim,
+                ),
+                device=device,
+                dtype=state_embed.dtype,
+            )
+        if response_post_candidate_tile_id is None:
+            response_post_candidate_tile_id = torch.full(
+                (
+                    batch_size,
+                    XMODEL1_MAX_RESPONSE_CANDIDATES,
+                    candidate_feat.shape[1],
+                ),
+                34,
+                device=device,
+                dtype=torch.long,
+            )
+        if response_post_candidate_mask is None:
+            response_post_candidate_mask = torch.zeros(
+                (
+                    batch_size,
+                    XMODEL1_MAX_RESPONSE_CANDIDATES,
+                    candidate_feat.shape[1],
+                ),
+                device=device,
+                dtype=torch.uint8,
+            )
+        if response_post_candidate_flags is None:
+            response_post_candidate_flags = torch.zeros(
+                (
+                    batch_size,
+                    XMODEL1_MAX_RESPONSE_CANDIDATES,
+                    candidate_feat.shape[1],
+                    self.candidate_flag_dim,
+                ),
+                device=device,
+                dtype=torch.uint8,
+            )
+        if response_post_candidate_feat.dtype == torch.float16 and response_post_candidate_feat.device.type != "cuda":
+            response_post_candidate_feat = response_post_candidate_feat.float()
+        response_action_ids = response_action_idx.long().clamp(min=-1, max=44) + 1
+        response_action_embed = self.response_action_embed(response_action_ids)
+        response_post_tile_embed = self.tile_embed(
+            response_post_candidate_tile_id.long().clamp(min=0, max=34)
+        )
+        response_post_input = torch.cat(
+            [
+                response_post_candidate_feat,
+                response_post_candidate_flags.float(),
+                response_post_tile_embed,
+            ],
+            dim=-1,
+        )
+        flat_post_input = response_post_input.reshape(
+            batch_size * XMODEL1_MAX_RESPONSE_CANDIDATES,
+            response_post_input.shape[2],
+            response_post_input.shape[3],
+        )
+        flat_post_embed = self.candidate_proj(flat_post_input).reshape(
+            batch_size,
+            XMODEL1_MAX_RESPONSE_CANDIDATES,
+            response_post_input.shape[2],
+            -1,
+        )
+        flat_state_expand = state_embed.unsqueeze(1).unsqueeze(2).expand(
+            batch_size,
+            XMODEL1_MAX_RESPONSE_CANDIDATES,
+            response_post_input.shape[2],
             state_embed.shape[-1],
         )
-        special_interaction = special_state_expand[..., : special_embed.shape[-1]] * special_embed
-        special_score_input = torch.cat([special_state_expand, special_embed, special_interaction], dim=-1)
-        special_logits = self.special_score_head(special_score_input).squeeze(-1)
-        special_logits = special_logits.masked_fill(special_candidate_mask <= 0, -1e4)
+        flat_post_interaction = flat_state_expand[..., : flat_post_embed.shape[-1]] * flat_post_embed
+        flat_post_score_input = torch.cat(
+            [flat_state_expand, flat_post_embed, flat_post_interaction],
+            dim=-1,
+        ).reshape(
+            batch_size * XMODEL1_MAX_RESPONSE_CANDIDATES,
+            response_post_input.shape[2],
+            state_embed.shape[-1] + flat_post_embed.shape[-1] * 2,
+        )
+        response_post_logits = self.score_head(flat_post_score_input).squeeze(-1).reshape(
+            batch_size,
+            XMODEL1_MAX_RESPONSE_CANDIDATES,
+            response_post_input.shape[2],
+        )
+        response_post_logits = response_post_logits.masked_fill(
+            response_post_candidate_mask <= 0,
+            -1e4,
+        )
+        post_valid = response_post_candidate_mask > 0
+        post_valid_f = post_valid.float()
+        post_count = post_valid_f.sum(dim=-1, keepdim=True)
+        pooled_post_embed = (
+            flat_post_embed * post_valid_f.unsqueeze(-1)
+        ).sum(dim=-2) / post_count.clamp_min(1.0)
+        pooled_post_embed = torch.where(
+            post_count > 0,
+            pooled_post_embed,
+            torch.zeros_like(pooled_post_embed),
+        )
+        safe_post_logits = response_post_logits.masked_fill(~post_valid, -1e4)
+        best_post_logit = safe_post_logits.max(dim=-1).values
+        best_post_logit = torch.where(
+            post_valid.any(dim=-1),
+            best_post_logit,
+            torch.zeros_like(best_post_logit),
+        )
+        mean_post_logit = (
+            response_post_logits.masked_fill(~post_valid, 0.0).sum(dim=-1)
+            / post_count.squeeze(-1).clamp_min(1.0)
+        )
+        mean_post_logit = torch.where(
+            post_valid.any(dim=-1),
+            mean_post_logit,
+            torch.zeros_like(mean_post_logit),
+        )
+        post_count_norm = post_count.squeeze(-1) / float(response_post_input.shape[2])
+        has_post = post_valid.any(dim=-1).float()
+        response_input = torch.cat(
+            [
+                response_action_embed,
+                pooled_post_embed,
+                best_post_logit.unsqueeze(-1),
+                mean_post_logit.unsqueeze(-1),
+                post_count_norm.unsqueeze(-1),
+                has_post.unsqueeze(-1),
+            ],
+            dim=-1,
+        )
+        response_embed = self.response_proj(response_input)
+        response_state_expand = state_embed.unsqueeze(1).expand(
+            response_embed.shape[0],
+            response_embed.shape[1],
+            state_embed.shape[-1],
+        )
+        response_interaction = response_state_expand[..., : response_embed.shape[-1]] * response_embed
+        response_score_input = torch.cat(
+            [response_state_expand, response_embed, response_interaction],
+            dim=-1,
+        )
+        response_logits = self.response_score_head(response_score_input).squeeze(-1)
+        response_logits = response_logits.masked_fill(response_action_mask <= 0, -1e4)
         action_logits = self.to_action_logits(
             discard_logits,
             candidate_tile_id,
             candidate_mask,
-            special_logits,
-            special_candidate_type_id,
-            special_candidate_mask,
+            response_logits,
+            response_action_idx,
+            response_action_mask,
         )
         win_logit = self.win_head(state_embed)
         dealin_logit = self.dealin_head(state_embed)
         pts_given_win = self.pts_given_win_head(state_embed)
         pts_given_dealin = self.pts_given_dealin_head(state_embed)
         opp_tenpai_logits = self.opp_tenpai_head(state_embed)
+        placement_embed = self.placement_stream(state_embed)
+        rank_logits = self.rank_logits_head(placement_embed)
+        final_score_delta = self.final_score_delta_head(placement_embed)
         composed_ev = torch.sigmoid(win_logit) * pts_given_win - torch.sigmoid(dealin_logit) * pts_given_dealin
         self._last_aux_outputs = {
             "score_delta": composed_ev,
@@ -341,17 +474,22 @@ class Xmodel1Model(nn.Module):
             "pts_given_win": pts_given_win,
             "pts_given_dealin": pts_given_dealin,
             "opp_tenpai_logits": opp_tenpai_logits,
+            "rank_logits": rank_logits,
+            "final_score_delta": final_score_delta,
         }
 
         return Xmodel1Output(
             discard_logits=discard_logits,
-            special_logits=special_logits,
+            response_logits=response_logits,
+            response_post_logits=response_post_logits,
             action_logits=action_logits,
             win_logit=win_logit,
             dealin_logit=dealin_logit,
             pts_given_win=pts_given_win,
             pts_given_dealin=pts_given_dealin,
             opp_tenpai_logits=opp_tenpai_logits,
+            rank_logits=rank_logits,
+            final_score_delta=final_score_delta,
         )
 
     def to_action_logits(
@@ -359,9 +497,9 @@ class Xmodel1Model(nn.Module):
         discard_logits: torch.Tensor,
         candidate_tile_id: torch.Tensor,
         candidate_mask: torch.Tensor,
-        special_logits: torch.Tensor | None = None,
-        special_candidate_type_id: torch.Tensor | None = None,
-        special_candidate_mask: torch.Tensor | None = None,
+        response_logits: torch.Tensor | None = None,
+        response_action_idx: torch.Tensor | None = None,
+        response_action_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         valid_mask = (candidate_mask > 0) & (candidate_tile_id >= 0) & (candidate_tile_id < 34)
         discard_action_logits = []
@@ -372,26 +510,14 @@ class Xmodel1Model(nn.Module):
         non_discard_logits = discard_logits.new_full((discard_logits.shape[0], self.action_space - 34), -1e4)
         action_logits = torch.cat([torch.stack(discard_action_logits, dim=1), non_discard_logits], dim=1)
         if (
-            special_logits is not None
-            and special_candidate_type_id is not None
-            and special_candidate_mask is not None
+            response_logits is not None
+            and response_action_idx is not None
+            and response_action_mask is not None
         ):
-            valid_special = special_candidate_mask > 0
-            for special_type, action_idx in (
-                (XMODEL1_SPECIAL_TYPE_REACH, 34),
-                (XMODEL1_SPECIAL_TYPE_CHI_LOW, 35),
-                (XMODEL1_SPECIAL_TYPE_CHI_MID, 36),
-                (XMODEL1_SPECIAL_TYPE_CHI_HIGH, 37),
-                (XMODEL1_SPECIAL_TYPE_PON, 38),
-                (XMODEL1_SPECIAL_TYPE_DAIMINKAN, 39),
-                (XMODEL1_SPECIAL_TYPE_ANKAN, 40),
-                (XMODEL1_SPECIAL_TYPE_KAKAN, 41),
-                (XMODEL1_SPECIAL_TYPE_HORA, 42),
-                (XMODEL1_SPECIAL_TYPE_RYUKYOKU, 43),
-                (XMODEL1_SPECIAL_TYPE_NONE, 44),
-            ):
-                slot_mask = valid_special & (special_candidate_type_id == special_type)
-                score = special_logits.masked_fill(~slot_mask, -1e4).max(dim=1).values
+            valid_response = response_action_mask > 0
+            for action_idx in range(34, self.action_space):
+                slot_mask = valid_response & (response_action_idx == action_idx)
+                score = response_logits.masked_fill(~slot_mask, -1e4).max(dim=1).values
                 action_logits[:, action_idx] = score
         return action_logits
 

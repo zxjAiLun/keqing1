@@ -20,14 +20,6 @@ from xmodel1.checkpoint import (
     validate_xmodel1_checkpoint_metadata,
 )
 from xmodel1.model import Xmodel1Model
-from xmodel1.schema import (
-    XMODEL1_CHI_SPECIAL_TYPES,
-    XMODEL1_KAN_SPECIAL_TYPES,
-    XMODEL1_SPECIAL_TYPE_DAMA,
-    XMODEL1_SPECIAL_TYPE_NONE,
-    XMODEL1_SPECIAL_TYPE_PON,
-    XMODEL1_SPECIAL_TYPE_REACH,
-)
 
 
 def _autocast_enabled(*, device: torch.device, is_train: bool, scaler) -> bool:
@@ -81,9 +73,11 @@ def _unpack_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]
         if key in {
             "candidate_tile_id",
             "chosen_candidate_idx",
-            "special_candidate_type_id",
-            "chosen_special_candidate_idx",
+            "response_action_idx",
+            "chosen_response_action_idx",
+            "response_post_candidate_tile_id",
             "action_idx_target",
+            "final_rank_target",
         }:
             moved = moved.long()
         out[key] = moved
@@ -113,7 +107,7 @@ def _resolve_pts_given_targets(batch: dict[str, torch.Tensor]) -> tuple[torch.Te
     pts_given_win_target = batch.get("pts_given_win_target")
     pts_given_dealin_target = batch.get("pts_given_dealin_target")
     if pts_given_win_target is None or pts_given_dealin_target is None:
-        raise ValueError("Xmodel1 v3 batches require pts_given_win_target and pts_given_dealin_target")
+        raise ValueError("Xmodel1 batches require pts_given_win_target and pts_given_dealin_target")
     return pts_given_win_target.float(), pts_given_dealin_target.float()
 
 
@@ -141,7 +135,7 @@ def _hard_bad_penalty(
     return (chosen_logits.relu() * chosen_hard_bad * valid).mean()
 
 
-def _special_candidate_ce_loss(
+def _response_candidate_ce_loss(
     logits: torch.Tensor,
     chosen_idx: torch.Tensor,
     mask: torch.Tensor,
@@ -153,126 +147,67 @@ def _special_candidate_ce_loss(
     return F.cross_entropy(masked_logits, chosen_idx[valid_rows].long())
 
 
-def _pairwise_margin_loss(
-    pos_logits: torch.Tensor,
-    neg_logits: torch.Tensor,
-    *,
-    margin: float,
+def _response_post_teacher_ce_loss(
+    response_post_logits: torch.Tensor,
+    chosen_response_idx: torch.Tensor,
+    response_teacher_discard_idx: torch.Tensor,
+    response_action_mask: torch.Tensor,
+    response_post_candidate_mask: torch.Tensor,
 ) -> torch.Tensor:
-    if pos_logits.numel() == 0:
-        return pos_logits.new_tensor(0.0)
-    return F.relu(margin - (pos_logits - neg_logits)).mean()
+    valid_rows = (chosen_response_idx >= 0) & (response_action_mask.sum(dim=-1) > 0)
+    if not torch.any(valid_rows):
+        return response_post_logits.new_tensor(0.0)
+    row_idx = torch.nonzero(valid_rows, as_tuple=False).flatten()
+    chosen_slots = chosen_response_idx[valid_rows].long()
+    slot_logits = response_post_logits[row_idx, chosen_slots]
+    slot_mask = response_post_candidate_mask[row_idx, chosen_slots]
+    slot_teacher = response_teacher_discard_idx[row_idx, chosen_slots]
+    valid_teacher = (slot_teacher >= 0) & (slot_mask.sum(dim=-1) > 0)
+    if not torch.any(valid_teacher):
+        return response_post_logits.new_tensor(0.0)
+    masked_logits = slot_logits[valid_teacher].float().masked_fill(slot_mask[valid_teacher] <= 0, -1e4)
+    return F.cross_entropy(masked_logits, slot_teacher[valid_teacher].long())
 
 
-def _special_comparison_losses(
-    special_logits: torch.Tensor,
-    special_type_id: torch.Tensor,
-    special_mask: torch.Tensor,
-    chosen_special_idx: torch.Tensor,
-    special_hard_bad_flag: torch.Tensor,
-    *,
-    margin: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    device = special_logits.device
-    valid = (special_mask > 0) & (special_type_id >= 0)
-    chosen_valid = (chosen_special_idx >= 0) & (valid.sum(dim=-1) > 0)
-    zero = torch.tensor(0.0, device=device)
-    if not torch.any(chosen_valid):
-        return zero, zero
-
-    reach_losses: list[torch.Tensor] = []
-    call_losses: list[torch.Tensor] = []
-    call_family_mask = (
-        torch.isin(special_type_id, torch.tensor(XMODEL1_CHI_SPECIAL_TYPES, device=device))
-        | (special_type_id == XMODEL1_SPECIAL_TYPE_PON)
-        | torch.isin(special_type_id, torch.tensor(XMODEL1_KAN_SPECIAL_TYPES, device=device))
-    ) & valid
-    none_mask = (special_type_id == XMODEL1_SPECIAL_TYPE_NONE) & valid
-    reach_mask = (special_type_id == XMODEL1_SPECIAL_TYPE_REACH) & valid
-    dama_mask = (special_type_id == XMODEL1_SPECIAL_TYPE_DAMA) & valid
-
-    for row in range(special_logits.shape[0]):
-        if not bool(chosen_valid[row]):
-            continue
-        chosen = int(chosen_special_idx[row].item())
-        reach_slots = torch.nonzero(reach_mask[row], as_tuple=False).flatten()
-        dama_slots = torch.nonzero(dama_mask[row], as_tuple=False).flatten()
-        if reach_slots.numel() > 0 and dama_slots.numel() > 0:
-            reach_slot = int(reach_slots[0].item())
-            dama_slot = int(dama_slots[0].item())
-            if chosen == reach_slot:
-                reach_losses.append(
-                    _pairwise_margin_loss(
-                        special_logits[row, reach_slot].unsqueeze(0),
-                        special_logits[row, dama_slot].unsqueeze(0),
-                        margin=margin,
-                    )
-                )
-            elif chosen == dama_slot:
-                reach_losses.append(
-                    _pairwise_margin_loss(
-                        special_logits[row, dama_slot].unsqueeze(0),
-                        special_logits[row, reach_slot].unsqueeze(0),
-                        margin=margin,
-                    )
-                )
-
-        none_slots = torch.nonzero(none_mask[row], as_tuple=False).flatten()
-        call_slots = torch.nonzero(call_family_mask[row], as_tuple=False).flatten()
-        if none_slots.numel() > 0 and call_slots.numel() > 0:
-            none_slot = int(none_slots[0].item())
-            chosen_type = int(special_type_id[row, chosen].item()) if chosen < special_type_id.shape[1] else -1
-            if chosen_type in {*XMODEL1_CHI_SPECIAL_TYPES, XMODEL1_SPECIAL_TYPE_PON, *XMODEL1_KAN_SPECIAL_TYPES}:
-                call_losses.append(
-                    _pairwise_margin_loss(
-                        special_logits[row, chosen].unsqueeze(0),
-                        special_logits[row, none_slot].unsqueeze(0),
-                        margin=margin,
-                    )
-                )
-            elif chosen == none_slot:
-                call_scores = special_logits[row].masked_fill(~call_family_mask[row], -1e4)
-                best_call_idx = int(call_scores.argmax().item())
-                best_call_hard_bad = float(special_hard_bad_flag[row, best_call_idx].item())
-                if best_call_hard_bad > 0.5:
-                    call_losses.append(
-                        _pairwise_margin_loss(
-                            special_logits[row, none_slot].unsqueeze(0),
-                            special_logits[row, best_call_idx].unsqueeze(0),
-                            margin=margin,
-                        )
-                    )
-
-    reach_loss = torch.stack(reach_losses).mean() if reach_losses else zero
-    call_loss = torch.stack(call_losses).mean() if call_losses else zero
-    return reach_loss, call_loss
+def _response_post_ranking_loss(
+    response_post_logits: torch.Tensor,
+    response_post_teacher_scores: torch.Tensor,
+    chosen_response_idx: torch.Tensor,
+    response_action_mask: torch.Tensor,
+    response_post_candidate_mask: torch.Tensor,
+) -> torch.Tensor:
+    valid_rows = (chosen_response_idx >= 0) & (response_action_mask.sum(dim=-1) > 0)
+    if not torch.any(valid_rows):
+        return response_post_logits.new_tensor(0.0)
+    row_idx = torch.nonzero(valid_rows, as_tuple=False).flatten()
+    chosen_slots = chosen_response_idx[valid_rows].long()
+    slot_logits = response_post_logits[row_idx, chosen_slots]
+    slot_teacher_scores = response_post_teacher_scores[row_idx, chosen_slots]
+    slot_mask = response_post_candidate_mask[row_idx, chosen_slots]
+    valid_teacher = slot_mask.sum(dim=-1) > 0
+    if not torch.any(valid_teacher):
+        return response_post_logits.new_tensor(0.0)
+    return _candidate_ranking_loss(
+        slot_logits[valid_teacher],
+        slot_teacher_scores[valid_teacher],
+        slot_mask[valid_teacher],
+    )
 
 
 def _build_action_mask(
     candidate_tile_id: torch.Tensor,
     candidate_mask: torch.Tensor,
-    special_type_id: torch.Tensor,
-    special_mask: torch.Tensor,
+    response_action_idx: torch.Tensor,
+    response_action_mask: torch.Tensor,
 ) -> torch.Tensor:
     batch = candidate_tile_id.shape[0]
     action_mask = torch.zeros((batch, 45), dtype=torch.uint8, device=candidate_tile_id.device)
     valid_discard = (candidate_mask > 0) & (candidate_tile_id >= 0) & (candidate_tile_id < 34)
     for tile_id in range(34):
         action_mask[:, tile_id] = (valid_discard & (candidate_tile_id == tile_id)).any(dim=1).to(torch.uint8)
-    for special_type, action_idx in (
-        (0, 34),
-        (3, 35),
-        (4, 36),
-        (5, 37),
-        (6, 38),
-        (7, 39),
-        (8, 40),
-        (9, 41),
-        (2, 42),
-        (10, 43),
-        (11, 44),
-    ):
-        action_mask[:, action_idx] = ((special_mask > 0) & (special_type_id == special_type)).any(dim=1).to(torch.uint8)
+    valid_response = (response_action_mask > 0) & (response_action_idx >= 34) & (response_action_idx < 45)
+    for action_idx in range(34, 45):
+        action_mask[:, action_idx] = (valid_response & (response_action_idx == action_idx)).any(dim=1).to(torch.uint8)
     return action_mask
 
 
@@ -290,9 +225,12 @@ class _Xmodel1TrainWrapper(nn.Module):
             model_kwargs["candidate_tile_id"],
             model_kwargs["candidate_flags"],
             model_kwargs["candidate_mask"],
-            model_kwargs.get("special_candidate_feat"),
-            model_kwargs.get("special_candidate_type_id"),
-            model_kwargs.get("special_candidate_mask"),
+            model_kwargs.get("response_action_idx"),
+            model_kwargs.get("response_action_mask"),
+            model_kwargs.get("response_post_candidate_feat"),
+            model_kwargs.get("response_post_candidate_tile_id"),
+            model_kwargs.get("response_post_candidate_mask"),
+            model_kwargs.get("response_post_candidate_flags"),
             history_summary=model_kwargs.get("history_summary"),
         )
         self._last_output = out
@@ -316,10 +254,11 @@ class _Xmodel1TrainWrapper(nn.Module):
 
 def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
     ce_loss_weight = float(cfg.get("ce_loss_weight", 1.0))
-    special_ce_loss_weight = float(cfg.get("special_ce_loss_weight", 0.25))
-    special_rank_loss_weight = float(cfg.get("special_rank_loss_weight", 0.25))
-    reach_pair_loss_weight = float(cfg.get("reach_pair_loss_weight", 0.2))
-    call_pair_loss_weight = float(cfg.get("call_pair_loss_weight", 0.2))
+    response_ce_loss_weight = float(cfg.get("response_ce_loss_weight", cfg.get("special_ce_loss_weight", 0.25)))
+    response_post_ce_loss_weight = float(
+        cfg.get("response_post_ce_loss_weight", cfg.get("special_rank_loss_weight", 0.25))
+    )
+    response_post_rank_loss_weight = float(cfg.get("response_post_rank_loss_weight", 0.15))
     rank_loss_weight = float(cfg.get("rank_loss_weight", 0.5))
     hard_bad_loss_weight = float(cfg.get("hard_bad_loss_weight", 0.25))
     win_loss_weight = float(cfg.get("win_loss_weight", 0.5))
@@ -327,21 +266,49 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
     pts_win_loss_weight = float(cfg.get("pts_win_loss_weight", 0.3))
     pts_dealin_loss_weight = float(cfg.get("pts_dealin_loss_weight", 0.3))
     opp_tenpai_loss_weight = float(cfg.get("opp_tenpai_loss_weight", 0.25))
-    special_margin = float(cfg.get("special_pair_margin", 0.25))
+    placement_cfg = cfg.get("placement", {})
+    final_rank_loss_weight = float(
+        placement_cfg.get("rank_loss_weight", cfg.get("final_rank_loss_weight", 0.05))
+    )
+    final_score_delta_loss_weight = float(
+        placement_cfg.get(
+            "final_score_delta_loss_weight",
+            cfg.get("final_score_delta_loss_weight", 0.05),
+        )
+    )
+    rank_pt_loss_weight = float(
+        placement_cfg.get(
+            "rank_pt_value_loss_weight",
+            cfg.get("rank_pt_value_loss_weight", 0.01),
+        )
+    )
+    rank_bonus = placement_cfg.get(
+        "rank_bonus",
+        cfg.get("rank_bonus", [90.0, 45.0, 0.0, -135.0]),
+    )
+    rank_bonus_norm = float(
+        placement_cfg.get("rank_bonus_norm", cfg.get("rank_bonus_norm", 90.0))
+    )
+    rank_score_scale = float(
+        placement_cfg.get("rank_score_scale", cfg.get("rank_score_scale", 0.0))
+    )
+    score_norm = float(
+        placement_cfg.get("score_norm", cfg.get("score_norm", 30000.0))
+    )
 
     def unpack_batch(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, Any]:
         moved = _unpack_batch(batch, device)
         candidate_tile_id = moved["candidate_tile_id"]
         candidate_mask = moved["candidate_mask"]
-        special_type_id = moved["special_candidate_type_id"]
-        special_mask = moved["special_candidate_mask"]
+        response_action_idx = moved["response_action_idx"]
+        response_action_mask = moved["response_action_mask"]
         moved["tile_feat"] = moved["state_tile_feat"]
         moved["scalar"] = moved["state_scalar"]
         moved["mask"] = _build_action_mask(
             candidate_tile_id,
             candidate_mask,
-            special_type_id,
-            special_mask,
+            response_action_idx,
+            response_action_mask,
         )
         moved["action_idx"] = moved["action_idx_target"].long()
         moved["value_target"] = (
@@ -353,9 +320,12 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
             "candidate_tile_id": moved["candidate_tile_id"],
             "candidate_flags": moved["candidate_flags"],
             "candidate_mask": moved["candidate_mask"],
-            "special_candidate_feat": moved.get("special_candidate_feat"),
-            "special_candidate_type_id": moved.get("special_candidate_type_id"),
-            "special_candidate_mask": moved.get("special_candidate_mask"),
+            "response_action_idx": moved.get("response_action_idx"),
+            "response_action_mask": moved.get("response_action_mask"),
+            "response_post_candidate_feat": moved.get("response_post_candidate_feat"),
+            "response_post_candidate_tile_id": moved.get("response_post_candidate_tile_id"),
+            "response_post_candidate_mask": moved.get("response_post_candidate_mask"),
+            "response_post_candidate_flags": moved.get("response_post_candidate_flags"),
             "history_summary": moved.get("history_summary"),
         }
         return moved
@@ -375,10 +345,10 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
             out.action_logits.float().masked_fill(batch_data["mask"] <= 0, -1e4),
             batch_data["action_idx"],
         )
-        special_ce_loss = _special_candidate_ce_loss(
-            out.special_logits,
-            batch_data["chosen_special_candidate_idx"],
-            batch_data["special_candidate_mask"],
+        response_ce_loss = _response_candidate_ce_loss(
+            out.response_logits,
+            batch_data["chosen_response_action_idx"],
+            batch_data["response_action_mask"],
         )
         rank_loss = (
             _candidate_ranking_loss(
@@ -389,18 +359,19 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
             if torch.any(discard_rows)
             else out.discard_logits.new_tensor(0.0)
         )
-        special_rank_loss = _candidate_ranking_loss(
-            out.special_logits,
-            batch_data["special_candidate_quality_score"],
-            batch_data["special_candidate_mask"],
+        response_post_ce_loss = _response_post_teacher_ce_loss(
+            out.response_post_logits,
+            batch_data["chosen_response_action_idx"],
+            batch_data["response_teacher_discard_idx"],
+            batch_data["response_action_mask"],
+            batch_data["response_post_candidate_mask"],
         )
-        reach_pair_loss, call_pair_loss = _special_comparison_losses(
-            out.special_logits.float(),
-            batch_data["special_candidate_type_id"],
-            batch_data["special_candidate_mask"],
-            batch_data["chosen_special_candidate_idx"],
-            batch_data["special_candidate_hard_bad_flag"].float(),
-            margin=special_margin,
+        response_post_rank_loss = _response_post_ranking_loss(
+            out.response_post_logits,
+            batch_data["response_post_candidate_quality_score"],
+            batch_data["chosen_response_action_idx"],
+            batch_data["response_action_mask"],
+            batch_data["response_post_candidate_mask"],
         )
         hard_bad_loss = (
             _hard_bad_penalty(
@@ -433,12 +404,33 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
                 out.opp_tenpai_logits.float(),
                 opp_tenpai_target.float(),
             )
+        final_rank_target = batch_data["final_rank_target"].long()
+        final_score_delta_target = (
+            batch_data["final_score_delta_points_target"].float() / score_norm
+        )
+        final_rank_loss = F.cross_entropy(out.rank_logits.float(), final_rank_target)
+        final_score_delta_loss = F.smooth_l1_loss(
+            out.final_score_delta.squeeze(-1).float(),
+            final_score_delta_target,
+        )
+        rank_bonus_t = (
+            torch.tensor(rank_bonus, dtype=torch.float32, device=out.rank_logits.device)
+            / max(rank_bonus_norm, 1e-6)
+        )
+        rank_probs = F.softmax(out.rank_logits.float(), dim=-1)
+        rank_pt_pred = (
+            (rank_probs * rank_bonus_t.unsqueeze(0)).sum(dim=-1)
+            + rank_score_scale * out.final_score_delta.squeeze(-1).float()
+        )
+        rank_pt_target = (
+            rank_bonus_t[final_rank_target] + rank_score_scale * final_score_delta_target
+        )
+        rank_pt_loss = F.smooth_l1_loss(rank_pt_pred, rank_pt_target)
         extra_loss = (
             ce_loss_weight * ce_loss
-            + special_ce_loss_weight * special_ce_loss
-            + special_rank_loss_weight * special_rank_loss
-            + reach_pair_loss_weight * reach_pair_loss
-            + call_pair_loss_weight * call_pair_loss
+            + response_ce_loss_weight * response_ce_loss
+            + response_post_ce_loss_weight * response_post_ce_loss
+            + response_post_rank_loss_weight * response_post_rank_loss
             + rank_loss_weight * rank_loss
             + hard_bad_loss_weight * hard_bad_loss
             + win_loss_weight * win_loss
@@ -446,6 +438,9 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
             + pts_win_loss_weight * pts_win_loss
             + pts_dealin_loss_weight * pts_dealin_loss
             + opp_tenpai_loss_weight * opp_tenpai_loss
+            + final_rank_loss_weight * final_rank_loss
+            + final_score_delta_loss_weight * final_score_delta_loss
+            + rank_pt_loss_weight * rank_pt_loss
         )
         discard_acc = (
             (out.discard_logits.argmax(dim=-1)[discard_rows] == batch_data["chosen_candidate_idx"][discard_rows]).float().mean().item()
@@ -458,13 +453,15 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
                 == batch_data["action_idx"]
             ).float().mean().item()
         )
+        final_rank_acc = (
+            (out.rank_logits.argmax(dim=-1) == final_rank_target).float().mean().item()
+        )
         return extra_loss, {
             "loss": float((extra_loss + action_ce_loss).item()),
             "action_ce": float(action_ce_loss.item()),
-            "special_ce": float(special_ce_loss.item()),
-            "special_rank": float(special_rank_loss.item()),
-            "reach_pair": float(reach_pair_loss.item()),
-            "call_pair": float(call_pair_loss.item()),
+            "response_ce": float(response_ce_loss.item()),
+            "response_post_ce": float(response_post_ce_loss.item()),
+            "response_post_rank": float(response_post_rank_loss.item()),
             "ce": float(ce_loss.item()),
             "rank": float(rank_loss.item()),
             "hard_bad": float(hard_bad_loss.item()),
@@ -473,8 +470,13 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
             "pts_win": float(pts_win_loss.item()),
             "pts_dealin": float(pts_dealin_loss.item()),
             "opp_tenpai": float(opp_tenpai_loss.item()),
+            "final_rank": float(final_rank_loss.item()),
+            "final_score_delta": float(final_score_delta_loss.item()),
+            "rank_pt": float(rank_pt_loss.item()),
             "acc": float(discard_acc),
             "action_acc": float(action_acc),
+            "final_rank_acc": float(final_rank_acc),
+            "rank_pt_value_mean": float(rank_pt_pred.mean().item()),
         }
 
     return TaskSpec(
@@ -484,10 +486,9 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
         log_metric_keys=(
             "loss",
             "action_ce",
-            "special_ce",
-            "special_rank",
-            "reach_pair",
-            "call_pair",
+            "response_ce",
+            "response_post_ce",
+            "response_post_rank",
             "ce",
             "rank",
             "hard_bad",
@@ -496,8 +497,13 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
             "pts_win",
             "pts_dealin",
             "opp_tenpai",
+            "final_rank",
+            "final_score_delta",
+            "rank_pt",
             "acc",
             "action_acc",
+            "final_rank_acc",
+            "rank_pt_value_mean",
         ),
         best_metric_name="objective",
         best_metric_mode="min",
@@ -529,23 +535,39 @@ def _rewrite_train_log(path: Path, *, cfg: dict[str, Any]) -> dict[str, Any] | N
             "loss": row["train_objective"],
             "ce": row["train_ce"],
             "action_ce": row.get("train_action_ce"),
-            "special_rank": row.get("train_special_rank"),
-            "reach_pair": row.get("train_reach_pair"),
-            "call_pair": row.get("train_call_pair"),
+            "response_ce": row.get("train_response_ce"),
+            "response_post_ce": row.get("train_response_post_ce"),
+            "response_post_rank": row.get("train_response_post_rank"),
             "acc": row.get("train_acc"),
             "action_acc": row.get("train_action_acc", row.get("train_acc")),
+            "final_rank_acc": row.get("train_final_rank_acc"),
+            "rank_pt_value_mean": row.get("train_rank_pt_value_mean"),
         }
         val = {
             "loss": row["val_objective"],
             "ce": row["val_ce"],
             "action_ce": row.get("val_action_ce"),
-            "special_rank": row.get("val_special_rank"),
-            "reach_pair": row.get("val_reach_pair"),
-            "call_pair": row.get("val_call_pair"),
+            "response_ce": row.get("val_response_ce"),
+            "response_post_ce": row.get("val_response_post_ce"),
+            "response_post_rank": row.get("val_response_post_rank"),
             "acc": row.get("val_acc"),
             "action_acc": row.get("val_action_acc", row.get("val_acc")),
+            "final_rank_acc": row.get("val_final_rank_acc"),
+            "rank_pt_value_mean": row.get("val_rank_pt_value_mean"),
         }
-        for key in ("special_ce", "ce", "rank", "hard_bad", "win", "dealin", "pts_win", "pts_dealin", "opp_tenpai"):
+        for key in (
+            "ce",
+            "rank",
+            "hard_bad",
+            "win",
+            "dealin",
+            "pts_win",
+            "pts_dealin",
+            "opp_tenpai",
+            "final_rank",
+            "final_score_delta",
+            "rank_pt",
+        ):
             train[key] = row.get(f"train_{key}")
             val[key] = row.get(f"val_{key}")
         train["num_batches"] = int(row.get("train_num_batches", cfg.get("steps_per_epoch", 0) or 0) or 0)

@@ -83,6 +83,8 @@ pub struct SnapshotCore {
     pub ura_dora_markers: Vec<String>,
     pub actor: usize,
     pub hand: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tsumo_pai: Option<String>,
     pub discards: Vec<Vec<DiscardEntry>>,
     pub melds: Vec<Vec<serde_json::Value>>,
     pub reached: Vec<bool>,

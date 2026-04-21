@@ -21,6 +21,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/xmodel1_default.yaml")
     parser.add_argument("--data-dirs", "--data_dirs", nargs="+", default=None)
     parser.add_argument("--output-dir", "--output_dir", default=None)
+    parser.add_argument("--limit-files", "--limit_files", type=int, default=None)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -62,10 +63,16 @@ def _validate_batch_gate(batch: dict, *, inferred_dims: dict[str, int] | None) -
         "state_tile_feat",
         "state_scalar",
         "candidate_feat",
+        "candidate_tile_id",
         "candidate_mask",
         "candidate_flags",
-        "special_candidate_feat",
-        "special_candidate_mask",
+        "response_action_idx",
+        "response_action_mask",
+        "response_post_candidate_feat",
+        "response_post_candidate_tile_id",
+        "response_post_candidate_mask",
+        "response_post_candidate_flags",
+        "response_teacher_discard_idx",
         "history_summary",
         "opp_tenpai_target",
         "pts_given_win_target",
@@ -80,7 +87,6 @@ def _validate_batch_gate(batch: dict, *, inferred_dims: dict[str, int] | None) -
     if inferred_dims is not None:
         expected_candidate_dim = int(inferred_dims["candidate_feature_dim"])
         expected_flag_dim = int(inferred_dims["candidate_flag_dim"])
-        expected_special_dim = int(inferred_dims["special_candidate_feature_dim"])
         if int(batch["candidate_feat"].shape[-1]) != expected_candidate_dim:
             raise RuntimeError(
                 f"xmodel1 train gate: candidate_feat last dim {batch['candidate_feat'].shape[-1]} != {expected_candidate_dim}"
@@ -89,9 +95,10 @@ def _validate_batch_gate(batch: dict, *, inferred_dims: dict[str, int] | None) -
             raise RuntimeError(
                 f"xmodel1 train gate: candidate_flags last dim {batch['candidate_flags'].shape[-1]} != {expected_flag_dim}"
             )
-        if int(batch["special_candidate_feat"].shape[-1]) != expected_special_dim:
+        if int(batch["response_post_candidate_feat"].shape[-1]) != expected_candidate_dim:
             raise RuntimeError(
-                f"xmodel1 train gate: special_candidate_feat last dim {batch['special_candidate_feat'].shape[-1]} != {expected_special_dim}"
+                "xmodel1 train gate: response_post_candidate_feat last dim "
+                f"{batch['response_post_candidate_feat'].shape[-1]} != {expected_candidate_dim}"
             )
     if tuple(batch["history_summary"].shape[1:]) != (20,):
         raise RuntimeError(
@@ -154,6 +161,25 @@ def _auto_steps_from_sampled_summary(
     if sampled_samples <= 0:
         return None
     return max(1, math.ceil(sampled_samples / max(1, batch_size)))
+
+
+def _split_file_list(
+    file_paths: list[Path],
+    *,
+    val_ratio: float,
+    seed: int,
+) -> tuple[list[Path], list[Path]]:
+    shuffled = list(file_paths)
+    rng = random.Random(seed)
+    rng.shuffle(shuffled)
+    if not shuffled:
+        return [], []
+    n_val = max(1, int(len(shuffled) * val_ratio))
+    if len(shuffled) == 1:
+        return shuffled, shuffled
+    if n_val >= len(shuffled):
+        n_val = len(shuffled) - 1
+    return shuffled[n_val:], shuffled[:n_val]
 
 
 def _expected_manifest_summary_for_cache_files(
@@ -416,6 +442,15 @@ def main() -> None:
         if files_per_epoch_count_cfg is not None and int(files_per_epoch_count_cfg) > 0
         else None
     )
+    limit_files = (
+        args.limit_files
+        if args.limit_files is not None
+        else (
+            int(cfg["limit_files"])
+            if cfg.get("limit_files") is not None and int(cfg["limit_files"]) > 0
+            else None
+        )
+    )
 
     train_loader = None
     train_loader_factory = None
@@ -427,24 +462,31 @@ def main() -> None:
     dataset_summary = None
 
     cache_files = discover_cached_files(data_dirs)
+    if limit_files is not None and len(cache_files) > limit_files:
+        cache_files = cache_files[:limit_files]
     if cache_files:
         probe_summary = probe_cached_samples(cache_files)
-        if args.strict_cache_scan:
+        if args.strict_cache_scan and limit_files is None:
             _validate_manifest_against_cache_files(
                 manifest_map,
                 cache_files=cache_files,
                 data_dirs=data_dirs,
                 summarize_cached_files_fn=summarize_cached_files,
             )
+        elif args.strict_cache_scan and limit_files is not None:
+            print(
+                "xmodel1 train gate: strict manifest scan skipped because limit_files selects a cache subset",
+                flush=True,
+            )
         print(
             f"xmodel1 train gate: cache_probe files={probe_summary['num_files']} "
             f"rows={probe_summary['rows_probed']} dims={probe_summary['dims']} "
-            f"required_shards={required_shards}",
+            f"required_shards={required_shards} limit_files={limit_files}",
             flush=True,
         )
 
-        train_files, val_files = split_cached_files(
-            data_dirs,
+        train_files, val_files = _split_file_list(
+            cache_files,
             val_ratio=float(cfg.get("val_ratio", 0.05)),
             seed=args.seed,
         )
@@ -562,12 +604,16 @@ def main() -> None:
                     "action_idx_target": np.int64(chosen),
                     "candidate_quality_score": quality,
                     "candidate_hard_bad_flag": np.zeros((14,), dtype=np.float32),
-                    "special_candidate_feat": np.zeros((12, int(cfg.get("special_candidate_feature_dim", 19))), dtype=np.float32),
-                    "special_candidate_type_id": np.full((12,), -1, dtype=np.int16),
-                    "special_candidate_mask": np.zeros((12,), dtype=np.uint8),
-                    "special_candidate_quality_score": np.zeros((12,), dtype=np.float32),
-                    "special_candidate_hard_bad_flag": np.zeros((12,), dtype=np.float32),
-                    "chosen_special_candidate_idx": np.int64(-1),
+                    "response_action_idx": np.full((8,), -1, dtype=np.int16),
+                    "response_action_mask": np.zeros((8,), dtype=np.uint8),
+                    "chosen_response_action_idx": np.int64(-1),
+                    "response_post_candidate_feat": np.zeros((8, 14, XMODEL1_CANDIDATE_FEATURE_DIM), dtype=np.float32),
+                    "response_post_candidate_tile_id": np.full((8, 14), -1, dtype=np.int16),
+                    "response_post_candidate_mask": np.zeros((8, 14), dtype=np.uint8),
+                    "response_post_candidate_flags": np.zeros((8, 14, XMODEL1_CANDIDATE_FLAG_DIM), dtype=np.uint8),
+                    "response_post_candidate_quality_score": np.zeros((8, 14), dtype=np.float32),
+                    "response_post_candidate_hard_bad_flag": np.zeros((8, 14), dtype=np.float32),
+                    "response_teacher_discard_idx": np.full((8,), -1, dtype=np.int16),
                     "win_target": np.float32(0.0),
                     "dealin_target": np.float32(0.0),
                     "pts_given_win_target": np.float32(0.0),
@@ -580,7 +626,7 @@ def main() -> None:
             out = {}
             for key in batch[0].keys():
                 values = [item[key] for item in batch]
-                if key == "chosen_candidate_idx":
+                if key in {"chosen_candidate_idx", "chosen_response_action_idx"}:
                     out[key] = torch.tensor(values, dtype=torch.long)
                 else:
                     out[key] = torch.from_numpy(np.stack(values))
@@ -597,7 +643,6 @@ def main() -> None:
             "state_scalar_dim",
             "candidate_feature_dim",
             "candidate_flag_dim",
-            "special_candidate_feature_dim",
         ):
             cfg_value = cfg.get(key)
             if key not in inferred_dims:
@@ -615,7 +660,6 @@ def main() -> None:
         state_scalar_dim=int(cfg.get("state_scalar_dim", default_xmodel1_state_scalar_dim() or N_SCALAR)),
         candidate_feature_dim=int(cfg.get("candidate_feature_dim", XMODEL1_CANDIDATE_FEATURE_DIM)),
         candidate_flag_dim=int(cfg.get("candidate_flag_dim", XMODEL1_CANDIDATE_FLAG_DIM)),
-        special_candidate_feature_dim=int(cfg.get("special_candidate_feature_dim", 16)),
         hidden_dim=int(cfg.get("hidden_dim", 256)),
         num_res_blocks=int(cfg.get("num_res_blocks", 4)),
         dropout=float(cfg.get("dropout", 0.1)),
@@ -643,6 +687,7 @@ def main() -> None:
     print(
         f"xmodel1 train: synthetic_smoke={synthetic_smoke} data_dirs={[str(p) for p in data_dirs]} "
         f"train_files={len(train_files)} val_files={len(val_files)} manifests={manifest_paths} "
+        f"limit_files={limit_files} "
         f"batch={batch_size} epochs={cfg.get('num_epochs')} "
         f"steps_per_epoch={cfg.get('steps_per_epoch')} val_steps_per_epoch={cfg.get('val_steps_per_epoch')} "
         f"files_per_epoch_ratio={files_per_epoch_ratio} files_per_epoch_count={files_per_epoch_count} "

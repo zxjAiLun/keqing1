@@ -4,7 +4,7 @@ data_dirs:
   - artifacts/converted_mjai/ds2
   - artifacts/converted_mjai/ds3
 
-output_dir: processed_xmodel1_v1b
+output_dir: processed_xmodel1_v1c
 progress_every: 20
 jobs: 0  # 0 = auto (use available CPU cores)
 preflight_files_per_shard: 2

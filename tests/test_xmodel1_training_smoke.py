@@ -67,10 +67,14 @@ def test_xmodel1_training_smoke(tmp_path: Path):
     assert rows
     assert "step" in rows[-1]
     assert "action_ce" in rows[-1]["train"]
-    assert "special_rank" in rows[-1]["train"]
-    assert "reach_pair" in rows[-1]["train"]
-    assert "call_pair" in rows[-1]["train"]
+    assert "response_ce" in rows[-1]["train"]
+    assert "response_post_ce" in rows[-1]["train"]
+    assert "response_post_rank" in rows[-1]["train"]
+    assert "final_rank" in rows[-1]["train"]
+    assert "final_score_delta" in rows[-1]["train"]
+    assert "rank_pt" in rows[-1]["train"]
     assert "action_acc" in rows[-1]["val"]
+    assert "final_rank_acc" in rows[-1]["val"]
 
 
 def test_xmodel1_training_supports_epoch_file_sampling(tmp_path: Path):

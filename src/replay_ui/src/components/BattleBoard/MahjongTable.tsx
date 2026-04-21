@@ -990,6 +990,7 @@ function CenterPanel({
 export function MahjongTable({
   state, onAction, isMyTurn, selectedTile, selectedTileIdx, onTileSelect,
   autoHora, setAutoHora, noMeld, setNoMeld, autoTsumogiri, setAutoTsumogiri,
+  suppressActionBar = false,
   actionPending,
   mode = "battle",
   logitData,
@@ -1008,6 +1009,7 @@ export function MahjongTable({
   setNoMeld: (v: boolean) => void;
   autoTsumogiri: boolean;
   setAutoTsumogiri: (v: boolean) => void;
+  suppressActionBar?: boolean;
   actionPending?: boolean;
   mode?: "battle" | "replay";
   logitData?: LogitTileData[];
@@ -1029,7 +1031,7 @@ export function MahjongTable({
   const oppLeft  = (humanId + 3) % 4;
 
   const [tablecloth, setTablecloth]             = useState<TableclothId>("default");
-  const showActionBar = mode === "battle" && isMyTurn && !reachPending && !state.pending_reach[humanId];
+  const showActionBar = mode === "battle" && isMyTurn && !reachPending && !state.pending_reach[humanId] && !suppressActionBar;
   const showReachBanner = mode === "battle" && isMyTurn && (reachPending || state.pending_reach[humanId]);
   const replayPendingReachActor = mode === "replay"
     ? state.pending_reach.findIndex(Boolean)
