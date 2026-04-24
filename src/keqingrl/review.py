@@ -45,9 +45,9 @@ class StepReview:
     value: float
     recorded_value: float
     rank_probs: tuple[float, float, float, float]
-    entropy: float
-    recorded_log_prob: float
-    recomputed_log_prob: float
+    entropy: float | None
+    recorded_log_prob: float | None
+    recomputed_log_prob: float | None
     reward: float
     done: bool
     is_autopilot: bool = False
@@ -166,9 +166,9 @@ def review_rollout_step(
         value=float(value),
         recorded_value=float(step.value),
         rank_probs=tuple(float(value) for value in rank_probs),  # type: ignore[arg-type]
-        entropy=float(entropy),
-        recorded_log_prob=float(step.log_prob),
-        recomputed_log_prob=float(recomputed_log_prob),
+        entropy=None if step.is_autopilot else float(entropy),
+        recorded_log_prob=None if step.is_autopilot else float(step.log_prob),
+        recomputed_log_prob=None if step.is_autopilot else float(recomputed_log_prob),
         reward=float(step.reward),
         done=bool(step.done),
         is_autopilot=bool(step.is_autopilot),
@@ -245,7 +245,7 @@ def _candidate_from_step(
         action_type=step.legal_actions[action_index].action_type.name,
         raw_rule_score=None if raw_rule_scores is None else float(raw_rule_scores[action_index]),
         prior_logit=None if prior_logits is None else float(prior_logits[action_index]),
-        neural_delta=None if neural_delta is None else float(neural_delta[action_index]),
+        neural_delta=None if step.is_autopilot or neural_delta is None else float(neural_delta[action_index]),
         is_chosen=is_chosen,
     )
 

@@ -10,6 +10,8 @@ ACTION_FEATURE_CONTRACT_VERSION = "keqingrl_action_feature_v1"
 ENV_CONTRACT_VERSION = "keqingrl_env_v2"
 RULE_SCORE_VERSION = "keqingrl_rule_score_v1"
 RULE_CONTEXT_ENCODING_VERSION = "keqingrl_rule_context_v1"
+REWARD_SPEC_VERSION = "keqingrl_reward_spec_v1"
+STYLE_CONTEXT_VERSION = "keqingrl_style_context_v1"
 STYLE_CONTEXT_DIM = 5
 
 REQUIRED_CHECKPOINT_METADATA_KEYS = (
@@ -21,6 +23,8 @@ REQUIRED_CHECKPOINT_METADATA_KEYS = (
     "env_contract_version",
     "rule_score_version",
     "rule_context_encoding_version",
+    "reward_spec_version",
+    "style_context_version",
     "style_context_dim",
     "controlled_action_types",
     "rule_score_clip_min",
@@ -55,6 +59,8 @@ def default_checkpoint_metadata(
         "env_contract_version": ENV_CONTRACT_VERSION,
         "rule_score_version": RULE_SCORE_VERSION,
         "rule_context_encoding_version": RULE_CONTEXT_ENCODING_VERSION,
+        "reward_spec_version": REWARD_SPEC_VERSION,
+        "style_context_version": STYLE_CONTEXT_VERSION,
         "style_context_dim": STYLE_CONTEXT_DIM,
         "controlled_action_types": list(controlled_action_types),
         "rule_score_clip_min": float(rule_score_clip_min),
@@ -82,6 +88,8 @@ def validate_checkpoint_metadata(metadata: dict[str, object]) -> None:
         "env_contract_version": ENV_CONTRACT_VERSION,
         "rule_score_version": RULE_SCORE_VERSION,
         "rule_context_encoding_version": RULE_CONTEXT_ENCODING_VERSION,
+        "reward_spec_version": REWARD_SPEC_VERSION,
+        "style_context_version": STYLE_CONTEXT_VERSION,
     }
     for key, expected in expected_versions.items():
         actual = metadata[key]
@@ -102,9 +110,11 @@ __all__ = [
     "OBSERVATION_CONTRACT_VERSION",
     "POLICY_CONTRACT_VERSION",
     "REQUIRED_CHECKPOINT_METADATA_KEYS",
+    "REWARD_SPEC_VERSION",
     "RULE_CONTEXT_ENCODING_VERSION",
     "RULE_SCORE_VERSION",
     "STYLE_CONTEXT_DIM",
+    "STYLE_CONTEXT_VERSION",
     "default_checkpoint_metadata",
     "validate_checkpoint_metadata",
 ]

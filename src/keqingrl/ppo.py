@@ -124,19 +124,27 @@ def critic_pretrain_update(
     value_coef: float = 1.0,
     rank_coef: float = 1.0,
     max_grad_norm: float | None = None,
+    freeze_actor_delta: bool = True,
 ) -> CriticPretrainLossBreakdown:
+    frozen_parameters: list[tuple[torch.nn.Parameter, bool]] = []
+    if freeze_actor_delta:
+        frozen_parameters = _freeze_actor_delta_parameters(policy)
     optimizer.zero_grad(set_to_none=True)
-    losses = compute_critic_pretrain_loss(
-        policy,
-        batch,
-        value_coef=value_coef,
-        rank_coef=rank_coef,
-    )
-    losses.total_loss.backward()
-    if max_grad_norm is not None:
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
-    optimizer.step()
-    return losses
+    try:
+        losses = compute_critic_pretrain_loss(
+            policy,
+            batch,
+            value_coef=value_coef,
+            rank_coef=rank_coef,
+        )
+        losses.total_loss.backward()
+        if max_grad_norm is not None:
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
+        optimizer.step()
+        return losses
+    finally:
+        for parameter, requires_grad in frozen_parameters:
+            parameter.requires_grad_(requires_grad)
 
 
 def ppo_update(
@@ -214,6 +222,17 @@ def _delta_metrics_from_output(output, batch: PPOBatch) -> tuple[torch.Tensor | 
     if legal_delta.numel() == 0:
         return None, None
     return legal_delta.abs().mean(), legal_delta.pow(2).mean().sqrt()
+
+
+def _freeze_actor_delta_parameters(policy: InteractivePolicy) -> list[tuple[torch.nn.Parameter, bool]]:
+    module = getattr(policy, "policy_mlp", None)
+    if not isinstance(module, torch.nn.Module):
+        return []
+    frozen: list[tuple[torch.nn.Parameter, bool]] = []
+    for parameter in module.parameters():
+        frozen.append((parameter, bool(parameter.requires_grad)))
+        parameter.requires_grad_(False)
+    return frozen
 
 
 __all__ = [

@@ -41,6 +41,8 @@ class RolloutStep:
     action_feature_contract_version: str | None = None
     env_contract_version: str | None = None
     rule_score_version: str | None = None
+    reward_spec_version: str | None = None
+    style_context_version: str | None = None
     is_autopilot: bool = False
     is_learner_controlled: bool = True
     control_action_types: tuple[str, ...] = ()
@@ -144,6 +146,13 @@ def rollout_step_policy_input(
             "policy_version": step.policy_version,
             "behavior_policy_id": step.behavior_policy_id,
             "env_seed": step.env_seed,
+            "terminal_reason": step.terminal_reason,
+            "observation_contract_version": step.observation_contract_version,
+            "action_feature_contract_version": step.action_feature_contract_version,
+            "env_contract_version": step.env_contract_version,
+            "rule_score_version": step.rule_score_version,
+            "reward_spec_version": step.reward_spec_version,
+            "style_context_version": step.style_context_version,
         },
     )
 

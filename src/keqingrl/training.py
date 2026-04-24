@@ -317,6 +317,7 @@ def run_critic_pretraining_iteration(
     value_coef: float = 1.0,
     rank_coef: float = 1.0,
     max_grad_norm: float | None = None,
+    freeze_actor_delta: bool = True,
     device: torch.device | str | None = None,
 ) -> CriticPretrainingIterationResult:
     if num_episodes <= 0:
@@ -355,6 +356,7 @@ def run_critic_pretraining_iteration(
                 value_coef=value_coef,
                 rank_coef=rank_coef,
                 max_grad_norm=max_grad_norm,
+                freeze_actor_delta=freeze_actor_delta,
             )
         )
 

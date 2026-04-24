@@ -11,7 +11,9 @@ from keqingrl.metadata import (
     ACTION_FEATURE_CONTRACT_VERSION,
     ENV_CONTRACT_VERSION,
     OBSERVATION_CONTRACT_VERSION,
+    REWARD_SPEC_VERSION,
     RULE_SCORE_VERSION,
+    STYLE_CONTEXT_VERSION,
 )
 from keqingrl.rollout import RolloutStep
 
@@ -148,6 +150,8 @@ def build_ppo_batch(
             "action_feature_contract_version": ACTION_FEATURE_CONTRACT_VERSION,
             "env_contract_version": ENV_CONTRACT_VERSION,
             "rule_score_version": RULE_SCORE_VERSION,
+            "reward_spec_version": REWARD_SPEC_VERSION,
+            "style_context_version": STYLE_CONTEXT_VERSION,
         },
     )
     rank_target = None if final_rank_target is None else torch.as_tensor(final_rank_target, dtype=torch.long)
@@ -252,6 +256,10 @@ def _assert_rollout_action_order(steps: list[RolloutStep]) -> None:
             raise ValueError(f"unsupported env contract: {step.env_contract_version}")
         if step.rule_score_version not in {None, RULE_SCORE_VERSION}:
             raise ValueError(f"unsupported rule score contract: {step.rule_score_version}")
+        if step.reward_spec_version not in {None, REWARD_SPEC_VERSION}:
+            raise ValueError(f"unsupported reward spec contract: {step.reward_spec_version}")
+        if step.style_context_version not in {None, STYLE_CONTEXT_VERSION}:
+            raise ValueError(f"unsupported style context contract: {step.style_context_version}")
 
 
 def stack_obs_batches(obs_batches: list[ObsTensorBatch]) -> ObsTensorBatch:

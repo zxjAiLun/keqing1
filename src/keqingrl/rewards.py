@@ -13,6 +13,7 @@ from inference.pt_map import expected_pt_for_all_seats, validate_pt_map
 DEFAULT_PT_MAP = (90.0, 45.0, 0.0, -135.0)
 RULE_CONTEXT_DIM = 6
 RULE_CONTEXT_ENCODING_VERSION = "keqingrl_rule_context_v1"
+REWARD_SPEC_VERSION = "keqingrl_reward_spec_v1"
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,7 @@ __all__ = [
     "DEFAULT_RULE_CONTEXT",
     "RULE_CONTEXT_DIM",
     "RULE_CONTEXT_ENCODING_VERSION",
+    "REWARD_SPEC_VERSION",
     "RewardSpec",
     "RuleContext",
     "build_rule_context",

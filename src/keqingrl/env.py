@@ -23,7 +23,9 @@ from keqingrl.metadata import (
     ACTION_FEATURE_CONTRACT_VERSION,
     ENV_CONTRACT_VERSION,
     OBSERVATION_CONTRACT_VERSION,
+    REWARD_SPEC_VERSION,
     RULE_SCORE_VERSION,
+    STYLE_CONTEXT_VERSION,
 )
 from keqingrl.rewards import (
     DEFAULT_PT_MAP,
@@ -238,6 +240,8 @@ class DiscardOnlyMahjongEnv:
                 "action_feature_contract_version": ACTION_FEATURE_CONTRACT_VERSION,
                 "env_contract_version": ENV_CONTRACT_VERSION,
                 "rule_score_version": RULE_SCORE_VERSION,
+                "reward_spec_version": REWARD_SPEC_VERSION,
+                "style_context_version": STYLE_CONTEXT_VERSION,
             },
         )
 

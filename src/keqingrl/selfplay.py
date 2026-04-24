@@ -131,6 +131,8 @@ def collect_policy_episode(
                 action_feature_contract_version=policy_input_cpu.metadata.get("action_feature_contract_version"),
                 env_contract_version=policy_input_cpu.metadata.get("env_contract_version"),
                 rule_score_version=policy_input_cpu.metadata.get("rule_score_version"),
+                reward_spec_version=policy_input_cpu.metadata.get("reward_spec_version"),
+                style_context_version=policy_input_cpu.metadata.get("style_context_version"),
                 is_autopilot=False,
                 is_learner_controlled=bool(policy_input_cpu.metadata.get("is_learner_controlled", True)),
                 control_action_types=tuple(policy_input_cpu.metadata.get("control_action_types", ())),
