@@ -15,7 +15,7 @@ from keqingrl.actions import (
 from keqingrl.contracts import ActionSample, ObsTensorBatch, PolicyInput, PolicyOutput
 from keqingrl.distribution import MaskedCategorical
 from keqingrl.buffer import PPOBatch, build_ppo_batch, compute_returns_and_advantages, stack_obs_batches
-from keqingrl.env import DiscardOnlyMahjongEnv, EnvState, StepResult
+from keqingrl.env import AutopilotTraceEvent, DiscardOnlyMahjongEnv, EnvState, StepResult
 from keqingrl.latency import LatencyReport, measure_latency_smoke
 from keqingrl.opponent_pool import (
     OpponentPool,
@@ -118,17 +118,24 @@ from keqingrl.selfplay import (
     summarize_discard_only_iteration,
 )
 from keqingrl.training import (
+    CriticPretrainSmokeReport,
     CriticPretrainingIterationResult,
     DiscardOnlyEvalMetrics,
+    DiscardOnlyPpoSmokeIterationReport,
+    DiscardOnlyPpoSmokeReport,
     DiscardOnlyTrainingHistory,
     DiscardOnlyTrainingIteration,
     FixedSeedEvaluationSmoke,
+    ZeroDeltaSelfplaySmokeReport,
     evaluate_discard_only_policy,
     evaluate_policy,
     run_fixed_seed_evaluation_smoke,
+    run_discard_only_ppo_smoke,
+    run_critic_pretrain_smoke,
     run_critic_pretraining_iteration,
     run_discard_only_training,
     run_training,
+    run_zero_delta_selfplay_smoke,
 )
 
 __all__ = [
@@ -137,8 +144,10 @@ __all__ = [
     "ActionSample",
     "ActionSpec",
     "ActionType",
+    "AutopilotTraceEvent",
     "ACTION_CONTRACT_VERSION",
     "CriticPretrainLossBreakdown",
+    "CriticPretrainSmokeReport",
     "CriticPretrainingIterationResult",
     "DEFAULT_PT_MAP",
     "DEFAULT_REWARD_SPEC",
@@ -147,6 +156,8 @@ __all__ = [
     "DEFAULT_STYLE_CONTEXT",
     "DiscardOnlyMahjongEnv",
     "DiscardOnlyEvalMetrics",
+    "DiscardOnlyPpoSmokeIterationReport",
+    "DiscardOnlyPpoSmokeReport",
     "DiscardOnlyIterationMetrics",
     "DiscardOnlyIterationResult",
     "DiscardOnlyTrainingHistory",
@@ -154,6 +165,7 @@ __all__ = [
     "EpisodeReview",
     "EnvState",
     "FixedSeedEvaluationSmoke",
+    "ZeroDeltaSelfplaySmokeReport",
     "InteractivePolicy",
     "LatencyReport",
     "MaskedCategorical",
@@ -232,10 +244,13 @@ __all__ = [
     "review_rollout_step",
     "run_ppo_iteration",
     "run_discard_only_ppo_iteration",
+    "run_discard_only_ppo_smoke",
     "run_discard_only_training",
+    "run_critic_pretrain_smoke",
     "run_critic_pretraining_iteration",
     "run_fixed_seed_evaluation_smoke",
     "run_training",
+    "run_zero_delta_selfplay_smoke",
     "score_legal_actions",
     "smoothed_prior_probs",
     "stack_obs_batches",

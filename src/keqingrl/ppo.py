@@ -22,6 +22,11 @@ class PPOLossBreakdown:
     entropy_bonus: torch.Tensor
     approx_kl: torch.Tensor
     clip_fraction: torch.Tensor
+    ratio_mean: torch.Tensor
+    ratio_std: torch.Tensor
+    advantage_mean: torch.Tensor
+    advantage_std: torch.Tensor
+    return_mean: torch.Tensor
     rank_loss: torch.Tensor | None = None
     rule_kl: torch.Tensor | None = None
     rule_agreement: torch.Tensor | None = None
@@ -53,11 +58,18 @@ def compute_ppo_loss(
     new_log_prob = dist.log_prob(batch.action_index)
     entropy = output.entropy if output.entropy is not None else dist.entropy()
 
+    raw_advantages = batch.advantages.float()
+    advantage_mean = raw_advantages.mean()
+    advantage_std = raw_advantages.std(unbiased=False)
+    return_mean = batch.returns.float().mean()
+
     advantages = batch.advantages
     if normalize_advantages and advantages.numel() > 1:
         advantages = (advantages - advantages.mean()) / advantages.std(unbiased=False).clamp_min(1e-8)
 
     ratio = torch.exp(new_log_prob - batch.old_log_prob)
+    ratio_mean = ratio.mean()
+    ratio_std = ratio.std(unbiased=False)
     unclipped = ratio * advantages
     clipped = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantages
     policy_loss = -torch.min(unclipped, clipped).mean()
@@ -86,6 +98,11 @@ def compute_ppo_loss(
         entropy_bonus=entropy_bonus,
         approx_kl=approx_kl,
         clip_fraction=clip_fraction,
+        ratio_mean=ratio_mean,
+        ratio_std=ratio_std,
+        advantage_mean=advantage_mean,
+        advantage_std=advantage_std,
+        return_mean=return_mean,
         rank_loss=rank_loss,
         rule_kl=rule_kl,
         rule_agreement=rule_agreement,
@@ -127,9 +144,11 @@ def critic_pretrain_update(
     max_grad_norm: float | None = None,
     freeze_actor_delta: bool = True,
 ) -> CriticPretrainLossBreakdown:
+    _initialize_lazy_parameters_for_training(policy, batch.policy_input)
     frozen_parameters: list[tuple[torch.nn.Parameter, bool]] = []
     if freeze_actor_delta:
         frozen_parameters = _freeze_actor_delta_parameters(policy)
+        _assert_critic_pretrain_optimizer_param_groups(policy, optimizer)
     optimizer.zero_grad(set_to_none=True)
     try:
         losses = compute_critic_pretrain_loss(
@@ -225,12 +244,62 @@ def _delta_metrics_from_output(output, batch: PPOBatch) -> tuple[torch.Tensor | 
     return legal_delta.abs().mean(), legal_delta.pow(2).mean().sqrt()
 
 
+def _initialize_lazy_parameters_for_training(policy: InteractivePolicy, policy_input) -> None:
+    if _uninitialized_parameter_names(policy):
+        with torch.no_grad():
+            policy(policy_input)
+
+
+def _uninitialized_parameter_names(policy: InteractivePolicy) -> list[str]:
+    return [
+        name
+        for name, parameter in policy.named_parameters()
+        if isinstance(parameter, UninitializedParameter)
+    ]
+
+
+def _is_critic_pretrain_parameter_name(name: str) -> bool:
+    return name.startswith("value_head.") or name.startswith("rank_head.")
+
+
+def _assert_critic_pretrain_optimizer_param_groups(
+    policy: InteractivePolicy,
+    optimizer: torch.optim.Optimizer,
+) -> None:
+    names_by_id = {id(parameter): name for name, parameter in policy.named_parameters()}
+    unexpected: list[str] = []
+    unknown_trainable = 0
+    for group in optimizer.param_groups:
+        for parameter in group.get("params", ()):  # type: ignore[assignment]
+            if isinstance(parameter, UninitializedParameter) or not parameter.requires_grad:
+                continue
+            name = names_by_id.get(id(parameter))
+            if name is None:
+                unknown_trainable += 1
+            elif not _is_critic_pretrain_parameter_name(name):
+                unexpected.append(name)
+    if unexpected or unknown_trainable:
+        detail = ", ".join(unexpected)
+        if unknown_trainable:
+            detail = f"{detail}, " if detail else ""
+            detail += f"{unknown_trainable} unknown optimizer params"
+        raise RuntimeError(f"critic pretrain optimizer has trainable non-critic parameters: {detail}")
+
+
+def _critic_pretrain_trainable_parameter_names(policy: InteractivePolicy) -> list[str]:
+    return [
+        name
+        for name, parameter in policy.named_parameters()
+        if parameter.requires_grad and not isinstance(parameter, UninitializedParameter)
+    ]
+
+
 def _freeze_actor_delta_parameters(policy: InteractivePolicy) -> list[tuple[torch.nn.Parameter, bool]]:
     frozen: list[tuple[torch.nn.Parameter, bool]] = []
     for name, parameter in policy.named_parameters():
         if isinstance(parameter, UninitializedParameter):
             continue
-        if name.startswith("value_head.") or name.startswith("rank_head."):
+        if _is_critic_pretrain_parameter_name(name):
             continue
         frozen.append((parameter, bool(parameter.requires_grad)))
         parameter.requires_grad_(False)

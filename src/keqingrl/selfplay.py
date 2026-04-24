@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import random
 from typing import Callable, Sequence
 
 import torch
 
 from keqingrl.buffer import PPOBatch, build_ppo_batch, compute_returns_and_advantages
+from keqingrl.actions import ActionType
 from keqingrl.contracts import ObsTensorBatch, PolicyInput
 from keqingrl.env import DiscardOnlyMahjongEnv
 from keqingrl.opponent_pool import (
@@ -34,12 +35,23 @@ class DiscardOnlyIterationMetrics:
     mean_terminal_reward: float
     mean_rank: float
     first_place_rate: float
+    fourth_rate: float
+    win_rate: float
+    deal_in_rate: float
+    call_rate: float
+    riichi_rate: float
+    illegal_action_rate: float
+    fallback_rate: float
+    forced_terminal_missed: int
     mean_total_loss: float
     mean_policy_loss: float
     mean_value_loss: float
     mean_entropy_bonus: float
     mean_approx_kl: float
     mean_clip_fraction: float
+    terminal_reason_count: dict[str, int] = field(default_factory=dict)
+    avg_decision_latency: float | None = None
+    p95_decision_latency: float | None = None
     mean_rank_loss: float | None = None
     mean_rule_kl: float | None = None
     mean_rule_agreement: float | None = None
@@ -71,8 +83,15 @@ def collect_policy_episode(
     game_id = state.game_id
     rollout_steps: list[RolloutStep] = []
     final_result = None
+    _append_autopilot_trace_steps(
+        rollout_steps,
+        _drain_autopilot_events(env),
+        env=env,
+        game_id=game_id,
+        seed=seed,
+    )
 
-    for step_id in range(max_steps):
+    for _step_cursor in range(max_steps):
         actor = env.current_actor()
         if actor is None:
             if env.is_done():
@@ -141,8 +160,15 @@ def collect_policy_episode(
                 policy_name=seat_policy.name,
                 legal_actions=tuple(policy_input_cpu.legal_actions[0]),
                 game_id=game_id,
-                step_id=step_id,
+                step_id=len(rollout_steps),
             )
+        )
+        _append_autopilot_trace_steps(
+            rollout_steps,
+            _drain_autopilot_events(env),
+            env=env,
+            game_id=game_id,
+            seed=seed,
         )
 
         if final_result.done:
@@ -150,16 +176,26 @@ def collect_policy_episode(
     else:
         raise RuntimeError(f"policy episode exceeded max_steps={max_steps}")
 
-    if final_result is None or not final_result.done:
-        raise RuntimeError("collect_policy_episode finished without a terminal StepResult")
-    if final_result.terminal_rewards is None or final_result.final_ranks is None or final_result.scores is None:
-        raise RuntimeError("terminal StepResult is missing episode metadata")
+    if final_result is None:
+        if not env.is_done():
+            raise RuntimeError("collect_policy_episode finished without a terminal StepResult")
+        terminal_rewards = env.terminal_rewards()
+        final_ranks = env.final_ranks()
+        scores = env.state().scores
+    else:
+        if not final_result.done:
+            raise RuntimeError("collect_policy_episode finished without a terminal StepResult")
+        if final_result.terminal_rewards is None or final_result.final_ranks is None or final_result.scores is None:
+            raise RuntimeError("terminal StepResult is missing episode metadata")
+        terminal_rewards = final_result.terminal_rewards
+        final_ranks = final_result.final_ranks
+        scores = final_result.scores
 
     return RolloutEpisode(
         steps=tuple(rollout_steps),
-        terminal_rewards=tuple(float(value) for value in final_result.terminal_rewards),  # type: ignore[arg-type]
-        final_ranks=tuple(int(rank) for rank in final_result.final_ranks),  # type: ignore[arg-type]
-        scores=tuple(int(score) for score in final_result.scores),  # type: ignore[arg-type]
+        terminal_rewards=tuple(float(value) for value in terminal_rewards),  # type: ignore[arg-type]
+        final_ranks=tuple(int(rank) for rank in final_ranks),  # type: ignore[arg-type]
+        scores=tuple(int(score) for score in scores),  # type: ignore[arg-type]
         game_id=game_id,
         seed=seed,
     )
@@ -316,11 +352,15 @@ def build_episode_ppo_batch(
     gamma: float = 1.0,
     gae_lambda: float = 0.95,
     include_rank_targets: bool = True,
+    strict_metadata: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, list[RolloutStep], PPOBatch]:
     if not episode.steps:
         raise ValueError("episode.steps must not be empty")
 
-    prepared_steps = backfill_actor_terminal_rewards(list(episode.steps), episode.terminal_rewards)
+    training_steps = _learner_training_steps(episode.steps)
+    if not training_steps:
+        raise RuntimeError("episode contains no learner-controlled policy steps for PPO batching")
+    prepared_steps = backfill_actor_terminal_rewards(training_steps, episode.terminal_rewards)
     advantages = torch.zeros((len(prepared_steps),), dtype=torch.float32)
     returns = torch.zeros((len(prepared_steps),), dtype=torch.float32)
 
@@ -352,6 +392,7 @@ def build_episode_ppo_batch(
         advantages,
         returns,
         final_rank_target=final_rank_target,
+        strict_metadata=strict_metadata,
     )
     return advantages, returns, prepared_steps, batch
 
@@ -362,6 +403,7 @@ def build_episodes_ppo_batch(
     gamma: float = 1.0,
     gae_lambda: float = 0.95,
     include_rank_targets: bool = True,
+    strict_metadata: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, list[RolloutStep], PPOBatch]:
     if not episodes:
         raise ValueError("episodes must not be empty")
@@ -377,6 +419,7 @@ def build_episodes_ppo_batch(
             gamma=gamma,
             gae_lambda=gae_lambda,
             include_rank_targets=include_rank_targets,
+            strict_metadata=strict_metadata,
         )
         all_advantages.append(episode_advantages)
         all_returns.append(episode_returns)
@@ -391,6 +434,7 @@ def build_episodes_ppo_batch(
         advantages,
         returns,
         final_rank_target=final_rank_target,
+        strict_metadata=strict_metadata,
     )
     return advantages, returns, prepared_steps, batch
 
@@ -421,6 +465,7 @@ def run_ppo_iteration(
     normalize_advantages: bool = True,
     max_grad_norm: float | None = None,
     device: torch.device | str | None = None,
+    strict_metadata: bool = True,
 ) -> DiscardOnlyIterationResult:
     if update_epochs <= 0:
         raise ValueError(f"update_epochs must be positive, got {update_epochs}")
@@ -445,6 +490,7 @@ def run_ppo_iteration(
         gamma=gamma,
         gae_lambda=gae_lambda,
         include_rank_targets=include_rank_targets,
+        strict_metadata=strict_metadata,
     )
     target_device = _policy_device(policy) if device is None else torch.device(device)
     batch = batch.to(target_device)
@@ -500,6 +546,7 @@ def run_discard_only_ppo_iteration(
     normalize_advantages: bool = True,
     max_grad_norm: float | None = None,
     device: torch.device | str | None = None,
+    strict_metadata: bool = True,
 ) -> DiscardOnlyIterationResult:
     return run_ppo_iteration(
         env,
@@ -525,6 +572,7 @@ def run_discard_only_ppo_iteration(
         normalize_advantages=normalize_advantages,
         max_grad_norm=max_grad_norm,
         device=device,
+        strict_metadata=strict_metadata,
     )
 
 
@@ -552,6 +600,7 @@ def summarize_iteration(
         for seat in learner_seat_tuple
     ]
     episode_steps = [len(episode.steps) for episode in episodes]
+    smoke_counts = _smoke_metric_counts(episodes, learner_seat_tuple)
 
     rank_losses = [loss.rank_loss.item() for loss in losses if loss.rank_loss is not None]
     mean_rank_loss = None if not rank_losses else sum(rank_losses) / len(rank_losses)
@@ -576,6 +625,15 @@ def summarize_iteration(
         mean_terminal_reward=sum(seat_rewards) / len(seat_rewards),
         mean_rank=sum(seat_ranks) / len(seat_ranks),
         first_place_rate=sum(1.0 for rank in seat_ranks if rank == 1) / len(seat_ranks),
+        fourth_rate=sum(1.0 for rank in seat_ranks if rank == 4) / len(seat_ranks),
+        win_rate=smoke_counts["win_count"] / max(1, smoke_counts["seat_episode_count"]),
+        deal_in_rate=smoke_counts["deal_in_count"] / max(1, smoke_counts["seat_episode_count"]),
+        call_rate=smoke_counts["call_count"] / max(1, smoke_counts["learner_step_count"]),
+        riichi_rate=smoke_counts["riichi_count"] / max(1, smoke_counts["learner_step_count"]),
+        illegal_action_rate=0.0,
+        fallback_rate=0.0,
+        forced_terminal_missed=0,
+        terminal_reason_count=smoke_counts["terminal_reason_count"],
         mean_total_loss=sum(loss.total_loss.item() for loss in losses) / len(losses),
         mean_policy_loss=sum(loss.policy_loss.item() for loss in losses) / len(losses),
         mean_value_loss=sum(loss.value_loss.item() for loss in losses) / len(losses),
@@ -588,6 +646,39 @@ def summarize_iteration(
         mean_avg_abs_neural_delta=None if not avg_abs_deltas else sum(avg_abs_deltas) / len(avg_abs_deltas),
         mean_delta_norm=None if not delta_norms else sum(delta_norms) / len(delta_norms),
     )
+
+
+def _smoke_metric_counts(
+    episodes: Sequence[RolloutEpisode],
+    learner_seats: Sequence[int],
+) -> dict[str, object]:
+    learner_seat_set = set(int(seat) for seat in learner_seats)
+    counts: dict[str, object] = {
+        "seat_episode_count": len(episodes) * max(1, len(learner_seat_set)),
+        "learner_step_count": 0,
+        "win_count": 0,
+        "deal_in_count": 0,
+        "call_count": 0,
+        "riichi_count": 0,
+        "terminal_reason_count": {},
+    }
+    terminal_reason_count: dict[str, int] = counts["terminal_reason_count"]  # type: ignore[assignment]
+    for episode in episodes:
+        for step in episode.steps:
+            if step.terminal_reason is not None:
+                terminal_reason_count[step.terminal_reason] = terminal_reason_count.get(step.terminal_reason, 0) + 1
+            if step.actor not in learner_seat_set:
+                continue
+            counts["learner_step_count"] = int(counts["learner_step_count"]) + 1
+            if step.action_spec.action_type in {ActionType.TSUMO, ActionType.RON}:
+                counts["win_count"] = int(counts["win_count"]) + 1
+            if step.action_spec.action_type == ActionType.RON and step.action_spec.from_who in learner_seat_set:
+                counts["deal_in_count"] = int(counts["deal_in_count"]) + 1
+            if step.action_spec.action_type in {ActionType.CHI, ActionType.PON, ActionType.DAIMINKAN}:
+                counts["call_count"] = int(counts["call_count"]) + 1
+            if step.action_spec.action_type == ActionType.REACH_DISCARD:
+                counts["riichi_count"] = int(counts["riichi_count"]) + 1
+    return counts
 
 
 def summarize_discard_only_iteration(
@@ -603,6 +694,84 @@ def summarize_discard_only_iteration(
     )
 
 
+def _learner_training_steps(steps: Sequence[RolloutStep]) -> list[RolloutStep]:
+    return [step for step in steps if not step.is_autopilot and step.is_learner_controlled]
+
+
+def _drain_autopilot_events(env) -> tuple[object, ...]:
+    drain = getattr(env, "drain_autopilot_events", None)
+    if drain is None:
+        return ()
+    return tuple(drain())
+
+
+def _append_autopilot_trace_steps(
+    rollout_steps: list[RolloutStep],
+    events,
+    *,
+    env: DiscardOnlyMahjongEnv,
+    game_id: str,
+    seed: int | None,
+) -> None:
+    events_tuple = tuple(events)
+    if not events_tuple:
+        return
+    for offset, event in enumerate(events_tuple):
+        policy_input = event.policy_input
+        is_last = offset == len(events_tuple) - 1
+        rollout_steps.append(
+            RolloutStep(
+                obs=_single_obs(policy_input.obs),
+                legal_action_ids=policy_input.legal_action_ids[0].clone(),
+                legal_action_features=policy_input.legal_action_features[0].clone(),
+                legal_action_mask=policy_input.legal_action_mask[0].clone(),
+                action_index=int(event.action_index),
+                action_spec=event.action_spec,
+                log_prob=0.0,
+                value=0.0,
+                entropy=0.0,
+                reward=0.0,
+                done=bool(env.is_done() and is_last),
+                actor=int(event.actor),
+                policy_version=0,
+                rule_context=policy_input.rule_context[0].clone(),
+                raw_rule_scores=None
+                if policy_input.raw_rule_scores is None
+                else policy_input.raw_rule_scores[0].clone(),
+                prior_logits=None
+                if policy_input.prior_logits is None
+                else policy_input.prior_logits[0].clone(),
+                style_context=None
+                if policy_input.style_context is None
+                else policy_input.style_context[0].clone(),
+                chosen_action_canonical_key=event.action_spec.canonical_key,
+                episode_id=game_id,
+                actor_id=int(event.actor),
+                seat_id=int(event.actor),
+                behavior_policy_id="autopilot",
+                learner_policy_version=0,
+                env_seed=seed,
+                terminal_reason=event.terminal_reason,
+                observation_contract_version=policy_input.metadata.get("observation_contract_version"),
+                action_feature_contract_version=policy_input.metadata.get("action_feature_contract_version"),
+                env_contract_version=policy_input.metadata.get("env_contract_version"),
+                rule_score_version=policy_input.metadata.get("rule_score_version"),
+                reward_spec_version=policy_input.metadata.get("reward_spec_version"),
+                style_context_version=policy_input.metadata.get("style_context_version"),
+                is_autopilot=True,
+                is_learner_controlled=False,
+                control_action_types=tuple(policy_input.metadata.get("control_action_types", ())),
+                rulebase_chosen=event.rulebase_chosen,
+                policy_chosen=event.policy_chosen,
+                truncated=False,
+                policy_name="autopilot",
+                legal_actions=tuple(policy_input.legal_actions[0]) if policy_input.legal_actions is not None else (event.action_spec,),
+                game_id=game_id,
+                step_id=len(rollout_steps),
+            )
+        )
+
+
 def _filter_episodes_for_actors(
     episodes: Sequence[RolloutEpisode],
     actor_seats: Sequence[int],
@@ -610,7 +779,11 @@ def _filter_episodes_for_actors(
     actor_seat_set = set(_normalize_actor_seats(actor_seats))
     filtered_episodes: list[RolloutEpisode] = []
     for episode in episodes:
-        filtered_steps = tuple(step for step in episode.steps if step.actor in actor_seat_set)
+        filtered_steps = tuple(
+            step
+            for step in episode.steps
+            if step.actor in actor_seat_set and not step.is_autopilot and step.is_learner_controlled
+        )
         if not filtered_steps:
             continue
         filtered_episodes.append(

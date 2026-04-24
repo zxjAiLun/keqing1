@@ -109,9 +109,20 @@ def build_ppo_batch(
     returns: torch.Tensor | list[float],
     *,
     final_rank_target: torch.Tensor | list[int] | None = None,
+    strict_metadata: bool = False,
 ) -> PPOBatch:
     if not steps:
         raise ValueError("steps must not be empty")
+    invalid_policy_steps = [
+        index
+        for index, step in enumerate(steps)
+        if step.is_autopilot or not step.is_learner_controlled
+    ]
+    if invalid_policy_steps:
+        raise ValueError(
+            "PPO batch only accepts learner-controlled policy steps; "
+            f"invalid indices={invalid_policy_steps}"
+        )
 
     advantages_t = torch.as_tensor(advantages, dtype=torch.float32)
     returns_t = torch.as_tensor(returns, dtype=torch.float32)
@@ -120,7 +131,7 @@ def build_ppo_batch(
 
     obs = stack_obs_batches([step.obs for step in steps])
     legal_action_ids, legal_action_features, legal_action_mask = pad_legal_action_tensors(steps)
-    _assert_rollout_action_order(steps)
+    _assert_rollout_action_order(steps, strict_metadata=strict_metadata)
     raw_rule_scores = pad_optional_legal_action_values(
         [step.raw_rule_scores for step in steps],
         legal_action_mask.shape[-1],
@@ -234,7 +245,7 @@ def stack_optional_contexts(
     return torch.stack([value.float() for value in values if value is not None], dim=0)
 
 
-def _assert_rollout_action_order(steps: list[RolloutStep]) -> None:
+def _assert_rollout_action_order(steps: list[RolloutStep], *, strict_metadata: bool = False) -> None:
     for step_idx, step in enumerate(steps):
         if step.legal_actions is None:
             continue
@@ -248,18 +259,57 @@ def _assert_rollout_action_order(steps: list[RolloutStep]) -> None:
                 "rollout action-order contract violation: "
                 f"step={step_idx} index={action_index} actual={actual_key!r} expected={expected_key!r}"
             )
-        if step.observation_contract_version not in {None, OBSERVATION_CONTRACT_VERSION}:
-            raise ValueError(f"unsupported observation contract: {step.observation_contract_version}")
-        if step.action_feature_contract_version not in {None, ACTION_FEATURE_CONTRACT_VERSION}:
-            raise ValueError(f"unsupported action feature contract: {step.action_feature_contract_version}")
-        if step.env_contract_version not in {None, ENV_CONTRACT_VERSION}:
-            raise ValueError(f"unsupported env contract: {step.env_contract_version}")
-        if step.rule_score_version not in {None, RULE_SCORE_VERSION}:
-            raise ValueError(f"unsupported rule score contract: {step.rule_score_version}")
-        if step.reward_spec_version not in {None, REWARD_SPEC_VERSION}:
-            raise ValueError(f"unsupported reward spec contract: {step.reward_spec_version}")
-        if step.style_context_version not in {None, STYLE_CONTEXT_VERSION}:
-            raise ValueError(f"unsupported style context contract: {step.style_context_version}")
+        _assert_contract_version(
+            step.observation_contract_version,
+            OBSERVATION_CONTRACT_VERSION,
+            "observation contract",
+            strict_metadata=strict_metadata,
+        )
+        _assert_contract_version(
+            step.action_feature_contract_version,
+            ACTION_FEATURE_CONTRACT_VERSION,
+            "action feature contract",
+            strict_metadata=strict_metadata,
+        )
+        _assert_contract_version(
+            step.env_contract_version,
+            ENV_CONTRACT_VERSION,
+            "env contract",
+            strict_metadata=strict_metadata,
+        )
+        _assert_contract_version(
+            step.rule_score_version,
+            RULE_SCORE_VERSION,
+            "rule score contract",
+            strict_metadata=strict_metadata,
+        )
+        _assert_contract_version(
+            step.reward_spec_version,
+            REWARD_SPEC_VERSION,
+            "reward spec contract",
+            strict_metadata=strict_metadata,
+        )
+        _assert_contract_version(
+            step.style_context_version,
+            STYLE_CONTEXT_VERSION,
+            "style context contract",
+            strict_metadata=strict_metadata,
+        )
+
+
+def _assert_contract_version(
+    actual: str | None,
+    expected: str,
+    label: str,
+    *,
+    strict_metadata: bool,
+) -> None:
+    if actual is None:
+        if strict_metadata:
+            raise ValueError(f"missing {label}")
+        return
+    if actual != expected:
+        raise ValueError(f"unsupported {label}: {actual}")
 
 
 def stack_obs_batches(obs_batches: list[ObsTensorBatch]) -> ObsTensorBatch:

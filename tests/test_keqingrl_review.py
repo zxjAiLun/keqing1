@@ -434,6 +434,8 @@ def test_review_autopilot_null_policy_fields_are_not_aggregated(tmp_path) -> Non
     summary = summarize_review_policy_fields(review)
     assert summary.learner_step_count == 1
     assert summary.autopilot_step_count == 1
+    assert summary.autopilot_terminal_count == 1
+    assert summary.terminal_reason_count == {"tsumo": 1}
     assert summary.entropy_count == 1
     assert summary.log_prob_count == 1
     assert summary.neural_delta_count == 1
@@ -446,6 +448,7 @@ def test_review_autopilot_null_policy_fields_are_not_aggregated(tmp_path) -> Non
     assert payloads[1]["entropy"] is None
     assert payloads[1]["recorded_log_prob"] is None
     assert payloads[1]["recomputed_log_prob"] is None
+    assert payloads[1]["terminal_reason"] == "tsumo"
     assert payloads[1]["chosen_action"]["neural_delta"] is None
 
 

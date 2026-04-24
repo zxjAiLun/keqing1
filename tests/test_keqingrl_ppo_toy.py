@@ -7,7 +7,16 @@ from keqingrl.actions import ActionSpec, ActionType
 from keqingrl.buffer import PPOBatch, build_ppo_batch, compute_returns_and_advantages
 from keqingrl.contracts import ObsTensorBatch, PolicyInput, PolicyOutput
 from keqingrl.policy import InteractivePolicy, NeuralInteractivePolicy, RulePriorDeltaPolicy
-from keqingrl.ppo import compute_ppo_loss, critic_pretrain_update, ppo_update
+from keqingrl.ppo import (
+    _assert_critic_pretrain_optimizer_param_groups,
+    _critic_pretrain_trainable_parameter_names,
+    _freeze_actor_delta_parameters,
+    _initialize_lazy_parameters_for_training,
+    _uninitialized_parameter_names,
+    compute_ppo_loss,
+    critic_pretrain_update,
+    ppo_update,
+)
 from keqingrl.rollout import RolloutStep
 from mahjong_env.action_space import TILE_NAME_TO_IDX
 
@@ -79,6 +88,51 @@ def test_compute_returns_and_advantages_one_step_terminal_bandit() -> None:
     assert torch.allclose(returns, rewards)
 
 
+def _make_two_action_policy_input() -> PolicyInput:
+    actions = (
+        (
+            ActionSpec(ActionType.DISCARD, tile=TILE_NAME_TO_IDX["1m"]),
+            ActionSpec(ActionType.DISCARD, tile=TILE_NAME_TO_IDX["2m"]),
+        ),
+    )
+    return PolicyInput(
+        obs=ObsTensorBatch(
+            tile_obs=torch.zeros((1, 4, 34), dtype=torch.float32),
+            scalar_obs=torch.zeros((1, 6), dtype=torch.float32),
+        ),
+        legal_action_ids=torch.tensor([[11, 29]], dtype=torch.long),
+        legal_action_features=torch.tensor([[[1.0, 0.0], [0.0, 1.0]]], dtype=torch.float32),
+        legal_action_mask=torch.tensor([[True, True]], dtype=torch.bool),
+        rule_context=torch.zeros((1, 6), dtype=torch.float32),
+        prior_logits=torch.tensor([[0.0, -1.0]], dtype=torch.float32),
+        legal_actions=actions,
+    )
+
+
+def _make_two_action_ppo_batch(policy_input: PolicyInput) -> PPOBatch:
+    return PPOBatch(
+        policy_input=policy_input,
+        action_index=torch.tensor([0], dtype=torch.long),
+        old_log_prob=torch.tensor([-0.5], dtype=torch.float32),
+        old_value=torch.zeros((1,), dtype=torch.float32),
+        advantages=torch.ones((1,), dtype=torch.float32),
+        returns=torch.tensor([1.0], dtype=torch.float32),
+        final_rank_target=torch.tensor([0], dtype=torch.long),
+    )
+
+
+def _make_two_action_rule_prior_delta_policy() -> RulePriorDeltaPolicy:
+    return RulePriorDeltaPolicy(
+        hidden_dim=32,
+        num_res_blocks=1,
+        c_tile=4,
+        n_scalar=6,
+        action_id_buckets=64,
+        action_id_dim=8,
+        dropout=0.0,
+    )
+
+
 def test_rule_kl_uses_same_filtered_learner_action_set() -> None:
     class _TwoActionPolicy(InteractivePolicy):
         def forward(self, policy_input: PolicyInput) -> PolicyOutput:
@@ -128,33 +182,8 @@ def test_rule_kl_uses_same_filtered_learner_action_set() -> None:
 
 def test_critic_pretrain_freeze_keeps_actor_logits_and_probs_unchanged() -> None:
     torch.manual_seed(2)
-    actions = (
-        (
-            ActionSpec(ActionType.DISCARD, tile=TILE_NAME_TO_IDX["1m"]),
-            ActionSpec(ActionType.DISCARD, tile=TILE_NAME_TO_IDX["2m"]),
-        ),
-    )
-    policy_input = PolicyInput(
-        obs=ObsTensorBatch(
-            tile_obs=torch.zeros((1, 4, 34), dtype=torch.float32),
-            scalar_obs=torch.zeros((1, 6), dtype=torch.float32),
-        ),
-        legal_action_ids=torch.tensor([[11, 29]], dtype=torch.long),
-        legal_action_features=torch.tensor([[[1.0, 0.0], [0.0, 1.0]]], dtype=torch.float32),
-        legal_action_mask=torch.tensor([[True, True]], dtype=torch.bool),
-        rule_context=torch.zeros((1, 6), dtype=torch.float32),
-        prior_logits=torch.tensor([[0.0, -1.0]], dtype=torch.float32),
-        legal_actions=actions,
-    )
-    policy = RulePriorDeltaPolicy(
-        hidden_dim=32,
-        num_res_blocks=1,
-        c_tile=4,
-        n_scalar=6,
-        action_id_buckets=64,
-        action_id_dim=8,
-        dropout=0.0,
-    )
+    policy_input = _make_two_action_policy_input()
+    policy = _make_two_action_rule_prior_delta_policy()
     with torch.no_grad():
         before = policy(policy_input)
         before_logits = before.action_logits.clone()
@@ -162,16 +191,7 @@ def test_critic_pretrain_freeze_keeps_actor_logits_and_probs_unchanged() -> None
         before_probs = torch.softmax(before.action_logits, dim=-1)
 
     optimizer = torch.optim.SGD(policy.parameters(), lr=0.1)
-    batch = PPOBatch(
-        policy_input=policy_input,
-        action_index=torch.tensor([0], dtype=torch.long),
-        old_log_prob=torch.tensor([-0.5], dtype=torch.float32),
-        old_value=torch.zeros((1,), dtype=torch.float32),
-        advantages=torch.ones((1,), dtype=torch.float32),
-        returns=torch.tensor([1.0], dtype=torch.float32),
-        final_rank_target=torch.tensor([0], dtype=torch.long),
-    )
-    critic_pretrain_update(policy, optimizer, batch, freeze_actor_delta=True)
+    critic_pretrain_update(policy, optimizer, _make_two_action_ppo_batch(policy_input), freeze_actor_delta=True)
 
     with torch.no_grad():
         after = policy(policy_input)
@@ -180,6 +200,36 @@ def test_critic_pretrain_freeze_keeps_actor_logits_and_probs_unchanged() -> None
     assert torch.allclose(after.aux["neural_delta"], before_delta, atol=1e-6)
     assert torch.allclose(after.action_logits, before_logits, atol=1e-6)
     assert torch.allclose(after_probs, before_probs, atol=1e-6)
+
+
+def test_critic_pretrain_dry_run_initializes_active_lazy_policy_before_optimizer_step() -> None:
+    torch.manual_seed(3)
+    policy_input = _make_two_action_policy_input()
+    policy = _make_two_action_rule_prior_delta_policy()
+    optimizer = torch.optim.SGD(policy.parameters(), lr=0.1)
+
+    critic_pretrain_update(policy, optimizer, _make_two_action_ppo_batch(policy_input), freeze_actor_delta=True)
+
+    remaining = _uninitialized_parameter_names(policy)
+    assert remaining == ["history_proj.0.weight", "history_proj.0.bias"]
+
+
+def test_critic_pretrain_freeze_trainable_param_names_and_optimizer_gate() -> None:
+    torch.manual_seed(4)
+    policy_input = _make_two_action_policy_input()
+    policy = _make_two_action_rule_prior_delta_policy()
+    optimizer = torch.optim.SGD(policy.parameters(), lr=0.1)
+
+    _initialize_lazy_parameters_for_training(policy, policy_input)
+    frozen = _freeze_actor_delta_parameters(policy)
+    try:
+        _assert_critic_pretrain_optimizer_param_groups(policy, optimizer)
+        trainable_names = _critic_pretrain_trainable_parameter_names(policy)
+        assert trainable_names
+        assert all(name.startswith(("value_head.", "rank_head.")) for name in trainable_names)
+    finally:
+        for parameter, requires_grad in frozen:
+            parameter.requires_grad_(requires_grad)
 
 
 def test_ppo_update_learns_toy_bandit_policy() -> None:

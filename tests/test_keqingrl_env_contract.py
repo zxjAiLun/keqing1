@@ -144,6 +144,19 @@ def test_forced_terminal_actions_preempt_learner_gate(
 
     assert dispatched == [raw_actions[0].to_mjai()]
     assert dispatched[0]["type"] == expected_type
+    events = env.drain_autopilot_events()
+    expected_action_type = (
+        ActionType.RYUKYOKU
+        if expected_type == "ryukyoku"
+        else ActionType.RON
+        if response_window
+        else ActionType.TSUMO
+    )
+    assert len(events) == 1
+    assert events[0].action_spec.action_type == expected_action_type
+    assert events[0].terminal_reason == expected_action_type.name.lower()
+    assert events[0].policy_input.metadata["is_autopilot"] is True
+    assert events[0].policy_input.metadata["is_learner_controlled"] is False
     assert env._turn is None
     assert env.is_done()
 

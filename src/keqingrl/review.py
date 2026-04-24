@@ -55,6 +55,7 @@ class StepReview:
     rulebase_chosen: str | None = None
     policy_chosen: str | None = None
     rule_kl: float | None = None
+    terminal_reason: str | None = None
     rule_context: tuple[float, ...] = ()
     style_context: tuple[float, ...] = ()
 
@@ -73,6 +74,8 @@ class EpisodeReview:
 class ReviewPolicyFieldSummary:
     learner_step_count: int
     autopilot_step_count: int
+    autopilot_terminal_count: int
+    terminal_reason_count: dict[str, int]
     entropy_count: int
     log_prob_count: int
     neural_delta_count: int
@@ -187,6 +190,7 @@ def review_rollout_step(
         is_learner_controlled=bool(step.is_learner_controlled),
         rulebase_chosen=step.rulebase_chosen,
         policy_chosen=step.policy_chosen,
+        terminal_reason=step.terminal_reason,
         rule_context=tuple(float(value) for value in step.rule_context.flatten().tolist()),
         style_context=()
         if step.style_context is None
@@ -236,6 +240,10 @@ def export_episode_review_jsonl(
 def summarize_review_policy_fields(episode_review: EpisodeReview) -> ReviewPolicyFieldSummary:
     learner_steps = [step for step in episode_review.steps if not step.is_autopilot]
     autopilot_steps = [step for step in episode_review.steps if step.is_autopilot]
+    terminal_reason_count: dict[str, int] = {}
+    for step in episode_review.steps:
+        if step.terminal_reason is not None:
+            terminal_reason_count[step.terminal_reason] = terminal_reason_count.get(step.terminal_reason, 0) + 1
     entropies = [step.entropy for step in learner_steps if step.entropy is not None]
     log_probs = [step.recorded_log_prob for step in learner_steps if step.recorded_log_prob is not None]
     deltas = [
@@ -246,6 +254,8 @@ def summarize_review_policy_fields(episode_review: EpisodeReview) -> ReviewPolic
     return ReviewPolicyFieldSummary(
         learner_step_count=len(learner_steps),
         autopilot_step_count=len(autopilot_steps),
+        autopilot_terminal_count=sum(1 for step in autopilot_steps if step.terminal_reason is not None),
+        terminal_reason_count=terminal_reason_count,
         entropy_count=len(entropies),
         log_prob_count=len(log_probs),
         neural_delta_count=len(deltas),
@@ -323,6 +333,7 @@ def _step_review_dict(step_review: StepReview) -> dict[str, object]:
         "rulebase_chosen": step_review.rulebase_chosen,
         "policy_chosen": step_review.policy_chosen,
         "rule_kl": step_review.rule_kl,
+        "terminal_reason": step_review.terminal_reason,
         "rule_context": list(step_review.rule_context),
         "style_context": list(step_review.style_context),
     }

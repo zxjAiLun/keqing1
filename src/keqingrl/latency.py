@@ -20,6 +20,8 @@ class LatencyReport:
     rust_rule_score_call_latency_ms: float
     python_policy_forward_latency_ms: float
     rust_env_step_latency_ms: float
+    avg_decision_latency_ms: float
+    p95_decision_latency_ms: float
     decisions_per_sec: float
     games_per_sec: float
 
@@ -42,6 +44,7 @@ def measure_latency_smoke(
     observe_seconds = 0.0
     policy_seconds = 0.0
     step_seconds = 0.0
+    decision_latencies_ms: list[float] = []
     total_start = perf_counter()
 
     for game_idx in range(num_games):
@@ -55,6 +58,7 @@ def measure_latency_smoke(
                     break
                 raise RuntimeError("environment has no current actor before episode termination")
 
+            decision_start = perf_counter()
             start = perf_counter()
             policy_input_cpu = env.observe(actor)
             observe_seconds += perf_counter() - start
@@ -72,6 +76,7 @@ def measure_latency_smoke(
             step_seconds += perf_counter() - start
 
             decision_count += 1
+            decision_latencies_ms.append((perf_counter() - decision_start) * 1000.0)
             if result.done:
                 break
         else:
@@ -86,9 +91,19 @@ def measure_latency_smoke(
         rust_rule_score_call_latency_ms=observe_seconds * 1000.0 / divisor,
         python_policy_forward_latency_ms=policy_seconds * 1000.0 / divisor,
         rust_env_step_latency_ms=step_seconds * 1000.0 / divisor,
+        avg_decision_latency_ms=sum(decision_latencies_ms) / divisor,
+        p95_decision_latency_ms=_percentile(decision_latencies_ms, 0.95),
         decisions_per_sec=decision_count / max(elapsed_seconds, 1e-12),
         games_per_sec=num_games / max(elapsed_seconds, 1e-12),
     )
+
+
+def _percentile(values: list[float], q: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, int(round((len(ordered) - 1) * float(q)))))
+    return float(ordered[index])
 
 
 def _policy_input_to_device(policy_input: PolicyInput, device: torch.device) -> PolicyInput:

@@ -87,6 +87,17 @@ class StepResult:
 
 
 @dataclass(frozen=True)
+class AutopilotTraceEvent:
+    actor: int
+    policy_input: PolicyInput
+    action_index: int
+    action_spec: ActionSpec
+    terminal_reason: str | None
+    rulebase_chosen: str | None
+    policy_chosen: str
+
+
+@dataclass(frozen=True)
 class _TurnContext:
     actor: int
     snapshot: dict[str, object]
@@ -161,6 +172,7 @@ class DiscardOnlyMahjongEnv:
         self._done = False
         self._completed_kyokus = 0
         self._game_start_oya = 0
+        self._autopilot_events: list[AutopilotTraceEvent] = []
 
     def reset(self, seed: int | None = None) -> EnvState:
         if self.room is not None:
@@ -171,6 +183,7 @@ class DiscardOnlyMahjongEnv:
         self._done = False
         self._completed_kyokus = 0
         self._turn = None
+        self._autopilot_events.clear()
         self.room = self.manager.create_room(_default_battle_config())
         self.manager.start_kyoku(self.room, seed=self._next_seed())
         self._game_start_oya = int(self.room.state.oya)
@@ -200,6 +213,11 @@ class DiscardOnlyMahjongEnv:
     def legal_actions(self, actor: int) -> tuple[ActionSpec, ...]:
         turn = self._require_turn(actor)
         return turn.legal_actions
+
+    def drain_autopilot_events(self) -> tuple[AutopilotTraceEvent, ...]:
+        events = tuple(self._autopilot_events)
+        self._autopilot_events.clear()
+        return events
 
     def observe(self, actor: int) -> PolicyInput:
         turn = self._require_turn(actor)
@@ -327,6 +345,7 @@ class DiscardOnlyMahjongEnv:
             if self._is_response_window(actor):
                 forced_response = self._forced_autopilot_action(raw_legal_actions)
                 if forced_response is not None:
+                    self._record_autopilot_event(snapshot, actor, forced_response, rulebase_action=forced_response)
                     self._dispatch_manager_action(room, actor, forced_response.to_mjai())
                     continue
                 rulebase_response = self._choose_rulebase_raw_action(snapshot, actor, raw_legal_actions)
@@ -334,6 +353,7 @@ class DiscardOnlyMahjongEnv:
                     rulebase_response,
                     response=True,
                 ):
+                    self._record_autopilot_event(snapshot, actor, rulebase_response, rulebase_action=rulebase_response)
                     self._dispatch_manager_action(room, actor, rulebase_response.to_mjai())
                     continue
                 controlled_response_pairs = self._collect_controlled_response_actions(raw_legal_actions)
@@ -342,6 +362,7 @@ class DiscardOnlyMahjongEnv:
                     has_controlled_actions=bool(controlled_response_pairs),
                 )
                 if auto_response is not None:
+                    self._record_autopilot_event(snapshot, actor, auto_response, rulebase_action=rulebase_response)
                     self._dispatch_manager_action(room, actor, auto_response.to_mjai())
                     continue
                 if not controlled_response_pairs:
@@ -358,6 +379,7 @@ class DiscardOnlyMahjongEnv:
 
             forced_self_action = self._forced_autopilot_action(raw_legal_actions)
             if forced_self_action is not None:
+                self._record_autopilot_event(snapshot, actor, forced_self_action, rulebase_action=forced_self_action)
                 self._dispatch_manager_action(room, actor, forced_self_action.to_mjai())
                 continue
 
@@ -366,6 +388,7 @@ class DiscardOnlyMahjongEnv:
                 rulebase_self_action,
                 response=False,
             ):
+                self._record_autopilot_event(snapshot, actor, rulebase_self_action, rulebase_action=rulebase_self_action)
                 self._dispatch_manager_action(room, actor, rulebase_self_action.to_mjai())
                 continue
 
@@ -375,6 +398,7 @@ class DiscardOnlyMahjongEnv:
                 has_controlled_actions=bool(controlled_pairs),
             )
             if auto_action is not None:
+                self._record_autopilot_event(snapshot, actor, auto_action, rulebase_action=rulebase_self_action)
                 self._dispatch_manager_action(room, actor, auto_action.to_mjai())
                 continue
 
@@ -390,6 +414,107 @@ class DiscardOnlyMahjongEnv:
                 control_action_types=tuple(action_type.name for action_type in self.self_turn_action_types),
             )
             return
+
+    def _record_autopilot_event(
+        self,
+        snapshot: dict[str, object],
+        actor: int,
+        raw_action: MahjongActionSpec,
+        *,
+        rulebase_action: MahjongActionSpec | None,
+    ) -> None:
+        try:
+            action_spec = action_from_mahjong_spec(raw_action)
+        except ValueError:
+            return
+        policy_input = self._policy_input_for_trace_action(
+            snapshot,
+            actor,
+            action_spec,
+            rulebase_chosen=self._raw_action_canonical_key(rulebase_action),
+            terminal_reason=self._terminal_reason_for_action(action_spec),
+        )
+        self._autopilot_events.append(
+            AutopilotTraceEvent(
+                actor=int(actor),
+                policy_input=policy_input,
+                action_index=0,
+                action_spec=action_spec,
+                terminal_reason=self._terminal_reason_for_action(action_spec),
+                rulebase_chosen=self._raw_action_canonical_key(rulebase_action),
+                policy_chosen=action_spec.canonical_key,
+            )
+        )
+
+    def _policy_input_for_trace_action(
+        self,
+        snapshot: dict[str, object],
+        actor: int,
+        action_spec: ActionSpec,
+        *,
+        rulebase_chosen: str | None,
+        terminal_reason: str | None,
+    ) -> PolicyInput:
+        try:
+            tile_obs_np, scalar_obs_np = encode_state_features(snapshot, actor)
+            tile_obs = torch.from_numpy(tile_obs_np).float().unsqueeze(0)
+            scalar_obs = torch.from_numpy(scalar_obs_np).float().unsqueeze(0)
+        except Exception:
+            tile_obs = torch.zeros((1, 4, 34), dtype=torch.float32)
+            scalar_obs = torch.zeros((1, 6), dtype=torch.float32)
+        legal_actions = (action_spec,)
+        legal_action_ids = torch.tensor([[encode_action_id(action_spec)]], dtype=torch.long)
+        try:
+            action_features = self._action_features(snapshot, action_spec)
+        except Exception:
+            action_features = [float(action_spec.action_type) / float(max(1, len(ActionType) - 1))] + [0.0] * 7
+        legal_action_features = torch.tensor([[action_features]], dtype=torch.float32)
+        legal_action_mask = torch.ones((1, 1), dtype=torch.bool)
+        try:
+            rule_scores = score_legal_actions(
+                snapshot,
+                actor,
+                legal_actions,
+                config=self.rule_score_config,
+            )
+            raw_rule_scores = rule_scores.raw_rule_scores.unsqueeze(0)
+            prior_logits = rule_scores.prior_logits.unsqueeze(0)
+        except Exception:
+            raw_rule_scores = torch.zeros((1, 1), dtype=torch.float32)
+            prior_logits = torch.zeros((1, 1), dtype=torch.float32)
+        return PolicyInput(
+            obs=ObsTensorBatch(tile_obs=tile_obs, scalar_obs=scalar_obs),
+            legal_action_ids=legal_action_ids,
+            legal_action_features=legal_action_features,
+            legal_action_mask=legal_action_mask,
+            rule_context=self.rule_context.unsqueeze(0).clone(),
+            raw_rule_scores=raw_rule_scores,
+            prior_logits=prior_logits,
+            style_context=self.style_context_tensor.unsqueeze(0).clone(),
+            legal_actions=(legal_actions,),
+            metadata={
+                "rulebase_chosen": rulebase_chosen,
+                "control_action_types": (),
+                "is_autopilot": True,
+                "is_learner_controlled": False,
+                "terminal_reason": terminal_reason,
+                "observation_contract_version": OBSERVATION_CONTRACT_VERSION,
+                "action_feature_contract_version": ACTION_FEATURE_CONTRACT_VERSION,
+                "env_contract_version": ENV_CONTRACT_VERSION,
+                "rule_score_version": RULE_SCORE_VERSION,
+                "reward_spec_version": REWARD_SPEC_VERSION,
+                "style_context_version": STYLE_CONTEXT_VERSION,
+            },
+        )
+
+    def _terminal_reason_for_action(self, action_spec: ActionSpec) -> str | None:
+        if action_spec.action_type == ActionType.TSUMO:
+            return "tsumo"
+        if action_spec.action_type == ActionType.RON:
+            return "ron"
+        if action_spec.action_type == ActionType.RYUKYOKU:
+            return "ryukyoku"
+        return None
 
     def _forced_autopilot_action(
         self,
@@ -773,4 +898,4 @@ def _default_battle_config() -> BattleConfig:
     )
 
 
-__all__ = ["DiscardOnlyMahjongEnv", "EnvState", "StepResult"]
+__all__ = ["AutopilotTraceEvent", "DiscardOnlyMahjongEnv", "EnvState", "StepResult"]

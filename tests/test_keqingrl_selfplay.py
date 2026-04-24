@@ -20,6 +20,7 @@ from keqingrl import (
     StepResult,
     build_episode_ppo_batch,
     build_episodes_ppo_batch,
+    build_ppo_batch,
     bind_reach_discard,
     collect_policy_episode,
     collect_selfplay_episode,
@@ -247,6 +248,85 @@ def test_build_episode_ppo_batch_separates_actor_returns() -> None:
     assert batch.final_rank_target.tolist() == [0, 3, 0, 3]
 
 
+def test_build_episode_ppo_batch_filters_autopilot_steps() -> None:
+    learner_step = _dummy_step(actor=0, step_id=1, action_count=2, reward=0.0, done=True)
+    autopilot_step = RolloutStep(
+        obs=learner_step.obs,
+        legal_action_ids=learner_step.legal_action_ids,
+        legal_action_features=learner_step.legal_action_features,
+        legal_action_mask=learner_step.legal_action_mask,
+        action_index=learner_step.action_index,
+        action_spec=learner_step.action_spec,
+        log_prob=-99.0,
+        value=99.0,
+        entropy=99.0,
+        reward=0.0,
+        done=False,
+        actor=0,
+        policy_version=learner_step.policy_version,
+        rule_context=learner_step.rule_context,
+        legal_actions=learner_step.legal_actions,
+        game_id=learner_step.game_id,
+        step_id=0,
+        is_autopilot=True,
+        is_learner_controlled=False,
+        terminal_reason="tsumo",
+    )
+    episode = RolloutEpisode(
+        steps=(autopilot_step, learner_step),
+        terminal_rewards=(1.0, 0.0, 0.0, 0.0),
+        final_ranks=(0, 1, 2, 3),
+        scores=(30000, 25000, 25000, 20000),
+    )
+
+    _advantages, _returns, prepared_steps, batch = build_episode_ppo_batch(episode)
+
+    assert [step.step_id for step in prepared_steps] == [learner_step.step_id]
+    assert batch.action_index.numel() == 1
+    assert batch.old_log_prob.tolist() == [learner_step.log_prob]
+
+
+def test_build_ppo_batch_rejects_autopilot_steps_directly() -> None:
+    step = _dummy_step(actor=0, step_id=0, action_count=2, done=True)
+    autopilot_step = RolloutStep(
+        obs=step.obs,
+        legal_action_ids=step.legal_action_ids,
+        legal_action_features=step.legal_action_features,
+        legal_action_mask=step.legal_action_mask,
+        action_index=step.action_index,
+        action_spec=step.action_spec,
+        log_prob=step.log_prob,
+        value=step.value,
+        entropy=step.entropy,
+        reward=step.reward,
+        done=step.done,
+        actor=step.actor,
+        policy_version=step.policy_version,
+        rule_context=step.rule_context,
+        legal_actions=step.legal_actions,
+        is_autopilot=True,
+        is_learner_controlled=False,
+    )
+
+    try:
+        build_ppo_batch([autopilot_step], [1.0], [1.0])
+    except ValueError as exc:
+        assert "learner-controlled policy steps" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected autopilot step rejection")
+
+
+def test_build_ppo_batch_strict_metadata_rejects_missing_contract_versions() -> None:
+    step = _dummy_step(actor=0, step_id=0, action_count=2, done=True)
+
+    try:
+        build_ppo_batch([step], [1.0], [1.0], strict_metadata=True)
+    except ValueError as exc:
+        assert "missing observation contract" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected missing strict metadata rejection")
+
+
 def test_build_ppo_batch_rejects_reordered_legal_actions() -> None:
     legal_actions = (
         ActionSpec(ActionType.DISCARD, tile=0),
@@ -329,9 +409,27 @@ def test_collect_discard_only_episode_emits_terminal_metadata() -> None:
     assert episode.game_id is not None
     assert len(episode.terminal_rewards) == 4
     assert tuple(sorted(episode.final_ranks)) == (0, 1, 2, 3)
-    assert all(step.policy_version == 7 for step in episode.steps)
+    policy_steps = [step for step in episode.steps if not step.is_autopilot]
+    assert all(step.policy_version == 7 for step in policy_steps)
     assert all(step.game_id == episode.game_id for step in episode.steps)
-    assert all(step.action_spec.action_type == ActionType.DISCARD for step in episode.steps)
+    assert all(step.action_spec.action_type == ActionType.DISCARD for step in policy_steps)
+
+
+def test_collect_discard_only_episode_records_autopilot_trace_rows() -> None:
+    torch.manual_seed(0)
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    policy = RandomInteractivePolicy()
+
+    episode = collect_discard_only_episode(env, policy, seed=31, policy_version=8)
+
+    autopilot_steps = [step for step in episode.steps if step.is_autopilot]
+    assert autopilot_steps
+    assert all(not step.is_learner_controlled for step in autopilot_steps)
+    assert all(step.policy_name == "autopilot" for step in autopilot_steps)
+    assert all(step.behavior_policy_id == "autopilot" for step in autopilot_steps)
+    _advantages, _returns, prepared_steps, batch = build_episode_ppo_batch(episode)
+    assert all(not step.is_autopilot for step in prepared_steps)
+    assert batch.action_index.numel() == len(prepared_steps)
 
 
 def test_collect_discard_only_episodes_returns_requested_episode_count() -> None:
@@ -351,7 +449,12 @@ def test_collect_discard_only_episodes_returns_requested_episode_count() -> None
     assert len(episodes) == 2
     assert [episode.seed for episode in episodes] == [41, 44]
     assert all(episode.steps for episode in episodes)
-    assert all(step.policy_version == 5 for episode in episodes for step in episode.steps)
+    assert all(
+        step.policy_version == 5
+        for episode in episodes
+        for step in episode.steps
+        if not step.is_autopilot
+    )
 
 
 def test_build_episodes_ppo_batch_combines_multiple_episodes() -> None:
@@ -819,6 +922,7 @@ def test_run_ppo_iteration_filters_batch_to_learner_seats_with_opponent_pool() -
         seed=23,
         rank_coef=0.05,
         max_grad_norm=1.0,
+        strict_metadata=False,
     )
 
     assert isinstance(result, DiscardOnlyIterationResult)
@@ -889,6 +993,15 @@ def test_run_discard_only_ppo_iteration_returns_finite_metrics() -> None:
     assert result.metrics.episode_count == 2
     assert result.metrics.total_steps == sum(len(episode.steps) for episode in result.episodes)
     assert result.metrics.batch_size == int(result.batch.action_index.numel())
+    assert 0.0 <= result.metrics.fourth_rate <= 1.0
+    assert 0.0 <= result.metrics.win_rate <= 1.0
+    assert 0.0 <= result.metrics.deal_in_rate <= 1.0
+    assert 0.0 <= result.metrics.call_rate <= 1.0
+    assert 0.0 <= result.metrics.riichi_rate <= 1.0
+    assert result.metrics.illegal_action_rate == 0.0
+    assert result.metrics.fallback_rate == 0.0
+    assert result.metrics.forced_terminal_missed == 0
+    assert isinstance(result.metrics.terminal_reason_count, dict)
     assert torch.isfinite(torch.tensor(result.metrics.mean_total_loss))
     assert torch.isfinite(torch.tensor(result.metrics.mean_policy_loss))
     assert torch.isfinite(torch.tensor(result.metrics.mean_value_loss))
