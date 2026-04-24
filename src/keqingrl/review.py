@@ -10,6 +10,7 @@ from typing import Callable, Mapping, Sequence
 import torch
 
 from keqingrl.actions import ACTION_FLAG_REACH, ACTION_FLAG_TSUMOGIRI, ActionSpec, ActionType
+from keqingrl.buffer import _assert_rollout_action_order
 from keqingrl.distribution import MaskedCategorical
 from keqingrl.policy import InteractivePolicy
 from keqingrl.rollout import RolloutEpisode, RolloutStep, rollout_step_policy_input
@@ -113,11 +114,13 @@ def review_rollout_step(
     top_k: int = 5,
     device: torch.device | str | None = None,
     policy_resolver: Callable[[RolloutStep], InteractivePolicy] | None = None,
+    strict_metadata: bool = True,
 ) -> StepReview:
     if step.legal_actions is None:
         raise ValueError("rollout review requires step.legal_actions to be present")
     if top_k <= 0:
         raise ValueError(f"top_k must be positive, got {top_k}")
+    _assert_rollout_action_order([step], strict_metadata=strict_metadata)
 
     active_policy = _resolve_review_policy(
         step,
@@ -205,6 +208,7 @@ def review_rollout_episode(
     top_k: int = 5,
     device: torch.device | str | None = None,
     policy_resolver: Callable[[RolloutStep], InteractivePolicy] | None = None,
+    strict_metadata: bool = True,
 ) -> EpisodeReview:
     return EpisodeReview(
         game_id=episode.game_id,
@@ -219,6 +223,7 @@ def review_rollout_episode(
                 top_k=top_k,
                 device=device,
                 policy_resolver=policy_resolver,
+                strict_metadata=strict_metadata,
             )
             for step in episode.steps
         ),

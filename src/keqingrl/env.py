@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -11,7 +10,6 @@ import torch
 
 from gateway.battle import BattleConfig, BattleManager, BattleRoom
 from keqingrl.actions import (
-    ACTION_FLAG_TSUMOGIRI,
     ActionSpec,
     ActionType,
     action_from_mahjong_spec,
@@ -22,6 +20,11 @@ from keqingrl.contracts import ObsTensorBatch, PolicyInput
 from keqingrl.metadata import (
     ACTION_FEATURE_CONTRACT_VERSION,
     ENV_CONTRACT_VERSION,
+    NATIVE_ACTION_IDENTITY_VERSION,
+    NATIVE_LEGAL_ENUMERATION_VERSION,
+    NATIVE_SCHEMA_NAME,
+    NATIVE_SCHEMA_VERSION,
+    NATIVE_TERMINAL_RESOLVER_VERSION,
     OBSERVATION_CONTRACT_VERSION,
     REWARD_SPEC_VERSION,
     RULE_SCORE_VERSION,
@@ -36,10 +39,16 @@ from keqingrl.rule_score import DEFAULT_RULE_SCORE_CONFIG, RuleScoreConfig, scor
 from keqingrl.style import DEFAULT_STYLE_CONTEXT, StyleContext
 from mahjong_env.feature_tracker import SnapshotFeatureTracker
 from mahjong_env.final_rank import final_ranks
-from mahjong_env.legal_actions import enumerate_legal_action_specs
-from mahjong_env.tiles import tile_to_34
 from mahjong_env.types import ActionSpec as MahjongActionSpec
 from training.state_features import encode as encode_state_features
+
+_KEQINGRL_NATIVE_SCHEMA_KWARGS = {
+    "schema_name": "keqingrl_native_boundary",
+    "schema_version": 1,
+    "action_identity_version": 1,
+    "legal_enumeration_version": 1,
+    "terminal_resolver_version": 1,
+}
 
 _SUPPORTED_SELF_TURN_ACTION_TYPES = frozenset(
     {
@@ -107,6 +116,12 @@ class _TurnContext:
     control_action_types: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class _ResolvedTerminalAction:
+    raw_spec: MahjongActionSpec
+    terminal_reason: str
+
+
 class DiscardOnlyMahjongEnv:
     """A conservative interactive env where the policy controls a bounded action subset."""
 
@@ -127,6 +142,8 @@ class DiscardOnlyMahjongEnv:
         style_context: StyleContext = DEFAULT_STYLE_CONTEXT,
         rule_score_config: RuleScoreConfig = DEFAULT_RULE_SCORE_CONFIG,
     ) -> None:
+        keqing_core.enable_rust(True)
+        self.native_schema_info = keqing_core.require_native_schema(**_KEQINGRL_NATIVE_SCHEMA_KWARGS)
         self.manager = manager or BattleManager()
         self.pt_map = tuple(float(value) for value in pt_map)
         self.rank_score_scale = float(rank_score_scale)
@@ -173,6 +190,7 @@ class DiscardOnlyMahjongEnv:
         self._completed_kyokus = 0
         self._game_start_oya = 0
         self._autopilot_events: list[AutopilotTraceEvent] = []
+        self._rust_synced_event_count = 0
 
     def reset(self, seed: int | None = None) -> EnvState:
         if self.room is not None:
@@ -185,7 +203,9 @@ class DiscardOnlyMahjongEnv:
         self._turn = None
         self._autopilot_events.clear()
         self.room = self.manager.create_room(_default_battle_config())
+        self._rust_synced_event_count = 0
         self.manager.start_kyoku(self.room, seed=self._next_seed())
+        self._sync_rust_runtime_state(self.room, actor_hint=int(self.room.state.oya))
         self._game_start_oya = int(self.room.state.oya)
         self._advance_until_decision()
         return self.state()
@@ -230,7 +250,7 @@ class DiscardOnlyMahjongEnv:
             dtype=torch.long,
         )
         legal_action_features = torch.tensor(
-            [[self._action_features(turn.snapshot, spec) for spec in turn.legal_actions]],
+            [self._action_features_batch(turn.snapshot, turn.legal_actions)],
             dtype=torch.float32,
         )
         legal_action_mask = torch.ones((1, len(turn.legal_actions)), dtype=torch.bool)
@@ -257,6 +277,11 @@ class DiscardOnlyMahjongEnv:
                 "observation_contract_version": OBSERVATION_CONTRACT_VERSION,
                 "action_feature_contract_version": ACTION_FEATURE_CONTRACT_VERSION,
                 "env_contract_version": ENV_CONTRACT_VERSION,
+                "native_schema_name": self.native_schema_info.get("schema_name", NATIVE_SCHEMA_NAME),
+                "native_schema_version": self.native_schema_info.get("schema_version", NATIVE_SCHEMA_VERSION),
+                "native_action_identity_version": self.native_schema_info.get("action_identity_version", NATIVE_ACTION_IDENTITY_VERSION),
+                "native_legal_enumeration_version": self.native_schema_info.get("legal_enumeration_version", NATIVE_LEGAL_ENUMERATION_VERSION),
+                "native_terminal_resolver_version": self.native_schema_info.get("terminal_resolver_version", NATIVE_TERMINAL_RESOLVER_VERSION),
                 "rule_score_version": RULE_SCORE_VERSION,
                 "reward_spec_version": REWARD_SPEC_VERSION,
                 "style_context_version": STYLE_CONTEXT_VERSION,
@@ -324,6 +349,7 @@ class DiscardOnlyMahjongEnv:
                     self._mark_done()
                     return
                 self.manager.start_kyoku(room, seed=self._next_seed())
+                self._sync_rust_runtime_state(room, actor_hint=int(room.state.oya))
                 continue
 
             actor = room.state.actor_to_move
@@ -331,7 +357,10 @@ class DiscardOnlyMahjongEnv:
                 self._mark_done()
                 return
 
+            before_event_count = len(room.events)
             self.manager.prepare_turn(room, actor)
+            if len(room.events) != before_event_count:
+                self._sync_rust_runtime_state(room, actor_hint=actor)
             if room.phase == "ended":
                 continue
 
@@ -341,12 +370,18 @@ class DiscardOnlyMahjongEnv:
                 return
 
             snapshot = self._snapshot_with_rl_fields(actor)
-            raw_legal_actions = tuple(enumerate_legal_action_specs(snapshot, actor))
+            raw_legal_actions = self._enumerate_runtime_legal_actions(snapshot, actor)
             if self._is_response_window(actor):
-                forced_response = self._forced_autopilot_action(raw_legal_actions)
+                forced_response = self._resolve_forced_terminal_action(snapshot, actor, raw_legal_actions)
                 if forced_response is not None:
-                    self._record_autopilot_event(snapshot, actor, forced_response, rulebase_action=forced_response)
-                    self._dispatch_manager_action(room, actor, forced_response.to_mjai())
+                    self._record_autopilot_event(
+                        snapshot,
+                        actor,
+                        forced_response.raw_spec,
+                        rulebase_action=forced_response.raw_spec,
+                        terminal_reason=forced_response.terminal_reason,
+                    )
+                    self._dispatch_manager_action(room, actor, forced_response.raw_spec.to_mjai())
                     continue
                 rulebase_response = self._choose_rulebase_raw_action(snapshot, actor, raw_legal_actions)
                 if rulebase_response is not None and not self._is_raw_action_controlled(
@@ -377,10 +412,16 @@ class DiscardOnlyMahjongEnv:
                 )
                 return
 
-            forced_self_action = self._forced_autopilot_action(raw_legal_actions)
+            forced_self_action = self._resolve_forced_terminal_action(snapshot, actor, raw_legal_actions)
             if forced_self_action is not None:
-                self._record_autopilot_event(snapshot, actor, forced_self_action, rulebase_action=forced_self_action)
-                self._dispatch_manager_action(room, actor, forced_self_action.to_mjai())
+                self._record_autopilot_event(
+                    snapshot,
+                    actor,
+                    forced_self_action.raw_spec,
+                    rulebase_action=forced_self_action.raw_spec,
+                    terminal_reason=forced_self_action.terminal_reason,
+                )
+                self._dispatch_manager_action(room, actor, forced_self_action.raw_spec.to_mjai())
                 continue
 
             rulebase_self_action = self._choose_rulebase_raw_action(snapshot, actor, raw_legal_actions)
@@ -422,6 +463,7 @@ class DiscardOnlyMahjongEnv:
         raw_action: MahjongActionSpec,
         *,
         rulebase_action: MahjongActionSpec | None,
+        terminal_reason: str | None = None,
     ) -> None:
         try:
             action_spec = action_from_mahjong_spec(raw_action)
@@ -432,7 +474,7 @@ class DiscardOnlyMahjongEnv:
             actor,
             action_spec,
             rulebase_chosen=self._raw_action_canonical_key(rulebase_action),
-            terminal_reason=self._terminal_reason_for_action(action_spec),
+            terminal_reason=terminal_reason if terminal_reason is not None else self._terminal_reason_for_action(action_spec),
         )
         self._autopilot_events.append(
             AutopilotTraceEvent(
@@ -440,7 +482,7 @@ class DiscardOnlyMahjongEnv:
                 policy_input=policy_input,
                 action_index=0,
                 action_spec=action_spec,
-                terminal_reason=self._terminal_reason_for_action(action_spec),
+                terminal_reason=terminal_reason if terminal_reason is not None else self._terminal_reason_for_action(action_spec),
                 rulebase_chosen=self._raw_action_canonical_key(rulebase_action),
                 policy_chosen=action_spec.canonical_key,
             )
@@ -464,11 +506,10 @@ class DiscardOnlyMahjongEnv:
             scalar_obs = torch.zeros((1, 6), dtype=torch.float32)
         legal_actions = (action_spec,)
         legal_action_ids = torch.tensor([[encode_action_id(action_spec)]], dtype=torch.long)
-        try:
-            action_features = self._action_features(snapshot, action_spec)
-        except Exception:
-            action_features = [float(action_spec.action_type) / float(max(1, len(ActionType) - 1))] + [0.0] * 7
-        legal_action_features = torch.tensor([[action_features]], dtype=torch.float32)
+        legal_action_features = torch.tensor(
+            [self._action_features_batch(snapshot, legal_actions)],
+            dtype=torch.float32,
+        )
         legal_action_mask = torch.ones((1, 1), dtype=torch.bool)
         try:
             rule_scores = score_legal_actions(
@@ -501,6 +542,11 @@ class DiscardOnlyMahjongEnv:
                 "observation_contract_version": OBSERVATION_CONTRACT_VERSION,
                 "action_feature_contract_version": ACTION_FEATURE_CONTRACT_VERSION,
                 "env_contract_version": ENV_CONTRACT_VERSION,
+                "native_schema_name": self.native_schema_info.get("schema_name", NATIVE_SCHEMA_NAME),
+                "native_schema_version": self.native_schema_info.get("schema_version", NATIVE_SCHEMA_VERSION),
+                "native_action_identity_version": self.native_schema_info.get("action_identity_version", NATIVE_ACTION_IDENTITY_VERSION),
+                "native_legal_enumeration_version": self.native_schema_info.get("legal_enumeration_version", NATIVE_LEGAL_ENUMERATION_VERSION),
+                "native_terminal_resolver_version": self.native_schema_info.get("terminal_resolver_version", NATIVE_TERMINAL_RESOLVER_VERSION),
                 "rule_score_version": RULE_SCORE_VERSION,
                 "reward_spec_version": REWARD_SPEC_VERSION,
                 "style_context_version": STYLE_CONTEXT_VERSION,
@@ -515,6 +561,36 @@ class DiscardOnlyMahjongEnv:
         if action_spec.action_type == ActionType.RYUKYOKU:
             return "ryukyoku"
         return None
+
+    def _enumerate_runtime_legal_actions(self, snapshot: dict[str, object], actor: int) -> tuple[MahjongActionSpec, ...]:
+        try:
+            raw_items = keqing_core.enumerate_public_legal_action_specs(snapshot, actor)
+        except RuntimeError as exc:
+            if keqing_core.is_missing_rust_capability_error(exc):
+                raise RuntimeError("KeqingRL runtime requires Rust legal action enumeration") from exc
+            raise
+        return tuple(_mahjong_spec_from_payload(item) for item in raw_items)
+
+    def _resolve_forced_terminal_action(
+        self,
+        snapshot: dict[str, object],
+        actor: int,
+        raw_legal_actions: Sequence[MahjongActionSpec],
+    ) -> _ResolvedTerminalAction | None:
+        raw_payloads = [raw.to_mjai() for raw in raw_legal_actions]
+        forced_action_types = [action_type.name for action_type in self.forced_autopilot_action_types]
+        try:
+            resolved = keqing_core.resolve_terminal_action(snapshot, actor, raw_payloads, forced_action_types)
+        except RuntimeError as exc:
+            if keqing_core.is_missing_rust_capability_error(exc):
+                raise RuntimeError("KeqingRL runtime requires Rust terminal resolver") from exc
+            raise
+        if resolved is None:
+            return None
+        return _ResolvedTerminalAction(
+            raw_spec=raw_legal_actions[int(resolved["action_index"])],
+            terminal_reason=str(resolved["terminal_reason"]),
+        )
 
     def _forced_autopilot_action(
         self,
@@ -745,51 +821,9 @@ class DiscardOnlyMahjongEnv:
         try:
             return list(keqing_core.enumerate_keqingv4_reach_discards(snapshot, actor))
         except RuntimeError as exc:
-            if not keqing_core.is_missing_rust_capability_error(exc):
-                raise
-        return self._python_reach_discard_candidates(snapshot, actor)
-
-    def _python_reach_discard_candidates(
-        self,
-        snapshot: dict[str, object],
-        actor: int,
-    ) -> list[tuple[str, bool]]:
-        hand_raw = snapshot.get("hand", [])
-        hand_list = (
-            list(hand_raw)
-            if isinstance(hand_raw, list)
-            else [str(tile) for tile, count in dict(hand_raw).items() for _ in range(int(count))]
-        )
-        hand = Counter(hand_list)
-        last_tsumo_all = snapshot.get("last_tsumo", [None, None, None, None])
-        last_tsumo_raw_all = snapshot.get("last_tsumo_raw", [None, None, None, None])
-        last_tsumo = last_tsumo_all[actor] if actor < len(last_tsumo_all) else None
-        last_tsumo_raw = last_tsumo_raw_all[actor] if actor < len(last_tsumo_raw_all) else None
-
-        counts34 = [0] * 34
-        for tile, count in hand.items():
-            tile34 = tile_to_34(tile)
-            if 0 <= tile34 < 34:
-                counts34[tile34] += int(count)
-
-        candidates: list[tuple[str, bool]] = []
-        seen: set[tuple[str, bool]] = set()
-        for tile in list(hand.keys()):
-            discard_tile = tile
-            tsumogiri = last_tsumo == tile
-            if tsumogiri and last_tsumo_raw is not None:
-                discard_tile = str(last_tsumo_raw)
-            tile34 = tile_to_34(tile)
-            if not (0 <= tile34 < 34) or counts34[tile34] <= 0:
-                continue
-            counts34[tile34] -= 1
-            if keqing_core.calc_standard_shanten(tuple(counts34)) == 0:
-                key = (str(discard_tile), bool(tsumogiri))
-                if key not in seen:
-                    seen.add(key)
-                    candidates.append(key)
-            counts34[tile34] += 1
-        return candidates
+            if keqing_core.is_missing_rust_capability_error(exc):
+                raise RuntimeError("KeqingRL runtime requires Rust reach-discard enumeration") from exc
+            raise
 
     def _is_self_turn_hora(self, raw_spec: MahjongActionSpec) -> bool:
         return raw_spec.type == "hora" and (
@@ -822,35 +856,61 @@ class DiscardOnlyMahjongEnv:
         actor: int,
         action: dict[str, object],
     ) -> None:
+        before_event_count = len(getattr(room, "events", ()))
         if action.get("type") == "ryukyoku":
             self.manager.ryukyoku(room)
+        else:
+            self.manager.apply_action(room, actor, action)
+        events = getattr(room, "events", None)
+        if events is not None and len(events) != before_event_count:
+            self._sync_rust_runtime_state(room, actor_hint=actor)
+
+    def _sync_rust_runtime_state(self, room: BattleRoom, *, actor_hint: int | None = None) -> None:
+        event_count = len(room.events)
+        if event_count <= self._rust_synced_event_count:
             return
-        self.manager.apply_action(room, actor, action)
+        self.manager.sync_state_from_rust_events(room, actor_hint=actor_hint)
+        self._rust_synced_event_count = event_count
+
+    def _action_features_batch(
+        self,
+        snapshot: dict[str, object],
+        specs: Sequence[ActionSpec],
+    ) -> list[list[float]]:
+        tracker = SnapshotFeatureTracker.from_state(snapshot, actor=int(snapshot["actor"]))
+        try:
+            return keqing_core.build_keqingrl_action_features_typed(
+                tracker.hand_counts34,
+                tracker.visible_counts34,
+                [int(spec.action_type) for spec in specs],
+                [-1 if spec.tile is None else int(spec.tile) for spec in specs],
+                [int(spec.flags) for spec in specs],
+                self._require_room().remaining_wall(),
+            )
+        except RuntimeError as exc:
+            if keqing_core.is_missing_rust_capability_error(exc):
+                raise RuntimeError("KeqingRL runtime requires Rust typed action feature generation") from exc
+            raise
 
     def _action_features(self, snapshot: dict[str, object], spec: ActionSpec) -> list[float]:
-        tracker = SnapshotFeatureTracker.from_state(snapshot, actor=int(snapshot["actor"]))
-        tile = -1 if spec.tile is None else int(spec.tile)
-        tile_norm = 0.0 if tile < 0 else float(tile) / 33.0
-        hand_count = 0.0 if tile < 0 else float(tracker.hand_counts34[tile]) / 4.0
-        visible = 0.0 if tile < 0 else float(tracker.visible_counts34[tile]) / 4.0
-        is_honor = 1.0 if tile >= 27 else 0.0
-        is_terminal = 1.0 if 0 <= tile < 27 and tile % 9 in (0, 8) else 0.0
-        return [
-            float(spec.action_type) / float(max(1, len(ActionType) - 1)),
-            tile_norm,
-            1.0 if spec.flags & ACTION_FLAG_TSUMOGIRI else 0.0,
-            hand_count,
-            visible,
-            is_honor,
-            is_terminal,
-            float(self._require_room().remaining_wall()) / 70.0,
-        ]
+        return self._action_features_batch(snapshot, (spec,))[0]
+
+    def _action_feature_payload(self, spec: ActionSpec, *, actor: int) -> dict[str, object]:
+        return {
+            "action_type": int(spec.action_type),
+            "actor": actor,
+            "tile": spec.tile,
+            "consumed": list(spec.consumed),
+            "from_who": spec.from_who,
+            "flags": int(spec.flags),
+        }
 
     def _snapshot_with_rl_fields(self, actor: int) -> dict[str, object]:
         room = self._require_room()
-        snapshot = self.manager.get_snap_with_shanten(room, actor)
+        snapshot = keqing_core.replay_state_snapshot(room.events, actor)
         snapshot["actor"] = actor
         snapshot["tsumo_pai"] = room.state.last_tsumo_raw[actor] or room.state.last_tsumo[actor]
+        self._inject_rust_shanten_waits(snapshot, actor)
         snapshot["_hora_is_haitei"] = room.remaining_wall() == 0
         snapshot["_hora_is_houtei"] = room.remaining_wall() == 0
         snapshot["_hora_is_rinshan"] = room.state.players[actor].rinshan_tsumo
@@ -858,6 +918,13 @@ class DiscardOnlyMahjongEnv:
             room.state.last_kakan and room.state.last_kakan.get("actor") != actor
         )
         return snapshot
+
+    def _inject_rust_shanten_waits(self, snapshot: dict[str, object], actor: int) -> None:
+        tracker = SnapshotFeatureTracker.from_state(snapshot, actor=actor)
+        summary = keqing_core.summarize_3n1(tracker.hand_counts34, tracker.visible_counts34)
+        snapshot["shanten"] = int(summary[0])
+        snapshot["waits_count"] = int(summary[1])
+        snapshot["waits_tiles"] = [bool(value) for value in summary[2]]
 
     def _next_seed(self) -> int | None:
         if self._base_seed is None:
@@ -870,6 +937,7 @@ class DiscardOnlyMahjongEnv:
         room = self._require_room()
         if not room.events or room.events[-1].get("type") != "end_game":
             room.events.append({"type": "end_game"})
+            self._sync_rust_runtime_state(room, actor_hint=0)
         self._done = True
         self._turn = None
 
@@ -895,6 +963,17 @@ def _default_battle_config() -> BattleConfig:
             {"id": seat, "name": f"RL{seat}", "type": "bot"}
             for seat in range(4)
         ],
+    )
+
+
+def _mahjong_spec_from_payload(item: dict[str, object]) -> MahjongActionSpec:
+    return MahjongActionSpec(
+        type=str(item["type"]),
+        actor=item.get("actor"),
+        pai=item.get("pai"),
+        consumed=tuple(item.get("consumed") or ()),
+        target=item.get("target"),
+        tsumogiri=item.get("tsumogiri"),
     )
 
 

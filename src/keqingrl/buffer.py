@@ -10,6 +10,11 @@ from keqingrl.contracts import ObsTensorBatch, PolicyInput
 from keqingrl.metadata import (
     ACTION_FEATURE_CONTRACT_VERSION,
     ENV_CONTRACT_VERSION,
+    NATIVE_ACTION_IDENTITY_VERSION,
+    NATIVE_LEGAL_ENUMERATION_VERSION,
+    NATIVE_SCHEMA_NAME,
+    NATIVE_SCHEMA_VERSION,
+    NATIVE_TERMINAL_RESOLVER_VERSION,
     OBSERVATION_CONTRACT_VERSION,
     REWARD_SPEC_VERSION,
     RULE_SCORE_VERSION,
@@ -160,6 +165,11 @@ def build_ppo_batch(
             "observation_contract_version": OBSERVATION_CONTRACT_VERSION,
             "action_feature_contract_version": ACTION_FEATURE_CONTRACT_VERSION,
             "env_contract_version": ENV_CONTRACT_VERSION,
+            "native_schema_name": NATIVE_SCHEMA_NAME,
+            "native_schema_version": NATIVE_SCHEMA_VERSION,
+            "native_action_identity_version": NATIVE_ACTION_IDENTITY_VERSION,
+            "native_legal_enumeration_version": NATIVE_LEGAL_ENUMERATION_VERSION,
+            "native_terminal_resolver_version": NATIVE_TERMINAL_RESOLVER_VERSION,
             "rule_score_version": RULE_SCORE_VERSION,
             "reward_spec_version": REWARD_SPEC_VERSION,
             "style_context_version": STYLE_CONTEXT_VERSION,
@@ -278,6 +288,36 @@ def _assert_rollout_action_order(steps: list[RolloutStep], *, strict_metadata: b
             strict_metadata=strict_metadata,
         )
         _assert_contract_version(
+            step.native_schema_name,
+            NATIVE_SCHEMA_NAME,
+            "native schema name",
+            strict_metadata=strict_metadata,
+        )
+        _assert_contract_version(
+            step.native_schema_version,
+            NATIVE_SCHEMA_VERSION,
+            "native schema version",
+            strict_metadata=strict_metadata,
+        )
+        _assert_contract_version(
+            step.native_action_identity_version,
+            NATIVE_ACTION_IDENTITY_VERSION,
+            "native action identity version",
+            strict_metadata=strict_metadata,
+        )
+        _assert_contract_version(
+            step.native_legal_enumeration_version,
+            NATIVE_LEGAL_ENUMERATION_VERSION,
+            "native legal enumeration version",
+            strict_metadata=strict_metadata,
+        )
+        _assert_contract_version(
+            step.native_terminal_resolver_version,
+            NATIVE_TERMINAL_RESOLVER_VERSION,
+            "native terminal resolver version",
+            strict_metadata=strict_metadata,
+        )
+        _assert_contract_version(
             step.rule_score_version,
             RULE_SCORE_VERSION,
             "rule score contract",
@@ -298,8 +338,8 @@ def _assert_rollout_action_order(steps: list[RolloutStep], *, strict_metadata: b
 
 
 def _assert_contract_version(
-    actual: str | None,
-    expected: str,
+    actual: object | None,
+    expected: object,
     label: str,
     *,
     strict_metadata: bool,

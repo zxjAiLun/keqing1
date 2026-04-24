@@ -40,6 +40,11 @@ class RolloutStep:
     observation_contract_version: str | None = None
     action_feature_contract_version: str | None = None
     env_contract_version: str | None = None
+    native_schema_name: str | None = None
+    native_schema_version: int | None = None
+    native_action_identity_version: int | None = None
+    native_legal_enumeration_version: int | None = None
+    native_terminal_resolver_version: int | None = None
     rule_score_version: str | None = None
     reward_spec_version: str | None = None
     style_context_version: str | None = None
@@ -150,6 +155,11 @@ def rollout_step_policy_input(
             "observation_contract_version": step.observation_contract_version,
             "action_feature_contract_version": step.action_feature_contract_version,
             "env_contract_version": step.env_contract_version,
+            "native_schema_name": step.native_schema_name,
+            "native_schema_version": step.native_schema_version,
+            "native_action_identity_version": step.native_action_identity_version,
+            "native_legal_enumeration_version": step.native_legal_enumeration_version,
+            "native_terminal_resolver_version": step.native_terminal_resolver_version,
             "rule_score_version": step.rule_score_version,
             "reward_spec_version": step.reward_spec_version,
             "style_context_version": step.style_context_version,

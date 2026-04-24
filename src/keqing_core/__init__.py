@@ -49,11 +49,22 @@ _RUST_SUMMARIZE_BEST_3N2_CANDIDATE = None
 _RUST_BUILD_XMODEL1_DISCARD_RECORDS = None
 _RUST_BUILD_KEQINGV4_CACHED_RECORDS = None
 _RUST_BUILD_REPLAY_DECISION_RECORDS_MC_RETURN_JSON = None
+_RUST_NATIVE_SCHEMA_INFO_JSON = None
+_RUST_ACTION_IDENTITY_JSON = None
+_RUST_DECODE_ACTION_ID_JSON = None
+_RUST_MJAI_EVENTS_FOR_ACTION_JSON = None
+_RUST_RESOLVE_TERMINAL_ACTION_JSON = None
 _RUST_XMODEL1_SCHEMA_INFO = None
 _RUST_VALIDATE_XMODEL1_DISCARD_RECORD = None
 _RUST_BUILD_XMODEL1_RUNTIME_TENSORS_JSON = None
 _RUST_REPLAY_STATE_SNAPSHOT_JSON = None
+_RUST_VALIDATE_REPLAY_STATE_SNAPSHOT_JSON = None
+_RUST_BUILD_KEQINGRL_ACTION_FEATURES = None
+_RUST_BUILD_KEQINGRL_ACTION_FEATURES_TYPED = None
+_RUST_KEQINGRL_ACTION_FEATURE_DIM = None
+_RUST_FIXED_SEED_EVAL_GATE_JSON = None
 _RUST_ENUMERATE_LEGAL_ACTION_SPECS_STRUCTURAL_JSON = None
+_RUST_ENUMERATE_PUBLIC_LEGAL_ACTION_SPECS_JSON = None
 _RUST_ENUMERATE_HORA_CANDIDATES_JSON = None
 _RUST_CAN_HORA_SHAPE_FROM_SNAPSHOT_JSON = None
 _RUST_PREPARE_HORA_EVALUATION_FROM_SNAPSHOT_JSON = None
@@ -180,6 +191,7 @@ def _disable_stale_xmodel1_native_if_needed() -> None:
     global _RUST_VALIDATE_XMODEL1_DISCARD_RECORD
     global _RUST_BUILD_XMODEL1_RUNTIME_TENSORS_JSON
     global _RUST_XMODEL1_SCHEMA_MISMATCH
+    global _RUST_VALIDATE_REPLAY_STATE_SNAPSHOT_JSON
 
     if (
         _PY_XMODEL1_SCHEMA_NAME is None
@@ -241,12 +253,22 @@ if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
     _RUST_BUILD_REPLAY_DECISION_RECORDS_MC_RETURN_JSON = getattr(
         _rust_ext, "build_replay_decision_records_mc_return_json_py", None
     )
+    _RUST_NATIVE_SCHEMA_INFO_JSON = getattr(_rust_ext, "native_schema_info_json_py", None)
+    _RUST_ACTION_IDENTITY_JSON = getattr(_rust_ext, "action_identity_json_py", None)
+    _RUST_DECODE_ACTION_ID_JSON = getattr(_rust_ext, "decode_action_id_json_py", None)
+    _RUST_MJAI_EVENTS_FOR_ACTION_JSON = getattr(_rust_ext, "mjai_events_for_action_json_py", None)
+    _RUST_RESOLVE_TERMINAL_ACTION_JSON = getattr(_rust_ext, "resolve_terminal_action_json_py", None)
     _RUST_XMODEL1_SCHEMA_INFO = getattr(_rust_ext, "xmodel1_schema_info_py", None)
     _RUST_VALIDATE_XMODEL1_DISCARD_RECORD = getattr(_rust_ext, "validate_xmodel1_discard_record_py", None)
     _RUST_BUILD_XMODEL1_RUNTIME_TENSORS_JSON = getattr(
         _rust_ext, "build_xmodel1_runtime_tensors_json_py", None
     )
     _RUST_REPLAY_STATE_SNAPSHOT_JSON = getattr(_rust_ext, "replay_state_snapshot_json_py", None)
+    _RUST_VALIDATE_REPLAY_STATE_SNAPSHOT_JSON = getattr(_rust_ext, "validate_replay_state_snapshot_json_py", None)
+    _RUST_BUILD_KEQINGRL_ACTION_FEATURES = getattr(_rust_ext, "build_keqingrl_action_features_py", None)
+    _RUST_BUILD_KEQINGRL_ACTION_FEATURES_TYPED = getattr(_rust_ext, "build_keqingrl_action_features_typed_py", None)
+    _RUST_KEQINGRL_ACTION_FEATURE_DIM = getattr(_rust_ext, "keqingrl_action_feature_dim_py", None)
+    _RUST_FIXED_SEED_EVAL_GATE_JSON = getattr(_rust_ext, "fixed_seed_eval_gate_json_py", None)
     _RUST_ENUMERATE_LEGAL_ACTION_SPECS_STRUCTURAL_JSON = getattr(
         _rust_ext, "enumerate_legal_action_specs_structural_json_py", None
     )
@@ -584,6 +606,94 @@ def build_replay_decision_records_mc_return(events):
     return _json.loads(_RUST_BUILD_REPLAY_DECISION_RECORDS_MC_RETURN_JSON(payload))
 
 
+def native_schema_info():
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_NATIVE_SCHEMA_INFO_JSON is not None):
+        raise RuntimeError("Rust native schema capability is not available")
+    return _json.loads(_RUST_NATIVE_SCHEMA_INFO_JSON())
+
+
+def require_native_schema(
+    *,
+    schema_name: str = "keqingrl_native_boundary",
+    schema_version: int = 1,
+    action_identity_version: int = 1,
+    legal_enumeration_version: int = 1,
+    terminal_resolver_version: int = 1,
+):
+    info = native_schema_info()
+    expected = {
+        "schema_name": schema_name,
+        "schema_version": int(schema_version),
+        "action_identity_version": int(action_identity_version),
+        "legal_enumeration_version": int(legal_enumeration_version),
+        "terminal_resolver_version": int(terminal_resolver_version),
+        "runtime_fallback_policy": "fail_closed_no_silent_python_fallback",
+    }
+    for key, expected_value in expected.items():
+        actual = info.get(key)
+        if actual != expected_value:
+            raise RuntimeError(
+                f"Rust native schema mismatch for {key}: {actual!r}; expected {expected_value!r}"
+            )
+    capabilities = dict(info.get("capabilities") or {})
+    required_capabilities = {
+        "action_identity_v1": "supported",
+        "action_id_decode_v1": "supported",
+        "mjai_event_expansion_v1": "supported",
+        "legal_enumeration_v1": "supported",
+        "terminal_resolver_v1": "supported",
+        "state_apply_validation_v1": "supported",
+        "action_feature_parity_v1": "supported",
+        "fixed_seed_eval_gate_v1": "supported",
+        "typed_action_feature_api_v1": "supported",
+        "nuki": "unsupported",
+    }
+    for key, expected_value in required_capabilities.items():
+        actual = capabilities.get(key)
+        if actual != expected_value:
+            raise RuntimeError(
+                f"Rust native capability mismatch for {key}: {actual!r}; expected {expected_value!r}"
+            )
+    return info
+
+
+def action_identity(action: dict):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_ACTION_IDENTITY_JSON is not None):
+        raise RuntimeError("Rust action identity capability is not available")
+    return _json.loads(
+        _RUST_ACTION_IDENTITY_JSON(_json.dumps(action, ensure_ascii=False, default=_json_default))
+    )
+
+
+def decode_action_id(action_id: int):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_DECODE_ACTION_ID_JSON is not None):
+        raise RuntimeError("Rust action id decode capability is not available")
+    return _json.loads(_RUST_DECODE_ACTION_ID_JSON(int(action_id)))
+
+
+def mjai_events_for_action(action: dict, *, actor: int | None = None):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_MJAI_EVENTS_FOR_ACTION_JSON is not None):
+        raise RuntimeError("Rust MJAI action expansion capability is not available")
+    return _json.loads(
+        _RUST_MJAI_EVENTS_FOR_ACTION_JSON(
+            _json.dumps(action, ensure_ascii=False, default=_json_default),
+            None if actor is None else int(actor),
+        )
+    )
+
+
+def resolve_terminal_action(state_snapshot, actor: int, legal_actions: list[dict], forced_action_types):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_RESOLVE_TERMINAL_ACTION_JSON is not None):
+        raise RuntimeError("Rust terminal resolver capability is not available")
+    payload = _RUST_RESOLVE_TERMINAL_ACTION_JSON(
+        _json.dumps(state_snapshot, ensure_ascii=False, default=_json_default),
+        int(actor),
+        _json.dumps(legal_actions, ensure_ascii=False, default=_json_default),
+        _json.dumps(list(forced_action_types), ensure_ascii=False, default=_json_default),
+    )
+    return None if payload is None else _json.loads(payload)
+
+
 def xmodel1_schema_info():
     if _USE_RUST and _RUST_AVAILABLE and _RUST_XMODEL1_SCHEMA_INFO is not None:
         name, version, max_candidates, candidate_dim, flag_dim = _RUST_XMODEL1_SCHEMA_INFO()
@@ -663,6 +773,71 @@ def replay_state_snapshot(events, actor: int):
         raise RuntimeError("Rust replay state snapshot capability is not available")
     payload = _json.dumps(events, ensure_ascii=False)
     return _json.loads(_RUST_REPLAY_STATE_SNAPSHOT_JSON(payload, int(actor)))
+
+
+def validate_replay_state_snapshot(events, actor: int, expected_snapshot: dict | None = None):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_VALIDATE_REPLAY_STATE_SNAPSHOT_JSON is not None
+    ):
+        raise RuntimeError("Rust replay state snapshot validation capability is not available")
+    expected_payload = None
+    if expected_snapshot is not None:
+        expected_payload = _json.dumps(expected_snapshot, ensure_ascii=False, default=_json_default)
+    return _json.loads(
+        _RUST_VALIDATE_REPLAY_STATE_SNAPSHOT_JSON(
+            _json.dumps(events, ensure_ascii=False, default=_json_default),
+            int(actor),
+            expected_payload,
+        )
+    )
+
+
+def build_keqingrl_action_features(snapshot: dict, actions: list[dict], remaining_wall: int | float):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_BUILD_KEQINGRL_ACTION_FEATURES is not None):
+        raise RuntimeError("Rust KeqingRL action feature capability is not available")
+    return _RUST_BUILD_KEQINGRL_ACTION_FEATURES(
+        _json.dumps(snapshot, ensure_ascii=False, default=_json_default),
+        _json.dumps(actions, ensure_ascii=False, default=_json_default),
+        float(remaining_wall),
+    )
+
+
+def build_keqingrl_action_features_typed(
+    hand_counts34,
+    visible_counts34,
+    action_types,
+    tiles,
+    flags,
+    remaining_wall: int | float,
+):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_BUILD_KEQINGRL_ACTION_FEATURES_TYPED is not None):
+        raise RuntimeError("Rust KeqingRL typed action feature capability is not available")
+    return _RUST_BUILD_KEQINGRL_ACTION_FEATURES_TYPED(
+        [int(value) for value in hand_counts34],
+        [int(value) for value in visible_counts34],
+        [int(value) for value in action_types],
+        [int(value) for value in tiles],
+        [int(value) for value in flags],
+        float(remaining_wall),
+    )
+
+
+def keqingrl_action_feature_dim() -> int:
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_KEQINGRL_ACTION_FEATURE_DIM is not None):
+        raise RuntimeError("Rust KeqingRL action feature dim capability is not available")
+    return int(_RUST_KEQINGRL_ACTION_FEATURE_DIM())
+
+
+def fixed_seed_eval_gate(report: dict):
+    if not (_USE_RUST and _RUST_AVAILABLE and _RUST_FIXED_SEED_EVAL_GATE_JSON is not None):
+        raise RuntimeError("Rust fixed-seed eval gate capability is not available")
+    return _json.loads(
+        _RUST_FIXED_SEED_EVAL_GATE_JSON(
+            _json.dumps(report, ensure_ascii=False, default=_json_default)
+        )
+    )
 
 
 def enumerate_legal_action_specs_structural(state_snapshot, actor: int):
@@ -1186,10 +1361,21 @@ __all__ = [
     "build_xmodel1_discard_records",
     "build_keqingv4_cached_records",
     "build_replay_decision_records_mc_return",
+    "native_schema_info",
+    "require_native_schema",
+    "action_identity",
+    "decode_action_id",
+    "mjai_events_for_action",
+    "resolve_terminal_action",
     "xmodel1_schema_info",
     "validate_xmodel1_discard_record",
     "build_xmodel1_runtime_tensors",
     "replay_state_snapshot",
+    "validate_replay_state_snapshot",
+    "build_keqingrl_action_features",
+    "build_keqingrl_action_features_typed",
+    "keqingrl_action_feature_dim",
+    "fixed_seed_eval_gate",
     "enumerate_legal_action_specs_structural",
     "enumerate_public_legal_action_specs",
     "choose_rulebase_action",

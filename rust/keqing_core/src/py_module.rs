@@ -6,10 +6,16 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList};
 
+use crate::action_features::{
+    action_feature_dim, build_keqingrl_action_features, build_keqingrl_action_features_from_parts,
+};
+use crate::action_identity::{action_identity_json, decode_action_id, mjai_events_for_action};
+use crate::boundary_contract::native_schema_info;
 use crate::continuation_scenarios::build_keqingv4_continuation_scenarios;
 use crate::continuation_scoring::{aggregate_continuation_scores, score_continuation_scenario};
 use crate::counts::TILE_COUNT;
-use crate::event_apply::replay_state_snapshot;
+use crate::eval_gate::fixed_seed_eval_gate;
+use crate::event_apply::{replay_state_snapshot, validate_replay_state_snapshot};
 use crate::hora_truth::{
     evaluate_hora_truth_from_prepared, legacy_error_payload, legacy_payload_from_truth,
 };
@@ -39,6 +45,7 @@ use crate::score_rules::{
 use crate::scoring_pool::build_136_pool_entries;
 use crate::shanten_table::{calc_shanten_all, calc_shanten_normal, ensure_init};
 use crate::standard::counts34_to_ids;
+use crate::terminal_resolver::resolve_terminal_action;
 use crate::xmodel1_export::{
     build_xmodel1_runtime_tensors, validate_xmodel1_discard_record, xmodel1_schema_info,
 };
@@ -254,6 +261,57 @@ fn build_replay_decision_records_mc_return_json_py(events_json: &str) -> PyResul
     let records =
         build_replay_decision_records_mc_return(&events).map_err(PyRuntimeError::new_err)?;
     serde_json::to_string(&records).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn native_schema_info_json_py() -> PyResult<String> {
+    serde_json::to_string(&native_schema_info())
+        .map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn action_identity_json_py(action_json: &str) -> PyResult<String> {
+    let action: serde_json::Value = serde_json::from_str(action_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let identity = action_identity_json(&action).map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&identity).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn decode_action_id_json_py(action_id: u64) -> PyResult<String> {
+    let decoded = decode_action_id(action_id).map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&decoded).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+#[pyo3(signature = (action_json, actor=None))]
+fn mjai_events_for_action_json_py(action_json: &str, actor: Option<usize>) -> PyResult<String> {
+    let action: serde_json::Value = serde_json::from_str(action_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let events = mjai_events_for_action(&action, actor).map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&events).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
+fn resolve_terminal_action_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    legal_actions_json: &str,
+    forced_action_types_json: &str,
+) -> PyResult<Option<String>> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let legal_actions: Vec<serde_json::Value> = serde_json::from_str(legal_actions_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let forced_action_types: Vec<String> = serde_json::from_str(forced_action_types_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let resolved = resolve_terminal_action(&snapshot, actor, &legal_actions, &forced_action_types)
+        .map_err(PyRuntimeError::new_err)?;
+    resolved
+        .map(|value| {
+            serde_json::to_string(&value).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+        })
+        .transpose()
 }
 
 #[pyfunction]
@@ -527,6 +585,70 @@ fn replay_state_snapshot_json_py(events_json: &str, actor: usize) -> PyResult<St
 }
 
 #[pyfunction]
+#[pyo3(signature = (events_json, actor, expected_snapshot_json=None))]
+fn validate_replay_state_snapshot_json_py(
+    events_json: &str,
+    actor: usize,
+    expected_snapshot_json: Option<&str>,
+) -> PyResult<String> {
+    let events: Vec<serde_json::Value> = serde_json::from_str(events_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let expected_snapshot = expected_snapshot_json
+        .map(|payload| serde_json::from_str::<serde_json::Value>(payload))
+        .transpose()
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    validate_replay_state_snapshot(&events, actor, expected_snapshot.as_ref())
+        .map_err(PyRuntimeError::new_err)
+}
+
+#[pyfunction]
+fn build_keqingrl_action_features_py(
+    snapshot_json: &str,
+    actions_json: &str,
+    remaining_wall: f32,
+) -> PyResult<Vec<Vec<f32>>> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let actions: Vec<serde_json::Value> = serde_json::from_str(actions_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    build_keqingrl_action_features(&snapshot, &actions, remaining_wall)
+        .map_err(PyRuntimeError::new_err)
+}
+
+#[pyfunction]
+fn build_keqingrl_action_features_typed_py(
+    hand_counts34: Vec<u8>,
+    visible_counts34: Vec<u8>,
+    action_types: Vec<u8>,
+    tiles: Vec<i16>,
+    flags: Vec<u32>,
+    remaining_wall: f32,
+) -> PyResult<Vec<Vec<f32>>> {
+    build_keqingrl_action_features_from_parts(
+        &hand_counts34,
+        &visible_counts34,
+        &action_types,
+        &tiles,
+        &flags,
+        remaining_wall,
+    )
+    .map_err(PyRuntimeError::new_err)
+}
+
+#[pyfunction]
+fn keqingrl_action_feature_dim_py() -> PyResult<usize> {
+    Ok(action_feature_dim())
+}
+
+#[pyfunction]
+fn fixed_seed_eval_gate_json_py(report_json: &str) -> PyResult<String> {
+    let report: serde_json::Value = serde_json::from_str(report_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let result = fixed_seed_eval_gate(&report).map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&result).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
+#[pyfunction]
 fn build_xmodel1_runtime_tensors_json_py(
     snapshot_json: &str,
     actor: usize,
@@ -737,6 +859,11 @@ pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(summarize_best_3n2_candidate_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_xmodel1_discard_records_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_keqingv4_cached_records_py, m)?)?;
+    m.add_function(wrap_pyfunction!(native_schema_info_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(action_identity_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_action_id_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(mjai_events_for_action_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_terminal_action_json_py, m)?)?;
     m.add_function(wrap_pyfunction!(
         build_replay_decision_records_mc_return_json_py,
         m
@@ -786,6 +913,14 @@ pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(validate_xmodel1_discard_record_py, m)?)?;
     m.add_function(wrap_pyfunction!(build_xmodel1_runtime_tensors_json_py, m)?)?;
     m.add_function(wrap_pyfunction!(replay_state_snapshot_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_replay_state_snapshot_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(build_keqingrl_action_features_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        build_keqingrl_action_features_typed_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(keqingrl_action_feature_dim_py, m)?)?;
+    m.add_function(wrap_pyfunction!(fixed_seed_eval_gate_json_py, m)?)?;
     m.add_function(wrap_pyfunction!(
         enumerate_legal_action_specs_structural_json_py,
         m

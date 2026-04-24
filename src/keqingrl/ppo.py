@@ -248,6 +248,26 @@ def _initialize_lazy_parameters_for_training(policy: InteractivePolicy, policy_i
     if _uninitialized_parameter_names(policy):
         with torch.no_grad():
             policy(policy_input)
+    _initialize_inactive_optional_lazy_parameters(policy, policy_input)
+    _assert_no_uninitialized_parameters(policy)
+
+
+def _initialize_inactive_optional_lazy_parameters(policy: InteractivePolicy, policy_input) -> None:
+    names = set(_uninitialized_parameter_names(policy))
+    if not names:
+        return
+    history_proj = getattr(policy, "history_proj", None)
+    if history_proj is not None and any(name.startswith("history_proj.") for name in names):
+        batch_size = int(policy_input.obs.scalar_obs.shape[0])
+        empty_history = policy_input.obs.scalar_obs.new_zeros((batch_size, 0))
+        with torch.no_grad():
+            history_proj(empty_history)
+
+
+def _assert_no_uninitialized_parameters(policy: InteractivePolicy) -> None:
+    names = _uninitialized_parameter_names(policy)
+    if names:
+        raise RuntimeError(f"policy still has uninitialized parameters after training dry-run: {names}")
 
 
 def _uninitialized_parameter_names(policy: InteractivePolicy) -> list[str]:

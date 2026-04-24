@@ -394,10 +394,16 @@ def apply_event(state: GameState, event: MjaiEvent) -> None:
         state.pending_rinshan_actor = None
         if "scores" in event:
             state.scores = list(event["scores"])
-        if "honba" in event:
+        if "state_honba" in event:
+            state.honba = int(event["state_honba"])
+        elif "honba" in event:
             state.honba = int(event["honba"])
-        if "kyotaku" in event:
+        if "state_kyotaku" in event:
+            state.kyotaku = int(event["state_kyotaku"])
+        elif "kyotaku" in event:
             state.kyotaku = int(event["kyotaku"])
+        if "oya" in event:
+            state.oya = int(event["oya"])
         if "ura_dora_markers" in event:
             state.ura_dora_markers = [
                 _normalize_or_keep_aka(tile) for tile in event["ura_dora_markers"]

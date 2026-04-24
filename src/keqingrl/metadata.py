@@ -5,6 +5,11 @@ from __future__ import annotations
 MODEL_FAMILY = "keqingrl_lite"
 POLICY_CONTRACT_VERSION = "keqingrl_policy_v2"
 ACTION_CONTRACT_VERSION = "keqingrl_action_v2"
+NATIVE_SCHEMA_NAME = "keqingrl_native_boundary"
+NATIVE_SCHEMA_VERSION = 1
+NATIVE_ACTION_IDENTITY_VERSION = 1
+NATIVE_LEGAL_ENUMERATION_VERSION = 1
+NATIVE_TERMINAL_RESOLVER_VERSION = 1
 OBSERVATION_CONTRACT_VERSION = "keqingrl_observation_v1"
 ACTION_FEATURE_CONTRACT_VERSION = "keqingrl_action_feature_v1"
 ENV_CONTRACT_VERSION = "keqingrl_env_v2"
@@ -18,6 +23,11 @@ REQUIRED_CHECKPOINT_METADATA_KEYS = (
     "model_family",
     "policy_contract_version",
     "action_contract_version",
+    "native_schema_name",
+    "native_schema_version",
+    "native_action_identity_version",
+    "native_legal_enumeration_version",
+    "native_terminal_resolver_version",
     "observation_contract_version",
     "action_feature_contract_version",
     "env_contract_version",
@@ -54,6 +64,11 @@ def default_checkpoint_metadata(
         "model_family": MODEL_FAMILY,
         "policy_contract_version": POLICY_CONTRACT_VERSION,
         "action_contract_version": ACTION_CONTRACT_VERSION,
+        "native_schema_name": NATIVE_SCHEMA_NAME,
+        "native_schema_version": NATIVE_SCHEMA_VERSION,
+        "native_action_identity_version": NATIVE_ACTION_IDENTITY_VERSION,
+        "native_legal_enumeration_version": NATIVE_LEGAL_ENUMERATION_VERSION,
+        "native_terminal_resolver_version": NATIVE_TERMINAL_RESOLVER_VERSION,
         "observation_contract_version": OBSERVATION_CONTRACT_VERSION,
         "action_feature_contract_version": ACTION_FEATURE_CONTRACT_VERSION,
         "env_contract_version": ENV_CONTRACT_VERSION,
@@ -83,6 +98,11 @@ def validate_checkpoint_metadata(metadata: dict[str, object]) -> None:
     expected_versions = {
         "policy_contract_version": POLICY_CONTRACT_VERSION,
         "action_contract_version": ACTION_CONTRACT_VERSION,
+        "native_schema_name": NATIVE_SCHEMA_NAME,
+        "native_schema_version": NATIVE_SCHEMA_VERSION,
+        "native_action_identity_version": NATIVE_ACTION_IDENTITY_VERSION,
+        "native_legal_enumeration_version": NATIVE_LEGAL_ENUMERATION_VERSION,
+        "native_terminal_resolver_version": NATIVE_TERMINAL_RESOLVER_VERSION,
         "observation_contract_version": OBSERVATION_CONTRACT_VERSION,
         "action_feature_contract_version": ACTION_FEATURE_CONTRACT_VERSION,
         "env_contract_version": ENV_CONTRACT_VERSION,
@@ -107,6 +127,11 @@ __all__ = [
     "ACTION_FEATURE_CONTRACT_VERSION",
     "ENV_CONTRACT_VERSION",
     "MODEL_FAMILY",
+    "NATIVE_ACTION_IDENTITY_VERSION",
+    "NATIVE_LEGAL_ENUMERATION_VERSION",
+    "NATIVE_SCHEMA_NAME",
+    "NATIVE_SCHEMA_VERSION",
+    "NATIVE_TERMINAL_RESOLVER_VERSION",
     "OBSERVATION_CONTRACT_VERSION",
     "POLICY_CONTRACT_VERSION",
     "REQUIRED_CHECKPOINT_METADATA_KEYS",

@@ -28,6 +28,8 @@ from keqingrl.rollout import (
 
 @dataclass(frozen=True)
 class DiscardOnlyIterationMetrics:
+    # Phase-0/4 smoke counters are fail-closed gates today: the env raises on
+    # illegal/fallback failures before they become recoverable sampled events.
     episode_count: int
     total_steps: int
     batch_size: int
@@ -149,6 +151,11 @@ def collect_policy_episode(
                 observation_contract_version=policy_input_cpu.metadata.get("observation_contract_version"),
                 action_feature_contract_version=policy_input_cpu.metadata.get("action_feature_contract_version"),
                 env_contract_version=policy_input_cpu.metadata.get("env_contract_version"),
+                native_schema_name=policy_input_cpu.metadata.get("native_schema_name"),
+                native_schema_version=policy_input_cpu.metadata.get("native_schema_version"),
+                native_action_identity_version=policy_input_cpu.metadata.get("native_action_identity_version"),
+                native_legal_enumeration_version=policy_input_cpu.metadata.get("native_legal_enumeration_version"),
+                native_terminal_resolver_version=policy_input_cpu.metadata.get("native_terminal_resolver_version"),
                 rule_score_version=policy_input_cpu.metadata.get("rule_score_version"),
                 reward_spec_version=policy_input_cpu.metadata.get("reward_spec_version"),
                 style_context_version=policy_input_cpu.metadata.get("style_context_version"),
@@ -352,7 +359,7 @@ def build_episode_ppo_batch(
     gamma: float = 1.0,
     gae_lambda: float = 0.95,
     include_rank_targets: bool = True,
-    strict_metadata: bool = False,
+    strict_metadata: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, list[RolloutStep], PPOBatch]:
     if not episode.steps:
         raise ValueError("episode.steps must not be empty")
@@ -403,7 +410,7 @@ def build_episodes_ppo_batch(
     gamma: float = 1.0,
     gae_lambda: float = 0.95,
     include_rank_targets: bool = True,
-    strict_metadata: bool = False,
+    strict_metadata: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, list[RolloutStep], PPOBatch]:
     if not episodes:
         raise ValueError("episodes must not be empty")
@@ -755,6 +762,11 @@ def _append_autopilot_trace_steps(
                 observation_contract_version=policy_input.metadata.get("observation_contract_version"),
                 action_feature_contract_version=policy_input.metadata.get("action_feature_contract_version"),
                 env_contract_version=policy_input.metadata.get("env_contract_version"),
+                native_schema_name=policy_input.metadata.get("native_schema_name"),
+                native_schema_version=policy_input.metadata.get("native_schema_version"),
+                native_action_identity_version=policy_input.metadata.get("native_action_identity_version"),
+                native_legal_enumeration_version=policy_input.metadata.get("native_legal_enumeration_version"),
+                native_terminal_resolver_version=policy_input.metadata.get("native_terminal_resolver_version"),
                 rule_score_version=policy_input.metadata.get("rule_score_version"),
                 reward_spec_version=policy_input.metadata.get("reward_spec_version"),
                 style_context_version=policy_input.metadata.get("style_context_version"),

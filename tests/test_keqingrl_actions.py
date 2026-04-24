@@ -12,6 +12,7 @@ from keqingrl.actions import (
     bind_reach_discard,
     decode_action_id,
     encode_action_id,
+    make_action_identity,
 )
 from mahjong_env.action_space import TILE_NAME_TO_IDX
 from mahjong_env.types import ActionSpec as MahjongActionSpec
@@ -166,3 +167,72 @@ def test_action_spec_canonical_key_is_derived_and_stable() -> None:
     assert spec.canonical_key != different.canonical_key
     with pytest.raises(TypeError):
         ActionSpec(ActionType.DISCARD, tile=0, canonical_key="bad")  # type: ignore[call-arg]
+
+
+def test_rust_action_identity_v1_matches_python_key_and_id() -> None:
+    import keqing_core
+
+    if not keqing_core.is_available():
+        pytest.skip("keqing_core native module is not available")
+    previous = keqing_core.is_enabled()
+    keqing_core.enable_rust(True)
+    try:
+        specs = [
+            ActionSpec(ActionType.DISCARD, tile=TILE_NAME_TO_IDX["1m"], flags=ACTION_FLAG_TSUMOGIRI),
+            ActionSpec(ActionType.REACH_DISCARD, tile=TILE_NAME_TO_IDX["4m"], flags=ACTION_FLAG_REACH),
+            ActionSpec(ActionType.TSUMO, tile=TILE_NAME_TO_IDX["C"]),
+            ActionSpec(ActionType.RON, tile=TILE_NAME_TO_IDX["9p"], from_who=1),
+            ActionSpec(ActionType.CHI, tile=TILE_NAME_TO_IDX["3m"], consumed=(TILE_NAME_TO_IDX["1m"], TILE_NAME_TO_IDX["2m"]), from_who=0),
+            ActionSpec(ActionType.PON, tile=TILE_NAME_TO_IDX["5p"], consumed=(TILE_NAME_TO_IDX["5p"], TILE_NAME_TO_IDX["5p"]), from_who=2),
+            ActionSpec(ActionType.DAIMINKAN, tile=TILE_NAME_TO_IDX["7s"], consumed=(TILE_NAME_TO_IDX["7s"], TILE_NAME_TO_IDX["7s"], TILE_NAME_TO_IDX["7s"]), from_who=3),
+            ActionSpec(ActionType.ANKAN, tile=TILE_NAME_TO_IDX["E"], consumed=(TILE_NAME_TO_IDX["E"], TILE_NAME_TO_IDX["E"], TILE_NAME_TO_IDX["E"])),
+            ActionSpec(ActionType.KAKAN, tile=TILE_NAME_TO_IDX["P"], consumed=(TILE_NAME_TO_IDX["P"], TILE_NAME_TO_IDX["P"], TILE_NAME_TO_IDX["P"])),
+            ActionSpec(ActionType.PASS),
+            ActionSpec(ActionType.RYUKYOKU),
+        ]
+        for spec in specs:
+            identity = make_action_identity(spec, actor=2)
+            assert identity.version == 1
+            assert identity.action_type == spec.action_type
+            assert identity.canonical_key == spec.canonical_key
+            assert identity.action_id == encode_action_id(spec)
+            assert identity.supported is True
+
+        nuki_identity = make_action_identity(ActionSpec(ActionType.NUKI, tile=TILE_NAME_TO_IDX["N"]), actor=0)
+        assert nuki_identity.supported is False
+        assert nuki_identity.unsupported_reason is not None
+    finally:
+        keqing_core.enable_rust(previous)
+
+
+def test_rust_decode_action_id_and_mjai_expansion_parity() -> None:
+    import keqing_core
+
+    if not keqing_core.is_available():
+        pytest.skip("keqing_core native module is not available")
+    previous = keqing_core.is_enabled()
+    keqing_core.enable_rust(True)
+    try:
+        specs = [
+            ActionSpec(ActionType.DISCARD, tile=TILE_NAME_TO_IDX["1m"], flags=ACTION_FLAG_TSUMOGIRI),
+            ActionSpec(ActionType.REACH_DISCARD, tile=TILE_NAME_TO_IDX["4m"], flags=ACTION_FLAG_REACH | ACTION_FLAG_TSUMOGIRI),
+            ActionSpec(ActionType.TSUMO, tile=TILE_NAME_TO_IDX["C"]),
+            ActionSpec(ActionType.RON, tile=TILE_NAME_TO_IDX["9p"], from_who=1),
+            ActionSpec(ActionType.CHI, tile=TILE_NAME_TO_IDX["3m"], consumed=(TILE_NAME_TO_IDX["1m"], TILE_NAME_TO_IDX["2m"]), from_who=0),
+            ActionSpec(ActionType.PON, tile=TILE_NAME_TO_IDX["5p"], consumed=(TILE_NAME_TO_IDX["5p"], TILE_NAME_TO_IDX["5p"]), from_who=2),
+            ActionSpec(ActionType.DAIMINKAN, tile=TILE_NAME_TO_IDX["7s"], consumed=(TILE_NAME_TO_IDX["7s"], TILE_NAME_TO_IDX["7s"], TILE_NAME_TO_IDX["7s"]), from_who=3),
+            ActionSpec(ActionType.ANKAN, tile=TILE_NAME_TO_IDX["E"], consumed=(TILE_NAME_TO_IDX["E"], TILE_NAME_TO_IDX["E"], TILE_NAME_TO_IDX["E"])),
+            ActionSpec(ActionType.KAKAN, tile=TILE_NAME_TO_IDX["P"], consumed=(TILE_NAME_TO_IDX["P"], TILE_NAME_TO_IDX["P"], TILE_NAME_TO_IDX["P"])),
+            ActionSpec(ActionType.PASS),
+            ActionSpec(ActionType.RYUKYOKU),
+        ]
+        for spec in specs:
+            assert decode_action_id(encode_action_id(spec)) == spec
+            expected = (
+                [{"type": "reach", "actor": 2}, {"type": "dahai", "actor": 2, "pai": "4m", "tsumogiri": True}]
+                if spec.action_type == ActionType.REACH_DISCARD
+                else [spec.to_mjai_action(actor=2)]
+            )
+            assert spec.to_mjai_events(actor=2) == expected
+    finally:
+        keqing_core.enable_rust(previous)

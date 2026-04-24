@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Mapping, TYPE_CHECKING
 
+import keqing_core
+
 from mahjong_env.action_space import IDX_TO_TILE_NAME, TILE_NAME_TO_IDX
 from mahjong_env.tiles import normalize_tile
 
@@ -36,6 +38,22 @@ class ActionType(IntEnum):
 
 
 @dataclass(frozen=True)
+class ActionIdentity:
+    version: int
+    action_type: ActionType
+    action_type_name: str
+    actor: int | None
+    tile: int | None
+    consumed: tuple[int, ...]
+    from_who: int | None
+    flags: int
+    canonical_key: str
+    action_id: int
+    supported: bool
+    unsupported_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class ActionSpec:
     action_type: ActionType
     tile: int | None = None
@@ -46,6 +64,9 @@ class ActionSpec:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "canonical_key", make_action_canonical_key(self))
+
+    def identity(self, *, actor: int | None = None) -> ActionIdentity:
+        return make_action_identity(self, actor=actor)
 
     def to_mjai_action(self, *, actor: int) -> dict[str, object]:
         if self.action_type == ActionType.REACH_DISCARD:
@@ -67,16 +88,7 @@ class ActionSpec:
         return payload
 
     def to_mjai_events(self, *, actor: int) -> list[dict[str, object]]:
-        if self.action_type != ActionType.REACH_DISCARD:
-            return [self.to_mjai_action(actor=actor)]
-        if self.tile is None:
-            raise ValueError("REACH_DISCARD requires tile to emit MJAI events")
-        discard = ActionSpec(
-            action_type=ActionType.DISCARD,
-            tile=self.tile,
-            flags=self.flags,
-        ).to_mjai_action(actor=actor)
-        return [{"type": "reach", "actor": actor}, discard]
+        return keqing_core.mjai_events_for_action(_identity_payload(self, actor=actor), actor=actor)
 
 
 _ACTION_TYPE_TO_MJAI = {
@@ -113,6 +125,39 @@ def encode_action_id(spec: ActionSpec) -> int:
     return encoded
 
 
+def make_action_identity(spec: ActionSpec, *, actor: int | None = None) -> ActionIdentity:
+    native = keqing_core.action_identity(_identity_payload(spec, actor=actor))
+    return ActionIdentity(
+        version=int(native["version"]),
+        action_type=ActionType(int(native["action_type"])),
+        action_type_name=str(native["action_type_name"]),
+        actor=_optional_int(native.get("actor")),
+        tile=_optional_int(native.get("tile")),
+        consumed=tuple(int(value) for value in native.get("consumed", ())),
+        from_who=_optional_int(native.get("from_who")),
+        flags=int(native["flags"]),
+        canonical_key=str(native["canonical_key"]),
+        action_id=int(native["action_id"]),
+        supported=bool(native["supported"]),
+        unsupported_reason=None if native.get("unsupported_reason") is None else str(native["unsupported_reason"]),
+    )
+
+
+def _identity_payload(spec: ActionSpec, *, actor: int | None) -> dict[str, object]:
+    return {
+        "action_type": int(spec.action_type),
+        "actor": actor,
+        "tile": spec.tile,
+        "consumed": list(spec.consumed),
+        "from_who": spec.from_who,
+        "flags": int(spec.flags),
+    }
+
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else int(value)
+
+
 def make_action_canonical_key(spec: ActionSpec) -> str:
     consumed = ",".join(str(int(tile)) for tile in spec.consumed)
     tile = -1 if spec.tile is None else int(spec.tile)
@@ -129,32 +174,13 @@ def make_action_canonical_key(spec: ActionSpec) -> str:
 def decode_action_id(encoded: int) -> ActionSpec:
     if encoded < 0:
         raise ValueError("encoded action id must be non-negative")
-
-    work = int(encoded)
-    flags = work % _FLAGS_BASE
-    work //= _FLAGS_BASE
-
-    from_who_slot = work % _FROM_WHO_BASE
-    work //= _FROM_WHO_BASE
-
-    consumed_rev: list[int] = []
-    for _ in range(_MAX_CONSUMED):
-        tile_slot = work % _TILE_SLOT_BASE
-        work //= _TILE_SLOT_BASE
-        tile = _decode_tile_slot(tile_slot)
-        if tile is not None:
-            consumed_rev.append(tile)
-
-    tile = _decode_tile_slot(work % _TILE_SLOT_BASE)
-    work //= _TILE_SLOT_BASE
-    action_type = ActionType(work)
-
+    decoded = keqing_core.decode_action_id(int(encoded))
     return ActionSpec(
-        action_type=action_type,
-        tile=tile,
-        consumed=tuple(reversed(consumed_rev)),
-        from_who=_decode_from_who_slot(from_who_slot),
-        flags=flags,
+        action_type=ActionType(int(decoded["action_type"])),
+        tile=_optional_int(decoded.get("tile")),
+        consumed=tuple(int(value) for value in decoded.get("consumed", ())),
+        from_who=_optional_int(decoded.get("from_who")),
+        flags=int(decoded["flags"]),
     )
 
 
@@ -256,6 +282,7 @@ def _maybe_int(value: object) -> int | None:
 __all__ = [
     "ACTION_FLAG_REACH",
     "ACTION_FLAG_TSUMOGIRI",
+    "ActionIdentity",
     "ActionSpec",
     "ActionType",
     "bind_reach_discard",
@@ -263,5 +290,6 @@ __all__ = [
     "action_from_mjai",
     "decode_action_id",
     "encode_action_id",
+    "make_action_identity",
     "make_action_canonical_key",
 ]

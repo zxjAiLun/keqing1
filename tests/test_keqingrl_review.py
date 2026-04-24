@@ -16,6 +16,12 @@ from keqingrl import (
     RolloutEpisode,
     RolloutStep,
     RandomInteractivePolicy,
+    ACTION_FEATURE_CONTRACT_VERSION,
+    ENV_CONTRACT_VERSION,
+    OBSERVATION_CONTRACT_VERSION,
+    REWARD_SPEC_VERSION,
+    RULE_SCORE_VERSION,
+    STYLE_CONTEXT_VERSION,
     bind_reach_discard,
     export_episode_review_jsonl,
     format_action_spec,
@@ -85,6 +91,12 @@ def _synthetic_review_step() -> RolloutStep:
         legal_actions=legal_actions,
         game_id="review-synthetic",
         step_id=5,
+        observation_contract_version=OBSERVATION_CONTRACT_VERSION,
+        action_feature_contract_version=ACTION_FEATURE_CONTRACT_VERSION,
+        env_contract_version=ENV_CONTRACT_VERSION,
+        rule_score_version=RULE_SCORE_VERSION,
+        reward_spec_version=REWARD_SPEC_VERSION,
+        style_context_version=STYLE_CONTEXT_VERSION,
     )
 
 
@@ -126,6 +138,12 @@ def _synthetic_response_review_step() -> RolloutStep:
         legal_actions=legal_actions,
         game_id="review-response",
         step_id=9,
+        observation_contract_version=OBSERVATION_CONTRACT_VERSION,
+        action_feature_contract_version=ACTION_FEATURE_CONTRACT_VERSION,
+        env_contract_version=ENV_CONTRACT_VERSION,
+        rule_score_version=RULE_SCORE_VERSION,
+        reward_spec_version=REWARD_SPEC_VERSION,
+        style_context_version=STYLE_CONTEXT_VERSION,
     )
 
 
@@ -163,6 +181,12 @@ def _synthetic_ryukyoku_review_step() -> RolloutStep:
         legal_actions=legal_actions,
         game_id="review-ryukyoku",
         step_id=12,
+        observation_contract_version=OBSERVATION_CONTRACT_VERSION,
+        action_feature_contract_version=ACTION_FEATURE_CONTRACT_VERSION,
+        env_contract_version=ENV_CONTRACT_VERSION,
+        rule_score_version=RULE_SCORE_VERSION,
+        reward_spec_version=REWARD_SPEC_VERSION,
+        style_context_version=STYLE_CONTEXT_VERSION,
     )
 
 
@@ -199,6 +223,12 @@ def _synthetic_mixed_policy_episode() -> RolloutEpisode:
                 legal_actions=step_a_actions,
                 game_id="mixed-review",
                 step_id=0,
+                observation_contract_version=OBSERVATION_CONTRACT_VERSION,
+                action_feature_contract_version=ACTION_FEATURE_CONTRACT_VERSION,
+                env_contract_version=ENV_CONTRACT_VERSION,
+                rule_score_version=RULE_SCORE_VERSION,
+                reward_spec_version=REWARD_SPEC_VERSION,
+                style_context_version=STYLE_CONTEXT_VERSION,
             ),
             RolloutStep(
                 obs=ObsTensorBatch(
@@ -222,6 +252,12 @@ def _synthetic_mixed_policy_episode() -> RolloutEpisode:
                 legal_actions=step_b_actions,
                 game_id="mixed-review",
                 step_id=1,
+                observation_contract_version=OBSERVATION_CONTRACT_VERSION,
+                action_feature_contract_version=ACTION_FEATURE_CONTRACT_VERSION,
+                env_contract_version=ENV_CONTRACT_VERSION,
+                rule_score_version=RULE_SCORE_VERSION,
+                reward_spec_version=REWARD_SPEC_VERSION,
+                style_context_version=STYLE_CONTEXT_VERSION,
             ),
         ),
         terminal_rewards=(1.0, -1.0, 0.0, 0.0),

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 import torch
+import keqing_core
 
 from keqingrl.actions import ActionType
 from keqingrl.buffer import build_ppo_batch
@@ -35,6 +36,8 @@ from keqingrl.ppo import (
 
 @dataclass(frozen=True)
 class DiscardOnlyEvalMetrics:
+    # These smoke counters are hard failure gates until env/review expose real
+    # recoverable counters for illegal/fallback/forced-terminal misses.
     episode_count: int
     total_steps: int
     mean_episode_steps: float
@@ -401,20 +404,24 @@ def _fixed_seed_eval_failure_reasons(
     max_fourth_rate: float,
     max_deal_in_rate: float,
 ) -> tuple[str, ...]:
-    reasons: list[str] = []
-    if illegal_action_rate > 0.0:
-        reasons.append(f"illegal_action_rate > 0: {illegal_action_rate}")
-    if fallback_rate > 0.0:
-        reasons.append(f"fallback_rate > 0: {fallback_rate}")
-    if forced_terminal_missed > 0:
-        reasons.append(f"forced_terminal_missed > 0: {forced_terminal_missed}")
-    if not terminal_reason_count:
-        reasons.append("terminal_reason_count is empty")
-    if fourth_rate > max_fourth_rate:
-        reasons.append(f"fourth_rate {fourth_rate} exceeded {max_fourth_rate}")
-    if deal_in_rate > max_deal_in_rate:
-        reasons.append(f"deal_in_rate {deal_in_rate} exceeded {max_deal_in_rate}")
-    return tuple(reasons)
+    try:
+        result = keqing_core.fixed_seed_eval_gate(
+            {
+                "illegal_action_rate": float(illegal_action_rate),
+                "fallback_rate": float(fallback_rate),
+                "forced_terminal_missed": int(forced_terminal_missed),
+                "terminal_reason_count": dict(terminal_reason_count),
+                "fourth_rate": float(fourth_rate),
+                "deal_in_rate": float(deal_in_rate),
+                "max_fourth_rate": float(max_fourth_rate),
+                "max_deal_in_rate": float(max_deal_in_rate),
+            }
+        )
+    except RuntimeError as exc:
+        if keqing_core.is_missing_rust_capability_error(exc):
+            raise RuntimeError("KeqingRL checkpoint/eval selection requires Rust fixed-seed eval gate") from exc
+        raise
+    return tuple(str(reason) for reason in result.get("failure_reasons", ()))
 
 
 def _smoke_metric_counts(episodes, learner_seats: Sequence[int]) -> dict[str, object]:

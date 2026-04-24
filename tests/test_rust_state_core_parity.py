@@ -283,3 +283,86 @@ def test_rust_replay_state_snapshot_matches_python_for_kakan_accepted_and_rinsha
     assert actual == expected
     assert actual["last_kakan"] is None
     assert actual["rinshan_tsumo"][1] is True
+
+
+def test_rust_replay_state_snapshot_validation_api_reports_match_and_mismatch():
+    if not keqing_core.is_available():
+        pytest.skip("keqing_core native module is not available")
+
+    events = [
+        {"type": "start_game", "names": ["p0", "p1", "p2", "p3"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4p"],
+                ["1m"] * 13,
+                ["2m"] * 13,
+                ["3m"] * 13,
+            ],
+        },
+        {"type": "tsumo", "actor": 0, "pai": "5p"},
+    ]
+    expected = _python_snapshot(events, 0)
+    _set_rust_mode(True)
+
+    matched = keqing_core.validate_replay_state_snapshot(events, 0, expected)
+
+    assert matched["ok"] is True
+    assert matched["event_count"] == len(events)
+    assert matched["rust_snapshot"] == expected
+
+    expected["scores"] = [1, 2, 3, 4]
+    mismatched = keqing_core.validate_replay_state_snapshot(events, 0, expected)
+
+    assert mismatched["ok"] is False
+    assert mismatched["mismatch"] is True
+    assert mismatched["rust_snapshot"]["scores"] == [25000, 25000, 25000, 25000]
+
+
+def test_rust_replay_state_snapshot_matches_python_for_terminal_runtime_state_fields():
+    if not keqing_core.is_available():
+        pytest.skip("keqing_core native module is not available")
+
+    events = [
+        {"type": "start_game", "names": ["p0", "p1", "p2", "p3"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 2,
+            "kyotaku": 1,
+            "oya": 0,
+            "scores": [24000, 26000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [["1m"] * 13, ["2m"] * 13, ["3m"] * 13, ["4m"] * 13],
+        },
+        {
+            "type": "hora",
+            "actor": 1,
+            "target": 0,
+            "pai": "2m",
+            "scores": [20000, 30000, 25000, 25000],
+            "honba": 2,
+            "state_honba": 0,
+            "kyotaku": 1,
+            "state_kyotaku": 0,
+            "oya": 1,
+        },
+        {"type": "end_kyoku"},
+    ]
+
+    expected = _python_snapshot(events, 1)
+    actual = _rust_snapshot(events, 1)
+
+    assert actual == expected
+    assert actual["honba"] == 0
+    assert actual["kyotaku"] == 0
+    assert actual["oya"] == 1
+    assert actual["actor_to_move"] is None

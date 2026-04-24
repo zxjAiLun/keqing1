@@ -3,9 +3,13 @@
 //! This crate provides optimized Rust implementations of hot-path
 //! computation functions for the Keqing Mahjong AI system.
 
+pub mod action_features;
+pub mod action_identity;
+pub mod boundary_contract;
 pub mod continuation_scenarios;
 pub mod continuation_scoring;
 pub mod counts;
+pub mod eval_gate;
 pub mod event_apply;
 pub mod export_common;
 pub mod future_truth;
@@ -28,6 +32,7 @@ pub mod shanten_table;
 pub mod snapshot;
 pub mod standard;
 pub mod state_core;
+pub mod terminal_resolver;
 pub mod types;
 pub mod value_proxy;
 pub mod xmodel1_export;

@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::state_core::{GameStateCore, PlayerStateCore};
 use crate::types::{DiscardEntry, LastDiscard};
@@ -443,11 +443,22 @@ pub fn apply_event(state: &mut GameStateCore, event: &Value) -> Result<(), Strin
                     .map(|v| v.as_i64().unwrap_or(25000) as i32)
                     .collect();
             }
-            if let Some(honba) = event.get("honba").and_then(Value::as_i64) {
+            if let Some(honba) = event
+                .get("state_honba")
+                .or_else(|| event.get("honba"))
+                .and_then(Value::as_i64)
+            {
                 state.honba = honba as i32;
             }
-            if let Some(kyotaku) = event.get("kyotaku").and_then(Value::as_i64) {
+            if let Some(kyotaku) = event
+                .get("state_kyotaku")
+                .or_else(|| event.get("kyotaku"))
+                .and_then(Value::as_i64)
+            {
                 state.kyotaku = kyotaku as i32;
+            }
+            if let Some(oya) = event.get("oya").and_then(Value::as_u64) {
+                state.oya = oya as usize;
             }
             if let Some(ura_markers) = event.get("ura_dora_markers").and_then(Value::as_array) {
                 state.ura_dora_markers = ura_markers
@@ -490,13 +501,36 @@ pub fn apply_event(state: &mut GameStateCore, event: &Value) -> Result<(), Strin
     }
 }
 
-pub fn replay_state_snapshot(events: &[Value], actor: usize) -> Result<String, String> {
+pub fn replay_state_snapshot_value(events: &[Value], actor: usize) -> Result<Value, String> {
     let mut state = GameStateCore::default();
     for event in events {
         apply_event(&mut state, event)?;
     }
-    let snapshot = crate::snapshot::snapshot_for_actor(&state, actor);
+    serde_json::to_value(crate::snapshot::snapshot_for_actor(&state, actor))
+        .map_err(|err| err.to_string())
+}
+
+pub fn replay_state_snapshot(events: &[Value], actor: usize) -> Result<String, String> {
+    let snapshot = replay_state_snapshot_value(events, actor)?;
     serde_json::to_string(&snapshot).map_err(|err| err.to_string())
+}
+
+pub fn validate_replay_state_snapshot(
+    events: &[Value],
+    actor: usize,
+    expected_snapshot: Option<&Value>,
+) -> Result<String, String> {
+    let rust_snapshot = replay_state_snapshot_value(events, actor)?;
+    let matches_expected = expected_snapshot.map(|expected| expected == &rust_snapshot);
+    let payload = json!({
+        "ok": matches_expected.unwrap_or(true),
+        "actor": actor,
+        "event_count": events.len(),
+        "rust_snapshot": rust_snapshot,
+        "expected_snapshot": expected_snapshot,
+        "mismatch": matches_expected == Some(false),
+    });
+    serde_json::to_string(&payload).map_err(|err| err.to_string())
 }
 
 #[cfg(test)]

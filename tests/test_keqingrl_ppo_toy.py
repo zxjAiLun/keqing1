@@ -211,7 +211,7 @@ def test_critic_pretrain_dry_run_initializes_active_lazy_policy_before_optimizer
     critic_pretrain_update(policy, optimizer, _make_two_action_ppo_batch(policy_input), freeze_actor_delta=True)
 
     remaining = _uninitialized_parameter_names(policy)
-    assert remaining == ["history_proj.0.weight", "history_proj.0.bias"]
+    assert remaining == []
 
 
 def test_critic_pretrain_freeze_trainable_param_names_and_optimizer_gate() -> None:

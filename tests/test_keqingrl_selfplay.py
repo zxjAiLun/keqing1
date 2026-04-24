@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
 import torch
 
 from keqingrl import (
@@ -14,6 +17,17 @@ from keqingrl import (
     OpponentPool,
     OpponentPoolEntry,
     RandomInteractivePolicy,
+    ACTION_FEATURE_CONTRACT_VERSION,
+    ENV_CONTRACT_VERSION,
+    NATIVE_ACTION_IDENTITY_VERSION,
+    NATIVE_LEGAL_ENUMERATION_VERSION,
+    NATIVE_SCHEMA_NAME,
+    NATIVE_SCHEMA_VERSION,
+    NATIVE_TERMINAL_RESOLVER_VERSION,
+    OBSERVATION_CONTRACT_VERSION,
+    REWARD_SPEC_VERSION,
+    RULE_SCORE_VERSION,
+    STYLE_CONTEXT_VERSION,
     RolloutEpisode,
     RolloutStep,
     SeatPolicyAssignment,
@@ -45,12 +59,30 @@ def _dummy_step(
     legal_actions: tuple[ActionSpec, ...] | None = None,
     feature_dim: int = 3,
     action_index: int = 0,
+    with_metadata: bool = True,
 ) -> RolloutStep:
     chosen_action = ActionSpec(ActionType.DISCARD, tile=0) if action_spec is None else action_spec
     available_actions = (
         tuple(ActionSpec(ActionType.DISCARD, tile=index) for index in range(action_count))
         if legal_actions is None
         else legal_actions
+    )
+    metadata_kwargs = (
+        {
+            "observation_contract_version": OBSERVATION_CONTRACT_VERSION,
+            "action_feature_contract_version": ACTION_FEATURE_CONTRACT_VERSION,
+            "env_contract_version": ENV_CONTRACT_VERSION,
+            "native_schema_name": NATIVE_SCHEMA_NAME,
+            "native_schema_version": NATIVE_SCHEMA_VERSION,
+            "native_action_identity_version": NATIVE_ACTION_IDENTITY_VERSION,
+            "native_legal_enumeration_version": NATIVE_LEGAL_ENUMERATION_VERSION,
+            "native_terminal_resolver_version": NATIVE_TERMINAL_RESOLVER_VERSION,
+            "rule_score_version": RULE_SCORE_VERSION,
+            "reward_spec_version": REWARD_SPEC_VERSION,
+            "style_context_version": STYLE_CONTEXT_VERSION,
+        }
+        if with_metadata
+        else {}
     )
     return RolloutStep(
         obs=ObsTensorBatch(
@@ -73,6 +105,7 @@ def _dummy_step(
         legal_actions=available_actions,
         game_id="dummy",
         step_id=step_id,
+        **metadata_kwargs,
     )
 
 
@@ -317,7 +350,7 @@ def test_build_ppo_batch_rejects_autopilot_steps_directly() -> None:
 
 
 def test_build_ppo_batch_strict_metadata_rejects_missing_contract_versions() -> None:
-    step = _dummy_step(actor=0, step_id=0, action_count=2, done=True)
+    step = _dummy_step(actor=0, step_id=0, action_count=2, done=True, with_metadata=False)
 
     try:
         build_ppo_batch([step], [1.0], [1.0], strict_metadata=True)
@@ -325,6 +358,14 @@ def test_build_ppo_batch_strict_metadata_rejects_missing_contract_versions() -> 
         assert "missing observation contract" in str(exc)
     else:  # pragma: no cover - defensive
         raise AssertionError("expected missing strict metadata rejection")
+
+
+def test_build_ppo_batch_strict_metadata_rejects_native_schema_drift() -> None:
+    step = _dummy_step(actor=0, step_id=0, action_count=2, done=True, with_metadata=True)
+    drifted = replace(step, native_terminal_resolver_version=999)
+
+    with pytest.raises(ValueError, match="native terminal resolver version"):
+        build_ppo_batch([drifted], [1.0], [1.0], strict_metadata=True)
 
 
 def test_build_ppo_batch_rejects_reordered_legal_actions() -> None:

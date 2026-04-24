@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import torch
+
+from keqingrl.training import _fixed_seed_eval_failure_reasons
 
 from keqingrl import (
     ActionType,
@@ -371,6 +377,75 @@ def test_discard_only_ppo_smoke_runs_and_records_metrics() -> None:
     assert iteration.forced_terminal_missed == 0
     assert isinstance(iteration.terminal_reason_count, dict)
 
+
+def test_keqingrl_smoke_cli_writes_reports(tmp_path) -> None:
+    out_dir = tmp_path / "smoke"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_keqingrl_smoke.py",
+            "--out-dir",
+            str(out_dir),
+            "--seed",
+            "151",
+            "--zero-delta-greedy-episodes",
+            "1",
+            "--zero-delta-sample-episodes",
+            "1",
+            "--critic-episodes",
+            "1",
+            "--critic-steps",
+            "1",
+            "--ppo-iterations",
+            "1",
+            "--ppo-rollout-episodes",
+            "1",
+            "--eval-seeds",
+            "1",
+            "--latency-games",
+            "1",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "KeqingRL-Lite Smoke Report" in result.stdout
+    for name in (
+        "zero_delta_selfplay.json",
+        "critic_pretrain.json",
+        "discard_only_ppo.json",
+        "fixed_seed_eval.json",
+        "latency.json",
+        "summary.md",
+    ):
+        assert (out_dir / name).exists()
+
+
+def test_keqingrl_fixed_seed_eval_cli_writes_report(tmp_path) -> None:
+    out_dir = tmp_path / "fixed_eval"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/run_keqingrl_fixed_seed_eval.py",
+            "--out-dir",
+            str(out_dir),
+            "--seed",
+            "152",
+            "--eval-seeds",
+            "1",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "Fixed-Seed Eval Smoke" in result.stdout
+    assert (out_dir / "fixed_seed_eval.json").exists()
+    assert (out_dir / "summary.md").exists()
+
 def test_run_training_accepts_opponent_pool() -> None:
     torch.manual_seed(6)
     env = DiscardOnlyMahjongEnv(max_kyokus=1)
@@ -409,3 +484,24 @@ def test_run_training_accepts_opponent_pool() -> None:
     assert eval_metrics is not None
     assert eval_metrics.episode_count == 1
     assert torch.isfinite(torch.tensor(eval_metrics.mean_terminal_reward))
+
+
+def test_fixed_seed_eval_failure_reasons_use_rust_gate() -> None:
+    reasons = _fixed_seed_eval_failure_reasons(
+        illegal_action_rate=0.0,
+        fallback_rate=1.0,
+        forced_terminal_missed=2,
+        terminal_reason_count={},
+        fourth_rate=0.8,
+        deal_in_rate=0.9,
+        max_fourth_rate=0.75,
+        max_deal_in_rate=0.75,
+    )
+
+    assert reasons == (
+        "fallback_rate > 0: 1",
+        "forced_terminal_missed > 0: 2",
+        "terminal_reason_count is empty",
+        "fourth_rate 0.8 exceeded 0.75",
+        "deal_in_rate 0.9 exceeded 0.75",
+    )

@@ -4,8 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
+import keqing_core
+
 from keqingrl import ActionSpec, ActionType, DiscardOnlyMahjongEnv, action_from_mahjong_spec, bind_reach_discard
+from keqingrl.actions import ACTION_FLAG_TSUMOGIRI
 from keqingrl.env import _TurnContext
+from mahjong_env.feature_tracker import SnapshotFeatureTracker
 from mahjong_env.types import ActionSpec as MahjongActionSpec
 
 
@@ -116,6 +120,7 @@ def test_forced_terminal_actions_preempt_learner_gate(
     room = SimpleNamespace(
         phase="active",
         events=[],
+        remaining_wall=lambda: 42,
         state=SimpleNamespace(
             actor_to_move=0 if not response_window else 1,
             last_discard=None if not response_window else {"actor": 0, "pai": "4m"},
@@ -126,8 +131,8 @@ def test_forced_terminal_actions_preempt_learner_gate(
 
     env.room = room
     monkeypatch.setattr(env.manager, "prepare_turn", lambda _room, _actor: None)
-    monkeypatch.setattr("keqingrl.env.enumerate_legal_action_specs", lambda _snapshot, _actor: raw_actions)
-    monkeypatch.setattr(env, "_snapshot_with_rl_fields", lambda actor: {"actor": actor})
+    monkeypatch.setattr(env, "_enumerate_runtime_legal_actions", lambda _snapshot, _actor: raw_actions)
+    monkeypatch.setattr(env, "_snapshot_with_rl_fields", lambda actor: {"actor": actor, "hand": [], "melds": [[], [], [], []], "discards": [[], [], [], []], "dora_markers": []})
     monkeypatch.setattr(
         env,
         "_choose_rulebase_raw_action",
@@ -600,3 +605,219 @@ def test_discard_only_env_step_dispatches_response_actions(
     assert result.done is False
     assert applied == [chosen_raw.to_mjai()]
     assert applied[0]["type"] == expected_raw_type
+
+
+def test_runtime_legal_enumeration_fails_closed_without_rust(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    monkeypatch.setattr(
+        "keqingrl.env.keqing_core.enumerate_public_legal_action_specs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("Rust public legal action capability is not available")),
+    )
+    monkeypatch.setattr(
+        "keqingrl.env._mahjong_spec_from_payload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("python fallback should stay unused")),
+    )
+
+    with pytest.raises(RuntimeError, match="requires Rust legal action enumeration"):
+        env._enumerate_runtime_legal_actions({"actor": 0}, 0)
+
+
+def test_runtime_terminal_resolver_fails_closed_without_rust(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    raw_actions = (MahjongActionSpec(type="hora", actor=0, target=0, pai="7m"),)
+    monkeypatch.setattr(
+        "keqingrl.env.keqing_core.resolve_terminal_action",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("Rust terminal resolver capability is not available")),
+    )
+
+    with pytest.raises(RuntimeError, match="requires Rust terminal resolver"):
+        env._resolve_forced_terminal_action({"actor": 0}, 0, raw_actions)
+
+
+def test_autopilot_trace_uses_rust_terminal_resolver_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    env.room = SimpleNamespace(remaining_wall=lambda: 42)
+    raw_actions = (MahjongActionSpec(type="hora", actor=1, target=0, pai="4m"),)
+    monkeypatch.setattr(
+        "keqingrl.env.keqing_core.resolve_terminal_action",
+        lambda *_args, **_kwargs: {
+            "action_index": 0,
+            "action": raw_actions[0].to_mjai(),
+            "terminal_reason": "rust_resolved_ron",
+        },
+    )
+
+    resolved = env._resolve_forced_terminal_action({"actor": 1}, 1, raw_actions)
+    assert resolved is not None
+    env._record_autopilot_event(
+        {"actor": 1, "hand": [], "melds": [[], [], [], []], "discards": [[], [], [], []], "dora_markers": []},
+        1,
+        resolved.raw_spec,
+        rulebase_action=resolved.raw_spec,
+        terminal_reason=resolved.terminal_reason,
+    )
+
+    events = env.drain_autopilot_events()
+    assert len(events) == 1
+    assert events[0].terminal_reason == "rust_resolved_ron"
+    assert events[0].policy_input.metadata["terminal_reason"] == "rust_resolved_ron"
+
+
+def test_dispatch_syncs_runtime_state_from_rust_apply() -> None:
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    env.reset(seed=7)
+    room = env._require_room()
+    actor = env.current_actor()
+    assert actor is not None
+    dispatch_action = env._require_turn(actor).dispatch_actions[0][0]
+
+    env._dispatch_manager_action(room, actor, dispatch_action)
+
+    assert env._rust_synced_event_count == len(room.events)
+    rust_snapshot = keqing_core.replay_state_snapshot(room.events, actor)
+    assert room.state.actor_to_move == rust_snapshot["actor_to_move"]
+    assert room.state.last_tsumo == rust_snapshot["last_tsumo"]
+    assert room.state.players[actor].discards == rust_snapshot["discards"][actor]
+    assert sorted(room.state.players[actor].hand.elements()) == rust_snapshot["hand"]
+
+
+def test_dispatch_fails_closed_without_rust_state_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    env.reset(seed=7)
+    room = env._require_room()
+    actor = env.current_actor()
+    assert actor is not None
+    dispatch_action = env._require_turn(actor).dispatch_actions[0][0]
+    monkeypatch.setattr(
+        "keqingrl.env.keqing_core.replay_state_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("Rust replay state snapshot capability is not available")),
+    )
+
+    with pytest.raises(RuntimeError, match="Rust replay state snapshot capability"):
+        env._dispatch_manager_action(room, actor, dispatch_action)
+
+
+def _python_action_features_reference(
+    snapshot: dict[str, object],
+    spec: ActionSpec,
+    *,
+    remaining_wall: int,
+) -> list[float]:
+    tracker = SnapshotFeatureTracker.from_state(snapshot, actor=int(snapshot["actor"]))
+    tile = -1 if spec.tile is None else int(spec.tile)
+    tile_norm = 0.0 if tile < 0 else float(tile) / 33.0
+    hand_count = 0.0 if tile < 0 else float(tracker.hand_counts34[tile]) / 4.0
+    visible = 0.0 if tile < 0 else float(tracker.visible_counts34[tile]) / 4.0
+    is_honor = 1.0 if tile >= 27 else 0.0
+    is_terminal = 1.0 if 0 <= tile < 27 and tile % 9 in (0, 8) else 0.0
+    return [
+        float(spec.action_type) / float(max(1, len(ActionType) - 1)),
+        tile_norm,
+        1.0 if spec.flags & ACTION_FLAG_TSUMOGIRI else 0.0,
+        hand_count,
+        visible,
+        is_honor,
+        is_terminal,
+        float(remaining_wall) / 70.0,
+    ]
+
+
+def test_rust_action_feature_parity_covers_non_discard_unlock_scope() -> None:
+    if not keqing_core.is_available():
+        pytest.skip("keqing_core native module is not available")
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    room = SimpleNamespace(remaining_wall=lambda: 42)
+    env.room = room
+    snapshot = {
+        "actor": 1,
+        "hand": ["1m", "2m", "3m", "4m", "5m", "5mr", "7p", "8p", "9p", "E", "E", "P", "C"],
+        "melds": [
+            [],
+            [{"type": "pon", "pai": "4s", "consumed": ["4s", "4s"], "target": 0}],
+            [{"type": "chi", "pai": "3m", "consumed": ["1m", "2m"], "target": 1}],
+            [],
+        ],
+        "discards": [
+            [{"pai": "9m", "tsumogiri": False}],
+            [{"pai": "1p", "tsumogiri": True}],
+            [],
+            ["N"],
+        ],
+        "dora_markers": ["5pr"],
+        "last_tsumo": [None, "7p", None, None],
+        "tsumo_pai": "7p",
+    }
+    specs = (
+        ActionSpec(ActionType.REACH_DISCARD, tile=0, flags=ACTION_FLAG_TSUMOGIRI),
+        ActionSpec(ActionType.PASS),
+        ActionSpec(ActionType.PON, tile=3, consumed=(3, 3), from_who=0),
+        ActionSpec(ActionType.CHI, tile=2, consumed=(0, 1), from_who=0),
+        ActionSpec(ActionType.DAIMINKAN, tile=27, consumed=(27, 27, 27), from_who=0),
+        ActionSpec(ActionType.ANKAN, tile=31, consumed=(31, 31, 31, 31)),
+        ActionSpec(ActionType.KAKAN, tile=13, consumed=(13,)),
+    )
+
+    actual = env._action_features_batch(snapshot, specs)
+    expected = [
+        _python_action_features_reference(snapshot, spec, remaining_wall=42)
+        for spec in specs
+    ]
+
+    assert len(actual) == len(expected)
+    for actual_row, expected_row in zip(actual, expected):
+        assert actual_row == pytest.approx(expected_row)
+    assert keqing_core.keqingrl_action_feature_dim() == 8
+
+
+def test_rust_action_feature_generation_fails_closed_without_capability(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    env.room = SimpleNamespace(remaining_wall=lambda: 42)
+    monkeypatch.setattr(
+        "keqingrl.env.keqing_core.build_keqingrl_action_features_typed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("Rust KeqingRL typed action feature capability is not available")),
+    )
+
+    with pytest.raises(RuntimeError, match="requires Rust typed action feature generation"):
+        env._action_features({"actor": 0, "hand": ["1m"]}, ActionSpec(ActionType.PASS))
+
+
+def test_env_snapshot_uses_rust_replay_not_manager_shanten(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    env.reset(seed=13)
+    actor = env.current_actor()
+    assert actor is not None
+    monkeypatch.setattr(
+        env.manager,
+        "get_snap_with_shanten",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Python shanten snapshot should not be used")),
+    )
+
+    snapshot = env._snapshot_with_rl_fields(actor)
+
+    assert snapshot["actor"] == actor
+    assert "shanten" in snapshot
+    assert "waits_count" in snapshot
+    assert "waits_tiles" in snapshot
+
+
+def test_battle_manager_shanten_waits_are_rust_owned(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gateway.battle import BattleManager
+    from mahjong_env.replay import _calc_shanten_waits
+
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    env.reset(seed=17)
+    room = env._require_room()
+    actor = env.current_actor()
+    assert actor is not None
+    monkeypatch.setattr(
+        "mahjong_env.replay._calc_shanten_waits",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Python waits fallback should not be used")),
+    )
+    del _calc_shanten_waits
+
+    snapshot = BattleManager().get_snap_with_shanten(room, actor)
+
+    assert snapshot["actor"] == actor
+    assert isinstance(snapshot["shanten"], int)
+    assert isinstance(snapshot["waits_count"], int)
+    assert len(snapshot["waits_tiles"]) == 34
