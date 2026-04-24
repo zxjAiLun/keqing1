@@ -23,6 +23,7 @@ from training.cache_schema import (
     XMODEL1_MAX_CANDIDATES,
     XMODEL1_MAX_RESPONSE_CANDIDATES,
     XMODEL1_MAX_SPECIAL_CANDIDATES,
+    XMODEL1_RULE_CONTEXT_DIM,
     XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
 from training.state_features import C_TILE, N_SCALAR, encode as _encode_state, encode_with_timings
@@ -48,6 +49,20 @@ def resolve_runtime_history_summary(snap: dict) -> np.ndarray:
     arr = np.asarray(value, dtype=np.float16)
     if arr.shape != (HISTORY_SUMMARY_DIM,):
         raise ValueError(f"history_summary shape {arr.shape} != ({HISTORY_SUMMARY_DIM},)")
+    return arr
+
+
+def default_rule_context() -> np.ndarray:
+    return np.asarray((1.0, 0.5, 0.0, -1.5, 0.0, 1.0), dtype=np.float32)
+
+
+def resolve_runtime_rule_context(snap: dict) -> np.ndarray:
+    value = snap.get("rule_context")
+    if value is None:
+        return default_rule_context()
+    arr = np.asarray(value, dtype=np.float32)
+    if arr.shape != (XMODEL1_RULE_CONTEXT_DIM,):
+        raise ValueError(f"rule_context shape {arr.shape} != ({XMODEL1_RULE_CONTEXT_DIM},)")
     return arr
 
 
@@ -122,6 +137,11 @@ def _python_runtime_tensor_payload(
         -1,
         dtype=np.int16,
     )
+    response_human_discard_idx = np.full(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES,),
+        -1,
+        dtype=np.int16,
+    )
     response_states = build_response_action_states(state, actor, legal_actions)
     for response_idx, response_state in enumerate(response_states[:XMODEL1_MAX_RESPONSE_CANDIDATES]):
         response_action_idx[response_idx] = np.int16(response_state.action_idx)
@@ -158,7 +178,9 @@ def _python_runtime_tensor_payload(
         "response_post_candidate_quality_score": response_post_candidate_quality_score,
         "response_post_candidate_hard_bad_flag": response_post_candidate_hard_bad_flag,
         "response_teacher_discard_idx": response_teacher_discard_idx,
+        "response_human_discard_idx": response_human_discard_idx,
         "history_summary": resolve_runtime_history_summary(state),
+        "rule_context": resolve_runtime_rule_context(state),
     }
 
 
@@ -268,7 +290,18 @@ def resolve_runtime_tensor_payload(
                 ),
                 dtype=np.int16,
             ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES),
+            "response_human_discard_idx": np.asarray(
+                payload.get(
+                    "response_human_discard_idx",
+                    np.full((XMODEL1_MAX_RESPONSE_CANDIDATES,), -1, dtype=np.int16),
+                ),
+                dtype=np.int16,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES),
             "history_summary": np.asarray(payload["history_summary"], dtype=np.float16).reshape(HISTORY_SUMMARY_DIM),
+            "rule_context": np.asarray(
+                payload.get("rule_context", resolve_runtime_rule_context(state)),
+                dtype=np.float32,
+            ).reshape(XMODEL1_RULE_CONTEXT_DIM),
         }
     return _python_runtime_tensor_payload(
         state,
@@ -331,8 +364,10 @@ __all__ = [
     "N_SCALAR",
     "HISTORY_SUMMARY_DIM",
     "compute_history_summary",
+    "default_rule_context",
     "empty_history_summary",
     "resolve_runtime_history_summary",
+    "resolve_runtime_rule_context",
     "resolve_runtime_tensor_payload",
     "encode",
     "encode_with_timings",

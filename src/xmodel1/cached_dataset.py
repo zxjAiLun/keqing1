@@ -23,6 +23,7 @@ from training.cache_schema import (
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_HISTORY_SUMMARY_DIM,
     XMODEL1_MAX_CANDIDATES,
+    XMODEL1_RULE_CONTEXT_DIM,
 )
 
 DEFAULT_BUFFER_SIZE = 512
@@ -41,6 +42,10 @@ _MANIFEST_REQUIRED_KEYS = (
 
 def _empty_history_summary() -> np.ndarray:
     return np.zeros((XMODEL1_HISTORY_SUMMARY_DIM,), dtype=np.float16)
+
+
+def _default_rule_context() -> np.ndarray:
+    return np.asarray((1.0, 0.5, 0.0, -1.5, 0.0, 1.0), dtype=np.float32)
 
 
 def _validate_xmodel1_cache_contract(data: np.lib.npyio.NpzFile, path: Path) -> None:
@@ -126,6 +131,18 @@ def _validate_xmodel1_cache_contract(data: np.lib.npyio.NpzFile, path: Path) -> 
     ):
         raise ValueError(
             f"response_teacher_discard_idx shape {data['response_teacher_discard_idx'].shape} incompatible in {path}"
+        )
+    if "response_human_discard_idx" in data and tuple(data["response_human_discard_idx"].shape[1:]) != (
+        XMODEL1_MAX_RESPONSE_CANDIDATES,
+    ):
+        raise ValueError(
+            f"response_human_discard_idx shape {data['response_human_discard_idx'].shape} incompatible in {path}"
+        )
+    if "rule_context" in data and tuple(data["rule_context"].shape[1:]) != (
+        XMODEL1_RULE_CONTEXT_DIM,
+    ):
+        raise ValueError(
+            f"rule_context shape {data['rule_context'].shape} incompatible in {path}"
         )
 
 
@@ -344,6 +361,7 @@ class Xmodel1DiscardDataset(IterableDataset):
             chosen_candidate_idx = data["chosen_candidate_idx"]
             sample_type = data["sample_type"]
             action_idx_target = data["action_idx_target"]
+            sample_count = int(state_tile_feat.shape[0])
             candidate_quality_score = data["candidate_quality_score"]
             candidate_hard_bad_flag = data["candidate_hard_bad_flag"]
             response_action_idx = data["response_action_idx"]
@@ -356,6 +374,11 @@ class Xmodel1DiscardDataset(IterableDataset):
             response_post_candidate_quality_score = data["response_post_candidate_quality_score"]
             response_post_candidate_hard_bad_flag = data["response_post_candidate_hard_bad_flag"]
             response_teacher_discard_idx = data["response_teacher_discard_idx"]
+            response_human_discard_idx = (
+                data["response_human_discard_idx"]
+                if "response_human_discard_idx" in data
+                else np.full((sample_count, XMODEL1_MAX_RESPONSE_CANDIDATES), -1, dtype=np.int16)
+            )
             win_target = data["win_target"]
             dealin_target = data["dealin_target"]
             pts_given_win_target = data["pts_given_win_target"]
@@ -364,10 +387,14 @@ class Xmodel1DiscardDataset(IterableDataset):
             final_rank_target = data["final_rank_target"]
             final_score_delta_points_target = data["final_score_delta_points_target"]
             history_summary = data["history_summary"]
+            rule_context = (
+                data["rule_context"]
+                if "rule_context" in data
+                else np.tile(_default_rule_context(), (sample_count, 1)).astype(np.float32)
+            )
             event_index = data["event_index"]
             replay_id = data["replay_id"] if "replay_id" in data else None
             sample_id = data["sample_id"] if "sample_id" in data else None
-            sample_count = int(state_tile_feat.shape[0])
             for i in range(sample_count):
                 replay_id_value = str(replay_id[i]) if replay_id is not None else path.stem
                 sample_id_value = (
@@ -397,6 +424,7 @@ class Xmodel1DiscardDataset(IterableDataset):
                     response_post_candidate_quality_score[i],
                     response_post_candidate_hard_bad_flag[i],
                     response_teacher_discard_idx[i],
+                    response_human_discard_idx[i],
                     np.float32(win_target[i]),
                     np.float32(dealin_target[i]),
                     np.float32(pts_given_win_target[i]),
@@ -405,6 +433,7 @@ class Xmodel1DiscardDataset(IterableDataset):
                     np.int8(final_rank_target[i]),
                     np.int32(final_score_delta_points_target[i]),
                     np.asarray(history_summary[i], dtype=np.float16).reshape(XMODEL1_HISTORY_SUMMARY_DIM),
+                    np.asarray(rule_context[i], dtype=np.float32).reshape(XMODEL1_RULE_CONTEXT_DIM),
                     replay_id_value,
                     sample_id_value,
                 )
@@ -459,6 +488,7 @@ class Xmodel1DiscardDataset(IterableDataset):
             response_post_candidate_quality_score,
             response_post_candidate_hard_bad_flag,
             response_teacher_discard_idx,
+            response_human_discard_idx,
             win_target,
             dealin_target,
             pts_given_win_target,
@@ -467,6 +497,7 @@ class Xmodel1DiscardDataset(IterableDataset):
             final_rank_target,
             final_score_delta_points_target,
             history_summary,
+            rule_context,
             replay_id,
             sample_id,
         ) = zip(*batch)
@@ -492,6 +523,7 @@ class Xmodel1DiscardDataset(IterableDataset):
             "response_post_candidate_quality_score": torch.from_numpy(np.stack(response_post_candidate_quality_score)).float(),
             "response_post_candidate_hard_bad_flag": torch.from_numpy(np.stack(response_post_candidate_hard_bad_flag)).float(),
             "response_teacher_discard_idx": torch.from_numpy(np.stack(response_teacher_discard_idx)).long(),
+            "response_human_discard_idx": torch.from_numpy(np.stack(response_human_discard_idx)).long(),
             "win_target": torch.tensor(win_target, dtype=torch.float32),
             "dealin_target": torch.tensor(dealin_target, dtype=torch.float32),
             "pts_given_win_target": torch.tensor(pts_given_win_target, dtype=torch.float32),
@@ -503,6 +535,7 @@ class Xmodel1DiscardDataset(IterableDataset):
                 dtype=torch.int32,
             ),
             "history_summary": torch.from_numpy(np.stack(history_summary)).float(),
+            "rule_context": torch.from_numpy(np.stack(rule_context)).float(),
             "replay_id": list(replay_id),
             "sample_id": list(sample_id),
         }

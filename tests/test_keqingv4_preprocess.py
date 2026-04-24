@@ -7,6 +7,7 @@ import subprocess
 import keqingv4.preprocess_features as v4_pf
 import numpy as np
 import pytest
+import training.cached_dataset as training_cached_dataset
 from mahjong_env.action_space import ANKAN_IDX, CHI_LOW_IDX, action_to_idx
 from keqing_core import (
     build_keqingv4_call_summary,
@@ -32,7 +33,7 @@ from keqingv4.preprocess_features import (
 )
 from mahjong_env.replay import _calc_normal_progress as _replay_calc_normal_progress
 from training.preprocess import KeqingV4PreprocessAdapter, events_to_cached_arrays
-from training.cache_schema import KEQINGV4_OPPORTUNITY_DIM, KEQINGV4_SUMMARY_DIM
+from training.cache_schema import KEQINGV4_OPPORTUNITY_DIM, KEQINGV4_RULE_CONTEXT_DIM, KEQINGV4_SUMMARY_DIM
 
 
 def test_build_typed_action_summaries_smoke():
@@ -861,6 +862,8 @@ def test_keqingv4_events_to_arrays_and_cached_dataset_smoke(tmp_path: Path):
     assert arrays["final_score_delta_points_target"].dtype == np.int32
     assert arrays["event_history"].shape[1:] == (48, 5)
     assert arrays["v4_opportunity"].shape[1:] == (KEQINGV4_OPPORTUNITY_DIM,)
+    assert arrays["rule_context"].shape[1:] == (KEQINGV4_RULE_CONTEXT_DIM,)
+    assert np.all(arrays["rule_context"] == 0)
     assert np.any(arrays["event_history"][0, :, 1] != 0)
 
     cache_path = tmp_path / "sample.npz"
@@ -877,6 +880,7 @@ def test_keqingv4_events_to_arrays_and_cached_dataset_smoke(tmp_path: Path):
     assert sample[17].shape == (34, KEQINGV4_SUMMARY_DIM)
     assert sample[18].shape == (8, KEQINGV4_SUMMARY_DIM)
     assert sample[19].shape == (3, KEQINGV4_SUMMARY_DIM)
+    assert sample[22].shape == (KEQINGV4_RULE_CONTEXT_DIM,)
 
 
 def test_keqingv4_cached_dataset_fails_fast_on_contract_mismatch(tmp_path: Path):
@@ -901,6 +905,7 @@ def test_keqingv4_cached_dataset_fails_fast_on_contract_mismatch(tmp_path: Path)
         v4_discard_summary=np.zeros((1, 34, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
         v4_call_summary=np.zeros((1, 7, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
         v4_special_summary=np.zeros((1, 3, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
+        rule_context=np.zeros((1, KEQINGV4_RULE_CONTEXT_DIM), dtype=np.float32),
     )
     dataset = CachedMjaiDatasetV4([broken], shuffle=False, buffer_size=1, seed=7, aug_perms=0)
     with pytest.raises(ValueError, match="v4_call_summary shape mismatch"):
@@ -927,10 +932,79 @@ def test_keqingv4_cache_adapter_keeps_scalar_placement_targets_under_perm():
         "v4_discard_summary": np.zeros((34, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
         "v4_call_summary": np.zeros((8, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
         "v4_special_summary": np.zeros((3, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
+        "rule_context": np.zeros((KEQINGV4_RULE_CONTEXT_DIM,), dtype=np.float32),
     }
     permuted = adapter.permute_row_extra(row_extra, (1, 0, 2), 7)
     assert int(permuted["final_rank_target"]) == 2
     assert int(permuted["final_score_delta_points_target"]) == -4300
+
+
+def test_keqingv4_cached_dataset_permutes_discard_summary_from_original_slices(tmp_path: Path, monkeypatch):
+    cache_path = tmp_path / "permute.npz"
+    discard_summary = np.zeros((1, 34, KEQINGV4_SUMMARY_DIM), dtype=np.float16)
+    discard_summary[0, 0:9, :] = np.float16(1.0)
+    discard_summary[0, 9:18, :] = np.float16(2.0)
+    discard_summary[0, 18:27, :] = np.float16(3.0)
+    discard_summary[0, 27:34, :] = np.float16(4.0)
+    np.savez(
+        cache_path,
+        tile_feat=np.zeros((1, 57, 34), dtype=np.float16),
+        scalar=np.zeros((1, 56), dtype=np.float16),
+        mask=np.zeros((1, 45), dtype=np.uint8),
+        action_idx=np.asarray([7], dtype=np.int16),
+        value=np.zeros((1,), dtype=np.float32),
+        score_delta_target=np.zeros((1,), dtype=np.float32),
+        win_target=np.zeros((1,), dtype=np.float32),
+        dealin_target=np.zeros((1,), dtype=np.float32),
+        pts_given_win_target=np.zeros((1,), dtype=np.float32),
+        pts_given_dealin_target=np.zeros((1,), dtype=np.float32),
+        opp_tenpai_target=np.zeros((1, 3), dtype=np.float32),
+        final_rank_target=np.zeros((1,), dtype=np.int8),
+        final_score_delta_points_target=np.zeros((1,), dtype=np.int32),
+        event_history=np.zeros((1, 48, 5), dtype=np.int16),
+        v4_opportunity=np.zeros((1, KEQINGV4_OPPORTUNITY_DIM), dtype=np.uint8),
+        v4_discard_summary=discard_summary,
+        v4_call_summary=np.zeros((1, 8, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
+        v4_special_summary=np.zeros((1, 3, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
+        rule_context=np.zeros((1, KEQINGV4_RULE_CONTEXT_DIM), dtype=np.float32),
+    )
+    monkeypatch.setattr(training_cached_dataset.random.Random, "sample", lambda self, population, k: [(1, 0, 2)])
+    dataset = CachedMjaiDatasetV4([cache_path], shuffle=False, buffer_size=16, seed=7, aug_perms=1)
+    samples = list(iter(dataset))
+    assert len(samples) == 2
+    permuted_summary = samples[1][17]
+    np.testing.assert_array_equal(permuted_summary[0:9], np.full((9, KEQINGV4_SUMMARY_DIM), 2.0, dtype=np.float16))
+    np.testing.assert_array_equal(permuted_summary[9:18], np.full((9, KEQINGV4_SUMMARY_DIM), 1.0, dtype=np.float16))
+    np.testing.assert_array_equal(permuted_summary[18:27], np.full((9, KEQINGV4_SUMMARY_DIM), 3.0, dtype=np.float16))
+    np.testing.assert_array_equal(permuted_summary[27:34], np.full((7, KEQINGV4_SUMMARY_DIM), 4.0, dtype=np.float16))
+
+
+def test_keqingv4_cached_dataset_backfills_missing_rule_context(tmp_path: Path):
+    cache_path = tmp_path / "legacy_no_rule_context.npz"
+    np.savez(
+        cache_path,
+        tile_feat=np.zeros((1, 57, 34), dtype=np.float16),
+        scalar=np.zeros((1, 56), dtype=np.float16),
+        mask=np.zeros((1, 45), dtype=np.uint8),
+        action_idx=np.asarray([7], dtype=np.int16),
+        value=np.zeros((1,), dtype=np.float32),
+        score_delta_target=np.zeros((1,), dtype=np.float32),
+        win_target=np.zeros((1,), dtype=np.float32),
+        dealin_target=np.zeros((1,), dtype=np.float32),
+        pts_given_win_target=np.zeros((1,), dtype=np.float32),
+        pts_given_dealin_target=np.zeros((1,), dtype=np.float32),
+        opp_tenpai_target=np.zeros((1, 3), dtype=np.float32),
+        final_rank_target=np.zeros((1,), dtype=np.int8),
+        final_score_delta_points_target=np.zeros((1,), dtype=np.int32),
+        event_history=np.zeros((1, 48, 5), dtype=np.int16),
+        v4_opportunity=np.zeros((1, KEQINGV4_OPPORTUNITY_DIM), dtype=np.uint8),
+        v4_discard_summary=np.zeros((1, 34, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
+        v4_call_summary=np.zeros((1, 8, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
+        v4_special_summary=np.zeros((1, 3, KEQINGV4_SUMMARY_DIM), dtype=np.float16),
+    )
+    dataset = CachedMjaiDatasetV4([cache_path], shuffle=False, buffer_size=4, seed=7, aug_perms=0)
+    sample = next(iter(dataset))
+    np.testing.assert_array_equal(sample[22], np.zeros((KEQINGV4_RULE_CONTEXT_DIM,), dtype=np.float32))
 
 
 def test_call_summary_uses_best_post_meld_discard_projection():

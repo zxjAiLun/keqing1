@@ -19,11 +19,19 @@ from keqingrl.actions import (
     encode_action_id,
 )
 from keqingrl.contracts import ObsTensorBatch, PolicyInput
+from keqingrl.metadata import (
+    ACTION_FEATURE_CONTRACT_VERSION,
+    ENV_CONTRACT_VERSION,
+    OBSERVATION_CONTRACT_VERSION,
+    RULE_SCORE_VERSION,
+)
 from keqingrl.rewards import (
     DEFAULT_PT_MAP,
     build_rule_context,
     terminal_rank_rewards,
 )
+from keqingrl.rule_score import DEFAULT_RULE_SCORE_CONFIG, RuleScoreConfig, score_legal_actions
+from keqingrl.style import DEFAULT_STYLE_CONTEXT, StyleContext
 from mahjong_env.feature_tracker import SnapshotFeatureTracker
 from mahjong_env.final_rank import final_ranks
 from mahjong_env.legal_actions import enumerate_legal_action_specs
@@ -82,6 +90,8 @@ class _TurnContext:
     snapshot: dict[str, object]
     legal_actions: tuple[ActionSpec, ...]
     dispatch_actions: tuple[tuple[dict[str, object], ...], ...]
+    rulebase_chosen: str | None = None
+    control_action_types: tuple[str, ...] = ()
 
 
 class DiscardOnlyMahjongEnv:
@@ -96,6 +106,13 @@ class DiscardOnlyMahjongEnv:
         manager: BattleManager | None = None,
         self_turn_action_types: tuple[ActionType, ...] = (ActionType.DISCARD,),
         response_action_types: tuple[ActionType, ...] = (),
+        forced_autopilot_action_types: tuple[ActionType, ...] = (
+            ActionType.TSUMO,
+            ActionType.RON,
+            ActionType.RYUKYOKU,
+        ),
+        style_context: StyleContext = DEFAULT_STYLE_CONTEXT,
+        rule_score_config: RuleScoreConfig = DEFAULT_RULE_SCORE_CONFIG,
     ) -> None:
         self.manager = manager or BattleManager()
         self.pt_map = tuple(float(value) for value in pt_map)
@@ -125,6 +142,11 @@ class DiscardOnlyMahjongEnv:
         self._self_turn_action_type_set = set(configured_action_types)
         self.response_action_types = configured_response_action_types
         self._response_action_type_set = set(configured_response_action_types)
+        self.forced_autopilot_action_types = tuple(ActionType(value) for value in forced_autopilot_action_types)
+        self._forced_autopilot_action_type_set = set(self.forced_autopilot_action_types)
+        self.style_context = style_context
+        self.style_context_tensor = style_context.to_tensor()
+        self.rule_score_config = rule_score_config
         self.rule_context = build_rule_context(
             self.pt_map,
             rank_score_scale=self.rank_score_scale,
@@ -192,13 +214,31 @@ class DiscardOnlyMahjongEnv:
             dtype=torch.float32,
         )
         legal_action_mask = torch.ones((1, len(turn.legal_actions)), dtype=torch.bool)
+        rule_scores = score_legal_actions(
+            turn.snapshot,
+            actor,
+            turn.legal_actions,
+            config=self.rule_score_config,
+        )
         return PolicyInput(
             obs=ObsTensorBatch(tile_obs=tile_obs, scalar_obs=scalar_obs),
             legal_action_ids=legal_action_ids,
             legal_action_features=legal_action_features,
             legal_action_mask=legal_action_mask,
             rule_context=self.rule_context.unsqueeze(0).clone(),
+            raw_rule_scores=rule_scores.raw_rule_scores.unsqueeze(0),
+            prior_logits=rule_scores.prior_logits.unsqueeze(0),
+            style_context=self.style_context_tensor.unsqueeze(0).clone(),
             legal_actions=(turn.legal_actions,),
+            metadata={
+                "rulebase_chosen": turn.rulebase_chosen,
+                "control_action_types": turn.control_action_types,
+                "is_learner_controlled": True,
+                "observation_contract_version": OBSERVATION_CONTRACT_VERSION,
+                "action_feature_contract_version": ACTION_FEATURE_CONTRACT_VERSION,
+                "env_contract_version": ENV_CONTRACT_VERSION,
+                "rule_score_version": RULE_SCORE_VERSION,
+            },
         )
 
     def step(self, actor: int, action_spec: ActionSpec) -> StepResult:
@@ -281,6 +321,17 @@ class DiscardOnlyMahjongEnv:
             snapshot = self._snapshot_with_rl_fields(actor)
             raw_legal_actions = tuple(enumerate_legal_action_specs(snapshot, actor))
             if self._is_response_window(actor):
+                forced_response = self._forced_autopilot_action(raw_legal_actions)
+                if forced_response is not None:
+                    self._dispatch_manager_action(room, actor, forced_response.to_mjai())
+                    continue
+                rulebase_response = self._choose_rulebase_raw_action(snapshot, actor, raw_legal_actions)
+                if rulebase_response is not None and not self._is_raw_action_controlled(
+                    rulebase_response,
+                    response=True,
+                ):
+                    self._dispatch_manager_action(room, actor, rulebase_response.to_mjai())
+                    continue
                 controlled_response_pairs = self._collect_controlled_response_actions(raw_legal_actions)
                 auto_response = self._auto_response_action(
                     raw_legal_actions,
@@ -296,8 +347,23 @@ class DiscardOnlyMahjongEnv:
                     snapshot=snapshot,
                     legal_actions=tuple(action for action, _ in controlled_response_pairs),
                     dispatch_actions=tuple(dispatch for _, dispatch in controlled_response_pairs),
+                    rulebase_chosen=self._raw_action_canonical_key(rulebase_response),
+                    control_action_types=tuple(action_type.name for action_type in self.response_action_types),
                 )
                 return
+
+            forced_self_action = self._forced_autopilot_action(raw_legal_actions)
+            if forced_self_action is not None:
+                self._dispatch_manager_action(room, actor, forced_self_action.to_mjai())
+                continue
+
+            rulebase_self_action = self._choose_rulebase_raw_action(snapshot, actor, raw_legal_actions)
+            if rulebase_self_action is not None and not self._is_raw_action_controlled(
+                rulebase_self_action,
+                response=False,
+            ):
+                self._dispatch_manager_action(room, actor, rulebase_self_action.to_mjai())
+                continue
 
             controlled_pairs = self._collect_controlled_self_turn_actions(snapshot, raw_legal_actions)
             auto_action = self._auto_self_action(
@@ -316,8 +382,74 @@ class DiscardOnlyMahjongEnv:
                 snapshot=snapshot,
                 legal_actions=tuple(action for action, _ in controlled_pairs),
                 dispatch_actions=tuple(dispatch for _, dispatch in controlled_pairs),
+                rulebase_chosen=self._raw_action_canonical_key(rulebase_self_action),
+                control_action_types=tuple(action_type.name for action_type in self.self_turn_action_types),
             )
             return
+
+    def _forced_autopilot_action(
+        self,
+        raw_legal_actions: Sequence[MahjongActionSpec],
+    ) -> MahjongActionSpec | None:
+        for raw_spec in raw_legal_actions:
+            action_type = self._raw_action_type(raw_spec)
+            if action_type in self._forced_autopilot_action_type_set:
+                return raw_spec
+        return None
+
+    def _choose_rulebase_raw_action(
+        self,
+        snapshot: dict[str, object],
+        actor: int,
+        raw_legal_actions: Sequence[MahjongActionSpec],
+    ) -> MahjongActionSpec | None:
+        if not raw_legal_actions:
+            return None
+        raw_payloads = [raw.to_mjai() for raw in raw_legal_actions]
+        try:
+            chosen_payload = keqing_core.choose_rulebase_action(snapshot, actor, raw_payloads)
+        except RuntimeError as exc:
+            if not (
+                keqing_core.is_missing_rust_capability_error(exc)
+                or "rulebase capability" in str(exc)
+            ):
+                raise
+            return None
+        if chosen_payload is None:
+            return None
+        for raw_spec, payload in zip(raw_legal_actions, raw_payloads):
+            if payload == chosen_payload:
+                return raw_spec
+        return None
+
+    def _is_raw_action_controlled(
+        self,
+        raw_spec: MahjongActionSpec,
+        *,
+        response: bool,
+    ) -> bool:
+        action_type = self._raw_action_type(raw_spec)
+        if response:
+            return action_type in self._response_action_type_set
+        return action_type in self._self_turn_action_type_set
+
+    def _raw_action_type(self, raw_spec: MahjongActionSpec) -> ActionType | None:
+        if raw_spec.type == "reach":
+            return ActionType.REACH_DISCARD
+        try:
+            return action_from_mahjong_spec(raw_spec).action_type
+        except ValueError:
+            return None
+
+    def _raw_action_canonical_key(self, raw_spec: MahjongActionSpec | None) -> str | None:
+        if raw_spec is None:
+            return None
+        if raw_spec.type == "reach":
+            return f"{int(ActionType.REACH_DISCARD)}|tile=-1|consumed=|from=-1|flags=0"
+        try:
+            return action_from_mahjong_spec(raw_spec).canonical_key
+        except ValueError:
+            return None
 
     def _is_response_window(self, actor: int) -> bool:
         room = self._require_room()

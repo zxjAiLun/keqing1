@@ -23,13 +23,14 @@ from training.cache_schema import (
     XMODEL1_HISTORY_SUMMARY_DIM,
     XMODEL1_MAX_CANDIDATES,
     XMODEL1_MAX_RESPONSE_CANDIDATES,
+    XMODEL1_RULE_CONTEXT_DIM,
 )
 from xmodel1.call_response import build_response_action_states
 from xmodel1.candidate_quality import (
     build_candidate_features,
     iter_legal_discards,
 )
-from xmodel1.features import compute_history_summary, encode
+from xmodel1.features import compute_history_summary, default_rule_context, encode
 from xmodel1.schema import (
     XMODEL1_SAMPLE_TYPE_CALL,
     XMODEL1_SAMPLE_TYPE_DISCARD,
@@ -38,7 +39,34 @@ from xmodel1.schema import (
 )
 
 
-def _build_response_semantics(sample) -> dict[str, np.ndarray]:
+def _resolve_human_response_discard_idx(sample, response_states, normalized_events) -> np.ndarray:
+    human_idx = np.full((XMODEL1_MAX_RESPONSE_CANDIDATES,), -1, dtype=np.int16)
+    label_type = sample.label_action.get("type")
+    if label_type not in {"reach", "chi", "pon", "daiminkan"}:
+        return human_idx
+    chosen_slot = -1
+    for response_idx, response_state in enumerate(response_states[:XMODEL1_MAX_RESPONSE_CANDIDATES]):
+        if replay_label_matches_legal(sample.label_action, [response_state.action]):
+            chosen_slot = response_idx
+            break
+    if chosen_slot < 0:
+        return human_idx
+    for event in normalized_events[int(getattr(sample, "event_index", 0)) + 1 :]:
+        event_type = event.get("type")
+        if event_type in {"reach_accepted", "dora", "new_dora", "tsumo"}:
+            continue
+        if event_type != "dahai" or int(event.get("actor", -1)) != int(sample.actor):
+            return human_idx
+        actions = response_states[chosen_slot].post_discard_actions[:XMODEL1_MAX_CANDIDATES]
+        for discard_idx, action in enumerate(actions):
+            if replay_label_matches_legal(event, [action]):
+                human_idx[chosen_slot] = np.int16(discard_idx)
+                return human_idx
+        return human_idx
+    return human_idx
+
+
+def _build_response_semantics(sample, normalized_events) -> dict[str, np.ndarray]:
     response_action_idx = np.full((XMODEL1_MAX_RESPONSE_CANDIDATES,), -1, dtype=np.int16)
     response_action_mask = np.zeros((XMODEL1_MAX_RESPONSE_CANDIDATES,), dtype=np.uint8)
     chosen_response_action_idx = np.int16(-1)
@@ -119,6 +147,11 @@ def _build_response_semantics(sample) -> dict[str, np.ndarray]:
                 best_teacher_quality = float(quality)
                 best_teacher_idx = discard_idx
         response_teacher_discard_idx[response_idx] = np.int16(best_teacher_idx)
+    response_human_discard_idx = _resolve_human_response_discard_idx(
+        sample,
+        response_states,
+        normalized_events,
+    )
 
     return {
         "response_action_idx": response_action_idx,
@@ -131,6 +164,7 @@ def _build_response_semantics(sample) -> dict[str, np.ndarray]:
         "response_post_candidate_quality_score": response_post_candidate_quality_score,
         "response_post_candidate_hard_bad_flag": response_post_candidate_hard_bad_flag,
         "response_teacher_discard_idx": response_teacher_discard_idx,
+        "response_human_discard_idx": response_human_discard_idx,
     }
 
 
@@ -156,6 +190,7 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         "response_post_candidate_quality_score": [],
         "response_post_candidate_hard_bad_flag": [],
         "response_teacher_discard_idx": [],
+        "response_human_discard_idx": [],
         "win_target": [],
         "dealin_target": [],
         "pts_given_win_target": [],
@@ -166,6 +201,7 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         "final_rank_target": [],
         "final_score_delta_points_target": [],
         "history_summary": [],
+        "rule_context": [],
         "sample_type": [],
         "action_idx_target": [],
         "actor": [],
@@ -191,7 +227,7 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         candidate_flags = np.zeros((XMODEL1_MAX_CANDIDATES, XMODEL1_CANDIDATE_FLAG_DIM), dtype=np.uint8)
         candidate_quality = np.zeros((XMODEL1_MAX_CANDIDATES,), dtype=np.float32)
         candidate_hard_bad = np.zeros((XMODEL1_MAX_CANDIDATES,), dtype=np.uint8)
-        response_semantics = _build_response_semantics(sample)
+        response_semantics = _build_response_semantics(sample, normalized_events)
 
         chosen_idx = None
         action_idx_target = int(action_to_idx(sample.label_action))
@@ -271,6 +307,9 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         rows["response_teacher_discard_idx"].append(
             response_semantics["response_teacher_discard_idx"]
         )
+        rows["response_human_discard_idx"].append(
+            response_semantics["response_human_discard_idx"]
+        )
         rows["win_target"].append(np.float32(sample.win_target))
         rows["dealin_target"].append(np.float32(sample.dealin_target))
         rows["pts_given_win_target"].append(np.float32(sample.pts_given_win_target))
@@ -288,6 +327,7 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         rows["history_summary"].append(
             compute_history_summary(normalized_events, event_index, sample.actor)
         )
+        rows["rule_context"].append(default_rule_context().reshape(XMODEL1_RULE_CONTEXT_DIM))
         rows["sample_type"].append(np.int8(sample_type))
         rows["action_idx_target"].append(np.int16(action_idx_target))
         rows["actor"].append(np.int8(sample.actor))
@@ -320,8 +360,10 @@ def events_to_xmodel1_arrays(events, *, replay_id: str) -> Optional[Dict[str, np
         "response_post_candidate_quality_score",
         "response_post_candidate_hard_bad_flag",
         "response_teacher_discard_idx",
+        "response_human_discard_idx",
         "opp_tenpai_target",
         "history_summary",
+        "rule_context",
     }
     out: Dict[str, np.ndarray] = {}
     for key, value in rows.items():

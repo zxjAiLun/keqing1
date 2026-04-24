@@ -12,13 +12,16 @@ from xmodel1.checkpoint import (
     default_xmodel1_state_scalar_dim,
     infer_xmodel1_model_dims,
     load_xmodel1_checkpoint_state,
+    resolve_xmodel1_rule_context_semantics,
     resolve_xmodel1_state_scalar_dim,
     validate_xmodel1_checkpoint_metadata,
 )
 from xmodel1.features import (
     build_runtime_candidate_arrays,
+    default_rule_context,
     empty_history_summary,
     resolve_runtime_history_summary,
+    resolve_runtime_rule_context,
     resolve_runtime_tensor_payload,
 )
 from xmodel1.model import Xmodel1Model
@@ -63,6 +66,8 @@ class Xmodel1Adapter:
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.model = model.to(self.device)
         self.model.eval()
+        self.rule_context_dim = int(getattr(model, "rule_context_dim", 6))
+        self._default_rule_context = default_rule_context()
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str | Path, *, device: str = "cpu") -> "Xmodel1Adapter":
@@ -103,7 +108,14 @@ class Xmodel1Adapter:
             state_dict,
             checkpoint_label=f"Xmodel1 checkpoint {checkpoint_path}",
         )
-        return cls(model, device=device)
+        inst = cls(model, device=device)
+        semantics = ckpt.get("rule_context_semantics")
+        if not isinstance(semantics, dict):
+            semantics = resolve_xmodel1_rule_context_semantics(cfg if isinstance(cfg, dict) else None)
+        vector = np.asarray(semantics.get("vector", default_rule_context()), dtype=np.float32)
+        if vector.shape == (inst.rule_context_dim,):
+            inst._default_rule_context = vector
+        return inst
 
     def score_batch(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         moved: dict[str, torch.Tensor] = {}
@@ -113,6 +125,10 @@ class Xmodel1Adapter:
                 if self.device.type != "cuda" and value.dtype == torch.float16:
                     value = value.float()
             moved[key] = value
+        batch_size = int(moved["state_tile_feat"].shape[0])
+        fallback_rule_context = torch.from_numpy(
+            np.repeat(self._default_rule_context[None, :], batch_size, axis=0)
+        ).float()
         with torch.no_grad():
             out = self.model(
                 moved["state_tile_feat"],
@@ -151,7 +167,9 @@ class Xmodel1Adapter:
             "response_post_candidate_hard_bad_flag": batch["response_post_candidate_hard_bad_flag"].detach().cpu(),
             "chosen_response_action_idx": batch["chosen_response_action_idx"].detach().cpu(),
             "response_teacher_discard_idx": batch["response_teacher_discard_idx"].detach().cpu(),
+            "response_human_discard_idx": batch.get("response_human_discard_idx", torch.full_like(batch["response_teacher_discard_idx"], -1)).detach().cpu(),
             "history_summary": batch["history_summary"].detach().cpu(),
+            "rule_context": batch.get("rule_context", fallback_rule_context).detach().cpu(),
             "replay_id": list(batch.get("replay_id", [])),
             "sample_id": list(batch.get("sample_id", [])),
         }
@@ -190,6 +208,7 @@ class Xmodel1Adapter:
             response_post_candidate_quality_score = runtime_payload["response_post_candidate_quality_score"]
             response_post_candidate_hard_bad_flag = runtime_payload["response_post_candidate_hard_bad_flag"]
             response_teacher_discard_idx = runtime_payload["response_teacher_discard_idx"]
+            response_human_discard_idx = runtime_payload["response_human_discard_idx"]
         else:
             response_action_idx = np.full(
                 (XMODEL1_MAX_RESPONSE_CANDIDATES,),
@@ -235,6 +254,11 @@ class Xmodel1Adapter:
                 -1,
                 dtype=np.int16,
             )
+            response_human_discard_idx = np.full(
+                (XMODEL1_MAX_RESPONSE_CANDIDATES,),
+                -1,
+                dtype=np.int16,
+            )
         from xmodel1.features import encode
 
         state_tile_feat, state_scalar = encode(snap, actor, state_scalar_dim=state_scalar_dim)
@@ -245,6 +269,10 @@ class Xmodel1Adapter:
             if "history_summary" in snap
             else empty_history_summary()
         )
+        if "rule_context" in snap:
+            rule_context = resolve_runtime_rule_context(snap)
+        else:
+            rule_context = np.asarray(self._default_rule_context, dtype=np.float32).reshape(self.rule_context_dim)
         return {
             "state_tile_feat": torch.from_numpy(state_tile_feat).unsqueeze(0),
             "state_scalar": torch.from_numpy(state_scalar).unsqueeze(0),
@@ -265,7 +293,9 @@ class Xmodel1Adapter:
             "response_post_candidate_quality_score": torch.from_numpy(response_post_candidate_quality_score).unsqueeze(0),
             "response_post_candidate_hard_bad_flag": torch.from_numpy(response_post_candidate_hard_bad_flag).unsqueeze(0),
             "response_teacher_discard_idx": torch.from_numpy(response_teacher_discard_idx).unsqueeze(0),
+            "response_human_discard_idx": torch.from_numpy(response_human_discard_idx).unsqueeze(0),
             "history_summary": torch.from_numpy(history_summary).unsqueeze(0).float(),
+            "rule_context": torch.from_numpy(rule_context).unsqueeze(0).float(),
         }
 
     def scored_row_to_review(self, scored: dict[str, torch.Tensor], row_index: int, *, k: int = 3) -> Xmodel1ScoredRow:

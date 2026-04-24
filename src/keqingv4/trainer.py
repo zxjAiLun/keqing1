@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from keqingv4.checkpoint import (
     build_keqingv4_checkpoint_payload,
+    resolve_keqingv4_placement_semantics,
     restore_keqingv4_checkpoint,
 )
 from mahjong_env.action_space import HORA_IDX, NONE_IDX, REACH_IDX
@@ -42,6 +43,7 @@ def _unpack_v4_batch(batch, device: torch.device) -> Dict:
         special_summary,
         final_rank_target,
         final_score_delta_points_target,
+        rule_context,
     ) = batch
     to_float = lambda tensor: tensor.to(device, non_blocking=True).float()
     to_device = lambda tensor: tensor.to(device, non_blocking=True)
@@ -68,6 +70,7 @@ def _unpack_v4_batch(batch, device: torch.device) -> Dict:
             "discard_summary": to_float(discard_summary),
             "call_summary": to_float(call_summary),
             "special_summary": to_float(special_summary),
+            "rule_context": to_float(rule_context),
         },
     }
 
@@ -79,35 +82,14 @@ def _make_v4_task(cfg: Dict) -> TaskSpec:
     pts_given_dealin_loss_weight = float(cfg.get("pts_given_dealin_loss_weight", 0.0))
     opp_tenpai_loss_weight = float(cfg.get("opp_tenpai_loss_weight", 0.0))
     mc_reg_loss_weight = float(cfg.get("mc_reg_loss_weight", 0.05))
-    placement_cfg = cfg.get("placement", {})
-    final_rank_loss_weight = float(
-        placement_cfg.get("rank_loss_weight", cfg.get("final_rank_loss_weight", 0.05))
-    )
-    final_score_delta_loss_weight = float(
-        placement_cfg.get(
-            "final_score_delta_loss_weight",
-            cfg.get("final_score_delta_loss_weight", 0.05),
-        )
-    )
-    rank_pt_loss_weight = float(
-        placement_cfg.get(
-            "rank_pt_value_loss_weight",
-            cfg.get("rank_pt_value_loss_weight", 0.0),
-        )
-    )
-    rank_bonus = placement_cfg.get(
-        "rank_bonus",
-        cfg.get("rank_bonus", [90.0, 45.0, 0.0, -135.0]),
-    )
-    rank_bonus_norm = float(
-        placement_cfg.get("rank_bonus_norm", cfg.get("rank_bonus_norm", 90.0))
-    )
-    rank_score_scale = float(
-        placement_cfg.get("rank_score_scale", cfg.get("rank_score_scale", 0.0))
-    )
-    score_norm = float(
-        placement_cfg.get("score_norm", cfg.get("score_norm", 30000.0))
-    )
+    placement_semantics = resolve_keqingv4_placement_semantics(cfg)
+    final_rank_loss_weight = float(placement_semantics["rank_loss_weight"])
+    final_score_delta_loss_weight = float(placement_semantics["final_score_delta_loss_weight"])
+    rank_pt_loss_weight = float(placement_semantics["rank_pt_value_loss_weight"])
+    rank_bonus = placement_semantics["rank_bonus"]
+    rank_bonus_norm = float(placement_semantics["rank_bonus_norm"])
+    rank_score_scale = float(placement_semantics["rank_score_scale"])
+    score_norm = float(placement_semantics["score_norm"])
     typed_rank_loss_weight = float(cfg.get("typed_rank_loss_weight", 0.15))
     typed_rank_margin = float(cfg.get("typed_rank_margin", 0.20))
     reach_opportunity_weight = float(cfg.get("reach_opportunity_weight", 1.5))

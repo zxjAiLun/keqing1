@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import torch
 
 import inference.bot_registry as bot_registry
@@ -70,6 +71,85 @@ def test_runtime_bot_explicit_v4_checkpoint(tmp_path: Path):
     bot = RuntimeBot(player_id=0, model_path=ckpt, device="cpu", model_version="keqingv4")
 
     assert bot._model_version == "keqingv4"
+
+
+def test_runtime_bot_disables_beam_lambda_for_untrained_value_head(tmp_path: Path):
+    ckpt = tmp_path / "v4_untrained_value.pth"
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
+    cfg = {
+        "model_name": "keqingv4",
+        "hidden_dim": 64,
+        "num_res_blocks": 2,
+        "action_embed_dim": 16,
+        "context_dim": 12,
+        "dropout": 0.0,
+        "value_loss_weight": 0.0,
+    }
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "cfg": cfg,
+            **build_keqingv4_checkpoint_metadata(cfg=cfg, model=model),
+        },
+        ckpt,
+    )
+
+    with pytest.warns(RuntimeWarning, match="value_loss_weight<=0"):
+        bot = RuntimeBot(player_id=0, model_path=ckpt, device="cpu", model_version="keqingv4")
+
+    assert bot.beam_lambda == 0.0
+    assert bot._scorer.beam_lambda == 0.0
+
+
+def test_runtime_bot_rejects_rank_pt_runtime_when_checkpoint_has_no_placement_training(tmp_path: Path):
+    ckpt = tmp_path / "v4_no_placement_training.pth"
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
+    cfg = {
+        "model_name": "keqingv4",
+        "hidden_dim": 64,
+        "num_res_blocks": 2,
+        "action_embed_dim": 16,
+        "context_dim": 12,
+        "dropout": 0.0,
+        "placement": {
+            "rank_loss_weight": 0.0,
+            "final_score_delta_loss_weight": 0.0,
+            "rank_pt_value_loss_weight": 0.0,
+            "rank_bonus": [90.0, 45.0, 0.0, -135.0],
+            "rank_bonus_norm": 90.0,
+            "rank_score_scale": 0.0,
+            "score_norm": 30000.0,
+        },
+    }
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "cfg": cfg,
+            **build_keqingv4_checkpoint_metadata(cfg=cfg, model=model),
+        },
+        ckpt,
+    )
+
+    with pytest.raises(RuntimeError, match="placement heads were not trained"):
+        RuntimeBot(
+            player_id=0,
+            model_path=ckpt,
+            device="cpu",
+            model_version="keqingv4",
+            rank_pt_lambda=0.1,
+        )
 
 
 def test_runtime_bot_rebuilds_scorer_with_rank_pt_lambda(monkeypatch):

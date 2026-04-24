@@ -5,6 +5,7 @@ import json
 
 import numpy as np
 import pytest
+import torch
 import xmodel1.cached_dataset as cached_dataset_mod
 
 from training.cache_schema import (
@@ -13,6 +14,7 @@ from training.cache_schema import (
     XMODEL1_HISTORY_SUMMARY_DIM,
     XMODEL1_MAX_CANDIDATES,
     XMODEL1_MAX_RESPONSE_CANDIDATES,
+    XMODEL1_RULE_CONTEXT_DIM,
     XMODEL1_SCHEMA_NAME,
     XMODEL1_SCHEMA_VERSION,
 )
@@ -56,6 +58,8 @@ def test_xmodel1_cached_dataset_iterates_and_collates(tmp_path: Path):
     assert batch["pts_given_dealin_target"].shape == (2,)
     assert batch["final_rank_target"].shape == (2,)
     assert batch["final_score_delta_points_target"].shape == (2,)
+    assert batch["response_human_discard_idx"].shape == (2, XMODEL1_MAX_RESPONSE_CANDIDATES)
+    assert batch["rule_context"].shape == (2, XMODEL1_RULE_CONTEXT_DIM)
     assert float(batch["pts_given_win_target"].sum()) == 0.0
     assert float(batch["pts_given_dealin_target"].sum()) == 0.0
     assert batch["replay_id"] == ["sample", "sample"]
@@ -189,6 +193,20 @@ def test_xmodel1_cached_dataset_loads_each_npz_array_once_per_file(monkeypatch):
     assert access_counts["state_scalar"] == 1
     assert access_counts["opp_tenpai_target"] == 1
     assert access_counts["history_summary"] == 2
+
+
+def test_xmodel1_cached_dataset_backfills_optional_rule_context_and_human_response(tmp_path: Path):
+    npz_path = tmp_path / "legacy_missing_optional.npz"
+    payload = make_xmodel1_v3_payload(n=2)
+    payload.pop("rule_context")
+    payload.pop("response_human_discard_idx")
+    np.savez(npz_path, **payload)
+
+    batch = Xmodel1DiscardDataset.collate(list(Xmodel1DiscardDataset([npz_path], shuffle=False, buffer_size=4, seed=1)))
+
+    assert batch["response_human_discard_idx"].shape == (2, XMODEL1_MAX_RESPONSE_CANDIDATES)
+    assert torch.equal(batch["response_human_discard_idx"], torch.full((2, XMODEL1_MAX_RESPONSE_CANDIDATES), -1))
+    assert batch["rule_context"].shape == (2, XMODEL1_RULE_CONTEXT_DIM)
 
 
 def test_xmodel1_cached_dataset_rejects_v1_cache(tmp_path: Path):

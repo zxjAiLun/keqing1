@@ -41,6 +41,10 @@ class DiscardOnlyIterationMetrics:
     mean_approx_kl: float
     mean_clip_fraction: float
     mean_rank_loss: float | None = None
+    mean_rule_kl: float | None = None
+    mean_rule_agreement: float | None = None
+    mean_avg_abs_neural_delta: float | None = None
+    mean_delta_norm: float | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +110,32 @@ def collect_policy_episode(
                 actor=actor,
                 policy_version=seat_policy.policy_version,
                 rule_context=policy_input_cpu.rule_context[0].clone(),
+                raw_rule_scores=None
+                if policy_input_cpu.raw_rule_scores is None
+                else policy_input_cpu.raw_rule_scores[0].clone(),
+                prior_logits=None
+                if policy_input_cpu.prior_logits is None
+                else policy_input_cpu.prior_logits[0].clone(),
+                style_context=None
+                if policy_input_cpu.style_context is None
+                else policy_input_cpu.style_context[0].clone(),
+                chosen_action_canonical_key=chosen_action.canonical_key,
+                episode_id=game_id,
+                actor_id=actor,
+                seat_id=actor,
+                behavior_policy_id=seat_policy.name,
+                learner_policy_version=seat_policy.policy_version,
+                env_seed=seed,
+                terminal_reason="terminal" if final_result.done else None,
+                observation_contract_version=policy_input_cpu.metadata.get("observation_contract_version"),
+                action_feature_contract_version=policy_input_cpu.metadata.get("action_feature_contract_version"),
+                env_contract_version=policy_input_cpu.metadata.get("env_contract_version"),
+                rule_score_version=policy_input_cpu.metadata.get("rule_score_version"),
+                is_autopilot=False,
+                is_learner_controlled=bool(policy_input_cpu.metadata.get("is_learner_controlled", True)),
+                control_action_types=tuple(policy_input_cpu.metadata.get("control_action_types", ())),
+                rulebase_chosen=policy_input_cpu.metadata.get("rulebase_chosen"),
+                policy_chosen=chosen_action.canonical_key,
                 policy_name=seat_policy.name,
                 legal_actions=tuple(policy_input_cpu.legal_actions[0]),
                 game_id=game_id,
@@ -281,7 +311,7 @@ def collect_discard_only_episodes(
 def build_episode_ppo_batch(
     episode: RolloutEpisode,
     *,
-    gamma: float = 0.99,
+    gamma: float = 1.0,
     gae_lambda: float = 0.95,
     include_rank_targets: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, list[RolloutStep], PPOBatch]:
@@ -327,7 +357,7 @@ def build_episode_ppo_batch(
 def build_episodes_ppo_batch(
     episodes: list[RolloutEpisode] | tuple[RolloutEpisode, ...],
     *,
-    gamma: float = 0.99,
+    gamma: float = 1.0,
     gae_lambda: float = 0.95,
     include_rank_targets: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, list[RolloutStep], PPOBatch]:
@@ -377,13 +407,15 @@ def run_ppo_iteration(
     greedy: bool = False,
     policy_version: int = 0,
     max_steps: int = 512,
-    gamma: float = 0.99,
+    gamma: float = 1.0,
     gae_lambda: float = 0.95,
     include_rank_targets: bool = True,
     clip_eps: float = 0.2,
     value_coef: float = 0.5,
     entropy_coef: float = 0.01,
     rank_coef: float = 0.0,
+    rule_kl_coef: float = 0.0,
+    prior_kl_eps: float = 1e-4,
     normalize_advantages: bool = True,
     max_grad_norm: float | None = None,
     device: torch.device | str | None = None,
@@ -426,6 +458,8 @@ def run_ppo_iteration(
                 value_coef=value_coef,
                 entropy_coef=entropy_coef,
                 rank_coef=rank_coef,
+                rule_kl_coef=rule_kl_coef,
+                prior_kl_eps=prior_kl_eps,
                 normalize_advantages=normalize_advantages,
                 max_grad_norm=max_grad_norm,
             )
@@ -452,13 +486,15 @@ def run_discard_only_ppo_iteration(
     greedy: bool = False,
     policy_version: int = 0,
     max_steps: int = 512,
-    gamma: float = 0.99,
+    gamma: float = 1.0,
     gae_lambda: float = 0.95,
     include_rank_targets: bool = True,
     clip_eps: float = 0.2,
     value_coef: float = 0.5,
     entropy_coef: float = 0.01,
     rank_coef: float = 0.0,
+    rule_kl_coef: float = 0.0,
+    prior_kl_eps: float = 1e-4,
     normalize_advantages: bool = True,
     max_grad_norm: float | None = None,
     device: torch.device | str | None = None,
@@ -482,6 +518,8 @@ def run_discard_only_ppo_iteration(
         value_coef=value_coef,
         entropy_coef=entropy_coef,
         rank_coef=rank_coef,
+        rule_kl_coef=rule_kl_coef,
+        prior_kl_eps=prior_kl_eps,
         normalize_advantages=normalize_advantages,
         max_grad_norm=max_grad_norm,
         device=device,
@@ -515,6 +553,18 @@ def summarize_iteration(
 
     rank_losses = [loss.rank_loss.item() for loss in losses if loss.rank_loss is not None]
     mean_rank_loss = None if not rank_losses else sum(rank_losses) / len(rank_losses)
+    rule_kls = [loss.rule_kl.item() for loss in losses if loss.rule_kl is not None]
+    rule_agreements = [
+        loss.rule_agreement.item()
+        for loss in losses
+        if loss.rule_agreement is not None
+    ]
+    avg_abs_deltas = [
+        loss.avg_abs_neural_delta.item()
+        for loss in losses
+        if loss.avg_abs_neural_delta is not None
+    ]
+    delta_norms = [loss.delta_norm.item() for loss in losses if loss.delta_norm is not None]
 
     return DiscardOnlyIterationMetrics(
         episode_count=len(episodes),
@@ -531,6 +581,10 @@ def summarize_iteration(
         mean_approx_kl=sum(loss.approx_kl.item() for loss in losses) / len(losses),
         mean_clip_fraction=sum(loss.clip_fraction.item() for loss in losses) / len(losses),
         mean_rank_loss=mean_rank_loss,
+        mean_rule_kl=None if not rule_kls else sum(rule_kls) / len(rule_kls),
+        mean_rule_agreement=None if not rule_agreements else sum(rule_agreements) / len(rule_agreements),
+        mean_avg_abs_neural_delta=None if not avg_abs_deltas else sum(avg_abs_deltas) / len(avg_abs_deltas),
+        mean_delta_norm=None if not delta_norms else sum(delta_norms) / len(delta_norms),
     )
 
 
@@ -614,8 +668,18 @@ def _policy_input_to_device(policy_input: PolicyInput, device: torch.device) -> 
         legal_action_features=policy_input.legal_action_features.to(device),
         legal_action_mask=policy_input.legal_action_mask.to(device),
         rule_context=policy_input.rule_context.to(device),
+        raw_rule_scores=None
+        if policy_input.raw_rule_scores is None
+        else policy_input.raw_rule_scores.to(device),
+        prior_logits=None
+        if policy_input.prior_logits is None
+        else policy_input.prior_logits.to(device),
+        style_context=None
+        if policy_input.style_context is None
+        else policy_input.style_context.to(device),
         legal_actions=policy_input.legal_actions,
         recurrent_state=policy_input.recurrent_state,
+        metadata=policy_input.metadata,
     )
 
 

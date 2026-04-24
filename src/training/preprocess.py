@@ -27,6 +27,7 @@ from training.cache_schema import (
     KEQINGV4_EVENT_HISTORY_DIM,
     KEQINGV4_EVENT_HISTORY_LEN,
     KEQINGV4_OPPORTUNITY_DIM,
+    KEQINGV4_RULE_CONTEXT_DIM,
 )
 
 _SUIT_PERMS = [
@@ -143,6 +144,7 @@ class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
         "v4_discard_summary",
         "v4_call_summary",
         "v4_special_summary",
+        "rule_context",
     )
 
     def init_rows(self) -> Dict[str, list]:
@@ -160,6 +162,7 @@ class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
             "v4_discard_summary": [],
             "v4_call_summary": [],
             "v4_special_summary": [],
+            "rule_context": [],
         }
 
     def sample_extras(self, sample, action_idx: int) -> Dict[str, object]:
@@ -199,6 +202,7 @@ class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
             "v4_discard_summary": discard_summary.astype(np.float16),
             "v4_call_summary": call_summary.astype(np.float16),
             "v4_special_summary": special_summary.astype(np.float16),
+            "rule_context": np.zeros((KEQINGV4_RULE_CONTEXT_DIM,), dtype=np.float32),
         }
 
     def finalize_result_extras(self, rows: Dict[str, list]) -> Dict[str, np.ndarray]:
@@ -216,6 +220,7 @@ class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
             "v4_discard_summary": np.stack(rows["v4_discard_summary"]).astype(np.float16),
             "v4_call_summary": np.stack(rows["v4_call_summary"]).astype(np.float16),
             "v4_special_summary": np.stack(rows["v4_special_summary"]).astype(np.float16),
+            "rule_context": np.stack(rows["rule_context"]).astype(np.float32),
         }
 
 

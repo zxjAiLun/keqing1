@@ -4,6 +4,7 @@ from mahjong_env.action_space import ACTION_SPACE
 from training.state_features import C_TILE, N_SCALAR
 from training.cache_schema import (
     KEQINGV4_CALL_SUMMARY_SLOTS,
+    KEQINGV4_RULE_CONTEXT_DIM,
     KEQINGV4_SPECIAL_SUMMARY_SLOTS,
     KEQINGV4_SUMMARY_DIM,
 )
@@ -18,6 +19,7 @@ def test_keqingv4_forward_shapes():
     discard_summary = torch.randn(3, 34, KEQINGV4_SUMMARY_DIM)
     call_summary = torch.randn(3, KEQINGV4_CALL_SUMMARY_SLOTS, KEQINGV4_SUMMARY_DIM)
     special_summary = torch.randn(3, KEQINGV4_SPECIAL_SUMMARY_SLOTS, KEQINGV4_SUMMARY_DIM)
+    rule_context = torch.zeros(3, KEQINGV4_RULE_CONTEXT_DIM)
     logits, value = model(
         tile,
         scalar,
@@ -25,6 +27,7 @@ def test_keqingv4_forward_shapes():
         discard_summary=discard_summary,
         call_summary=call_summary,
         special_summary=special_summary,
+        rule_context=rule_context,
     )
 
     assert logits.shape == (3, ACTION_SPACE)
@@ -54,6 +57,7 @@ def test_keqingv4_forward_under_cuda_autocast_keeps_logit_assignment_safe():
     discard_summary = torch.randn(2, 34, KEQINGV4_SUMMARY_DIM, device=device)
     call_summary = torch.randn(2, KEQINGV4_CALL_SUMMARY_SLOTS, KEQINGV4_SUMMARY_DIM, device=device)
     special_summary = torch.randn(2, KEQINGV4_SPECIAL_SUMMARY_SLOTS, KEQINGV4_SUMMARY_DIM, device=device)
+    rule_context = torch.zeros(2, KEQINGV4_RULE_CONTEXT_DIM, device=device)
 
     with torch.amp.autocast(device_type="cuda", enabled=True):
         logits, value = model(
@@ -63,6 +67,7 @@ def test_keqingv4_forward_under_cuda_autocast_keeps_logit_assignment_safe():
             discard_summary=discard_summary,
             call_summary=call_summary,
             special_summary=special_summary,
+            rule_context=rule_context,
         )
 
     assert logits.shape == (2, ACTION_SPACE)
@@ -85,3 +90,16 @@ def test_keqingv4_event_history_changes_state_encoding():
     shared_pad, _ = model.encode_state(tile, scalar, event_history=pad_history)
     shared_active, _ = model.encode_state(tile, scalar, event_history=active_history)
     assert not torch.allclose(shared_pad, shared_active)
+
+
+def test_keqingv4_rule_context_shape_drift_raises():
+    model = KeqingV4Model(hidden_dim=64, num_res_blocks=2, action_embed_dim=16, context_dim=12, dropout=0.0)
+    tile = torch.randn(2, C_TILE, 34)
+    scalar = torch.randn(2, N_SCALAR)
+    bad_rule_context = torch.zeros(2, KEQINGV4_RULE_CONTEXT_DIM - 1)
+
+    try:
+        model(tile, scalar, rule_context=bad_rule_context)
+        raise AssertionError("expected rule_context shape drift to raise")
+    except ValueError as exc:
+        assert "rule_context tensor" in str(exc)

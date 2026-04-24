@@ -36,6 +36,7 @@ from training.state_features import C_TILE, N_SCALAR
 from training.cache_schema import (
     KEQINGV4_CALL_SUMMARY_SLOTS,
     KEQINGV4_EVENT_HISTORY_LEN,
+    KEQINGV4_RULE_CONTEXT_DIM,
     KEQINGV4_SPECIAL_SUMMARY_SLOTS,
     KEQINGV4_SUMMARY_DIM,
 )
@@ -139,6 +140,7 @@ class KeqingV4Model(nn.Module):
         action_embed_dim: int = 64,
         context_dim: int = 32,
         summary_dim: int = KEQINGV4_SUMMARY_DIM,
+        rule_context_dim: int = KEQINGV4_RULE_CONTEXT_DIM,
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
@@ -148,6 +150,7 @@ class KeqingV4Model(nn.Module):
         self.context_dim = context_dim
         self.summary_dim = summary_dim
         self.event_history_len = KEQINGV4_EVENT_HISTORY_LEN
+        self.rule_context_dim = rule_context_dim
 
         self.input_proj = nn.Sequential(
             nn.Conv1d(c_tile, hidden_dim, kernel_size=1, bias=False),
@@ -294,7 +297,14 @@ class KeqingV4Model(nn.Module):
         tile_feat: torch.Tensor,
         scalar: torch.Tensor,
         event_history: torch.Tensor | None = None,
+        rule_context: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if rule_context is not None:
+            expected = (tile_feat.shape[0], self.rule_context_dim)
+            if tuple(rule_context.shape) != expected:
+                raise ValueError(
+                    f"expected rule_context tensor {expected}, got {tuple(rule_context.shape)}"
+                )
         x = self.input_proj(tile_feat)
         x = self.res_tower(x)
         avg_pool = x.mean(dim=-1)
@@ -342,8 +352,14 @@ class KeqingV4Model(nn.Module):
         discard_summary: torch.Tensor | None = None,
         call_summary: torch.Tensor | None = None,
         special_summary: torch.Tensor | None = None,
+        rule_context: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        shared, fields = self.encode_state(tile_feat, scalar, event_history=event_history)
+        shared, fields = self.encode_state(
+            tile_feat,
+            scalar,
+            event_history=event_history,
+            rule_context=rule_context,
+        )
         discard_repr, call_repr, special_repr = self._typed_state_repr(
             shared,
             fields,

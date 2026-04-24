@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 
 from training.cache_schema import (
@@ -7,11 +9,12 @@ from training.cache_schema import (
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_HISTORY_SUMMARY_DIM,
     XMODEL1_MAX_RESPONSE_CANDIDATES,
+    XMODEL1_RULE_CONTEXT_DIM,
 )
 from mahjong_env.tiles import tile_to_34
 from xmodel1.candidate_quality import build_candidate_features
 from xmodel1.candidate_quality import build_special_candidate_arrays
-from xmodel1.preprocess import events_to_xmodel1_arrays
+from xmodel1.preprocess import _resolve_human_response_discard_idx, events_to_xmodel1_arrays
 from xmodel1.schema import (
     XMODEL1_SAMPLE_TYPE_CALL,
     XMODEL1_SAMPLE_TYPE_HORA,
@@ -137,6 +140,7 @@ def test_xmodel1_events_to_arrays_smoke():
         XMODEL1_CANDIDATE_FEATURE_DIM,
     )
     assert arrays["history_summary"].shape[1:] == (XMODEL1_HISTORY_SUMMARY_DIM,)
+    assert arrays["rule_context"].shape[1:] == (XMODEL1_RULE_CONTEXT_DIM,)
     assert "event_history" not in arrays
 
 
@@ -379,6 +383,7 @@ def test_xmodel1_events_to_arrays_keeps_discard_candidates_on_reach_response_sam
     post_tile_ids = arrays["response_post_candidate_tile_id"][row, chosen_response_idx]
     post_mask = arrays["response_post_candidate_mask"][row, chosen_response_idx] > 0
     assert tile_to_34("4p") in post_tile_ids[post_mask].tolist()
+    assert int(arrays["response_human_discard_idx"][row, chosen_response_idx]) >= 0
 
 
 def test_xmodel1_events_to_arrays_exports_response_semantics_for_chi_call() -> None:
@@ -397,9 +402,40 @@ def test_xmodel1_events_to_arrays_exports_response_semantics_for_chi_call() -> N
     assert chosen_slot == 1
     assert int(arrays["response_action_idx"][row, chosen_slot]) == 37
     assert int(arrays["response_teacher_discard_idx"][row, chosen_slot]) >= 0
+    assert int(arrays["response_human_discard_idx"][row, chosen_slot]) >= 0
     assert int(arrays["response_post_candidate_mask"][row, chosen_slot].sum()) > 0
 
     none_slot = int(active_slots[-1])
     assert int(arrays["response_action_idx"][row, none_slot]) == 44
     assert int(arrays["response_teacher_discard_idx"][row, none_slot]) == -1
+    assert int(arrays["response_human_discard_idx"][row, none_slot]) == -1
     assert int(arrays["response_post_candidate_mask"][row, none_slot].sum()) == 0
+
+
+def test_xmodel1_human_response_discard_idx_maps_chosen_slot_without_rust_builder() -> None:
+    post_discard_actions = (
+        {"type": "dahai", "actor": 1, "pai": "E", "tsumogiri": False},
+        {"type": "dahai", "actor": 1, "pai": "S", "tsumogiri": False},
+    )
+    response_states = (
+        SimpleNamespace(
+            action={"type": "chi", "actor": 1, "target": 0, "pai": "5m", "consumed": ["3m", "4m"]},
+            post_discard_actions=post_discard_actions,
+        ),
+        SimpleNamespace(
+            action={"type": "none", "actor": 1},
+            post_discard_actions=(),
+        ),
+    )
+    sample = SimpleNamespace(
+        actor=1,
+        event_index=4,
+        label_action={"type": "chi", "actor": 1, "target": 0, "pai": "5m", "consumed": ["3m", "4m"]},
+    )
+    normalized_events = _chi_response_events()
+
+    human_idx = _resolve_human_response_discard_idx(sample, response_states, normalized_events)
+
+    assert human_idx.shape == (XMODEL1_MAX_RESPONSE_CANDIDATES,)
+    assert int(human_idx[0]) == 1
+    assert int(human_idx[1]) == -1

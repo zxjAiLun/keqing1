@@ -26,10 +26,45 @@ class RolloutStep:
     actor: int
     policy_version: int
     rule_context: torch.Tensor
+    raw_rule_scores: torch.Tensor | None = None
+    prior_logits: torch.Tensor | None = None
+    style_context: torch.Tensor | None = None
+    chosen_action_canonical_key: str | None = None
+    episode_id: str | None = None
+    actor_id: int | None = None
+    seat_id: int | None = None
+    behavior_policy_id: str | None = None
+    learner_policy_version: int | None = None
+    env_seed: int | None = None
+    terminal_reason: str | None = None
+    observation_contract_version: str | None = None
+    action_feature_contract_version: str | None = None
+    env_contract_version: str | None = None
+    rule_score_version: str | None = None
+    is_autopilot: bool = False
+    is_learner_controlled: bool = True
+    control_action_types: tuple[str, ...] = ()
+    rulebase_chosen: str | None = None
+    policy_chosen: str | None = None
+    truncated: bool = False
     policy_name: str | None = None
     legal_actions: tuple[ActionSpec, ...] | None = None
     game_id: str | None = None
     step_id: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.chosen_action_canonical_key is None:
+            object.__setattr__(self, "chosen_action_canonical_key", self.action_spec.canonical_key)
+        if self.actor_id is None:
+            object.__setattr__(self, "actor_id", int(self.actor))
+        if self.seat_id is None:
+            object.__setattr__(self, "seat_id", int(self.actor))
+        if self.learner_policy_version is None:
+            object.__setattr__(self, "learner_policy_version", int(self.policy_version))
+        if self.episode_id is None and self.game_id is not None:
+            object.__setattr__(self, "episode_id", self.game_id)
+        if self.policy_chosen is None:
+            object.__setattr__(self, "policy_chosen", self.action_spec.canonical_key)
 
 
 @dataclass(frozen=True)
@@ -100,7 +135,16 @@ def rollout_step_policy_input(
         legal_action_features=_move(step.legal_action_features.unsqueeze(0)).float(),
         legal_action_mask=_move(step.legal_action_mask.unsqueeze(0)).bool(),
         rule_context=_move(step.rule_context.unsqueeze(0)).float(),
+        raw_rule_scores=None if step.raw_rule_scores is None else _move(step.raw_rule_scores.unsqueeze(0)).float(),
+        prior_logits=None if step.prior_logits is None else _move(step.prior_logits.unsqueeze(0)).float(),
+        style_context=None if step.style_context is None else _move(step.style_context.unsqueeze(0)).float(),
         legal_actions=None if step.legal_actions is None else (step.legal_actions,),
+        metadata={
+            "episode_id": step.episode_id,
+            "policy_version": step.policy_version,
+            "behavior_policy_id": step.behavior_policy_id,
+            "env_seed": step.env_seed,
+        },
     )
 
 

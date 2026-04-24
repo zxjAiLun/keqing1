@@ -24,6 +24,11 @@ class ReviewCandidate:
     prob: float
     logit: float
     feature_values: tuple[float, ...]
+    action_canonical_key: str
+    action_type: str
+    raw_rule_score: float | None = None
+    prior_logit: float | None = None
+    neural_delta: float | None = None
     is_chosen: bool = False
 
 
@@ -45,6 +50,13 @@ class StepReview:
     recomputed_log_prob: float
     reward: float
     done: bool
+    is_autopilot: bool = False
+    is_learner_controlled: bool = True
+    rulebase_chosen: str | None = None
+    policy_chosen: str | None = None
+    rule_kl: float | None = None
+    rule_context: tuple[float, ...] = ()
+    style_context: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -104,6 +116,9 @@ def review_rollout_step(
         dist = MaskedCategorical(output.action_logits, policy_input.legal_action_mask)
         probs = dist.probs()[0].detach().cpu()
         logits = output.action_logits[0].detach().cpu()
+        raw_rule_scores = _optional_row(output.aux.get("rule_scores"), policy_input.raw_rule_scores)
+        prior_logits = _optional_row(output.aux.get("prior_logits"), policy_input.prior_logits)
+        neural_delta = _optional_row(output.aux.get("neural_delta"), None)
         rank_probs = torch.softmax(output.rank_logits[0], dim=-1).detach().cpu()
         entropy = (output.entropy if output.entropy is not None else dist.entropy())[0].detach().cpu()
         recomputed_log_prob = dist.log_prob(
@@ -115,9 +130,27 @@ def review_rollout_step(
     ranked_indices = torch.argsort(probs[:legal_count], descending=True)
     top_indices = ranked_indices[: min(top_k, legal_count)].tolist()
 
-    chosen_candidate = _candidate_from_step(step, probs, logits, step.action_index, is_chosen=True)
+    chosen_candidate = _candidate_from_step(
+        step,
+        probs,
+        logits,
+        step.action_index,
+        raw_rule_scores=raw_rule_scores,
+        prior_logits=prior_logits,
+        neural_delta=neural_delta,
+        is_chosen=True,
+    )
     top_candidates = tuple(
-        _candidate_from_step(step, probs, logits, action_index, is_chosen=(action_index == step.action_index))
+        _candidate_from_step(
+            step,
+            probs,
+            logits,
+            action_index,
+            raw_rule_scores=raw_rule_scores,
+            prior_logits=prior_logits,
+            neural_delta=neural_delta,
+            is_chosen=(action_index == step.action_index),
+        )
         for action_index in top_indices
     )
 
@@ -138,6 +171,14 @@ def review_rollout_step(
         recomputed_log_prob=float(recomputed_log_prob),
         reward=float(step.reward),
         done=bool(step.done),
+        is_autopilot=bool(step.is_autopilot),
+        is_learner_controlled=bool(step.is_learner_controlled),
+        rulebase_chosen=step.rulebase_chosen,
+        policy_chosen=step.policy_chosen,
+        rule_context=tuple(float(value) for value in step.rule_context.flatten().tolist()),
+        style_context=()
+        if step.style_context is None
+        else tuple(float(value) for value in step.style_context.flatten().tolist()),
     )
 
 
@@ -186,6 +227,9 @@ def _candidate_from_step(
     logits: torch.Tensor,
     action_index: int,
     *,
+    raw_rule_scores: torch.Tensor | None,
+    prior_logits: torch.Tensor | None,
+    neural_delta: torch.Tensor | None,
     is_chosen: bool,
 ) -> ReviewCandidate:
     if step.legal_actions is None:
@@ -197,6 +241,11 @@ def _candidate_from_step(
         prob=float(probs[action_index]),
         logit=float(logits[action_index]),
         feature_values=tuple(float(value) for value in step.legal_action_features[action_index].tolist()),
+        action_canonical_key=step.legal_actions[action_index].canonical_key,
+        action_type=step.legal_actions[action_index].action_type.name,
+        raw_rule_score=None if raw_rule_scores is None else float(raw_rule_scores[action_index]),
+        prior_logit=None if prior_logits is None else float(prior_logits[action_index]),
+        neural_delta=None if neural_delta is None else float(neural_delta[action_index]),
         is_chosen=is_chosen,
     )
 
@@ -208,6 +257,12 @@ def _step_review_dict(step_review: StepReview) -> dict[str, object]:
             "action": candidate.action_label,
             "prob": candidate.prob,
             "logit": candidate.logit,
+            "final_logit": candidate.logit,
+            "action_type": candidate.action_type,
+            "action_canonical_key": candidate.action_canonical_key,
+            "raw_rule_score": candidate.raw_rule_score,
+            "prior_logit": candidate.prior_logit,
+            "neural_delta": candidate.neural_delta,
             "feature_values": list(candidate.feature_values),
             "is_chosen": candidate.is_chosen,
         }
@@ -229,7 +284,24 @@ def _step_review_dict(step_review: StepReview) -> dict[str, object]:
         "recomputed_log_prob": step_review.recomputed_log_prob,
         "reward": step_review.reward,
         "done": step_review.done,
+        "is_autopilot": step_review.is_autopilot,
+        "is_learner_controlled": step_review.is_learner_controlled,
+        "rulebase_chosen": step_review.rulebase_chosen,
+        "policy_chosen": step_review.policy_chosen,
+        "rule_kl": step_review.rule_kl,
+        "rule_context": list(step_review.rule_context),
+        "style_context": list(step_review.style_context),
     }
+
+
+def _optional_row(
+    primary: torch.Tensor | None,
+    fallback: torch.Tensor | None,
+) -> torch.Tensor | None:
+    tensor = primary if primary is not None else fallback
+    if tensor is None:
+        return None
+    return tensor[0].detach().cpu()
 
 
 def _policy_device(policy: InteractivePolicy) -> torch.device:

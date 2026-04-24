@@ -137,3 +137,32 @@ def test_action_from_mahjong_spec_rejects_bare_reach() -> None:
 def test_action_from_mjai_rejects_bare_reach() -> None:
     with pytest.raises(ValueError, match="reach"):
         action_from_mjai({"type": "reach", "actor": 0})
+
+
+def test_action_spec_canonical_key_is_derived_and_stable() -> None:
+    spec = ActionSpec(
+        ActionType.CHI,
+        tile=TILE_NAME_TO_IDX["3m"],
+        consumed=(TILE_NAME_TO_IDX["1m"], TILE_NAME_TO_IDX["2m"]),
+        from_who=1,
+        flags=ACTION_FLAG_TSUMOGIRI,
+    )
+    same = ActionSpec(
+        ActionType.CHI,
+        tile=TILE_NAME_TO_IDX["3m"],
+        consumed=(TILE_NAME_TO_IDX["1m"], TILE_NAME_TO_IDX["2m"]),
+        from_who=1,
+        flags=ACTION_FLAG_TSUMOGIRI,
+    )
+    different = ActionSpec(
+        ActionType.CHI,
+        tile=TILE_NAME_TO_IDX["3m"],
+        consumed=(TILE_NAME_TO_IDX["2m"], TILE_NAME_TO_IDX["1m"]),
+        from_who=1,
+        flags=ACTION_FLAG_TSUMOGIRI,
+    )
+
+    assert spec.canonical_key == same.canonical_key
+    assert spec.canonical_key != different.canonical_key
+    with pytest.raises(TypeError):
+        ActionSpec(ActionType.DISCARD, tile=0, canonical_key="bad")  # type: ignore[call-arg]

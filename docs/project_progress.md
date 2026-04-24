@@ -1,408 +1,113 @@
 # Keqing1 Project Progress
 
-Updated: 2026-04-21
+Updated: 2026-04-24
 
-This is the primary status board for the repository.
+This is the primary live status board for the repository.
 
 ## Executive Summary
-- The repository is in a model-window execution phase, not a legacy runtime maintenance phase.
-- `xmodel1` remains the only active mainline for the current training window. `xmodel1_discard_v3` remains the frozen baseline for comparison, while the active code-side cache/runtime/checkpoint contract has now cut over to `xmodel1_discard_v5` / `schema_version = 5`.
-- The repaired self-turn special-vs-discard export bug is no longer the main architectural question. A verified replay case now shows the current `v3` meld/response path is structurally too weak even when preprocess, runtime, and action mapping are aligned:
-  - replay `replay_719cee70_1776764202`
-  - response window UI `step43`
-  - source `event_index=82`
-  - legal `chi 7m(6m,8m)` vs `none`
-  - GT `chi`
-  - current model choice `none`
-- `xmodel1` is therefore no longer "frozen until evidence rerun" in the old sense. The frozen baseline is `xmodel1_discard_v3`, while the active mainline path is now the in-place response-action refactor cut over as `xmodel1_discard_v5` inside `src/xmodel1/`.
-- `keqingrl` is now a top-priority parallel workstream with a distinct RL contract, not a lower-priority sidecar. It is still not a substitute for the xmodel1 meld refactor, but it no longer sits behind xmodel1 or keqingv4 in project priority.
-- `xmodel2` remains the bounded lower-priority experiment line.
-- `pt_map` now has a dedicated runtime-utility surface instead of being treated as an xmodel-family contract decision.
-- `keqingv4` remains a frozen backup line plus Rust-ownership repair path. Its code-side contract closure is now complete, and the line stays out of the training window unless `xmodel1` hits kill criteria.
-- `keqingv4` now has its current placement-rank support landed in-place on that same backup line: the current cache contract version is `7`, raw placement targets are exported into cache/dataset, model/trainer placement heads and losses are wired, review-side aux outputs expose `rank_probs` / `final_score_delta` / derived `rank_pt_value`, runtime now has action-conditioned placement rerank wiring, `rank_pt` still stays trainer/scoring-side derived, and runtime placement scoring remains off by default.
-- `docs/keqingv4/keqingv4_model_design_v2.md` should now be read as the current backup-snapshot contract note for `keqingv4`, not as an open v4 rearchitecture proposal.
-- `xmodel1`, `keqingv4`, and `keqingrl` now share the same top-tier project priority. Their roles differ, but the repository no longer imposes a fixed serial order across those three lines.
-- Shared Rust work should continue only insofar as it hardens public semantic ownership and fail-closed boundaries without consuming the mainline training window.
-- Replay/runtime/bot surfaces should be treated as compatibility layers around model work, not as independent product priorities.
+
+- `keqingrl` is now the only model-growth mainline.
+- The active design is `KeqingRL-Lite`: rulebase prior + neural delta + actor-critic + rollout-native PPO.
+- `xmodel1` and `keqingv4` are frozen assets/baselines. They remain useful for candidate features, after-state ideas, runtime/review adapters, and Rust ownership work, but they are no longer the default training path.
+- Do not spend default mainline effort on full `xmodel1` preprocess/retrain, new `keqingv4` aux heads, or cache schema churn.
+- `rulebase` is now both a compatibility bot and the initial policy prior/autopilot baseline.
+- Rollout data is first-class: ordered legal actions, canonical action keys, raw rule scores, prior logits, old log-prob/value, rule/style context, and policy version are part of the learner contract.
 
 ## Current Global Judgment
-- The project remains focused on building a lightweight but strong Mahjong model.
-- `xmodel1` is the current training-window mainline.
-- `xmodel1_discard_v3` is the frozen baseline and debugging reference, not the active training contract.
-- The active xmodel1 contract is now `xmodel1_discard_v5`: keep the refactor inside `xmodel1`, keep the dedicated response-action branch, and do not carry both legacy `special_*` and new `response_*` paths at the same time.
-- `keqingrl` is a distinct interactive RL family and now shares equal priority with `xmodel1` and `keqingv4`.
-- `keqingv4` is the current backup line and Rust-ownership repair path.
-- `keqingv4` current placement-rank support has now landed through export/cache/model/trainer/review/runtime surfaces on the backup line; it is still not a new family and not a mainline switch.
-- the live `keqingv4` design note now records the frozen backup snapshot and default-off placement boundary; it should not be read as a prompt to reopen `keqingv4` architecture work.
-- `xmodel1`, `keqingv4`, and `keqingrl` are now equal-priority workstreams. Which one moves first in a given session should be determined by concrete dependencies, not by a fixed project-level ranking.
-- `xmodel2` remains the bounded lower-priority experiment family.
-- `pt_map` belongs to runtime utility first; style/rule migration belongs to after-state scorer / reanalysis / self-play, not to more tactical `xmodel1` patching.
-- Raw replay truth datasets remain `artifacts/converted_mjai/ds1`, `ds2`, and `ds3`.
-- `.omx` is retired. Current tracking lives in `docs/project_progress.md`, `docs/agent_sync.md`, and the latest dated `docs/todo_*.md`.
-- Legacy model families have been removed from active runtime/training code paths.
-- Legacy model families and their dedicated configs/scripts have also been removed from the active tree; shared neutral modules are the only maintained import surfaces.
-- This cleanup batch has also archived legacy runtime docs and deploy templates, retired `processed_v3` to `processed_v3.retired`, and removed old cache roots from active defaults.
 
-## Active Workstreams
+The repository is moving from a supervised-cache workflow to an interactive-policy workflow:
 
-### Tier A: xmodel1 Mainline
-- Goal: freeze `xmodel1_discard_v3` as the old baseline, then continue the in-place response-action refactor on the active `xmodel1_discard_v5` contract so the weak meld/call special-slot path is fully replaced by explicit action-conditioned after-state comparison.
-- Current code-side status:
-  - The replay/runtime/preprocess investigation now shows a concrete structural meld failure in the current checkpoint, not just a missing export contract fix:
-    - replay `replay_719cee70_1776764202`
-    - UI `step43`
-    - `event_index=82`
-    - legal `chi` vs `none`
-    - GT `chi`
-    - model choice `none`
-  - That failure has already been checked end-to-end against normalized replay samples, export rows, runtime action mapping, and the live replay server checkpoint, so it should be read as model weakness, not UI/runtime drift.
-  - The live refactor boundary is now frozen in:
-    - `plans/xmodel1_call_refactor_2026_04_21.md`
-    - `docs/xmodel1/xmodel1_call_model_design_v1.md`
-  - The original `v4` response-action design has now been cut over in code as `xmodel1_discard_v5`, because the live schema removed the old `special_*` tensors instead of preserving a dual-path compatibility surface.
-  - The first `v4` cut stays inside `xmodel1` and adds a dedicated off-turn response-action branch for:
-    - `hora`
-    - `chi_low / chi_mid / chi_high`
-    - `pon`
-    - `daiminkan`
-    - `none`
-  - Self-turn `reach / hora / ankan / kakan / dahai` stay on the legacy `v3`-style path in the first `v4` cut so the refactor stays focused on the weakest surface first.
-  - Rust-first preprocess/cache path is in place.
-  - Production preprocess ownership is fully in Rust via `scripts/preprocess_xmodel1.py` and `keqing_core.build_xmodel1_discard_records(...)`.
-  - The active xmodel1 public schema identity is now `xmodel1_discard_v5` / `schema_version = 5`.
-  - Raw public `event_history` has been removed from the xmodel1 cache/runtime contract and replaced with fixed-shape `history_summary[20]`.
-  - The old `legacy_kakan2` drift was rooted in raw-history slicing on pre-normalized events while parity used normalized events; xmodel1 now builds history context from normalized events on both sides, so the legacy whitelist is no longer part of the target state.
-  - The active xmodel1 cache/runtime contract is now response-only: legacy `special_*` tensors have been removed from preprocess, cache loading, runtime payloads, inference adapters, and checkpoint metadata, while `response_*` tensors remain the sole non-discard action path.
-  - The model/runtime/train path now consumes `history_summary` directly; the old xmodel1 history transformer path is no longer the target architecture.
-  - The Python parity oracle, cached loader, train script smoke fixtures, and adapter/runtime batch helpers now all gate on the same response-only `v5` field set.
-  - `xmodel1` training now runs on the shared `training.train_model(...)` epoch loop; xmodel1 keeps a thin task wrapper for its candidate/response/value losses plus metadata/log shaping.
-  - New xmodel1 checkpoints now write full metadata (`model_version`, `cfg`, schema and tensor dims, hidden size, block count, dropout); runtime keeps read-only legacy loading for old no-`cfg` checkpoints but resume stays fail-closed across the schema cutover.
-  - `RuntimeBot`/`KeqingModelAdapter` now infer legacy xmodel1 structure from weight shapes instead of assuming default hidden depth.
-  - Shared beam continuation scoring now uses batched `forward_many(...)` when the adapter exposes it, reducing repeated per-candidate forwards without changing decision semantics.
-  - The xmodel1 runtime tensor entrypoint is now centralized behind `keqing_core.build_xmodel1_runtime_tensors(...)`, and the native Rust implementation is now the active owner for runtime candidate/response/history-summary tensors when the extension is available; Python fallback remains allowed only for missing capability on that path.
-  - Rust export/runtime parity is now green on the response-only `v5` contract, including:
-    - dedicated `hora` response rows
-    - explicit post-response discard sets for `reach / chi / pon / daiminkan`
-    - response teacher index parity with the Python oracle
-  - The preprocess launcher still runs a preflight export/probe gate per shard, and the active `v5` response-only contract plus fixed-subset profile gate are now green.
-  - Xmodel1 discard candidate analysis has been deliberately lowered again on the active path: special-waits fallback, one-shanten draw metrics, and pinfu/iipeikou break tracking no longer dominate preprocess compute, while the new public schema stays stable on `v5`.
-  - Fixed-subset evidence on `ds1 + ds2 + ds3` (15 files / 8843 samples) is now:
-    - `total_wall=1.386s`
-    - `discard_candidate_analysis=1.891s`
-    - `npz_write=9.670s`
-    - compared with the earlier profile on the same subset:
-      - `total_wall=53.048s`
-      - `discard_candidate_analysis=545.964s`
-  - Rust export now has env-gated stage profiling (`XMODEL1_EXPORT_PROFILE=1`) plus cooperative interrupt/resume work, so the next evidence loop can measure real wall-time and stop safely.
-  - The current full export is already present under `processed_xmodel1_v1b/ds1`, `ds2`, and `ds3`; the minimal real-cache smoke used that export directly rather than a synthetic fixture.
-  - A first real-cache smoke train is now green on a 3-file subset spanning `ds1 + ds2 + ds3`; the run completed end-to-end on CUDA with real cached batches, checkpoints, and rewritten logs/summary outputs.
-  - The xmodel1 smoke artifact summary now reads best-metric metadata from `best.pth`, so `training_summary.json` no longer reports stale `Infinity` after a successful first checkpoint save.
-  - A first short real train on the current `processed_xmodel1_v1b` export is now complete at `artifacts/xmodel1_runs/v1b_train_20260422/`.
-  - That run used the frozen v3 contract on the real full export manifest (`72738` files / `44802765` samples), with per-epoch random file sampling at `files_per_epoch_ratio=0.1`, `steps_per_epoch=8313`, `val_steps_per_epoch=100`, and finished `20` epochs on CUDA.
-  - The current best artifact summary from that run is:
-    - `best_val_objective=3.6016`
-    - `val_action_acc=0.7713`
-    - per-type validation accuracy remains near-saturated on `hora=1.000`, `reach=1.000`, `none=0.976`, `pon=0.934`, `kan=0.914`, `chi=0.893`, while `dahai=0.714` remains the dominant hard class.
-  - Review of that run found a preprocess/train contract bug: self-turn special samples with concurrent legal `dahai` choices were exported as pure special rows with zeroed discard candidate arrays, while runtime compares discard and special logits directly on the same decision.
-  - Rust production export and the Python parity oracle now retain same-turn discard candidate arrays on any special sample row whose `legal_actions` include `dahai`; this repairs the missing cross-head `special` vs `discard` supervision without changing the field set.
-  - The current `processed_xmodel1_v1b` export and `v1b_train_20260422` checkpoints predate that fix, so they remain useful as debugging evidence but are not valid acceptance artifacts for self-turn special-vs-discard behavior. They are also no longer sufficient as the mainline acceptance target because the off-turn meld architecture itself is now being replaced.
-  - `src/xmodel1/preprocess.py` remains only as a Python parity oracle used by contract tests; it is not a production exporter.
-  - Placement utility, rank-distribution work, and interactive RL are still kept outside this `xmodel1` refactor boundary.
-- User-owned execution remains:
-  - rerun full xmodel1 preprocess on the new `xmodel1_discard_v5` export
-  - rerun a short real train on the new `v5` export
-  - rerun slice review with explicit focus on `chi / pon / daiminkan / none / ron`
-  - decide on a broader/fuller train only after the `v5` meld slice looks behaviorally sane
-  - review / slice acceptance / strength judgment
+```text
+ActorObservation/PublicObservation
+-> ordered legal actions
+-> Rust rulebase scorer
+-> raw_rule_scores
+-> centered/clipped prior_logits
+-> RulePriorDeltaPolicy
+-> rollout buffer
+-> PPO update
+-> review/eval
+```
 
-### Tier A: keqingrl Interactive RL Family
-- Goal: open a new model family whose core contract is `obs + legal_actions + rule_context -> action distribution / log_prob / entropy / value`, without inheriting the supervised cache or fixed-45-logit assumptions from the imitation lines.
-- Current role:
-  - isolated interactive policy / actor-critic family
-  - future self-play and rule-conditioned optimization surface
-  - architecture boundary for variable legal-action distributions, rollout logging, and PPO-style learners
-- Current code-side status:
-  - the live design note for this family is now `docs/keqingrl/keqingrl_model_design_v1.md`
-  - the multi-session execution blueprint is now `plans/keqingrl_interactive_policy_2026_04_21.md`
-  - `src/keqingrl/` is now the dedicated namespace for:
-    - structured RL action specs
-    - policy input/output contracts
-    - masked legal-action distributions
-    - rollout metadata structures
-    - opponent-pool seat assignment helpers
-    - PPO batch / return / advantage utilities
-    - PPO loss/update helpers
-  - the first landed boundary is:
-    - variable legal-action distribution instead of fixed global action logits
-    - rollout-native records instead of supervised cache reuse
-    - a dedicated interactive policy interface instead of `training.train_model(...)` CE-first trainers
-  - a first neural forward contract now exists:
-    - state encoder over actor-relative tile/scalar/history tensors
-    - action encoder over ordered legal-action ids/features
-    - masked `[B, A]` action logits
-    - rule-conditioned value head
-    - rank logits head
-  - a PPO foundation now exists on rollout-native data:
-    - GAE-style return / advantage computation
-    - PPO batch collation from rollout steps
-    - clipped PPO loss / update helpers
-    - toy bandit learning test proving the update path can improve a policy
-  - a first Mahjong env bridge now exists:
-    - `src/keqingrl/env.py` wraps `BattleManager` plus ordered legal-action enumeration
-    - the default policy surface remains discard-only for compatibility, but the env can now opt into a widened learned action surface:
-      - `DISCARD`
-      - `REACH_DISCARD`
-      - `TSUMO`
-      - `ANKAN`
-      - `KAKAN`
-      - `RYUKYOKU`
-      - `RON`
-      - `CHI`
-      - `PON`
-      - `DAIMINKAN`
-      - `PASS`
-    - self-turn `REACH` is now exposed only through the dedicated composite `REACH_DISCARD` contract; bare Mahjong `"reach"` is still rejected at the keqingrl action boundary
-    - off-turn discard/kakan response windows can now be exposed to the learner through the same ordered legal-action contract instead of being forced through auto `hora/none`
-    - the env caches per-turn ordered legal actions and requires step replay against that same ordered list
-    - bounded `max_kyokus` episodes are now available for smoke and early PPO staging
-  - discard-only-named rollout collection now exists:
-    - `src/keqingrl/selfplay.py` now has a generic seat-policy collector underneath the discard-only compatibility names
-    - bounded Mahjong episodes can now be collected from the current env surface with either:
-      - one shared learner policy on every seat
-      - fixed learner seats plus sampled opponents from an opponent pool
-    - terminal rank rewards are backfilled per actor rather than only on the globally final acting step
-    - PPO batch collation now pads variable legal-action counts across Mahjong decisions instead of assuming fixed `A`
-    - mixed-policy PPO batching now filters to learner-controlled seats instead of backpropagating on opponent actions
-    - a first Mahjong PPO smoke now runs `collect episode -> actor-wise GAE -> padded PPO batch -> one PPO update`
-  - a first iteration-level training surface now exists:
-    - multi-episode collection with deterministic seed stepping
-    - opponent-pool-aware self-play collection and evaluation wrappers now exist under the generic path
-    - merged PPO batch construction across episodes
-    - repeated PPO update epochs on one collected iteration batch
-    - iteration metrics for steps, reward, rank, KL, clip fraction, and losses
-  - rollout review/export support now exists:
-    - rollout steps now retain the per-turn ordered legal-action objects needed for review
-    - `src/keqingrl/review.py` can reconstruct policy outputs on stored rollout steps
-    - top-k legal actions, chosen action, logits, probs, value, rank probs, and log-prob drift can now be exported as JSONL
-  - a longer-run discard-only harness now exists:
-    - `src/keqingrl/training.py` can run multi-iteration discard-only PPO loops
-    - optional greedy eval episodes can be collected alongside training iterations
-    - training history now records iteration-indexed train/eval metrics without claiming strength by itself
-  - rule-conditioned reward helpers now exist:
-    - normalized `pt_map` rule-context tensor construction
-    - terminal rank-pt reward mapping with `game_start_oya` tie-break
-    - focused coverage now exists for:
-      - action encode/decode and MJAI expansion
-      - atomic Mahjong-spec conversion for `DISCARD / TSUMO / ANKAN / KAKAN / RYUKYOKU`
-      - bound `REACH_DISCARD` construction plus bare `reach` rejection at the keqingrl action boundary
-    - masked distribution legality
-    - random policy sampling / greedy legality
-    - neural forward shapes and masking
-    - rollout reward backfill
-    - PPO toy learning
-    - discard-only env legality / ordered-action stability / bounded episode completion
-      - widened self-turn env filtering / raw-action dispatch for `REACH_DISCARD / TSUMO / ANKAN / KAKAN / RYUKYOKU`
-    - off-turn response env filtering / raw-action dispatch for `RON / CHI / PON / DAIMINKAN / PASS`
-    - terminal reward and rule-context normalization
-    - discard-only episode collection
-    - actor-wise terminal backup for shared-policy self-play
-    - Mahjong PPO smoke on variable legal-action batches
-    - multi-episode PPO batch aggregation
-    - iteration-level PPO metric reporting
-    - mixed-seat policy collection with per-step acting policy versions
-    - opponent-pool sampling plus learner-seat-only PPO batching
-    - training/eval smoke on opponent-pool self-play collection
-    - mixed-policy review routing via stored `policy_name` / `policy_version` plus resolver-based replay
-    - rollout review/export reconstruction from stored legal actions
-    - multi-iteration discard-only training history
-- Boundary:
-  - `keqingrl` is not the training-window mainline.
-  - `keqingrl` is not the `keqingv4` backup line.
-  - `keqingrl` should not mutate `xmodel1_discard_v3`, `xmodel2_aux`, or existing flat-policy runtime contracts just to get started.
-  - early execution should stay staged:
-    - landed: Phase 0 action contract + random policy legality
-    - landed: Phase 1 neural forward contract
-    - landed: PPO foundation on toy rollout data
-    - landed: discard-only Mahjong env wrapper
-    - landed: discard-only Mahjong rollout collection and PPO smoke
-    - landed: multi-episode PPO iteration surface
-    - landed: rollout trace export / review surface
-    - landed: longer-run training harness
-    - landed: generic collector + opponent-pool self-play surface under discard-only compatibility wrappers
-    - landed: first widened learned action surface:
-      - self-turn `DISCARD + REACH_DISCARD + TSUMO + ANKAN + KAKAN + RYUKYOKU`
-      - off-turn `RON + CHI + PON + DAIMINKAN + PASS`
-    - next: actual longer-run training evidence on the generic collector/opponent-pool path plus fuller self-play coverage on the widened surface
-    - Phase 3+: full-action self-play
+The core formula is:
 
-### Tier B: xmodel2 Experimental Family
-- Goal: stage the next offline post-`xmodel1` experiment line without mutating `xmodel1_discard_v3`.
-- Current role:
-  - isolated architecture sandbox for a decomposed-EV placement-support experiment
-  - neutral place to test rank-aware supervision before after-state reanalysis or self-play are ready
-- Current code-side status:
-  - the frozen design note for this experiment is now `docs/xmodel2/xmodel2_placement_design_v1.md`
-  - Shared replay samples now expose deterministic `final_rank_target` plus raw `final_score_delta_points_target`, filled by a Rust terminal post-pass from `score_before_action` and a fixed `game_start_oya` seat-order tie-break.
-  - Shared preprocess now has `Xmodel2PreprocessAdapter` / `create_preprocess_adapter('xmodel2_aux')` for exporting the base cache schema plus decomposed-EV targets and the new placement targets.
-  - Runtime utility now has `src/inference/pt_map.py` for validating `pt_map`, mapping deterministic ranks, and turning model-predicted `rank_probs` into expected placement utility.
-  - `src/xmodel2/` now contains:
-    - a lightweight model skeleton
-    - a cached dataset loader on the shared base cache schema
-    - a placement stream with `rank_logits` and `final_score_delta` heads
-    - trainer-derived `rank_pt` utility loss from `rank_probs + final_score_delta`
-    - a training wrapper on top of `training.train_model(...)`
-  - Focused coverage now exists for:
-    - seat-order tie-break behavior
-    - replay target propagation of `final_rank_target` / `final_score_delta_points_target`
-    - xmodel2 model shapes
-    - xmodel2 CPU smoke training
-- Boundary:
-  - `xmodel2` is not the training-window mainline yet.
-  - `rank_pt` is not a cache-native field; it remains a trainer/scoring-side utility derived from config.
-  - runtime action scoring is still untouched; there is no action-conditioned placement scorer yet.
-  - style/rule migration remains explicitly deferred to after-state scorer / reanalysis / self-play.
+```python
+prior_logits = (raw_rule_scores - raw_rule_scores.max(dim=-1, keepdim=True).values)
+prior_logits = prior_logits.clamp(min=-10.0, max=0.0) / prior_temperature
+final_logits = rule_score_scale * prior_logits + neural_delta
+```
 
-### Tier A: keqingv4 Backup
-- Goal: continue Rust ownership of preprocess, typed summaries, and runtime projection as a Tier A workstream while keeping `keqingv4` in its backup-line role.
-- Current role:
-  - backup line if xmodel1 hits kill criteria
-  - shared-core and Rust semantic consolidation track
-  - equal-priority top-tier workstream despite not being the supervised mainline
-- Current code-side status:
-  - the live design note for this line is now `docs/keqingv4/keqingv4_model_design_v2.md`, and it is intentionally written as a current contract snapshot rather than a future restructure plan
-  - Phase A train-ready gate is green.
-  - Phase B contract closure is complete and the current backup snapshot is frozen on that boundary.
-  - Bounded future-truth has been wired into the keqingv4 summary/value path, with recursive strengthening capped at `shanten <= 2` and non-recursive behavior kept above that cutoff.
-  - Shared Rust continuation helpers have landed for scenario construction, per-scenario scoring, and weighted aggregation; `src/inference/scoring.py` now prefers the Rust continuation path and keeps Python only as a missing-capability fallback.
-  - Hora truth and continuation/scoring bridges are now fail-closed on unexpected native drift; Python emergency code is no longer allowed to silently absorb schema or semantic errors on those paths.
-  - keqingv4 runtime/preprocess dependencies have been pulled off legacy `keqingv1` / `keqingv3` feature surfaces onto shared active surfaces such as `mahjong_env.action_space` and `training.state_features`.
-  - `event_history` is now an explicit runtime + preprocess contract on the backup line: parity/smoke/export paths compute real history from replay events, and `DefaultDecisionContextBuilder` injects the same `(48, 5)` tensor into both `runtime_snap` and `model_snap`.
-  - Typed-rank opportunity tags are now an explicit `v4_opportunity[3]` contract (`reach`, `hora`, `call_or_none_family`). The old summary magic-channel convention is no longer part of the public contract.
-  - keqingv4 cache export/inspect/train paths are now cut over to the current contract version `7`, keeping `v4_opportunity` / `event_history` required and adding raw `final_rank_target` + `final_score_delta_points_target`.
-  - keqingv4 checkpoints are now hard-cutover fail-closed: inference and resume both validate metadata, load with `strict=True`, and reject old metadata-less checkpoints.
-  - The current backup defaults are `value_loss_weight=0.0` and `mc_reg_loss_weight=0.01`, matching the intended weak-MC regularization regime.
-  - `keqingv4` current placement-rank support is now landed through its current full boundary:
-    - Rust export writes raw `final_rank_target` + `final_score_delta_points_target`
-    - cached dataset / collate / trainer batch contracts thread those tensors end-to-end
-    - the model now has a dedicated placement stream with `rank_logits` + `final_score_delta`
-    - trainer now computes placement losses / metrics from derived `rank_probs + final_score_delta`
-    - inference / review aux outputs now expose full `rank_probs[4]`, `final_score_delta`, and derived `rank_pt_value`
-    - runtime scoring now supports action-conditioned placement rerank on `keqingv4`
-    - gateway / runtime bot / riichi.dev / local inspect now thread `rank_pt_lambda`
-    - candidate review metadata now exposes per-action placement contribution
-  - preprocess and evidence scripts have been updated alongside that shift, including legacy `workers` config compatibility in `scripts/preprocess_keqingv4.py`, a new random preflight gate that samples a few real `.mjson` files before full export, checkpoint-contract diagnostics in `scripts/train_keqingv4.py`, and calibration harnesses that now consume the shared action-space surface.
-  - Focused coverage exists on the active path: preprocess parity, inference adapter behavior, model/training smoke, train-script contract checks, and continuation-contract tests all have corresponding test surfaces in the current tree.
-  - `keqingv4` can re-enter the training window if xmodel1 hits kill criteria, but it remains the backup line by default.
-- Boundary:
-  - `keqingv4` current placement-rank support does not create a new family name and does not move the xmodel1-mainline / keqingv4-backup boundary.
-  - runtime placement scoring is landed but still default-off; `rank_pt_lambda` remains `0.0` in default specs, and this slice is still just `keqingv4`, not a separately named `rank-pt policy`.
+`raw_rule_scores` preserve rulebase argmax parity. `prior_logits` are policy prior logits. Clipping must not change the raw best action except true raw-score ties.
 
-### Tier Support: Shared Rust Core
-- Shared priorities across `xmodel1` and `keqingv4`:
-  - hora/scoring truth consolidation
-  - event-history emission
-  - opponent tenpai labels
-  - after-state hand-value and summary primitives
-- Current code-side status:
-  - replay sample public ownership is now Rust-only
-  - continuation scoring is moving into shared Rust pure helpers
-  - public legal-action enumeration now prefers a Rust public bridge end-to-end; Python keeps only missing-capability fallback and compatibility shaping on that path
-  - `DefaultDecisionContextBuilder` now prefers Rust replay snapshots for runtime/model decision snapshots and falls back to Python `state.snapshot(actor)` only when the replay-snapshot capability is missing
-  - `mahjong_env.scoring.py` now treats Rust hora truth as the public owner path and allows Python scoring fallback only for missing capability, not for unexpected truth drift
-  - legacy preprocess helper surfaces are no longer active defaults
-  - a new multi-session execution plan for the next Rust-ownership push is now frozen at `plans/rust_ownership_push_2026_04_19.md`
-  - that plan keeps the current priority order intact and sequences the next push as:
-    - `S0` boundary freeze and guardrails
-    - `S1` keqingv4 fail-closed cleanup
-    - `S2` legal action public-owner consolidation
-  - current Python boundary notes:
-    - parity-only oracle: `src/xmodel1/preprocess.py`
-    - Rust-first shell / emergency-fallback surfaces: `src/mahjong_env/replay.py`, `src/mahjong_env/legal_actions.py`, `src/keqingv4/preprocess_features.py`, `src/inference/scoring.py`, `src/mahjong_env/scoring.py`
-    - remaining active Python semantic-owner surfaces for the next Rust push: `src/mahjong_env/state.py`, `src/training/state_features.py`, `src/xmodel1/features.py`, `src/xmodel1/candidate_quality.py`
-  - `S0` guardrails now explicitly require fail-closed tests for typed-summary shape drift, continuation scenario schema drift, continuation scoring schema drift, continuation aggregation schema drift, and hora-truth fallback boundaries
-- Rule: shared Rust semantics should land in common core first, then be consumed by model-specific export/runtime layers.
+## Active Workstream: KeqingRL-Lite
 
-### Tier Support: Legacy Cleanup Follow-Through
-- Legacy runtime docs now live under `docs/archive/legacy_runtime/`.
-- Legacy deploy templates now live under `deploy/archive/legacy_models/`.
-- Removed legacy active-tree surfaces now include `src/keqingv1/`, `src/keqingv2/`, `src/keqingv3/`, `src/keqingv31/`, their dedicated preprocess/train scripts, and their old default configs.
-- Active deploy/runtime naming is now:
-  - `xmodel1`
-  - `keqingv4`
-  - `rulebase`
-- `processed_v3` has been retired to `processed_v3.retired`; active configs and scripts should not point at it anymore.
-- The remaining follow-through is observational:
-  - keep archive-only policy stable
-  - do not restore legacy aliases or service names
-  - permanently delete `processed_v3.retired` after a short observation window if no consumer resurfaces
+### Contract Status
 
-## Current Priority Tiers
-- Tier A, same priority and no required order:
-  - `xmodel1`: response-only `xmodel1_discard_v5` refactor, re-export, retrain, and meld-slice acceptance
-  - `keqingv4`: backup-snapshot contract verification, current default-off placement-rank boundary, and Rust-ownership cleanup
-  - `keqingrl`: interactive policy / actor-critic contract, env / rollout / PPO evidence, and widened action-surface work
-- Tier B:
-  - `xmodel2`: bounded offline placement / rank-aware experiment work
-- Supporting work:
-  - shared Rust semantic core consolidation
-  - replay/runtime/gateway/UI compatibility cleanup
-  - legacy cleanup follow-through
+Landed or being landed:
 
-## Continuation Guidance
-- The next meaningful project-level state changes can come independently from any of the three Tier A workstreams.
-- There is no longer a fixed serial execution order across `xmodel1`, `keqingv4`, and `keqingrl`; impose sequencing only when a concrete dependency requires it.
-- Read the current parallel acceptance fronts as:
-  - `xmodel1`: keep the `v5` response-only schema/runtime boundary stable, rerun preprocess/train/review, and judge the meld slice on explicit evidence
-  - `keqingv4`: keep the backup snapshot frozen, preserve `event_history` / `v4_opportunity` / metadata fail-closed behavior, and verify the landed default-off placement-rank boundary
-  - `keqingrl`: keep the RL-native contract stable, collect longer-run PPO evidence, and widen the legal action surface without regressing legality or rollout replay
-- `xmodel2` remains the bounded lower-priority offline probe line.
-- `pt_map` stays in runtime utility until a later explicit integration choice.
-- after-state scorer / reanalysis / self-play remain the longer-term style-migration path rather than a substitute for any one Tier A line.
+- structured `ActionSpec` with derived `canonical_key`
+- `RuleContext` and `RewardSpec`
+- neutral `StyleContext`
+- rollout metadata for action-order safety and policy versioning
+- `MaskedCategorical` fail-closed semantics
+- Rust rulebase scoring API
+- `RulePriorPolicy` and `RulePriorDeltaPolicy`
+- PPO rule-KL metrics and delta metrics
 
-## Current Risks
-- The user still needs to execute the real preprocess, train, and review loops; code-side gates alone do not prove model quality.
-- The current green smoke evidence is still only a minimal real-cache subset run; it proves loader/train/checkpoint integrity, not model quality or full-root throughput.
-- The new `v1b_train_20260422` evidence is stronger than the subset smoke, but it still uses `files_per_epoch_ratio=0.1` and `val_steps_per_epoch=100`; it is a real short-train signal, not a final full-coverage quality verdict.
-- The pre-fix `hora=1.000` / `reach=1.000` slices do not prove runtime self-turn special-vs-discard quality, because those training rows did not expose competing discard logits on the old export.
-- The current per-type offline metrics are dominated by easy action classes; `dahai` remains the main hard class, so aggregate accuracy is not a sufficient proxy for decision quality.
-- Existing `xmodel1` caches exported before the dedicated `hora` sample-type change do not contain those rows; metadata repair cannot synthesize them, so a real re-export is required before retraining.
-- `xmodel1_discard_v2` is no longer the rerun target. Any old v2 cache or checkpoint must now fail closed and be replaced rather than silently reused.
-- The current `processed_xmodel1_v1b` export predates the repaired special-vs-discard sample semantics and must be replaced with a real full re-export before the next xmodel1 train; old caches cannot be upgraded in place.
-- `--strict-cache-scan` on the full `processed_xmodel1_v1b` root currently performs a linear validation pass over `72738` cache files before training begins; that is useful for deep validation, but it is an expensive startup path for smoke-triage runs.
-- Some historical docs still mention old model lines for comparison or historical context. They should not be treated as active runbooks.
-- Rust migration is not complete; the remaining work is no longer old-line compatibility, but shared semantic ownership and long-tail continuation/scoring cleanup.
-- keqingv4 checkpoints exported before the explicit metadata cutover are intentionally dead for both inference and resume; replace them instead of trying to bridge them.
-- `xmodel1` still carries a deliberate Python parity oracle for candidate arrays, and focused contract tests remain the place where real Rust/Python drift is measured.
-- `keqingrl` now has a Mahjong env wrapper, generic collector/opponent-pool self-play surfaces, rollout/PPO smoke coverage, review/export helpers, and a widened learned action surface (`DISCARD + REACH_DISCARD + TSUMO + ANKAN + KAKAN + RYUKYOKU + RON + CHI + PON + DAIMINKAN + PASS`), but it still lacks longer-run behavioral evidence and fuller self-play coverage on that widened surface.
-- `keqingrl` carries new failure modes that the imitation lines did not have:
-  - legal-action ordering drift between observation and step
-  - log-prob mismatch between rollout and learner replay
-  - reward backfill mistakes across seats and final ranks
-- `keqingrl` mixed-policy rollout review now has an explicit contract: rollout steps retain acting `policy_name` / `policy_version`, and review can route each step through a resolver instead of assuming one policy for the whole episode.
-- `xmodel2` is only a Phase 1 scaffold today; it has rank-aware targets and a smoke-trainable skeleton, but it does not yet encode after-state style signals or self-play adaptation.
-- `keqingv4` now has its current placement-rank runtime slice too: action-conditioned placement rerank is wired, but default specs still keep `rank_pt_lambda = 0.0`, and terminal `hora / ryukyoku` placement bonus is still intentionally `0.0`.
-- `pt_map` is deliberately outside the model family for now, so offline training metrics and runtime placement utility can still diverge until a later integration plan is chosen.
-- Gateway/runtime client coverage still depends on environment-specific endpoints and is not part of the current model-contract acceptance chain.
+### Non-Negotiable Rules
 
-## Near-Term Next Actions
-- `xmodel1`:
-  - keep the `xmodel1_discard_v5` response-only design stable and keep `xmodel1_discard_v3` explicitly frozen as the baseline
-  - use the landed `v5` response sample/export path for the next full preprocess
-  - keep model/trainer/runtime/review aligned and retain the known `event_index=82` fixture in the focused suite
-  - build a meld-focused slice harness covering `chi / pon / daiminkan / none / ron`
-  - run smoke export + smoke train on the `v5` contract before asking the user for full preprocess or retraining
-  - keep `XMODEL1_EXPORT_PROFILE=1` available for export regression spot checks
-- `keqingrl`:
-  - keep the RL-native contract stable across `ActionSpec` / env / rollout / learner replay
-  - collect longer-run PPO evidence on the generic collector/opponent-pool path
-  - continue widening action coverage beyond the current bounded surface without regressing legality
-  - keep rollout review/export and variable-legal-action batching aligned with the learner path
-- `keqingv4`:
-  - keep the explicit-contract backup snapshot frozen
-  - preserve `event_history` / `v4_opportunity` / metadata fail-closed behavior on any follow-up change
-  - keep the current placement-rank support on its default-off runtime boundary unless an explicit probe says otherwise
-  - continue non-training Rust-ownership work and focused verification on this line
-- `xmodel2`:
-  - keep it bounded to offline placement / rank-aware probes
-- Shared:
-  - start the next Rust push from `plans/rust_ownership_push_2026_04_19.md` only when it does not create a concrete dependency conflict for any Tier A line
+- PPO never re-enumerates legal actions to interpret an old action index.
+- `legal_action_specs[action_index].canonical_key` must match stored `chosen_action_canonical_key`.
+- `rule_score`, observation building, action feature building, and review components must consume public/actor observations only.
+- GAE/returns are computed per `(episode_id, actor_id)`, not over one global chronological step stream.
+- Checkpoint and rollout contract versions fail closed on mismatch.
+- Phase 1-7 use neutral style only: `[0, 0, 0, 0, 0]`.
+
+## Frozen Asset Lines
+
+### xmodel1
+
+Frozen role:
+
+- candidate/action feature ideas
+- response/after-state design reference
+- Rust export/profile lessons
+- baseline checkpoints and review slices
+
+Not default work:
+
+- full supervised preprocess reruns
+- new cache schema revisions
+- more aux heads as the main strength strategy
+
+### keqingv4
+
+Frozen role:
+
+- backup runtime/checkpoint line
+- Rust ownership repair examples
+- inference/review adapter reference
+- placement/rank-pt implementation reference
+
+Not default work:
+
+- new model-family fork
+- additional head stacking
+- replacing `keqingrl` as the growth line
+
+## Immediate Development Order
+
+1. Finish KeqingRL-Lite contracts and tests.
+2. Wire rulebase scoring into env observation and rollout storage.
+3. Verify zero-delta policy distribution equals rule prior distribution.
+4. Run discard-only PPO smoke with forced terminal autopilot.
+5. Add fixed-seed evaluation/duplicate smoke.
+
+## Current Known Environment Note
+
+The workstation `.venv` is broken. Recreate it before running Python tests:
+
+```bash
+rm -rf .venv
+uv sync
+```

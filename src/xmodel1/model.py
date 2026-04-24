@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from mahjong_env.action_space import ACTION_SPACE
-from training.cache_schema import XMODEL1_HISTORY_SUMMARY_DIM
+from training.cache_schema import XMODEL1_HISTORY_SUMMARY_DIM, XMODEL1_RULE_CONTEXT_DIM
 from xmodel1.schema import XMODEL1_MAX_RESPONSE_CANDIDATES
 
 
@@ -41,6 +41,72 @@ class Xmodel1Output:
     opp_tenpai_logits: torch.Tensor
     rank_logits: torch.Tensor
     final_score_delta: torch.Tensor
+
+
+@dataclass
+class ResponsePolicyOutput:
+    response_logits: torch.Tensor
+    response_post_logits: torch.Tensor
+
+
+@dataclass
+class PlacementPolicyOutput:
+    rank_logits: torch.Tensor
+    final_score_delta: torch.Tensor
+
+
+@dataclass
+class AuxiliaryPolicyOutput:
+    win_logit: torch.Tensor
+    dealin_logit: torch.Tensor
+    pts_given_win: torch.Tensor
+    pts_given_dealin: torch.Tensor
+    opp_tenpai_logits: torch.Tensor
+    placement: PlacementPolicyOutput
+
+
+@dataclass
+class PolicyOutput:
+    discard_logits: torch.Tensor
+    action_logits: torch.Tensor
+    response: ResponsePolicyOutput
+    auxiliary: AuxiliaryPolicyOutput
+
+    @property
+    def response_logits(self) -> torch.Tensor:
+        return self.response.response_logits
+
+    @property
+    def response_post_logits(self) -> torch.Tensor:
+        return self.response.response_post_logits
+
+    @property
+    def win_logit(self) -> torch.Tensor:
+        return self.auxiliary.win_logit
+
+    @property
+    def dealin_logit(self) -> torch.Tensor:
+        return self.auxiliary.dealin_logit
+
+    @property
+    def pts_given_win(self) -> torch.Tensor:
+        return self.auxiliary.pts_given_win
+
+    @property
+    def pts_given_dealin(self) -> torch.Tensor:
+        return self.auxiliary.pts_given_dealin
+
+    @property
+    def opp_tenpai_logits(self) -> torch.Tensor:
+        return self.auxiliary.opp_tenpai_logits
+
+    @property
+    def rank_logits(self) -> torch.Tensor:
+        return self.auxiliary.placement.rank_logits
+
+    @property
+    def final_score_delta(self) -> torch.Tensor:
+        return self.auxiliary.placement.final_score_delta
 
 
 class ResidualBlock(nn.Module):
@@ -71,6 +137,7 @@ class Xmodel1Model(nn.Module):
         hidden_dim: int = 256,
         num_res_blocks: int = 4,
         dropout: float = 0.1,
+        rule_context_dim: int = XMODEL1_RULE_CONTEXT_DIM,
     ):
         super().__init__()
         self.state_tile_channels = state_tile_channels
@@ -78,6 +145,7 @@ class Xmodel1Model(nn.Module):
         self.candidate_feature_dim = candidate_feature_dim
         self.candidate_flag_dim = candidate_flag_dim
         self.hidden_dim = hidden_dim
+        self.rule_context_dim = rule_context_dim
         self.action_space = ACTION_SPACE
 
         self.state_proj = nn.Sequential(
@@ -210,11 +278,18 @@ class Xmodel1Model(nn.Module):
         state_tile_feat: torch.Tensor,
         state_scalar: torch.Tensor,
         history_summary: torch.Tensor | None = None,
+        rule_context: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if state_tile_feat.dtype == torch.float16 and state_tile_feat.device.type != "cuda":
             state_tile_feat = state_tile_feat.float()
         if state_scalar.dtype == torch.float16 and state_scalar.device.type != "cuda":
             state_scalar = state_scalar.float()
+        if rule_context is not None:
+            expected = (state_tile_feat.shape[0], self.rule_context_dim)
+            if tuple(rule_context.shape) != expected:
+                raise RuntimeError(
+                    f"expected rule_context tensor {expected}, got {tuple(rule_context.shape)}"
+                )
         x = self.state_proj(state_tile_feat)
         x = self.state_blocks(x)
         x = x.mean(dim=-1)
@@ -241,7 +316,8 @@ class Xmodel1Model(nn.Module):
         response_post_candidate_mask: torch.Tensor | None = None,
         response_post_candidate_flags: torch.Tensor | None = None,
         history_summary: torch.Tensor | None = None,
-    ) -> Xmodel1Output:
+        rule_context: torch.Tensor | None = None,
+    ) -> PolicyOutput:
         # Legacy 5-arg path:
         #   model(state, scalar, candidate_feat, candidate_flags, candidate_mask)
         if candidate_mask is None and candidate_flags is not None and candidate_tile_id is not None:
@@ -268,6 +344,7 @@ class Xmodel1Model(nn.Module):
             state_tile_feat,
             state_scalar,
             history_summary=history_summary,
+            rule_context=rule_context,
         )
         if candidate_tile_id is None:
             candidate_tile_id = torch.full(
@@ -478,18 +555,24 @@ class Xmodel1Model(nn.Module):
             "final_score_delta": final_score_delta,
         }
 
-        return Xmodel1Output(
+        return PolicyOutput(
             discard_logits=discard_logits,
-            response_logits=response_logits,
-            response_post_logits=response_post_logits,
             action_logits=action_logits,
-            win_logit=win_logit,
-            dealin_logit=dealin_logit,
-            pts_given_win=pts_given_win,
-            pts_given_dealin=pts_given_dealin,
-            opp_tenpai_logits=opp_tenpai_logits,
-            rank_logits=rank_logits,
-            final_score_delta=final_score_delta,
+            response=ResponsePolicyOutput(
+                response_logits=response_logits,
+                response_post_logits=response_post_logits,
+            ),
+            auxiliary=AuxiliaryPolicyOutput(
+                win_logit=win_logit,
+                dealin_logit=dealin_logit,
+                pts_given_win=pts_given_win,
+                pts_given_dealin=pts_given_dealin,
+                opp_tenpai_logits=opp_tenpai_logits,
+                placement=PlacementPolicyOutput(
+                    rank_logits=rank_logits,
+                    final_score_delta=final_score_delta,
+                ),
+            ),
         )
 
     def to_action_logits(
@@ -527,4 +610,11 @@ class Xmodel1Model(nn.Module):
         return self._last_aux_outputs
 
 
-__all__ = ["Xmodel1Model", "Xmodel1Output"]
+__all__ = [
+    "AuxiliaryPolicyOutput",
+    "PlacementPolicyOutput",
+    "PolicyOutput",
+    "ResponsePolicyOutput",
+    "Xmodel1Model",
+    "Xmodel1Output",
+]

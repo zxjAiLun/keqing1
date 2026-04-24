@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from math import isfinite
 from typing import Any
 
 from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
     XMODEL1_CANDIDATE_FLAG_DIM,
+    XMODEL1_RULE_CONTEXT_DIM,
     XMODEL1_SCHEMA_NAME,
     XMODEL1_SCHEMA_VERSION,
 )
@@ -25,7 +27,134 @@ _REQUIRED_XMODEL1_METADATA_KEYS = (
     "hidden_dim",
     "num_res_blocks",
     "dropout",
+    "placement_semantics",
+    "rule_context_dim",
+    "rule_context_semantics",
 )
+
+_DEFAULT_XMODEL1_RANK_BONUS = (90.0, 45.0, 0.0, -135.0)
+
+
+def _normalize_rank_bonus(values: Any) -> tuple[float, float, float, float]:
+    if not isinstance(values, (list, tuple)) or len(values) != 4:
+        return _DEFAULT_XMODEL1_RANK_BONUS
+    normalized = tuple(float(value) for value in values)
+    if not all(isfinite(value) for value in normalized):
+        raise RuntimeError(f"xmodel1 placement rank_bonus must be finite, got {values!r}")
+    return normalized  # type: ignore[return-value]
+
+
+def _pt_map_scale(rank_bonus: tuple[float, float, float, float]) -> float:
+    first_place = abs(float(rank_bonus[0]))
+    if first_place > 0.0:
+        return first_place
+    fallback = max(abs(float(value)) for value in rank_bonus)
+    return fallback if fallback > 0.0 else 1.0
+
+
+def resolve_xmodel1_placement_semantics(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
+    cfg_dict = dict(cfg or {})
+    placement_cfg = cfg_dict.get("placement", {})
+    if not isinstance(placement_cfg, Mapping):
+        placement_cfg = {}
+    rank_bonus = _normalize_rank_bonus(
+        placement_cfg.get("rank_bonus", cfg_dict.get("rank_bonus", _DEFAULT_XMODEL1_RANK_BONUS))
+    )
+    semantics = {
+        "rank_loss_weight": float(
+            placement_cfg.get("rank_loss_weight", cfg_dict.get("final_rank_loss_weight", 0.05))
+        ),
+        "final_score_delta_loss_weight": float(
+            placement_cfg.get(
+                "final_score_delta_loss_weight",
+                cfg_dict.get("final_score_delta_loss_weight", 0.05),
+            )
+        ),
+        "rank_pt_value_loss_weight": float(
+            placement_cfg.get(
+                "rank_pt_value_loss_weight",
+                cfg_dict.get("rank_pt_value_loss_weight", 0.01),
+            )
+        ),
+        "rank_bonus": list(rank_bonus),
+        "rank_bonus_norm": float(
+            placement_cfg.get("rank_bonus_norm", cfg_dict.get("rank_bonus_norm", 90.0))
+        ),
+        "rank_score_scale": float(
+            placement_cfg.get("rank_score_scale", cfg_dict.get("rank_score_scale", 0.0))
+        ),
+        "score_norm": float(
+            placement_cfg.get("score_norm", cfg_dict.get("score_norm", 30000.0))
+        ),
+    }
+    semantics["placement_trained"] = any(
+        float(semantics[key]) > 0.0
+        for key in (
+            "rank_loss_weight",
+            "final_score_delta_loss_weight",
+            "rank_pt_value_loss_weight",
+        )
+    )
+    return semantics
+
+
+def resolve_xmodel1_rule_context_semantics(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
+    placement_semantics = resolve_xmodel1_placement_semantics(cfg)
+    rank_bonus = tuple(float(value) for value in placement_semantics["rank_bonus"])
+    scale = max(
+        abs(float(placement_semantics["rank_bonus_norm"])),
+        _pt_map_scale(rank_bonus),
+        1e-6,
+    )
+    vector = [
+        float(value) / scale
+        for value in rank_bonus
+    ]
+    vector.append(float(placement_semantics["rank_score_scale"]))
+    cfg_dict = dict(cfg or {})
+    vector.append(1.0 if bool(cfg_dict.get("is_hanchan", cfg_dict.get("hanchan", True))) else 0.0)
+    return {
+        "vector": vector,
+        "rank_bonus": list(rank_bonus),
+        "rank_score_scale": float(placement_semantics["rank_score_scale"]),
+        "is_hanchan": bool(cfg_dict.get("is_hanchan", cfg_dict.get("hanchan", True))),
+    }
+
+
+def resolve_xmodel1_response_post_semantics(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
+    cfg_dict = dict(cfg or {})
+    human_ce_loss_weight = float(
+        cfg_dict.get(
+            "response_post_human_ce_loss_weight",
+            cfg_dict.get("response_post_ce_loss_weight", cfg_dict.get("special_rank_loss_weight", 0.25)),
+        )
+    )
+    heuristic_rank_loss_weight = float(cfg_dict.get("response_post_rank_loss_weight", 0.15))
+    return {
+        "human_ce_loss_weight": human_ce_loss_weight,
+        "heuristic_rank_loss_weight": heuristic_rank_loss_weight,
+        "human_target_field": "response_human_discard_idx",
+        "heuristic_target_field": "response_post_candidate_quality_score",
+    }
+
+
+def canonicalize_xmodel1_checkpoint_cfg(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
+    cfg_dict = dict(cfg or {})
+    placement_semantics = resolve_xmodel1_placement_semantics(cfg_dict)
+    response_post_semantics = resolve_xmodel1_response_post_semantics(cfg_dict)
+    cfg_dict["placement"] = {
+        "rank_loss_weight": float(placement_semantics["rank_loss_weight"]),
+        "final_score_delta_loss_weight": float(placement_semantics["final_score_delta_loss_weight"]),
+        "rank_pt_value_loss_weight": float(placement_semantics["rank_pt_value_loss_weight"]),
+        "rank_bonus": list(placement_semantics["rank_bonus"]),
+        "rank_bonus_norm": float(placement_semantics["rank_bonus_norm"]),
+        "rank_score_scale": float(placement_semantics["rank_score_scale"]),
+        "score_norm": float(placement_semantics["score_norm"]),
+    }
+    cfg_dict["response_post_human_ce_loss_weight"] = float(response_post_semantics["human_ce_loss_weight"])
+    cfg_dict["response_post_ce_loss_weight"] = float(response_post_semantics["human_ce_loss_weight"])
+    cfg_dict["response_post_rank_loss_weight"] = float(response_post_semantics["heuristic_rank_loss_weight"])
+    return cfg_dict
 
 
 def default_xmodel1_state_scalar_dim() -> int:
@@ -176,6 +305,7 @@ def validate_xmodel1_checkpoint_metadata(
     cfg = checkpoint.get("cfg")
     if cfg is not None and not isinstance(cfg, Mapping):
         raise RuntimeError(f"{checkpoint_label} has invalid cfg metadata")
+    normalized_cfg = canonicalize_xmodel1_checkpoint_cfg(cfg if isinstance(cfg, Mapping) else None)
     cfg_schema_name = cfg.get("schema_name") if isinstance(cfg, Mapping) else None
     cfg_schema_version = cfg.get("schema_version") if isinstance(cfg, Mapping) else None
     schema_name = checkpoint.get("schema_name", cfg_schema_name)
@@ -200,6 +330,35 @@ def validate_xmodel1_checkpoint_metadata(
         checkpoint,
         checkpoint_label=checkpoint_label,
     )
+    placement_semantics = checkpoint.get("placement_semantics")
+    if placement_semantics is not None:
+        expected = resolve_xmodel1_placement_semantics(normalized_cfg)
+        if placement_semantics != expected:
+            raise RuntimeError(
+                f"{checkpoint_label} placement_semantics metadata drifted from the training cfg: "
+                f"expected {expected}, got {placement_semantics}"
+            )
+    rule_context_semantics = checkpoint.get("rule_context_semantics")
+    if rule_context_semantics is not None:
+        expected = resolve_xmodel1_rule_context_semantics(normalized_cfg)
+        if rule_context_semantics != expected:
+            raise RuntimeError(
+                f"{checkpoint_label} rule_context_semantics metadata drifted from the training cfg: "
+                f"expected {expected}, got {rule_context_semantics}"
+            )
+    response_post_semantics = checkpoint.get("response_post_semantics")
+    if response_post_semantics is not None:
+        expected = resolve_xmodel1_response_post_semantics(normalized_cfg)
+        if response_post_semantics != expected:
+            raise RuntimeError(
+                f"{checkpoint_label} response_post_semantics metadata drifted from the training cfg: "
+                f"expected {expected}, got {response_post_semantics}"
+            )
+    rule_context_dim = checkpoint.get("rule_context_dim")
+    if rule_context_dim is not None and int(rule_context_dim) != XMODEL1_RULE_CONTEXT_DIM:
+        raise RuntimeError(
+            f"{checkpoint_label} rule_context_dim metadata drifted from the active xmodel1 contract"
+        )
     if not require_complete_metadata:
         return
 
@@ -223,9 +382,10 @@ def build_xmodel1_checkpoint_metadata(
     cfg: Mapping[str, Any],
     model,
 ) -> dict[str, Any]:
+    normalized_cfg = canonicalize_xmodel1_checkpoint_cfg(cfg)
     return {
         "model_version": "xmodel1",
-        "cfg": dict(cfg),
+        "cfg": normalized_cfg,
         "schema_name": XMODEL1_SCHEMA_NAME,
         "schema_version": XMODEL1_SCHEMA_VERSION,
         "state_tile_channels": int(getattr(model, "state_tile_channels")),
@@ -234,7 +394,11 @@ def build_xmodel1_checkpoint_metadata(
         "candidate_flag_dim": int(getattr(model, "candidate_flag_dim", XMODEL1_CANDIDATE_FLAG_DIM)),
         "hidden_dim": int(getattr(model, "hidden_dim")),
         "num_res_blocks": int(len(getattr(model, "state_blocks"))),
-        "dropout": float(cfg.get("dropout", 0.1)),
+        "dropout": float(normalized_cfg.get("dropout", 0.1)),
+        "placement_semantics": resolve_xmodel1_placement_semantics(normalized_cfg),
+        "rule_context_dim": int(getattr(model, "rule_context_dim", XMODEL1_RULE_CONTEXT_DIM)),
+        "rule_context_semantics": resolve_xmodel1_rule_context_semantics(normalized_cfg),
+        "response_post_semantics": resolve_xmodel1_response_post_semantics(normalized_cfg),
     }
 
 
@@ -242,8 +406,12 @@ __all__ = [
     "assert_xmodel1_metadata_matches_weights",
     "build_xmodel1_checkpoint_metadata",
     "default_xmodel1_state_scalar_dim",
+    "canonicalize_xmodel1_checkpoint_cfg",
     "infer_xmodel1_model_dims",
     "load_xmodel1_checkpoint_state",
+    "resolve_xmodel1_placement_semantics",
+    "resolve_xmodel1_response_post_semantics",
+    "resolve_xmodel1_rule_context_semantics",
     "resolve_xmodel1_state_scalar_dim",
     "validate_xmodel1_checkpoint_metadata",
 ]

@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from keqingv4.cached_dataset import CachedMjaiDatasetV4
-from keqingv4.checkpoint import validate_keqingv4_checkpoint_metadata
+from keqingv4.checkpoint import resolve_keqingv4_placement_semantics, validate_keqingv4_checkpoint_metadata
 from keqingv4.model import KeqingV4Model
 from keqingv4.trainer import train
 from torch.utils.data import DataLoader
@@ -42,6 +42,8 @@ def test_keqingv4_training_smoke(tmp_path: Path):
     )
     assert arrays is not None
     assert "v4_opportunity" in arrays
+    assert "rule_context" in arrays
+    assert arrays["rule_context"].shape[1] == 6
     assert np.any(arrays["event_history"][0, :, 1] != 0)
     data_root = tmp_path / "processed_v4" / "ds1"
     data_root.mkdir(parents=True)
@@ -116,6 +118,8 @@ def test_keqingv4_training_smoke(tmp_path: Path):
         checkpoint,
         checkpoint_label=f"keqingv4 smoke checkpoint {out_dir / 'last.pth'}",
     )
+    assert checkpoint["placement_semantics"] == resolve_keqingv4_placement_semantics(cfg)
+    assert checkpoint["rule_context_dim"] == 6
     assert (out_dir / "train_log.jsonl").exists()
     rows = [
         json.loads(line)

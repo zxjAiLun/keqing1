@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from math import isfinite
 from typing import Any
 
 from keqingv4.cache_contract import KEQINGV4_SCHEMA_NAME, KEQINGV4_SCHEMA_VERSION
@@ -11,6 +12,7 @@ from training.cache_schema import (
     KEQINGV4_EVENT_HISTORY_DIM,
     KEQINGV4_EVENT_HISTORY_LEN,
     KEQINGV4_OPPORTUNITY_DIM,
+    KEQINGV4_RULE_CONTEXT_DIM,
     KEQINGV4_SPECIAL_SUMMARY_SLOTS,
     KEQINGV4_SUMMARY_DIM,
 )
@@ -31,6 +33,8 @@ _REQUIRED_METADATA_KEYS = (
     "action_embed_dim",
     "context_dim",
     "dropout",
+    "placement_semantics",
+    "rule_context_dim",
 )
 
 
@@ -54,14 +58,136 @@ def infer_keqingv4_input_dims(state_dict: Mapping[str, Any]) -> dict[str, int]:
     }
 
 
+def _normalize_rank_bonus(raw: Any, *, checkpoint_label: str) -> tuple[float, float, float, float]:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        raise RuntimeError(f"{checkpoint_label} placement rank_bonus must contain 4 values, got {raw!r}")
+    values = tuple(float(value) for value in raw)
+    if not all(isfinite(value) for value in values):
+        raise RuntimeError(f"{checkpoint_label} placement rank_bonus must be finite, got {raw!r}")
+    return values
+
+
+def resolve_keqingv4_placement_semantics(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
+    cfg = cfg if isinstance(cfg, Mapping) else {}
+    placement_cfg = cfg.get("placement", {}) if isinstance(cfg.get("placement", {}), Mapping) else {}
+    rank_bonus = _normalize_rank_bonus(
+        placement_cfg.get(
+            "rank_bonus",
+            cfg.get("rank_bonus", [90.0, 45.0, 0.0, -135.0]),
+        ),
+        checkpoint_label="keqingv4 placement cfg",
+    )
+    semantics = {
+        "rank_loss_weight": float(
+            placement_cfg.get("rank_loss_weight", cfg.get("final_rank_loss_weight", 0.05))
+        ),
+        "final_score_delta_loss_weight": float(
+            placement_cfg.get(
+                "final_score_delta_loss_weight",
+                cfg.get("final_score_delta_loss_weight", 0.05),
+            )
+        ),
+        "rank_pt_value_loss_weight": float(
+            placement_cfg.get(
+                "rank_pt_value_loss_weight",
+                cfg.get("rank_pt_value_loss_weight", 0.0),
+            )
+        ),
+        "rank_bonus": list(rank_bonus),
+        "rank_bonus_norm": float(
+            placement_cfg.get("rank_bonus_norm", cfg.get("rank_bonus_norm", 90.0))
+        ),
+        "rank_score_scale": float(
+            placement_cfg.get("rank_score_scale", cfg.get("rank_score_scale", 0.0))
+        ),
+        "score_norm": float(
+            placement_cfg.get("score_norm", cfg.get("score_norm", 30000.0))
+        ),
+    }
+    for key in (
+        "rank_loss_weight",
+        "final_score_delta_loss_weight",
+        "rank_pt_value_loss_weight",
+        "rank_bonus_norm",
+        "rank_score_scale",
+        "score_norm",
+    ):
+        if not isfinite(float(semantics[key])):
+            raise RuntimeError(f"keqingv4 placement cfg {key} must be finite, got {semantics[key]!r}")
+    semantics["placement_trained"] = any(
+        abs(float(semantics[key])) > 0.0
+        for key in (
+            "rank_loss_weight",
+            "final_score_delta_loss_weight",
+            "rank_pt_value_loss_weight",
+        )
+    )
+    return semantics
+
+
+def _normalize_keqingv4_placement_semantics(
+    payload: Any,
+    *,
+    checkpoint_label: str,
+) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise RuntimeError(f"{checkpoint_label} is missing placement_semantics metadata")
+    normalized = {
+        "rank_loss_weight": float(payload.get("rank_loss_weight", 0.0)),
+        "final_score_delta_loss_weight": float(payload.get("final_score_delta_loss_weight", 0.0)),
+        "rank_pt_value_loss_weight": float(payload.get("rank_pt_value_loss_weight", 0.0)),
+        "rank_bonus": list(
+            _normalize_rank_bonus(payload.get("rank_bonus", [90.0, 45.0, 0.0, -135.0]), checkpoint_label=checkpoint_label)
+        ),
+        "rank_bonus_norm": float(payload.get("rank_bonus_norm", 90.0)),
+        "rank_score_scale": float(payload.get("rank_score_scale", 0.0)),
+        "score_norm": float(payload.get("score_norm", 30000.0)),
+    }
+    for key in (
+        "rank_loss_weight",
+        "final_score_delta_loss_weight",
+        "rank_pt_value_loss_weight",
+        "rank_bonus_norm",
+        "rank_score_scale",
+        "score_norm",
+    ):
+        if not isfinite(float(normalized[key])):
+            raise RuntimeError(f"{checkpoint_label} placement_semantics.{key} must be finite, got {normalized[key]!r}")
+    normalized["placement_trained"] = any(
+        abs(float(normalized[key])) > 0.0
+        for key in (
+            "rank_loss_weight",
+            "final_score_delta_loss_weight",
+            "rank_pt_value_loss_weight",
+        )
+    )
+    return normalized
+
+
+def canonicalize_keqingv4_checkpoint_cfg(cfg: Mapping[str, Any] | None) -> dict[str, Any]:
+    cfg_dict = dict(cfg) if isinstance(cfg, Mapping) else {}
+    placement_semantics = resolve_keqingv4_placement_semantics(cfg_dict)
+    cfg_dict["placement"] = {
+        "rank_loss_weight": float(placement_semantics["rank_loss_weight"]),
+        "final_score_delta_loss_weight": float(placement_semantics["final_score_delta_loss_weight"]),
+        "rank_pt_value_loss_weight": float(placement_semantics["rank_pt_value_loss_weight"]),
+        "rank_bonus": list(placement_semantics["rank_bonus"]),
+        "rank_bonus_norm": float(placement_semantics["rank_bonus_norm"]),
+        "rank_score_scale": float(placement_semantics["rank_score_scale"]),
+        "score_norm": float(placement_semantics["score_norm"]),
+    }
+    return cfg_dict
+
+
 def build_keqingv4_checkpoint_metadata(
     *,
     cfg: Mapping[str, Any],
     model,
 ) -> dict[str, Any]:
+    normalized_cfg = canonicalize_keqingv4_checkpoint_cfg(cfg)
     return {
         "model_version": "keqingv4",
-        "cfg": dict(cfg),
+        "cfg": normalized_cfg,
         "schema_name": KEQINGV4_SCHEMA_NAME,
         "schema_version": KEQINGV4_SCHEMA_VERSION,
         "summary_dim": KEQINGV4_SUMMARY_DIM,
@@ -74,9 +200,11 @@ def build_keqingv4_checkpoint_metadata(
         "num_res_blocks": int(len(getattr(model, "res_tower"))),
         "action_embed_dim": int(getattr(model, "action_embed_dim")),
         "context_dim": int(getattr(model, "context_dim")),
-        "dropout": float(cfg.get("dropout", 0.1)),
+        "dropout": float(normalized_cfg.get("dropout", 0.1)),
         "state_tile_channels": int(getattr(model.input_proj[0], "in_channels")),
         "state_scalar_dim": int(getattr(model.scalar_proj[0], "in_features")),
+        "placement_semantics": resolve_keqingv4_placement_semantics(normalized_cfg),
+        "rule_context_dim": int(getattr(model, "rule_context_dim", KEQINGV4_RULE_CONTEXT_DIM)),
     }
 
 
@@ -88,6 +216,7 @@ def build_keqingv4_checkpoint_payload(
     **_: Any,
 ) -> dict[str, Any]:
     payload = dict(base_payload)
+    payload["cfg"] = canonicalize_keqingv4_checkpoint_cfg(cfg)
     payload.update(build_keqingv4_checkpoint_metadata(cfg=cfg, model=model))
     return payload
 
@@ -129,6 +258,18 @@ def validate_keqingv4_checkpoint_metadata(
         raise RuntimeError(f"{checkpoint_label} event_history_dim metadata drifted from the active keqingv4 contract")
     if int(checkpoint.get("opportunity_dim", -1)) != KEQINGV4_OPPORTUNITY_DIM:
         raise RuntimeError(f"{checkpoint_label} opportunity_dim metadata drifted from the active keqingv4 contract")
+    if int(checkpoint.get("rule_context_dim", -1)) != KEQINGV4_RULE_CONTEXT_DIM:
+        raise RuntimeError(f"{checkpoint_label} rule_context_dim metadata drifted from the active keqingv4 contract")
+    expected_placement_semantics = resolve_keqingv4_placement_semantics(cfg)
+    actual_placement_semantics = _normalize_keqingv4_placement_semantics(
+        checkpoint.get("placement_semantics"),
+        checkpoint_label=checkpoint_label,
+    )
+    if actual_placement_semantics != expected_placement_semantics:
+        raise RuntimeError(
+            f"{checkpoint_label} placement_semantics metadata drifted from the training cfg: "
+            f"expected {expected_placement_semantics}, got {actual_placement_semantics}"
+        )
     state_dict = checkpoint.get("model")
     if not isinstance(state_dict, Mapping):
         raise RuntimeError(f"{checkpoint_label} is missing model weights")
@@ -198,15 +339,18 @@ def keqingv4_checkpoint_contract_summary() -> dict[str, int | str]:
         "event_history_len": KEQINGV4_EVENT_HISTORY_LEN,
         "event_history_dim": KEQINGV4_EVENT_HISTORY_DIM,
         "opportunity_dim": KEQINGV4_OPPORTUNITY_DIM,
+        "rule_context_dim": KEQINGV4_RULE_CONTEXT_DIM,
     }
 
 
 __all__ = [
     "build_keqingv4_checkpoint_metadata",
     "build_keqingv4_checkpoint_payload",
+    "canonicalize_keqingv4_checkpoint_cfg",
     "infer_keqingv4_input_dims",
     "keqingv4_checkpoint_contract_summary",
     "load_keqingv4_checkpoint_state",
+    "resolve_keqingv4_placement_semantics",
     "restore_keqingv4_checkpoint",
     "validate_keqingv4_checkpoint_metadata",
 ]

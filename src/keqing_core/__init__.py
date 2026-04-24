@@ -77,6 +77,7 @@ _RUST_ENUMERATE_KEQINGV4_LIVE_DRAW_WEIGHTS_JSON = None
 _RUST_ENUMERATE_KEQINGV4_REACH_DISCARDS_JSON = None
 _RUST_PROJECT_KEQINGV4_REACH_SNAPSHOT_JSON = None
 _RUST_CHOOSE_RULEBASE_ACTION_JSON = None
+_RUST_SCORE_RULEBASE_ACTIONS_JSON = None
 _RUST_IMPORT_ERROR = None
 _RUST_XMODEL1_SCHEMA_MISMATCH = None
 
@@ -320,6 +321,9 @@ if _rust_ext is not None and hasattr(_rust_ext, "counts34_to_ids_py"):
     )
     _RUST_CHOOSE_RULEBASE_ACTION_JSON = getattr(
         _rust_ext, "choose_rulebase_action_json_py", None
+    )
+    _RUST_SCORE_RULEBASE_ACTIONS_JSON = getattr(
+        _rust_ext, "score_rulebase_actions_json_py", None
     )
     _USE_RUST = True
     _disable_stale_xmodel1_native_if_needed()
@@ -697,6 +701,22 @@ def choose_rulebase_action(state_snapshot, actor: int, legal_actions: list[dict]
         _json.dumps(legal_actions, ensure_ascii=False, default=_json_default),
     )
     return None if chosen is None else _json.loads(chosen)
+
+
+def score_rulebase_actions(state_snapshot, actor: int, legal_actions: list[dict]):
+    if not (
+        _USE_RUST
+        and _RUST_AVAILABLE
+        and _RUST_SCORE_RULEBASE_ACTIONS_JSON is not None
+    ):
+        raise RuntimeError("Rust rulebase scoring capability is not available")
+    payload = _json.dumps(state_snapshot, ensure_ascii=False, default=_json_default)
+    scored = _RUST_SCORE_RULEBASE_ACTIONS_JSON(
+        payload,
+        int(actor),
+        _json.dumps(legal_actions, ensure_ascii=False, default=_json_default),
+    )
+    return _json.loads(scored)
 
 
 def enumerate_hora_candidates(state_snapshot, actor: int):
@@ -1173,6 +1193,7 @@ __all__ = [
     "enumerate_legal_action_specs_structural",
     "enumerate_public_legal_action_specs",
     "choose_rulebase_action",
+    "score_rulebase_actions",
     "enumerate_hora_candidates",
     "can_hora_shape_from_snapshot",
     "prepare_hora_evaluation_from_snapshot",

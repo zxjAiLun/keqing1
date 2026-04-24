@@ -12,6 +12,7 @@ from training.cache_schema import (
     KEQINGV4_EVENT_HISTORY_DIM,
     KEQINGV4_EVENT_HISTORY_LEN,
     KEQINGV4_OPPORTUNITY_DIM,
+    KEQINGV4_RULE_CONTEXT_DIM,
     KEQINGV4_SPECIAL_SUMMARY_SLOTS,
     KEQINGV4_SUMMARY_DIM,
 )
@@ -70,6 +71,9 @@ def validate_keqingv4_npz(
         "v4_call_summary": (sample_count, KEQINGV4_CALL_SUMMARY_SLOTS, KEQINGV4_SUMMARY_DIM),
         "v4_special_summary": (sample_count, KEQINGV4_SPECIAL_SUMMARY_SLOTS, KEQINGV4_SUMMARY_DIM),
     }
+    optional_extra_shapes = {
+        "rule_context": (sample_count, KEQINGV4_RULE_CONTEXT_DIM),
+    }
 
     if scalar_shape is None or len(scalar_shape) != 2 or scalar_shape[0] != sample_count:
         problems.append(f"{label}: scalar shape mismatch, got {scalar_shape}")
@@ -93,6 +97,10 @@ def validate_keqingv4_npz(
                 problems.append(f"{label}: missing required field {key}")
             continue
         if actual != expected:
+            problems.append(f"{label}: {key} shape mismatch, expected {expected}, got {actual}")
+    for key, expected in optional_extra_shapes.items():
+        actual = _shape_of(data, key)
+        if actual is not None and actual != expected:
             problems.append(f"{label}: {key} shape mismatch, expected {expected}, got {actual}")
     return problems
 
@@ -148,12 +156,14 @@ def inspect_keqingv4_contract(file_paths: list[Path], *, max_files: int = 16) ->
         "opp_tenpai_files": 0,
         "event_history_files": 0,
         "opportunity_files": 0,
+        "rule_context_files": 0,
         "summary_dims": set(),
         "call_summary_slots": set(),
         "special_summary_slots": set(),
         "event_history_shapes": set(),
         "opp_tenpai_shapes": set(),
         "opportunity_shapes": set(),
+        "rule_context_shapes": set(),
         "npz_problems": [],
         "manifest_problems": [],
         "manifests": {},
@@ -174,12 +184,15 @@ def inspect_keqingv4_contract(file_paths: list[Path], *, max_files: int = 16) ->
                     summary["event_history_files"] += 1
                 if "v4_opportunity" in data:
                     summary["opportunity_files"] += 1
+                if "rule_context" in data:
+                    summary["rule_context_files"] += 1
                 discard_shape = _shape_of(data, "v4_discard_summary")
                 call_shape = _shape_of(data, "v4_call_summary")
                 special_shape = _shape_of(data, "v4_special_summary")
                 event_shape = _shape_of(data, "event_history")
                 opp_shape = _shape_of(data, "opp_tenpai_target")
                 opportunity_shape = _shape_of(data, "v4_opportunity")
+                rule_context_shape = _shape_of(data, "rule_context")
                 if discard_shape and len(discard_shape) == 3:
                     summary["summary_dims"].add(discard_shape[-1])
                 if call_shape and len(call_shape) == 3:
@@ -192,6 +205,8 @@ def inspect_keqingv4_contract(file_paths: list[Path], *, max_files: int = 16) ->
                     summary["opp_tenpai_shapes"].add(opp_shape[1:])
                 if opportunity_shape and len(opportunity_shape) == 2:
                     summary["opportunity_shapes"].add(opportunity_shape[1:])
+                if rule_context_shape and len(rule_context_shape) == 2:
+                    summary["rule_context_shapes"].add(rule_context_shape[1:])
                 summary["npz_problems"].extend(validate_keqingv4_npz(data, path=path))
         except Exception as exc:
             summary["npz_problems"].append(f"{path}: failed to read npz: {exc}")

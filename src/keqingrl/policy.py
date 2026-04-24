@@ -7,6 +7,11 @@ import torch.nn as nn
 
 from keqingrl.contracts import ActionSample, PolicyInput, PolicyOutput
 from keqingrl.distribution import MaskedCategorical
+from keqingrl.rule_score import (
+    DEFAULT_RULE_SCORE_CONFIG,
+    RuleScoreConfig,
+    prior_logits_from_raw_scores,
+)
 from training.state_features import C_TILE, N_SCALAR
 
 
@@ -76,6 +81,12 @@ class RandomInteractivePolicy(InteractivePolicy):
             value=value,
             rank_logits=rank_logits,
             entropy=entropy,
+            aux={
+                "rule_scores": torch.zeros_like(logits),
+                "prior_logits": torch.zeros_like(logits),
+                "neural_delta": torch.zeros_like(logits),
+                "final_logits": logits,
+            },
         )
 
 
@@ -191,6 +202,126 @@ class NeuralInteractivePolicy(InteractivePolicy):
         return self.action_proj(torch.cat([action_id_embed, action_features], dim=-1))
 
 
+class RulePriorPolicy(InteractivePolicy):
+    """Policy that samples directly from stored rule-prior logits."""
+
+    def __init__(
+        self,
+        *,
+        rule_score_scale: float = 1.0,
+        rule_score_config: RuleScoreConfig = DEFAULT_RULE_SCORE_CONFIG,
+    ) -> None:
+        super().__init__()
+        self.rule_score_scale = float(rule_score_scale)
+        self.rule_score_config = rule_score_config
+
+    def forward(self, policy_input: PolicyInput) -> PolicyOutput:
+        prior_logits = _resolve_prior_logits(policy_input, self.rule_score_config)
+        mask = policy_input.legal_action_mask.bool()
+        logits = self.rule_score_scale * prior_logits
+        logits = logits.masked_fill(~mask, torch.finfo(logits.dtype).min)
+        dtype = policy_input.legal_action_features.dtype
+        device = policy_input.legal_action_features.device
+        batch_size = int(mask.shape[0])
+        value = torch.zeros((batch_size,), device=device, dtype=dtype)
+        rank_logits = torch.zeros((batch_size, 4), device=device, dtype=dtype)
+        entropy = MaskedCategorical(logits, mask).entropy()
+        neural_delta = torch.zeros_like(logits)
+        raw_scores = (
+            torch.zeros_like(logits)
+            if policy_input.raw_rule_scores is None
+            else policy_input.raw_rule_scores.float()
+        )
+        return PolicyOutput(
+            action_logits=logits,
+            value=value,
+            rank_logits=rank_logits,
+            entropy=entropy,
+            aux={
+                "rule_scores": raw_scores,
+                "prior_logits": prior_logits,
+                "neural_delta": neural_delta,
+                "final_logits": logits,
+                "rule_score_scale": torch.tensor(self.rule_score_scale, device=device, dtype=dtype),
+                "prior_temperature": torch.tensor(
+                    self.rule_score_config.prior_temperature,
+                    device=device,
+                    dtype=dtype,
+                ),
+            },
+        )
+
+
+class RulePriorDeltaPolicy(NeuralInteractivePolicy):
+    """Neural correction policy with zero-delta initialization."""
+
+    def __init__(
+        self,
+        *,
+        rule_score_scale: float = 1.0,
+        rule_score_config: RuleScoreConfig = DEFAULT_RULE_SCORE_CONFIG,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.rule_score_scale = float(rule_score_scale)
+        self.rule_score_config = rule_score_config
+        self._zero_delta_output()
+
+    def forward(self, policy_input: PolicyInput) -> PolicyOutput:
+        h_state = self.encode_state(policy_input)
+        h_rule = self.encode_rule(policy_input.rule_context)
+        h_action = self.encode_actions(policy_input.legal_action_ids, policy_input.legal_action_features)
+
+        h_state_expanded = h_state[:, None, :].expand(-1, h_action.size(1), -1)
+        interaction = h_state_expanded * h_action
+        neural_delta = self.policy_mlp(torch.cat([h_state_expanded, h_action, interaction], dim=-1)).squeeze(-1)
+
+        prior_logits = _resolve_prior_logits(policy_input, self.rule_score_config)
+        mask = policy_input.legal_action_mask.bool()
+        logits = self.rule_score_scale * prior_logits + neural_delta
+        logits = logits.masked_fill(~mask, torch.finfo(logits.dtype).min)
+        value = self.value_head(torch.cat([h_state, h_rule], dim=-1)).squeeze(-1)
+        rank_logits = self.rank_head(h_state)
+        entropy = MaskedCategorical(logits, mask).entropy()
+        raw_scores = (
+            torch.zeros_like(logits)
+            if policy_input.raw_rule_scores is None
+            else policy_input.raw_rule_scores.float()
+        )
+
+        return PolicyOutput(
+            action_logits=logits,
+            value=value,
+            rank_logits=rank_logits,
+            entropy=entropy,
+            aux={
+                "state_repr": h_state,
+                "rule_repr": h_rule,
+                "rule_scores": raw_scores,
+                "prior_logits": prior_logits,
+                "neural_delta": neural_delta,
+                "final_logits": logits,
+                "rule_score_scale": torch.tensor(
+                    self.rule_score_scale,
+                    device=logits.device,
+                    dtype=logits.dtype,
+                ),
+                "prior_temperature": torch.tensor(
+                    self.rule_score_config.prior_temperature,
+                    device=logits.device,
+                    dtype=logits.dtype,
+                ),
+            },
+        )
+
+    def _zero_delta_output(self) -> None:
+        for module in reversed(self.policy_mlp):
+            if isinstance(module, nn.Linear):
+                nn.init.zeros_(module.weight)
+                nn.init.zeros_(module.bias)
+                return
+
+
 def _resolve_action_specs(policy_input: PolicyInput, action_index: torch.Tensor) -> list:
     if policy_input.legal_actions is None:
         raise ValueError("policy_input.legal_actions is required to resolve sampled ActionSpec objects")
@@ -214,4 +345,28 @@ def _cast_float(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
-__all__ = ["InteractivePolicy", "NeuralInteractivePolicy", "RandomInteractivePolicy"]
+def _resolve_prior_logits(policy_input: PolicyInput, config: RuleScoreConfig) -> torch.Tensor:
+    if policy_input.prior_logits is not None:
+        prior_logits = policy_input.prior_logits.float()
+    elif policy_input.raw_rule_scores is not None:
+        prior_logits = prior_logits_from_raw_scores(
+            policy_input.raw_rule_scores.float(),
+            mask=policy_input.legal_action_mask,
+            config=config,
+        )
+    else:
+        raise ValueError("RulePrior policies require prior_logits or raw_rule_scores in PolicyInput")
+    if prior_logits.shape != policy_input.legal_action_mask.shape:
+        raise ValueError("prior_logits shape must match legal_action_mask")
+    if not torch.isfinite(prior_logits[policy_input.legal_action_mask.bool()]).all():
+        raise ValueError("prior_logits must be finite on legal actions")
+    return prior_logits
+
+
+__all__ = [
+    "InteractivePolicy",
+    "NeuralInteractivePolicy",
+    "RandomInteractivePolicy",
+    "RulePriorDeltaPolicy",
+    "RulePriorPolicy",
+]

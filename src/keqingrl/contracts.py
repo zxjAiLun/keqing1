@@ -26,8 +26,12 @@ class PolicyInput:
     legal_action_features: torch.Tensor
     legal_action_mask: torch.BoolTensor
     rule_context: torch.Tensor
+    raw_rule_scores: torch.Tensor | None = None
+    prior_logits: torch.Tensor | None = None
+    style_context: torch.Tensor | None = None
     legal_actions: tuple[tuple["ActionSpec", ...], ...] | None = None
     recurrent_state: Any | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

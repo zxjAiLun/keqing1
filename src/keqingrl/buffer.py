@@ -7,6 +7,12 @@ from dataclasses import dataclass
 import torch
 
 from keqingrl.contracts import ObsTensorBatch, PolicyInput
+from keqingrl.metadata import (
+    ACTION_FEATURE_CONTRACT_VERSION,
+    ENV_CONTRACT_VERSION,
+    OBSERVATION_CONTRACT_VERSION,
+    RULE_SCORE_VERSION,
+)
 from keqingrl.rollout import RolloutStep
 
 
@@ -34,8 +40,18 @@ class PPOBatch:
             legal_action_features=self.policy_input.legal_action_features.to(device),
             legal_action_mask=self.policy_input.legal_action_mask.to(device),
             rule_context=self.policy_input.rule_context.to(device),
+            raw_rule_scores=None
+            if self.policy_input.raw_rule_scores is None
+            else self.policy_input.raw_rule_scores.to(device),
+            prior_logits=None
+            if self.policy_input.prior_logits is None
+            else self.policy_input.prior_logits.to(device),
+            style_context=None
+            if self.policy_input.style_context is None
+            else self.policy_input.style_context.to(device),
             legal_actions=self.policy_input.legal_actions,
             recurrent_state=self.policy_input.recurrent_state,
+            metadata=self.policy_input.metadata,
         )
         return PPOBatch(
             policy_input=moved_policy_input,
@@ -55,7 +71,7 @@ def compute_returns_and_advantages(
     values: torch.Tensor | list[float],
     dones: torch.Tensor | list[bool],
     *,
-    gamma: float = 0.99,
+    gamma: float = 1.0,
     gae_lambda: float = 0.95,
     last_value: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -102,13 +118,37 @@ def build_ppo_batch(
 
     obs = stack_obs_batches([step.obs for step in steps])
     legal_action_ids, legal_action_features, legal_action_mask = pad_legal_action_tensors(steps)
+    _assert_rollout_action_order(steps)
+    raw_rule_scores = pad_optional_legal_action_values(
+        [step.raw_rule_scores for step in steps],
+        legal_action_mask.shape[-1],
+        field_name="raw_rule_scores",
+    )
+    prior_logits = pad_optional_legal_action_values(
+        [step.prior_logits for step in steps],
+        legal_action_mask.shape[-1],
+        field_name="prior_logits",
+    )
+    style_context = stack_optional_contexts([step.style_context for step in steps], field_name="style_context")
+    legal_actions = None
+    if all(step.legal_actions is not None for step in steps):
+        legal_actions = tuple(step.legal_actions for step in steps)  # type: ignore[misc]
     policy_input = PolicyInput(
         obs=obs,
         legal_action_ids=legal_action_ids,
         legal_action_features=legal_action_features,
         legal_action_mask=legal_action_mask,
         rule_context=torch.stack([step.rule_context.float() for step in steps], dim=0),
-        legal_actions=None,
+        raw_rule_scores=raw_rule_scores,
+        prior_logits=prior_logits,
+        style_context=style_context,
+        legal_actions=legal_actions,
+        metadata={
+            "observation_contract_version": OBSERVATION_CONTRACT_VERSION,
+            "action_feature_contract_version": ACTION_FEATURE_CONTRACT_VERSION,
+            "env_contract_version": ENV_CONTRACT_VERSION,
+            "rule_score_version": RULE_SCORE_VERSION,
+        },
     )
     rank_target = None if final_rank_target is None else torch.as_tensor(final_rank_target, dtype=torch.long)
     return PPOBatch(
@@ -156,6 +196,64 @@ def pad_legal_action_tensors(
     return legal_action_ids, legal_action_features, legal_action_mask
 
 
+def pad_optional_legal_action_values(
+    values: list[torch.Tensor | None],
+    max_actions: int,
+    *,
+    field_name: str,
+) -> torch.Tensor | None:
+    if all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise ValueError(f"{field_name} presence must match across PPO steps")
+
+    out = torch.zeros((len(values), max_actions), dtype=torch.float32)
+    for row, value in enumerate(values):
+        assert value is not None
+        if value.ndim != 1:
+            raise ValueError(f"{field_name} must be 1-D per rollout step")
+        if value.numel() > max_actions:
+            raise ValueError(f"{field_name} length exceeds padded legal-action width")
+        out[row, : value.numel()] = value.float()
+    return out
+
+
+def stack_optional_contexts(
+    values: list[torch.Tensor | None],
+    *,
+    field_name: str,
+) -> torch.Tensor | None:
+    if all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise ValueError(f"{field_name} presence must match across PPO steps")
+    return torch.stack([value.float() for value in values if value is not None], dim=0)
+
+
+def _assert_rollout_action_order(steps: list[RolloutStep]) -> None:
+    for step_idx, step in enumerate(steps):
+        if step.legal_actions is None:
+            continue
+        action_index = int(step.action_index)
+        if action_index < 0 or action_index >= len(step.legal_actions):
+            raise IndexError(f"rollout step {step_idx} action_index is outside legal_actions")
+        actual_key = step.legal_actions[action_index].canonical_key
+        expected_key = step.chosen_action_canonical_key
+        if actual_key != expected_key:
+            raise ValueError(
+                "rollout action-order contract violation: "
+                f"step={step_idx} index={action_index} actual={actual_key!r} expected={expected_key!r}"
+            )
+        if step.observation_contract_version not in {None, OBSERVATION_CONTRACT_VERSION}:
+            raise ValueError(f"unsupported observation contract: {step.observation_contract_version}")
+        if step.action_feature_contract_version not in {None, ACTION_FEATURE_CONTRACT_VERSION}:
+            raise ValueError(f"unsupported action feature contract: {step.action_feature_contract_version}")
+        if step.env_contract_version not in {None, ENV_CONTRACT_VERSION}:
+            raise ValueError(f"unsupported env contract: {step.env_contract_version}")
+        if step.rule_score_version not in {None, RULE_SCORE_VERSION}:
+            raise ValueError(f"unsupported rule score contract: {step.rule_score_version}")
+
+
 def stack_obs_batches(obs_batches: list[ObsTensorBatch]) -> ObsTensorBatch:
     if not obs_batches:
         raise ValueError("obs_batches must not be empty")
@@ -188,6 +286,8 @@ __all__ = [
     "PPOBatch",
     "build_ppo_batch",
     "compute_returns_and_advantages",
+    "pad_optional_legal_action_values",
     "pad_legal_action_tensors",
     "stack_obs_batches",
+    "stack_optional_contexts",
 ]

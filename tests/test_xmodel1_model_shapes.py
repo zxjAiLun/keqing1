@@ -8,8 +8,9 @@ from training.cache_schema import (
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_HISTORY_SUMMARY_DIM,
     XMODEL1_MAX_RESPONSE_CANDIDATES,
+    XMODEL1_RULE_CONTEXT_DIM,
 )
-from xmodel1.model import Xmodel1Model
+from xmodel1.model import PolicyOutput, Xmodel1Model
 
 
 def test_xmodel1_model_forward_shapes():
@@ -31,7 +32,9 @@ def test_xmodel1_model_forward_shapes():
         torch.randint(0, 2, (batch_size, max_candidates, XMODEL1_CANDIDATE_FLAG_DIM), dtype=torch.uint8),
         torch.ones(batch_size, max_candidates, dtype=torch.uint8),
         history_summary=torch.zeros(batch_size, XMODEL1_HISTORY_SUMMARY_DIM, dtype=torch.float32),
+        rule_context=torch.zeros(batch_size, XMODEL1_RULE_CONTEXT_DIM, dtype=torch.float32),
     )
+    assert isinstance(out, PolicyOutput)
     assert out.discard_logits.shape == (batch_size, max_candidates)
     assert out.response_logits.shape == (batch_size, XMODEL1_MAX_RESPONSE_CANDIDATES)
     assert out.response_post_logits.shape == (
@@ -78,6 +81,27 @@ def test_xmodel1_model_event_history_changes_state_encoding():
     out_active = model(*common_args, history_summary=active_history)
 
     assert not torch.allclose(out_pad.discard_logits, out_active.discard_logits)
+
+
+def test_xmodel1_rule_context_shape_drift_raises():
+    model = Xmodel1Model(
+        state_tile_channels=57,
+        state_scalar_dim=64,
+        candidate_feature_dim=XMODEL1_CANDIDATE_FEATURE_DIM,
+        candidate_flag_dim=XMODEL1_CANDIDATE_FLAG_DIM,
+        hidden_dim=32,
+        num_res_blocks=1,
+    )
+    with pytest.raises(RuntimeError, match="rule_context tensor"):
+        model(
+            torch.randn(2, 57, 34),
+            torch.randn(2, 64),
+            torch.randn(2, 14, XMODEL1_CANDIDATE_FEATURE_DIM),
+            torch.randint(0, 34, (2, 14), dtype=torch.long),
+            torch.randint(0, 2, (2, 14, XMODEL1_CANDIDATE_FLAG_DIM), dtype=torch.uint8),
+            torch.ones(2, 14, dtype=torch.uint8),
+            rule_context=torch.zeros(2, XMODEL1_RULE_CONTEXT_DIM - 1),
+        )
 
 
 def test_xmodel1_action_logits_use_response_candidate_path_for_reach_and_none():

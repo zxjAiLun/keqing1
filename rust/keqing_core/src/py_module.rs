@@ -32,7 +32,7 @@ use crate::progress_batch::{
 use crate::progress_delta::{calc_discard_deltas, calc_draw_deltas, calc_required_tiles};
 use crate::progress_summary::{summarize_3n1, summarize_one_shanten_draw_metrics};
 use crate::replay_samples::build_replay_decision_records_mc_return;
-use crate::rulebase::choose_rulebase_action;
+use crate::rulebase::{choose_rulebase_action, score_rulebase_actions};
 use crate::score_rules::{
     build_hora_result_payload, compute_hora_deltas, prepare_hora_tile_allocation,
 };
@@ -705,6 +705,21 @@ fn choose_rulebase_action_json_py(
         .transpose()
 }
 
+#[pyfunction]
+fn score_rulebase_actions_json_py(
+    snapshot_json: &str,
+    actor: usize,
+    legal_actions_json: &str,
+) -> PyResult<String> {
+    let snapshot: serde_json::Value = serde_json::from_str(snapshot_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let legal_actions: Vec<serde_json::Value> = serde_json::from_str(legal_actions_json)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    let scored = score_rulebase_actions(&snapshot, actor, &legal_actions)
+        .map_err(PyRuntimeError::new_err)?;
+    serde_json::to_string(&scored).map_err(|err| PyRuntimeError::new_err(err.to_string()))
+}
+
 #[pymodule]
 pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     ensure_init();
@@ -794,6 +809,7 @@ pub fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(choose_rulebase_action_json_py, m)?)?;
+    m.add_function(wrap_pyfunction!(score_rulebase_actions_json_py, m)?)?;
     m.add("TILE_COUNT", TILE_COUNT)?;
     m.add("XMODEL1_SCHEMA_NAME", XMODEL1_SCHEMA_NAME)?;
     m.add("XMODEL1_SCHEMA_VERSION", XMODEL1_SCHEMA_VERSION)?;

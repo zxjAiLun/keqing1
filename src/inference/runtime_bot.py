@@ -121,6 +121,8 @@ class RuntimeBot:
             dealin_prob_lambda=self.dealin_prob_lambda,
             rank_pt_lambda=self.rank_pt_lambda,
         )
+        self.beam_lambda = getattr(self._scorer, "beam_lambda", self.beam_lambda)
+        self.rank_pt_lambda = getattr(self._scorer, "rank_pt_lambda", self.rank_pt_lambda)
         self._review_exporter = DefaultRuntimeReviewExporter()
 
     def reset(self):

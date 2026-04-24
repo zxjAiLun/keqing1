@@ -17,6 +17,7 @@ from training import TaskSpec, train_model
 from xmodel1.cached_dataset import Xmodel1DiscardDataset
 from xmodel1.checkpoint import (
     build_xmodel1_checkpoint_metadata,
+    resolve_xmodel1_placement_semantics,
     validate_xmodel1_checkpoint_metadata,
 )
 from xmodel1.model import Xmodel1Model
@@ -147,10 +148,10 @@ def _response_candidate_ce_loss(
     return F.cross_entropy(masked_logits, chosen_idx[valid_rows].long())
 
 
-def _response_post_teacher_ce_loss(
+def _response_post_target_ce_loss(
     response_post_logits: torch.Tensor,
     chosen_response_idx: torch.Tensor,
-    response_teacher_discard_idx: torch.Tensor,
+    response_target_discard_idx: torch.Tensor,
     response_action_mask: torch.Tensor,
     response_post_candidate_mask: torch.Tensor,
 ) -> torch.Tensor:
@@ -161,12 +162,44 @@ def _response_post_teacher_ce_loss(
     chosen_slots = chosen_response_idx[valid_rows].long()
     slot_logits = response_post_logits[row_idx, chosen_slots]
     slot_mask = response_post_candidate_mask[row_idx, chosen_slots]
-    slot_teacher = response_teacher_discard_idx[row_idx, chosen_slots]
-    valid_teacher = (slot_teacher >= 0) & (slot_mask.sum(dim=-1) > 0)
-    if not torch.any(valid_teacher):
+    slot_target = response_target_discard_idx[row_idx, chosen_slots]
+    valid_target = (slot_target >= 0) & (slot_mask.sum(dim=-1) > 0)
+    if not torch.any(valid_target):
         return response_post_logits.new_tensor(0.0)
-    masked_logits = slot_logits[valid_teacher].float().masked_fill(slot_mask[valid_teacher] <= 0, -1e4)
-    return F.cross_entropy(masked_logits, slot_teacher[valid_teacher].long())
+    masked_logits = slot_logits[valid_target].float().masked_fill(slot_mask[valid_target] <= 0, -1e4)
+    return F.cross_entropy(masked_logits, slot_target[valid_target].long())
+
+
+def _response_post_teacher_ce_loss(
+    response_post_logits: torch.Tensor,
+    chosen_response_idx: torch.Tensor,
+    response_teacher_discard_idx: torch.Tensor,
+    response_action_mask: torch.Tensor,
+    response_post_candidate_mask: torch.Tensor,
+) -> torch.Tensor:
+    return _response_post_target_ce_loss(
+        response_post_logits,
+        chosen_response_idx,
+        response_teacher_discard_idx,
+        response_action_mask,
+        response_post_candidate_mask,
+    )
+
+
+def _response_post_human_ce_loss(
+    response_post_logits: torch.Tensor,
+    chosen_response_idx: torch.Tensor,
+    response_human_discard_idx: torch.Tensor,
+    response_action_mask: torch.Tensor,
+    response_post_candidate_mask: torch.Tensor,
+) -> torch.Tensor:
+    return _response_post_target_ce_loss(
+        response_post_logits,
+        chosen_response_idx,
+        response_human_discard_idx,
+        response_action_mask,
+        response_post_candidate_mask,
+    )
 
 
 def _response_post_ranking_loss(
@@ -232,6 +265,7 @@ class _Xmodel1TrainWrapper(nn.Module):
             model_kwargs.get("response_post_candidate_mask"),
             model_kwargs.get("response_post_candidate_flags"),
             history_summary=model_kwargs.get("history_summary"),
+            rule_context=model_kwargs.get("rule_context"),
         )
         self._last_output = out
         composed_ev = self.model.get_last_aux_outputs()["composed_ev"]
@@ -255,8 +289,11 @@ class _Xmodel1TrainWrapper(nn.Module):
 def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
     ce_loss_weight = float(cfg.get("ce_loss_weight", 1.0))
     response_ce_loss_weight = float(cfg.get("response_ce_loss_weight", cfg.get("special_ce_loss_weight", 0.25)))
-    response_post_ce_loss_weight = float(
-        cfg.get("response_post_ce_loss_weight", cfg.get("special_rank_loss_weight", 0.25))
+    response_post_human_ce_loss_weight = float(
+        cfg.get(
+            "response_post_human_ce_loss_weight",
+            cfg.get("response_post_ce_loss_weight", cfg.get("special_rank_loss_weight", 0.25)),
+        )
     )
     response_post_rank_loss_weight = float(cfg.get("response_post_rank_loss_weight", 0.15))
     rank_loss_weight = float(cfg.get("rank_loss_weight", 0.5))
@@ -266,35 +303,14 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
     pts_win_loss_weight = float(cfg.get("pts_win_loss_weight", 0.3))
     pts_dealin_loss_weight = float(cfg.get("pts_dealin_loss_weight", 0.3))
     opp_tenpai_loss_weight = float(cfg.get("opp_tenpai_loss_weight", 0.25))
-    placement_cfg = cfg.get("placement", {})
-    final_rank_loss_weight = float(
-        placement_cfg.get("rank_loss_weight", cfg.get("final_rank_loss_weight", 0.05))
-    )
-    final_score_delta_loss_weight = float(
-        placement_cfg.get(
-            "final_score_delta_loss_weight",
-            cfg.get("final_score_delta_loss_weight", 0.05),
-        )
-    )
-    rank_pt_loss_weight = float(
-        placement_cfg.get(
-            "rank_pt_value_loss_weight",
-            cfg.get("rank_pt_value_loss_weight", 0.01),
-        )
-    )
-    rank_bonus = placement_cfg.get(
-        "rank_bonus",
-        cfg.get("rank_bonus", [90.0, 45.0, 0.0, -135.0]),
-    )
-    rank_bonus_norm = float(
-        placement_cfg.get("rank_bonus_norm", cfg.get("rank_bonus_norm", 90.0))
-    )
-    rank_score_scale = float(
-        placement_cfg.get("rank_score_scale", cfg.get("rank_score_scale", 0.0))
-    )
-    score_norm = float(
-        placement_cfg.get("score_norm", cfg.get("score_norm", 30000.0))
-    )
+    placement_semantics = resolve_xmodel1_placement_semantics(cfg)
+    final_rank_loss_weight = float(placement_semantics["rank_loss_weight"])
+    final_score_delta_loss_weight = float(placement_semantics["final_score_delta_loss_weight"])
+    rank_pt_loss_weight = float(placement_semantics["rank_pt_value_loss_weight"])
+    rank_bonus = placement_semantics["rank_bonus"]
+    rank_bonus_norm = float(placement_semantics["rank_bonus_norm"])
+    rank_score_scale = float(placement_semantics["rank_score_scale"])
+    score_norm = float(placement_semantics["score_norm"])
 
     def unpack_batch(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, Any]:
         moved = _unpack_batch(batch, device)
@@ -327,6 +343,7 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
             "response_post_candidate_mask": moved.get("response_post_candidate_mask"),
             "response_post_candidate_flags": moved.get("response_post_candidate_flags"),
             "history_summary": moved.get("history_summary"),
+            "rule_context": moved.get("rule_context"),
         }
         return moved
 
@@ -359,10 +376,10 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
             if torch.any(discard_rows)
             else out.discard_logits.new_tensor(0.0)
         )
-        response_post_ce_loss = _response_post_teacher_ce_loss(
+        response_post_ce_loss = _response_post_human_ce_loss(
             out.response_post_logits,
             batch_data["chosen_response_action_idx"],
-            batch_data["response_teacher_discard_idx"],
+            batch_data["response_human_discard_idx"],
             batch_data["response_action_mask"],
             batch_data["response_post_candidate_mask"],
         )
@@ -429,7 +446,7 @@ def _make_xmodel1_task(cfg: dict[str, Any]) -> TaskSpec:
         extra_loss = (
             ce_loss_weight * ce_loss
             + response_ce_loss_weight * response_ce_loss
-            + response_post_ce_loss_weight * response_post_ce_loss
+            + response_post_human_ce_loss_weight * response_post_ce_loss
             + response_post_rank_loss_weight * response_post_rank_loss
             + rank_loss_weight * rank_loss
             + hard_bad_loss_weight * hard_bad_loss

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from typing import Protocol
+import warnings
 
 import numpy as np
 
@@ -1413,6 +1414,46 @@ class ActionScorer(Protocol):
         ...
 
 
+def _checkpoint_value_loss_weight(adapter: KeqingModelAdapter) -> float | None:
+    cfg = getattr(adapter, "checkpoint_cfg", None)
+    if not isinstance(cfg, dict):
+        return None
+    raw = cfg.get("value_loss_weight")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_runtime_beam_lambda(adapter: KeqingModelAdapter, beam_lambda: float) -> float:
+    if beam_lambda == 0.0:
+        return 0.0
+    value_loss_weight = _checkpoint_value_loss_weight(adapter)
+    if value_loss_weight is None or value_loss_weight > 0.0:
+        return beam_lambda
+    warnings.warn(
+        "checkpoint cfg.value_loss_weight<=0 while beam_lambda is enabled; "
+        "forcing beam_lambda=0.0 so an untrained value head does not affect runtime decisions",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    return 0.0
+
+
+def _checkpoint_placement_semantics(adapter: KeqingModelAdapter) -> dict[str, object] | None:
+    payload = getattr(adapter, "placement_semantics", None)
+    return payload if isinstance(payload, dict) else None
+
+
+def _runtime_rank_pt_is_supported(adapter: KeqingModelAdapter) -> bool:
+    semantics = _checkpoint_placement_semantics(adapter)
+    if not semantics:
+        return True
+    return bool(semantics.get("placement_trained", False))
+
+
 class DefaultActionScorer:
     def __init__(
         self,
@@ -1429,13 +1470,23 @@ class DefaultActionScorer:
     ):
         self.adapter = adapter
         self.beam_k = beam_k
-        self.beam_lambda = beam_lambda
+        self.requested_beam_lambda = beam_lambda
+        self.beam_lambda = _resolve_runtime_beam_lambda(adapter, beam_lambda)
         self.style_lambda = style_lambda
         self.score_delta_lambda = score_delta_lambda
         self.win_prob_lambda = win_prob_lambda
         self.dealin_prob_lambda = dealin_prob_lambda
         self.rank_pt_lambda = rank_pt_lambda
         self.special_calibration_scale = special_calibration_scale
+        if (
+            self.rank_pt_lambda != 0.0
+            and getattr(self.adapter, "model_version", None) == "keqingv4"
+            and not _runtime_rank_pt_is_supported(self.adapter)
+        ):
+            raise RuntimeError(
+                "checkpoint placement semantics indicate keqingv4 placement heads were not trained; "
+                "runtime rank_pt scoring requires non-zero placement supervision in the checkpoint"
+            )
 
     def score(self, ctx: DecisionContext) -> DecisionResult:
         model_snap = dict(ctx.model_snap)

@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::counts::TILE_COUNT;
 use crate::replay_export_core::{normalize_tile_repr, strip_aka, tile34_from_pai};
@@ -45,6 +45,65 @@ struct CallEvaluation {
 }
 
 pub fn choose_rulebase_action(
+    snapshot: &Value,
+    actor: usize,
+    legal_actions: &[Value],
+) -> Result<Option<Value>, String> {
+    let scored = score_rulebase_actions(snapshot, actor, legal_actions)?;
+    if scored.is_empty() {
+        return Ok(None);
+    }
+    let best_index = best_scored_action_index(&scored).unwrap_or(0);
+    Ok(legal_actions.get(best_index).cloned())
+}
+
+pub fn score_rulebase_actions(
+    snapshot: &Value,
+    actor: usize,
+    legal_actions: &[Value],
+) -> Result<Vec<Value>, String> {
+    if legal_actions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let chosen = choose_rulebase_action_impl(snapshot, actor, legal_actions)?;
+    let chosen_index = chosen
+        .as_ref()
+        .and_then(|chosen_action| legal_actions.iter().position(|action| action == chosen_action))
+        .unwrap_or(0);
+
+    Ok(legal_actions
+        .iter()
+        .enumerate()
+        .map(|(index, action)| {
+            let action_type_name = action_type(action).unwrap_or_else(|| "unknown".to_string());
+            let selected = index == chosen_index;
+            let raw_score = if selected {
+                0.0
+            } else {
+                base_rulebase_penalty(&action_type_name) - (index as f64 * 0.001)
+            };
+            let priority = if selected {
+                1000
+            } else {
+                base_rulebase_priority(&action_type_name)
+            };
+            json!({
+                "action_index": index,
+                "raw_score": raw_score,
+                "priority": priority,
+                "tie_break_rank": -(index as i64),
+                "components": {
+                    "selected_by_rulebase": selected,
+                    "action_type": action_type_name,
+                    "legal_order": index,
+                }
+            })
+        })
+        .collect())
+}
+
+fn choose_rulebase_action_impl(
     snapshot: &Value,
     actor: usize,
     legal_actions: &[Value],
@@ -102,6 +161,68 @@ pub fn choose_rulebase_action(
     Ok(choose_best_discard(&context, snapshot, legal_actions)
         .or_else(|| find_action_by_type(legal_actions, "none"))
         .or_else(|| legal_actions.first().cloned()))
+}
+
+fn best_scored_action_index(scored: &[Value]) -> Option<usize> {
+    let mut best: Option<(usize, f64, i64, i64)> = None;
+    for (index, entry) in scored.iter().enumerate() {
+        let raw_score = entry
+            .get("raw_score")
+            .and_then(Value::as_f64)
+            .unwrap_or(f64::NEG_INFINITY);
+        let priority = entry
+            .get("priority")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        let tie_break_rank = entry
+            .get("tie_break_rank")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| -(index as i64));
+        let candidate = (index, raw_score, priority, tie_break_rank);
+        if best
+            .as_ref()
+            .is_none_or(|current| compare_scored_tuple(&candidate, current).is_gt())
+        {
+            best = Some(candidate);
+        }
+    }
+    best.map(|item| item.0)
+}
+
+fn compare_scored_tuple(
+    lhs: &(usize, f64, i64, i64),
+    rhs: &(usize, f64, i64, i64),
+) -> std::cmp::Ordering {
+    lhs.1
+        .partial_cmp(&rhs.1)
+        .unwrap_or(std::cmp::Ordering::Less)
+        .then_with(|| lhs.2.cmp(&rhs.2))
+        .then_with(|| lhs.3.cmp(&rhs.3))
+        .then_with(|| rhs.0.cmp(&lhs.0))
+}
+
+fn base_rulebase_penalty(action_type_name: &str) -> f64 {
+    match action_type_name {
+        "hora" => -1.0,
+        "reach" => -2.0,
+        "dahai" => -3.0,
+        "ankan" | "kakan" | "daiminkan" => -4.0,
+        "pon" | "chi" => -5.0,
+        "none" => -6.0,
+        _ => -8.0,
+    }
+}
+
+fn base_rulebase_priority(action_type_name: &str) -> i64 {
+    match action_type_name {
+        "hora" => 90,
+        "reach" => 80,
+        "dahai" => 70,
+        "ankan" | "kakan" | "daiminkan" => 60,
+        "pon" | "chi" => 50,
+        "none" => 10,
+        _ => 0,
+    }
 }
 
 impl RuleContext {
@@ -651,7 +772,7 @@ fn find_action_by_type(legal_actions: &[Value], expected_type: &str) -> Option<V
 mod tests {
     use serde_json::json;
 
-    use super::choose_rulebase_action;
+    use super::{choose_rulebase_action, score_rulebase_actions};
 
     #[test]
     fn chooses_safe_tile_against_riichi() {
@@ -696,5 +817,37 @@ mod tests {
             .expect("rulebase choose action should succeed")
             .expect("rulebase should choose pass");
         assert_eq!(chosen["type"], "none");
+    }
+
+    #[test]
+    fn rulebase_scores_argmax_matches_choose_action() {
+        let snapshot = json!({
+            "bakaze": "E",
+            "oya": 0,
+            "hand": ["1m", "9p", "1p", "2p", "4s", "5s", "7s", "E", "S", "W", "N", "P", "F", "C"],
+            "melds": [[], [], [], []],
+            "discards": [[], [{"pai": "1m"}], [], []],
+            "dora_markers": ["3m"],
+            "reached": [false, true, false, false],
+            "last_tsumo": ["C", null, null, null],
+        });
+        let legal_actions = vec![
+            json!({"type": "dahai", "actor": 0, "pai": "9p", "tsumogiri": false}),
+            json!({"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": false}),
+        ];
+        let chosen = choose_rulebase_action(&snapshot, 0, &legal_actions)
+            .expect("choose should succeed")
+            .expect("chosen action");
+        let scored = score_rulebase_actions(&snapshot, 0, &legal_actions).expect("score should succeed");
+        let best = scored
+            .iter()
+            .max_by(|lhs, rhs| {
+                let lhs_score = lhs["raw_score"].as_f64().unwrap();
+                let rhs_score = rhs["raw_score"].as_f64().unwrap();
+                lhs_score.partial_cmp(&rhs_score).unwrap()
+            })
+            .unwrap();
+        let best_index = best["action_index"].as_u64().unwrap() as usize;
+        assert_eq!(legal_actions[best_index], chosen);
     }
 }

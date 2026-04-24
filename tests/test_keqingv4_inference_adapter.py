@@ -147,6 +147,59 @@ def test_keqingv4_keqing_adapter_derives_rank_pt_value_from_checkpoint_placement
     )
 
 
+def test_keqingv4_keqing_adapter_rejects_checkpoint_placement_metadata_drift(tmp_path: Path):
+    ckpt = tmp_path / "keqingv4_bad_placement_metadata.pth"
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
+    _write_keqingv4_checkpoint(ckpt, model)
+    payload = torch.load(ckpt, map_location="cpu", weights_only=False)
+    payload["placement_semantics"]["rank_score_scale"] = 0.25
+    torch.save(payload, ckpt)
+    with pytest.raises(RuntimeError, match="placement_semantics metadata drifted"):
+        KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
+
+
+def test_keqingv4_keqing_adapter_rejects_runtime_rule_context_shape_drift(tmp_path: Path):
+    ckpt = tmp_path / "keqingv4_bad_rule_context_shape.pth"
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
+    _write_keqingv4_checkpoint(ckpt, model)
+    snap = {
+        "hand": ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+        "tsumo_pai": "5s",
+        "melds": [[], [], [], []],
+        "discards": [[], [], [], []],
+        "dora_markers": ["1m"],
+        "reached": [False, False, False, False],
+        "scores": [25000, 25000, 25000, 25000],
+        "bakaze": "E",
+        "kyoku": 1,
+        "honba": 0,
+        "kyotaku": 0,
+        "oya": 0,
+        "event_history": np.zeros((48, 5), dtype=np.int16),
+        "v4_discard_summary": np.zeros((34, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+        "v4_call_summary": np.zeros((8, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+        "v4_special_summary": np.zeros((3, KEQINGV4_SUMMARY_DIM), dtype=np.float32),
+        "legal_actions": [{"type": "dahai", "actor": 0, "pai": "5s", "tsumogiri": True}],
+    }
+    actor = 0
+    snap["rule_context"] = np.zeros((5,), dtype=np.float32)
+    adapter = KeqingModelAdapter.from_checkpoint(ckpt, device=torch.device("cpu"))
+    with pytest.raises(RuntimeError, match="rule_context contract drift"):
+        adapter.forward(snap, actor)
+
+
 def test_keqingv4_keqing_adapter_reuses_runtime_summary_cache(tmp_path: Path):
     ckpt = tmp_path / "keqingv4_cache_test.pth"
     model = KeqingV4Model(

@@ -16,6 +16,7 @@ from training.cache_schema import (
     KEQINGV4_EVENT_HISTORY_LEN,
     KEQINGV4_EVENT_HISTORY_DIM,
     KEQINGV4_OPPORTUNITY_DIM,
+    KEQINGV4_RULE_CONTEXT_DIM,
 )
 from training.cached_dataset import (
     DEFAULT_BUFFER_SIZE,
@@ -47,6 +48,7 @@ class KeqingV4CacheAdapter(BaseCacheAdapter):
         discard = data["v4_discard_summary"]
         call = data["v4_call_summary"]
         special = data["v4_special_summary"]
+        rule_context = data["rule_context"] if "rule_context" in data else np.zeros((sample_count, KEQINGV4_RULE_CONTEXT_DIM), dtype=np.float32)
         return {
             "score_delta_target": np.asarray(score_delta, dtype=np.float32),
             "win_target": np.asarray(win, dtype=np.float32),
@@ -69,6 +71,7 @@ class KeqingV4CacheAdapter(BaseCacheAdapter):
             "v4_discard_summary": np.asarray(discard, dtype=np.float16),
             "v4_call_summary": np.asarray(call, dtype=np.float16),
             "v4_special_summary": np.asarray(special, dtype=np.float16),
+            "rule_context": np.asarray(rule_context, dtype=np.float32).reshape(sample_count, KEQINGV4_RULE_CONTEXT_DIM),
         }
 
     def build_sample(
@@ -105,15 +108,20 @@ class KeqingV4CacheAdapter(BaseCacheAdapter):
             np.asarray(row_extra.get("v4_special_summary"), dtype=np.float16),
             np.int8(row_extra.get("final_rank_target", 0)),
             np.int32(row_extra.get("final_score_delta_points_target", 0)),
+            np.asarray(
+                row_extra.get("rule_context", np.zeros((KEQINGV4_RULE_CONTEXT_DIM,), dtype=np.float32)),
+                dtype=np.float32,
+            ).reshape(KEQINGV4_RULE_CONTEXT_DIM),
         )
 
     def permute_row_extra(self, row_extra: Dict[str, object], perm: tuple, action_idx: int) -> Dict[str, object]:
         del action_idx
-        discard = np.asarray(row_extra.get("v4_discard_summary"), dtype=np.float16).copy()
+        discard_orig = np.asarray(row_extra.get("v4_discard_summary"), dtype=np.float16).copy()
+        discard = discard_orig.copy()
         src_slices = [slice(i * 9, (i + 1) * 9) for i in perm]
-        discard[0:9] = discard[src_slices[0]]
-        discard[9:18] = discard[src_slices[1]]
-        discard[18:27] = discard[src_slices[2]]
+        discard[0:9] = discard_orig[src_slices[0]]
+        discard[9:18] = discard_orig[src_slices[1]]
+        discard[18:27] = discard_orig[src_slices[2]]
         return {
             "score_delta_target": np.float32(row_extra.get("score_delta_target", 0.0)),
             "win_target": np.float32(row_extra.get("win_target", 0.0)),
@@ -132,6 +140,10 @@ class KeqingV4CacheAdapter(BaseCacheAdapter):
             "v4_special_summary": np.asarray(row_extra.get("v4_special_summary"), dtype=np.float16),
             "final_rank_target": np.int8(row_extra.get("final_rank_target", 0)),
             "final_score_delta_points_target": np.int32(row_extra.get("final_score_delta_points_target", 0)),
+            "rule_context": np.asarray(
+                row_extra.get("rule_context", np.zeros((KEQINGV4_RULE_CONTEXT_DIM,), dtype=np.float32)),
+                dtype=np.float32,
+            ).reshape(KEQINGV4_RULE_CONTEXT_DIM),
         }
 
     @staticmethod
@@ -159,6 +171,7 @@ class KeqingV4CacheAdapter(BaseCacheAdapter):
             special_summary,
             final_rank_target,
             final_score_delta_points_target,
+            rule_context,
         ) = zip(*batch)
         return (
             torch.from_numpy(np.stack(tile_feats)),
@@ -183,6 +196,7 @@ class KeqingV4CacheAdapter(BaseCacheAdapter):
             torch.from_numpy(np.stack(special_summary)),
             torch.tensor(final_rank_target, dtype=torch.long),
             torch.tensor(final_score_delta_points_target, dtype=torch.int32),
+            torch.from_numpy(np.stack(rule_context)).float(),
         )
 
 

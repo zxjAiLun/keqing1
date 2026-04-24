@@ -1,12 +1,15 @@
 # Keqing1
 
-Keqing1 is organized around two active model lines plus shared semantic/runtime infrastructure:
+Keqing1 is now organized around `KeqingRL-Lite` as the single model-growth
+mainline.
 
-- `xmodel1`: current training-window mainline
-- `keqingv4`: current backup line
-- `rulebase`: compatibility baseline for runtime/replay surfaces
+- `keqingrl`: active growth mainline, rule-prior + neural-delta actor-critic
+- `xmodel1`: frozen SL asset line and evaluation baseline
+- `keqingv4`: frozen backup/runtime/Rust asset line
+- `rulebase`: rule-prior baseline and early self-play/autopilot policy
 
-Legacy model families are no longer active runtime or training targets.
+The project no longer treats large supervised cache rebuilds, new aux heads, or
+full `xmodel1` / `keqingv4` retraining as the default path to model strength.
 
 ## Environment
 
@@ -23,7 +26,31 @@ cd src/replay_ui
 npm install
 ```
 
-## Current Entry Points
+Local note for this workstation: the current `.venv` is broken. Recreate it
+before running Python tests:
+
+```bash
+rm -rf .venv
+uv sync
+```
+
+## Current Mainline Flow
+
+```text
+public observation + ordered legal actions
+-> Rust rulebase scoring
+-> raw_rule_scores
+-> centered/clipped prior_logits
+-> RulePriorDeltaPolicy
+-> rollout records with old_log_prob/value/rule priors
+-> PPO update
+-> JSONL review + fixed-seed eval
+```
+
+The policy contract is variable legal-action scoring, not fixed global 45-way
+logits.
+
+## Entry Points
 
 Run local replay/review service:
 
@@ -37,88 +64,40 @@ Run gateway only:
 uv run python src/main.py --gateway-port 11600 tenhou
 ```
 
-Run local service plus gateway:
+Launch live compatibility bots:
 
 ```bash
-uv run python src/main.py --port 8000 --gateway-port 11600 serve
+uv run python scripts/launch_tenhou_bots.py --room L2147 --count 1 --bot rulebase --start-gateway
 ```
 
-Launch live bots:
+Supported bot names on active runtime surfaces are still:
 
-```bash
-uv run python scripts/launch_tenhou_bots.py --room L2147 --count 1 --bot xmodel1 --start-gateway
-```
-
-Supported bot names on active surfaces are:
+- `rulebase`
 - `xmodel1`
 - `keqingv4`
-- `rulebase`
 
-## Current Data Flow
-
-Stable raw replay roots:
-- `artifacts/converted_mjai/ds1`
-- `artifacts/converted_mjai/ds2`
-- `artifacts/converted_mjai/ds3`
-
-Model-specific preprocess outputs are artifacts, not source-of-truth datasets.
-
-Current mainline flow:
-
-```text
-converted mjai replays
--> preprocess_xmodel1.py
--> processed_xmodel1/*
--> train_xmodel1.py
--> artifacts/models/xmodel1
--> runtime/review/slice evaluation
-```
-
-Current xmodel1 contract notes:
-- active schema: `xmodel1_discard_v3`
-- active context field: `history_summary[20]`
-- active candidate dims: `candidate=22`, `flag=8`, `special=19`
-- training resume requires full v3 checkpoint metadata; old no-`cfg` checkpoints are runtime-loadable only
-- runtime tensor construction enters through `keqing_core.build_xmodel1_runtime_tensors(...)` and may fall back only when the native capability is missing
-
-Backup flow:
-
-```text
-converted mjai replays
--> preprocess_keqingv4.py
--> processed_v4/*
--> train_keqingv4.py
--> artifacts/models/keqingv4
-```
+`xmodel1` and `keqingv4` remain useful for comparison and asset extraction, but
+they are not the growth mainline.
 
 ## Key Directories
 
-- `src/mahjong_env/`: shared Mahjong semantics and neutral action/progress utilities
-- `src/training/`: shared training infrastructure and neutral state feature encoders
-- `src/xmodel1/`: current mainline model family
-- `src/keqingv4/`: current backup model family
-- `src/inference/`: runtime adapters and bot entrypoints
-- `src/replay/`: replay API, storage, rendering, and review entrypoints
-- `rust/keqing_core/`: Rust semantic core
-- `tests/`: parity, regression, and focused model tests
-- `docs/`: design docs, status boards, and execution notes
-
-## Tracking
-
-Read these first when resuming work:
-1. `AGENTS.md`
-2. `docs/project_progress.md`
-3. `docs/agent_sync.md`
-4. the latest `docs/todo_*.md`
-
-`.omx` is retired and should not be used.
+- `src/keqingrl/`: active interactive policy, rollout, PPO, review contracts
+- `rust/keqing_core/`: Rust semantic core and rulebase scorer
+- `src/mahjong_env/`: shared public Mahjong semantics
+- `src/inference/`: compatibility bot/runtime surfaces
+- `src/xmodel1/`: frozen SL asset line
+- `src/keqingv4/`: frozen backup/runtime asset line
+- `docs/`: design docs, status boards, execution notes
+- `plans/`: multi-session implementation plans
 
 ## Verification
 
-Typical focused validation commands:
+Focused checks:
 
 ```bash
-uv run pytest tests/test_inference_contracts.py tests/test_progress_oracle_rust.py -q
-uv run pytest tests/test_keqingv4_preprocess.py tests/test_keqingv4_train_script.py -q
-uv run pytest tests/test_bot_model_version.py tests/test_selfplay_rulebase_seats.py -q
+uv run pytest tests/test_keqingrl_actions.py tests/test_keqingrl_distribution.py -q
+uv run pytest tests/test_keqingrl_rule_score.py tests/test_keqingrl_policy_lite.py -q
+uv run pytest tests/test_keqingrl_env_contract.py tests/test_keqingrl_selfplay.py -q
+uv run pytest tests/test_keqingrl_ppo_toy.py tests/test_keqingrl_training.py tests/test_keqingrl_review.py -q
+cargo test --manifest-path rust/keqing_core/Cargo.toml rulebase
 ```

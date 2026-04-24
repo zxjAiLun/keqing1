@@ -247,6 +247,77 @@ def test_build_episode_ppo_batch_separates_actor_returns() -> None:
     assert batch.final_rank_target.tolist() == [0, 3, 0, 3]
 
 
+def test_build_ppo_batch_rejects_reordered_legal_actions() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.DISCARD, tile=0),
+        ActionSpec(ActionType.DISCARD, tile=1),
+    )
+    step = _dummy_step(
+        actor=0,
+        step_id=0,
+        action_count=2,
+        legal_actions=tuple(reversed(legal_actions)),
+        action_spec=legal_actions[1],
+        action_index=1,
+    )
+
+    try:
+        build_episodes_ppo_batch(
+            (
+                RolloutEpisode(
+                    steps=(step,),
+                    terminal_rewards=(1.0, 0.0, 0.0, 0.0),
+                    final_ranks=(0, 1, 2, 3),
+                    scores=(30000, 25000, 25000, 20000),
+                ),
+            )
+        )
+    except ValueError as exc:
+        assert "action-order contract" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected action-order contract violation")
+
+
+def test_build_ppo_batch_rejects_contract_version_mismatch() -> None:
+    step = _dummy_step(actor=0, step_id=0, action_count=2, reward=1.0, done=True)
+    step = RolloutStep(
+        obs=step.obs,
+        legal_action_ids=step.legal_action_ids,
+        legal_action_features=step.legal_action_features,
+        legal_action_mask=step.legal_action_mask,
+        action_index=step.action_index,
+        action_spec=step.action_spec,
+        log_prob=step.log_prob,
+        value=step.value,
+        entropy=step.entropy,
+        reward=step.reward,
+        done=step.done,
+        actor=step.actor,
+        policy_version=step.policy_version,
+        rule_context=step.rule_context,
+        legal_actions=step.legal_actions,
+        game_id=step.game_id,
+        step_id=step.step_id,
+        observation_contract_version="old-observation-contract",
+    )
+
+    try:
+        build_episodes_ppo_batch(
+            (
+                RolloutEpisode(
+                    steps=(step,),
+                    terminal_rewards=(1.0, 0.0, 0.0, 0.0),
+                    final_ranks=(0, 1, 2, 3),
+                    scores=(30000, 25000, 25000, 20000),
+                ),
+            )
+        )
+    except ValueError as exc:
+        assert "unsupported observation contract" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected rollout contract-version mismatch")
+
+
 def test_collect_discard_only_episode_emits_terminal_metadata() -> None:
     torch.manual_seed(0)
     env = DiscardOnlyMahjongEnv(max_kyokus=1)

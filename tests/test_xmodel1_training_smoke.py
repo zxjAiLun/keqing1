@@ -6,11 +6,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-torch = pytest.importorskip("torch")
+torch = pytest.importorskip("torch", exc_type=ImportError)
 
 from training.cache_schema import XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM
 from tests.xmodel1_test_utils import write_xmodel1_v3_npz
 from xmodel1.cached_dataset import split_cached_files
+from xmodel1.checkpoint import (
+    resolve_xmodel1_placement_semantics,
+    resolve_xmodel1_response_post_semantics,
+)
 from xmodel1.model import Xmodel1Model
 from xmodel1.trainer import _autocast_enabled, _unpack_batch, build_dataloaders, train
 
@@ -61,6 +65,10 @@ def test_xmodel1_training_smoke(tmp_path: Path):
     assert (out_dir / "training_summary.json").exists()
     summary = json.loads((out_dir / "training_summary.json").read_text(encoding="utf-8"))
     assert summary["dataset_summary"] is None
+    checkpoint = torch.load(out_dir / "last.pth", map_location="cpu", weights_only=False)
+    assert checkpoint["placement_semantics"] == resolve_xmodel1_placement_semantics({"num_epochs": 1})
+    assert checkpoint["rule_context_dim"] == 6
+    assert checkpoint["response_post_semantics"] == resolve_xmodel1_response_post_semantics({"num_epochs": 1})
     log_path = out_dir / "train_log.jsonl"
     assert log_path.exists()
     rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]

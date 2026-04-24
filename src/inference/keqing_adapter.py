@@ -34,18 +34,22 @@ from xmodel1.checkpoint import (
     default_xmodel1_state_scalar_dim,
     infer_xmodel1_model_dims,
     load_xmodel1_checkpoint_state,
+    resolve_xmodel1_placement_semantics,
+    resolve_xmodel1_rule_context_semantics,
     resolve_xmodel1_state_scalar_dim,
     validate_xmodel1_checkpoint_metadata,
 )
 from training.cache_schema import (
     KEQINGV4_EVENT_HISTORY_DIM,
     KEQINGV4_EVENT_HISTORY_LEN,
+    KEQINGV4_RULE_CONTEXT_DIM,
     KEQINGV4_SUMMARY_DIM,
     XMODEL1_CANDIDATE_FEATURE_DIM,
     XMODEL1_CANDIDATE_FLAG_DIM,
     XMODEL1_MAX_CANDIDATES,
     XMODEL1_MAX_RESPONSE_CANDIDATES,
     XMODEL1_MAX_SPECIAL_CANDIDATES,
+    XMODEL1_RULE_CONTEXT_DIM,
     XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
 )
 from xmodel1.schema import (
@@ -83,10 +87,17 @@ class KeqingModelAdapter:
         self._placement_rank_bonus: tuple[float, float, float, float] = (90.0, 45.0, 0.0, -135.0)
         self._placement_rank_bonus_norm: float = 90.0
         self._placement_rank_score_scale: float = 0.0
+        self.checkpoint_cfg: dict[str, object] = {}
+        self.placement_semantics: dict[str, object] = {}
+        self.rule_context_dim: int = KEQINGV4_RULE_CONTEXT_DIM
+        self._default_rule_context: np.ndarray | None = None
 
     @staticmethod
     def _resolve_placement_runtime_cfg(cfg: object) -> tuple[tuple[float, float, float, float], float, float]:
-        placement_cfg = cfg.get("placement", {}) if isinstance(cfg, dict) else {}
+        if isinstance(cfg, dict) and "rank_bonus" in cfg:
+            placement_cfg = cfg
+        else:
+            placement_cfg = cfg.get("placement", {}) if isinstance(cfg, dict) else {}
         rank_bonus_raw = placement_cfg.get("rank_bonus", (90.0, 45.0, 0.0, -135.0))
         if not isinstance(rank_bonus_raw, (list, tuple)) or len(rank_bonus_raw) != 4:
             rank_bonus = (90.0, 45.0, 0.0, -135.0)
@@ -134,6 +145,7 @@ class KeqingModelAdapter:
                 hidden_dim=int(cfg.get("hidden_dim", inferred_dims["hidden_dim"])),
                 num_res_blocks=int(cfg.get("num_res_blocks", inferred_dims["num_res_blocks"])),
                 dropout=float(cfg.get("dropout", inferred_dims["dropout"])),
+                rule_context_dim=int(ckpt.get("rule_context_dim", XMODEL1_RULE_CONTEXT_DIM)),
             )
             load_xmodel1_checkpoint_state(
                 model,
@@ -148,11 +160,28 @@ class KeqingModelAdapter:
                 encode_fn=features_mod.encode,
                 device=device,
             )
+            inst.checkpoint_cfg = dict(cfg) if isinstance(cfg, dict) else {}
+            inst.placement_semantics = dict(
+                ckpt.get(
+                    "placement_semantics",
+                    resolve_xmodel1_placement_semantics(cfg if isinstance(cfg, dict) else None),
+                )
+            )
+            inst.rule_context_dim = int(ckpt.get("rule_context_dim", XMODEL1_RULE_CONTEXT_DIM))
+            rule_context_semantics = ckpt.get("rule_context_semantics")
+            if not isinstance(rule_context_semantics, dict):
+                rule_context_semantics = resolve_xmodel1_rule_context_semantics(
+                    cfg if isinstance(cfg, dict) else None
+                )
+            inst._default_rule_context = np.asarray(
+                rule_context_semantics.get("vector", (1.0, 0.5, 0.0, -1.5, 0.0, 1.0)),
+                dtype=np.float32,
+            ).reshape(inst.rule_context_dim)
             (
                 inst._placement_rank_bonus,
                 inst._placement_rank_bonus_norm,
                 inst._placement_rank_score_scale,
-            ) = cls._resolve_placement_runtime_cfg(cfg)
+            ) = cls._resolve_placement_runtime_cfg(inst.placement_semantics)
             inst._runtime_candidate_builder = lambda snap, actor, legal_actions=None: features_mod.build_runtime_candidate_arrays(
                 snap,
                 actor,
@@ -204,11 +233,14 @@ class KeqingModelAdapter:
                 encode_fn=features_mod.encode,
                 device=device,
             )
+            inst.checkpoint_cfg = dict(cfg) if isinstance(cfg, dict) else {}
+            inst.placement_semantics = dict(ckpt.get("placement_semantics", {}))
+            inst.rule_context_dim = int(ckpt.get("rule_context_dim", KEQINGV4_RULE_CONTEXT_DIM))
             (
                 inst._placement_rank_bonus,
                 inst._placement_rank_bonus_norm,
                 inst._placement_rank_score_scale,
-            ) = cls._resolve_placement_runtime_cfg(cfg)
+            ) = cls._resolve_placement_runtime_cfg(inst.placement_semantics)
             def _build_runtime_v4_summaries(snapshot: dict, actor: int, legal_actions: list[dict]):
                 try:
                     return core_mod.build_keqingv4_typed_summaries(snapshot, actor, legal_actions)
@@ -420,6 +452,32 @@ class KeqingModelAdapter:
             )
         return arr
 
+    def _resolve_v4_rule_context(self, snap: dict) -> np.ndarray:
+        if "rule_context" not in snap:
+            return np.zeros((self.rule_context_dim,), dtype=np.float32)
+        arr = np.asarray(snap["rule_context"], dtype=np.float32)
+        expected = (self.rule_context_dim,)
+        if arr.shape != expected:
+            raise RuntimeError(
+                f"keqingv4 runtime rule_context contract drift: expected shape {expected}, got {arr.shape}"
+            )
+        return arr
+
+    def _resolve_xmodel1_rule_context(self, snap: dict) -> np.ndarray:
+        value = snap.get("rule_context")
+        if value is None:
+            fallback = self._default_rule_context
+            if fallback is None:
+                fallback = np.asarray((1.0, 0.5, 0.0, -1.5, 0.0, 1.0), dtype=np.float32)
+            return np.asarray(fallback, dtype=np.float32).reshape(self.rule_context_dim)
+        arr = np.asarray(value, dtype=np.float32)
+        expected = (self.rule_context_dim,)
+        if arr.shape != expected:
+            raise RuntimeError(
+                f"xmodel1 runtime rule_context contract drift: expected shape {expected}, got {arr.shape}"
+            )
+        return arr
+
     def resolve_runtime_v4_summaries(
         self,
         snap: dict,
@@ -440,19 +498,22 @@ class KeqingModelAdapter:
             if self.model_version == "xmodel1":
                 features_mod = importlib.import_module("xmodel1.features")
                 legal_actions = self._resolve_runtime_legal_actions(snap, actor)
+                rule_context = self._resolve_xmodel1_rule_context(snap)
+                runtime_snap = dict(snap)
+                runtime_snap["rule_context"] = rule_context
                 candidate_feat, candidate_tile_id, candidate_mask, candidate_flags = self._runtime_candidate_builder(
-                    snap,
+                    runtime_snap,
                     actor,
                     legal_actions,
                 )
-                history_summary = features_mod.resolve_runtime_history_summary(snap)
+                history_summary = features_mod.resolve_runtime_history_summary(runtime_snap)
                 candidate_feat_t = torch.from_numpy(candidate_feat).unsqueeze(0).to(self.device)
                 candidate_tile_id_t = torch.from_numpy(candidate_tile_id).unsqueeze(0).to(self.device)
                 candidate_mask_t = torch.from_numpy(candidate_mask).unsqueeze(0).to(self.device)
                 candidate_flags_t = torch.from_numpy(candidate_flags).unsqueeze(0).to(self.device)
                 history_summary_t = torch.from_numpy(history_summary).unsqueeze(0).to(self.device).float()
                 runtime_payload = features_mod.resolve_runtime_tensor_payload(
-                    snap,
+                    runtime_snap,
                     actor,
                     legal_actions,
                     max_candidates=XMODEL1_MAX_CANDIDATES,
@@ -465,6 +526,7 @@ class KeqingModelAdapter:
                 response_post_candidate_tile_id_t = torch.from_numpy(runtime_payload["response_post_candidate_tile_id"]).unsqueeze(0).to(self.device).long()
                 response_post_candidate_mask_t = torch.from_numpy(runtime_payload["response_post_candidate_mask"]).unsqueeze(0).to(self.device)
                 response_post_candidate_flags_t = torch.from_numpy(runtime_payload["response_post_candidate_flags"]).unsqueeze(0).to(self.device)
+                rule_context_t = torch.from_numpy(rule_context).unsqueeze(0).to(self.device)
                 out = self.model(
                     tile_t.float() if self.device.type != "cuda" else tile_t,
                     scalar_t.float() if self.device.type != "cuda" else scalar_t,
@@ -485,6 +547,7 @@ class KeqingModelAdapter:
                     ),
                     response_post_candidate_flags=response_post_candidate_flags_t.float(),
                     history_summary=history_summary_t,
+                    rule_context=rule_context_t.float(),
                 )
                 policy_logits_t = out.action_logits.clone()
                 if self._runtime_special_candidate_builder is not None:
@@ -533,12 +596,14 @@ class KeqingModelAdapter:
             elif self.model_version == "keqingv4":
                 legal_actions = self._resolve_runtime_legal_actions(snap, actor)
                 event_history = self._resolve_v4_event_history(snap)
+                rule_context = self._resolve_v4_rule_context(snap)
                 discard_summary, call_summary, special_summary = self._resolve_v4_runtime_summaries(
                     snap,
                     actor,
                     legal_actions,
                 )
                 event_history_t = torch.from_numpy(event_history).unsqueeze(0).to(self.device).long()
+                rule_context_t = torch.from_numpy(rule_context).unsqueeze(0).to(self.device)
                 discard_summary_t = torch.from_numpy(discard_summary).unsqueeze(0).to(self.device)
                 call_summary_t = torch.from_numpy(call_summary).unsqueeze(0).to(self.device)
                 special_summary_t = torch.from_numpy(special_summary).unsqueeze(0).to(self.device)
@@ -549,6 +614,7 @@ class KeqingModelAdapter:
                     discard_summary=discard_summary_t.float(),
                     call_summary=call_summary_t.float(),
                     special_summary=special_summary_t.float(),
+                    rule_context=rule_context_t.float(),
                 )
             else:
                 policy_logits_t, value_t = self.model(tile_t, scalar_t)

@@ -11,6 +11,7 @@ from training.cache_schema import (
     XMODEL1_HISTORY_SUMMARY_DIM,
     XMODEL1_MAX_CANDIDATES,
     XMODEL1_MAX_RESPONSE_CANDIDATES,
+    XMODEL1_RULE_CONTEXT_DIM,
     XMODEL1_SCHEMA_NAME,
     XMODEL1_SCHEMA_VERSION,
 )
@@ -98,6 +99,11 @@ def make_xmodel1_v3_payload(
             -1,
             dtype=np.int16,
         ),
+        "response_human_discard_idx": np.full(
+            (n, XMODEL1_MAX_RESPONSE_CANDIDATES),
+            -1,
+            dtype=np.int16,
+        ),
         "win_target": np.zeros((n,), dtype=np.float32),
         "dealin_target": np.zeros((n,), dtype=np.float32),
         "pts_given_win_target": np.zeros((n,), dtype=np.float32),
@@ -106,6 +112,10 @@ def make_xmodel1_v3_payload(
         "final_rank_target": np.zeros((n,), dtype=np.int8),
         "final_score_delta_points_target": np.zeros((n,), dtype=np.int32),
         "history_summary": np.zeros((n, XMODEL1_HISTORY_SUMMARY_DIM), dtype=np.float16),
+        "rule_context": np.tile(
+            np.asarray((1.0, 0.5, 0.0, -1.5, 0.0, 1.0), dtype=np.float32),
+            (n, 1),
+        ).reshape(n, XMODEL1_RULE_CONTEXT_DIM),
         "sample_type": (
             np.zeros((n,), dtype=np.int8)
             if sample_type is None

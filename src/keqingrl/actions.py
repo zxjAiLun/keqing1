@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Mapping, TYPE_CHECKING
 
@@ -42,6 +42,10 @@ class ActionSpec:
     consumed: tuple[int, ...] = ()
     from_who: int | None = None
     flags: int = 0
+    canonical_key: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "canonical_key", make_action_canonical_key(self))
 
     def to_mjai_action(self, *, actor: int) -> dict[str, object]:
         if self.action_type == ActionType.REACH_DISCARD:
@@ -107,6 +111,19 @@ def encode_action_id(spec: ActionSpec) -> int:
     encoded = encoded * _FROM_WHO_BASE + _encode_from_who_slot(spec.from_who)
     encoded = encoded * _FLAGS_BASE + int(spec.flags)
     return encoded
+
+
+def make_action_canonical_key(spec: ActionSpec) -> str:
+    consumed = ",".join(str(int(tile)) for tile in spec.consumed)
+    tile = -1 if spec.tile is None else int(spec.tile)
+    from_who = -1 if spec.from_who is None else int(spec.from_who)
+    return (
+        f"{int(spec.action_type)}"
+        f"|tile={tile}"
+        f"|consumed={consumed}"
+        f"|from={from_who}"
+        f"|flags={int(spec.flags)}"
+    )
 
 
 def decode_action_id(encoded: int) -> ActionSpec:
@@ -246,4 +263,5 @@ __all__ = [
     "action_from_mjai",
     "decode_action_id",
     "encode_action_id",
+    "make_action_canonical_key",
 ]

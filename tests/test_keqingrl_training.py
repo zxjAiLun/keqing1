@@ -11,6 +11,8 @@ from keqingrl import (
     RandomInteractivePolicy,
     evaluate_discard_only_policy,
     evaluate_policy,
+    measure_latency_smoke,
+    run_fixed_seed_evaluation_smoke,
     run_discard_only_training,
     run_training,
 )
@@ -150,8 +152,49 @@ def test_evaluate_policy_accepts_opponent_pool() -> None:
     assert torch.isfinite(torch.tensor(metrics.mean_terminal_reward))
 
 
-def test_run_training_accepts_opponent_pool() -> None:
+def test_fixed_seed_evaluation_smoke_reports_seat_rotation() -> None:
     torch.manual_seed(4)
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    policy = NeuralInteractivePolicy(
+        hidden_dim=32,
+        num_res_blocks=1,
+        dropout=0.0,
+    )
+
+    report = run_fixed_seed_evaluation_smoke(
+        env,
+        policy,
+        num_games=1,
+        seed=117,
+        seat_rotation=(0, 1),
+    )
+
+    assert report.episode_count == 2
+    assert report.seat_rotation == (0, 1)
+    assert 1.0 <= report.average_rank <= 4.0
+    assert -2.0 <= report.rank_pt <= 2.0
+    assert 0.0 <= report.fourth_rate <= 1.0
+
+
+def test_latency_smoke_reports_positive_rates() -> None:
+    torch.manual_seed(5)
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    policy = NeuralInteractivePolicy(
+        hidden_dim=32,
+        num_res_blocks=1,
+        dropout=0.0,
+    )
+
+    report = measure_latency_smoke(env, policy, num_games=1, seed=119)
+
+    assert report.decision_count > 0
+    assert report.game_count == 1
+    assert report.decisions_per_sec > 0.0
+    assert report.games_per_sec > 0.0
+
+
+def test_run_training_accepts_opponent_pool() -> None:
+    torch.manual_seed(6)
     env = DiscardOnlyMahjongEnv(max_kyokus=1)
     policy = NeuralInteractivePolicy(
         hidden_dim=32,
