@@ -79,6 +79,75 @@ def test_discard_only_env_rejects_action_not_in_current_legal_order() -> None:
         env.step(actor, ActionSpec(ActionType.PASS))
 
 
+@pytest.mark.parametrize(
+    ("raw_actions", "expected_type"),
+    [
+        (
+            (
+                MahjongActionSpec(type="hora", actor=0, target=0, pai="7m"),
+                MahjongActionSpec(type="dahai", actor=0, pai="4m", tsumogiri=False),
+                MahjongActionSpec(type="dahai", actor=0, pai="7m", tsumogiri=True),
+            ),
+            "hora",
+        ),
+        (
+            (
+                MahjongActionSpec(type="hora", actor=1, target=0, pai="4m"),
+                MahjongActionSpec(type="none"),
+            ),
+            "hora",
+        ),
+        (
+            (
+                MahjongActionSpec(type="ryukyoku", actor=0),
+                MahjongActionSpec(type="dahai", actor=0, pai="4m", tsumogiri=False),
+            ),
+            "ryukyoku",
+        ),
+    ],
+)
+def test_forced_terminal_actions_preempt_learner_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_actions: tuple[MahjongActionSpec, ...],
+    expected_type: str,
+) -> None:
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    response_window = raw_actions[0].type == "hora" and raw_actions[0].target != raw_actions[0].actor
+    room = SimpleNamespace(
+        phase="active",
+        events=[],
+        state=SimpleNamespace(
+            actor_to_move=0 if not response_window else 1,
+            last_discard=None if not response_window else {"actor": 0, "pai": "4m"},
+            last_kakan=None,
+        ),
+    )
+    dispatched: list[dict[str, object]] = []
+
+    env.room = room
+    monkeypatch.setattr(env.manager, "prepare_turn", lambda _room, _actor: None)
+    monkeypatch.setattr("keqingrl.env.enumerate_legal_action_specs", lambda _snapshot, _actor: raw_actions)
+    monkeypatch.setattr(env, "_snapshot_with_rl_fields", lambda actor: {"actor": actor})
+    monkeypatch.setattr(
+        env,
+        "_choose_rulebase_raw_action",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("rulebase gate should not run")),
+    )
+
+    def _record_dispatch(_room, _actor: int, payload: dict[str, object]) -> None:
+        dispatched.append(payload)
+        env._done = True
+
+    monkeypatch.setattr(env, "_dispatch_manager_action", _record_dispatch)
+
+    env._advance_until_decision()
+
+    assert dispatched == [raw_actions[0].to_mjai()]
+    assert dispatched[0]["type"] == expected_type
+    assert env._turn is None
+    assert env.is_done()
+
+
 def test_discard_only_env_step_advances_or_finishes_episode() -> None:
     env = DiscardOnlyMahjongEnv(max_kyokus=1)
     state = env.reset(seed=19)

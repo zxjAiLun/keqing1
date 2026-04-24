@@ -56,12 +56,14 @@ from keqingrl.ppo import (
 from keqingrl.review import (
     EpisodeReview,
     ReviewCandidate,
+    ReviewPolicyFieldSummary,
     StepReview,
     build_policy_resolver,
     export_episode_review_jsonl,
     format_action_spec,
     review_rollout_episode,
     review_rollout_step,
+    summarize_review_policy_fields,
 )
 from keqingrl.rewards import (
     DEFAULT_PT_MAP,
@@ -173,6 +175,7 @@ __all__ = [
     "RandomInteractivePolicy",
     "RewardSpec",
     "ReviewCandidate",
+    "ReviewPolicyFieldSummary",
     "RULE_CONTEXT_DIM",
     "RULE_CONTEXT_ENCODING_VERSION",
     "REWARD_SPEC_VERSION",
@@ -239,6 +242,7 @@ __all__ = [
     "build_selfplay_seat_assignments",
     "summarize_iteration",
     "summarize_discard_only_iteration",
+    "summarize_review_policy_fields",
     "terminal_rank_rewards",
     "validate_checkpoint_metadata",
 ]

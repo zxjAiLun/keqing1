@@ -50,10 +50,16 @@ def test_checkpoint_metadata_rejects_contract_version_mismatch() -> None:
     metadata = default_checkpoint_metadata()
     validate_checkpoint_metadata(metadata)
 
-    metadata["action_contract_version"] = "old-action-contract"
-    try:
-        validate_checkpoint_metadata(metadata)
-    except ValueError as exc:
-        assert "action_contract_version" in str(exc)
-    else:  # pragma: no cover - defensive
-        raise AssertionError("expected checkpoint contract-version mismatch")
+    for key, old_value in (
+        ("action_contract_version", "old-action-contract"),
+        ("reward_spec_version", "old-reward-spec"),
+        ("style_context_version", "old-style-context"),
+    ):
+        mismatched = dict(metadata)
+        mismatched[key] = old_value
+        try:
+            validate_checkpoint_metadata(mismatched)
+        except ValueError as exc:
+            assert key in str(exc)
+        else:  # pragma: no cover - defensive
+            raise AssertionError(f"expected checkpoint {key} mismatch")

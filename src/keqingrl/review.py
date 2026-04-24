@@ -69,6 +69,18 @@ class EpisodeReview:
     steps: tuple[StepReview, ...]
 
 
+@dataclass(frozen=True)
+class ReviewPolicyFieldSummary:
+    learner_step_count: int
+    autopilot_step_count: int
+    entropy_count: int
+    log_prob_count: int
+    neural_delta_count: int
+    mean_entropy: float | None
+    mean_recorded_log_prob: float | None
+    mean_chosen_neural_delta: float | None
+
+
 def format_action_spec(spec: ActionSpec) -> str:
     action_name = spec.action_type.name.lower()
     parts = [action_name]
@@ -221,6 +233,28 @@ def export_episode_review_jsonl(
     return path
 
 
+def summarize_review_policy_fields(episode_review: EpisodeReview) -> ReviewPolicyFieldSummary:
+    learner_steps = [step for step in episode_review.steps if not step.is_autopilot]
+    autopilot_steps = [step for step in episode_review.steps if step.is_autopilot]
+    entropies = [step.entropy for step in learner_steps if step.entropy is not None]
+    log_probs = [step.recorded_log_prob for step in learner_steps if step.recorded_log_prob is not None]
+    deltas = [
+        step.chosen_action.neural_delta
+        for step in learner_steps
+        if step.chosen_action.neural_delta is not None
+    ]
+    return ReviewPolicyFieldSummary(
+        learner_step_count=len(learner_steps),
+        autopilot_step_count=len(autopilot_steps),
+        entropy_count=len(entropies),
+        log_prob_count=len(log_probs),
+        neural_delta_count=len(deltas),
+        mean_entropy=_mean_optional(entropies),
+        mean_recorded_log_prob=_mean_optional(log_probs),
+        mean_chosen_neural_delta=_mean_optional(deltas),
+    )
+
+
 def _candidate_from_step(
     step: RolloutStep,
     probs: torch.Tensor,
@@ -304,6 +338,13 @@ def _optional_row(
     return tensor[0].detach().cpu()
 
 
+def _mean_optional(values: Sequence[float | None]) -> float | None:
+    clean = [float(value) for value in values if value is not None]
+    if not clean:
+        return None
+    return sum(clean) / len(clean)
+
+
 def _policy_device(policy: InteractivePolicy) -> torch.device:
     parameter = next(policy.parameters(), None)
     if parameter is not None:
@@ -354,10 +395,12 @@ def _resolve_review_policy(
 __all__ = [
     "EpisodeReview",
     "ReviewCandidate",
+    "ReviewPolicyFieldSummary",
     "StepReview",
     "build_policy_resolver",
     "export_episode_review_jsonl",
     "format_action_spec",
     "review_rollout_episode",
     "review_rollout_step",
+    "summarize_review_policy_fields",
 ]

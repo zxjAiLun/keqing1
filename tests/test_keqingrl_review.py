@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 
 import pytest
@@ -20,23 +21,29 @@ from keqingrl import (
     format_action_spec,
     review_rollout_episode,
     review_rollout_step,
+    summarize_review_policy_fields,
 )
 from keqingrl.contracts import ObsTensorBatch, PolicyOutput
 
 
 class _FixedReviewPolicy(InteractivePolicy):
-    def __init__(self, logits: list[float]) -> None:
+    def __init__(self, logits: list[float], neural_delta: list[float] | None = None) -> None:
         super().__init__()
         self._logits = torch.tensor([logits], dtype=torch.float32)
+        self._neural_delta = None if neural_delta is None else torch.tensor([neural_delta], dtype=torch.float32)
 
     def forward(self, policy_input) -> PolicyOutput:
         batch_size = int(policy_input.legal_action_mask.shape[0])
         logits = self._logits.expand(batch_size, -1).clone()
         logits = logits.masked_fill(~policy_input.legal_action_mask, torch.finfo(logits.dtype).min)
+        aux = {}
+        if self._neural_delta is not None:
+            aux["neural_delta"] = self._neural_delta.expand(batch_size, -1).clone()
         return PolicyOutput(
             action_logits=logits,
             value=torch.full((batch_size,), 0.25, dtype=torch.float32),
             rank_logits=torch.tensor([[2.0, 1.0, 0.0, -1.0]], dtype=torch.float32).expand(batch_size, -1).clone(),
+            aux=aux,
         )
 
 
@@ -381,6 +388,65 @@ def test_review_rollout_step_and_export_support_ryukyoku_action(tmp_path) -> Non
         "ryukyoku",
         "discard:1m",
     ]
+
+
+def test_review_autopilot_null_policy_fields_are_not_aggregated(tmp_path) -> None:
+    learner_step = _synthetic_review_step()
+    autopilot_step = replace(
+        _synthetic_review_step(),
+        is_autopilot=True,
+        is_learner_controlled=False,
+        step_id=6,
+        policy_version=4,
+        log_prob=-99.0,
+        entropy=99.0,
+        terminal_reason="tsumo",
+        rulebase_chosen=learner_step.action_spec.canonical_key,
+        policy_chosen=learner_step.action_spec.canonical_key,
+    )
+    episode = RolloutEpisode(
+        steps=(learner_step, autopilot_step),
+        terminal_rewards=(1.0, 0.0, -0.5, -0.5),
+        final_ranks=(0, 1, 2, 3),
+        scores=(26000, 24000, 25000, 25000),
+        game_id="review-autopilot-null",
+    )
+    policy = _FixedReviewPolicy(
+        [0.1, 1.3, 1.1, 0.9, 0.7],
+        neural_delta=[0.01, 0.02, 0.03, 0.04, 0.05],
+    )
+
+    review = review_rollout_episode(policy, episode, top_k=3)
+
+    learner_review, autopilot_review = review.steps
+    assert learner_review.entropy is not None
+    assert learner_review.recorded_log_prob == pytest.approx(learner_step.log_prob)
+    assert learner_review.recomputed_log_prob is not None
+    assert learner_review.chosen_action.neural_delta == pytest.approx(0.04)
+
+    assert autopilot_review.is_autopilot is True
+    assert autopilot_review.entropy is None
+    assert autopilot_review.recorded_log_prob is None
+    assert autopilot_review.recomputed_log_prob is None
+    assert autopilot_review.chosen_action.neural_delta is None
+    assert all(candidate.neural_delta is None for candidate in autopilot_review.top_k)
+
+    summary = summarize_review_policy_fields(review)
+    assert summary.learner_step_count == 1
+    assert summary.autopilot_step_count == 1
+    assert summary.entropy_count == 1
+    assert summary.log_prob_count == 1
+    assert summary.neural_delta_count == 1
+    assert summary.mean_chosen_neural_delta == pytest.approx(0.04)
+
+    output_path = tmp_path / "autopilot-null-review.jsonl"
+    export_episode_review_jsonl(review, output_path)
+    payloads = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert payloads[1]["is_autopilot"] is True
+    assert payloads[1]["entropy"] is None
+    assert payloads[1]["recorded_log_prob"] is None
+    assert payloads[1]["recomputed_log_prob"] is None
+    assert payloads[1]["chosen_action"]["neural_delta"] is None
 
 
 def test_review_rollout_episode_can_route_mixed_policy_steps_via_resolver(tmp_path) -> None:

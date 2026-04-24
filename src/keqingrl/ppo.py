@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from torch.nn.parameter import UninitializedParameter
 
 from keqingrl.buffer import PPOBatch
 from keqingrl.distribution import MaskedCategorical
@@ -225,11 +226,12 @@ def _delta_metrics_from_output(output, batch: PPOBatch) -> tuple[torch.Tensor | 
 
 
 def _freeze_actor_delta_parameters(policy: InteractivePolicy) -> list[tuple[torch.nn.Parameter, bool]]:
-    module = getattr(policy, "policy_mlp", None)
-    if not isinstance(module, torch.nn.Module):
-        return []
     frozen: list[tuple[torch.nn.Parameter, bool]] = []
-    for parameter in module.parameters():
+    for name, parameter in policy.named_parameters():
+        if isinstance(parameter, UninitializedParameter):
+            continue
+        if name.startswith("value_head.") or name.startswith("rank_head."):
+            continue
         frozen.append((parameter, bool(parameter.requires_grad)))
         parameter.requires_grad_(False)
     return frozen
