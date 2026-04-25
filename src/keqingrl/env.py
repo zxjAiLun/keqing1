@@ -405,13 +405,19 @@ class DiscardOnlyMahjongEnv:
                     continue
                 if not controlled_response_pairs:
                     raise RuntimeError(f"keqingrl env found no controllable response action for actor {actor}")
+                rulebase_chosen, rulebase_debug_key = self._rulebase_keys_for_controlled_actions(
+                    snapshot,
+                    actor,
+                    controlled_response_pairs,
+                    rulebase_response,
+                )
                 self._turn = _TurnContext(
                     actor=actor,
                     snapshot=snapshot,
                     legal_actions=tuple(action for action, _ in controlled_response_pairs),
                     dispatch_actions=tuple(dispatch for _, dispatch in controlled_response_pairs),
-                    rulebase_chosen=self._raw_action_canonical_key(rulebase_response),
-                    rulebase_debug_key=self._raw_action_debug_key(rulebase_response),
+                    rulebase_chosen=rulebase_chosen,
+                    rulebase_debug_key=rulebase_debug_key,
                     control_action_types=tuple(action_type.name for action_type in self.response_action_types),
                 )
                 return
@@ -450,16 +456,46 @@ class DiscardOnlyMahjongEnv:
             if not controlled_pairs:
                 raise RuntimeError(f"keqingrl env found no controllable self-turn action for actor {actor}")
 
+            rulebase_chosen, rulebase_debug_key = self._rulebase_keys_for_controlled_actions(
+                snapshot,
+                actor,
+                controlled_pairs,
+                rulebase_self_action,
+            )
             self._turn = _TurnContext(
                 actor=actor,
                 snapshot=snapshot,
                 legal_actions=tuple(action for action, _ in controlled_pairs),
                 dispatch_actions=tuple(dispatch for _, dispatch in controlled_pairs),
-                rulebase_chosen=self._raw_action_canonical_key(rulebase_self_action),
-                rulebase_debug_key=self._raw_action_debug_key(rulebase_self_action),
+                rulebase_chosen=rulebase_chosen,
+                rulebase_debug_key=rulebase_debug_key,
                 control_action_types=tuple(action_type.name for action_type in self.self_turn_action_types),
             )
             return
+
+    def _rulebase_keys_for_controlled_actions(
+        self,
+        snapshot: dict[str, object],
+        actor: int,
+        controlled_pairs: Sequence[tuple[ActionSpec, MahjongActionSpec]],
+        rulebase_action: MahjongActionSpec | None,
+    ) -> tuple[str | None, str | None]:
+        controlled_keys = {action.canonical_key for action, _ in controlled_pairs}
+        rulebase_key = self._raw_action_canonical_key(rulebase_action)
+        if rulebase_key in controlled_keys:
+            return rulebase_key, self._raw_action_debug_key(rulebase_action)
+
+        dispatch_payloads = [dispatch_events[0] for _, dispatch_events in controlled_pairs if len(dispatch_events) == 1]
+        if len(dispatch_payloads) != len(controlled_pairs):
+            return None, self._raw_action_debug_key(rulebase_action)
+        chosen_payload = keqing_core.choose_rulebase_action(snapshot, actor, dispatch_payloads)
+        if chosen_payload is None:
+            return None, self._raw_action_debug_key(rulebase_action)
+        for action_spec, dispatch_events in controlled_pairs:
+            if dispatch_events[0] == chosen_payload:
+                return action_spec.canonical_key, action_spec.canonical_key
+        return None, self._raw_action_debug_key(rulebase_action)
+
 
     def _record_autopilot_event(
         self,

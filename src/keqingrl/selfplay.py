@@ -60,6 +60,34 @@ class DiscardOnlyIterationMetrics:
     mean_avg_abs_neural_delta: float | None = None
     mean_delta_norm: float | None = None
 
+    @property
+    def learner_win_rate(self) -> float:
+        return self.win_rate
+
+    @property
+    def learner_deal_in_rate(self) -> float:
+        return self.deal_in_rate
+
+    @property
+    def learner_call_rate(self) -> float:
+        return self.call_rate
+
+    @property
+    def learner_riichi_rate(self) -> float:
+        return self.riichi_rate
+
+    @property
+    def illegal_action_rate_fail_closed(self) -> float:
+        return self.illegal_action_rate
+
+    @property
+    def fallback_rate_fail_closed(self) -> float:
+        return self.fallback_rate
+
+    @property
+    def forced_terminal_missed_fail_closed(self) -> int:
+        return self.forced_terminal_missed
+
 
 @dataclass(frozen=True)
 class DiscardOnlyIterationResult:
@@ -674,13 +702,13 @@ def _smoke_metric_counts(
         for step in episode.steps:
             if step.terminal_reason is not None:
                 terminal_reason_count[step.terminal_reason] = terminal_reason_count.get(step.terminal_reason, 0) + 1
+            if step.action_spec.action_type == ActionType.RON and step.action_spec.from_who in learner_seat_set:
+                counts["deal_in_count"] = int(counts["deal_in_count"]) + 1
             if step.actor not in learner_seat_set:
                 continue
             counts["learner_step_count"] = int(counts["learner_step_count"]) + 1
             if step.action_spec.action_type in {ActionType.TSUMO, ActionType.RON}:
                 counts["win_count"] = int(counts["win_count"]) + 1
-            if step.action_spec.action_type == ActionType.RON and step.action_spec.from_who in learner_seat_set:
-                counts["deal_in_count"] = int(counts["deal_in_count"]) + 1
             if step.action_spec.action_type in {ActionType.CHI, ActionType.PON, ActionType.DAIMINKAN}:
                 counts["call_count"] = int(counts["call_count"]) + 1
             if step.action_spec.action_type == ActionType.REACH_DISCARD:

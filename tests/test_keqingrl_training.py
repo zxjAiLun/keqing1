@@ -2,18 +2,29 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
 import torch
 
-from keqingrl.training import _fixed_seed_eval_failure_reasons
+from keqingrl.selfplay import _smoke_metric_counts as _selfplay_smoke_metric_counts
+from scripts.run_keqingrl_discard_research_sweep import RulebaseGreedyPolicy
+
+from keqingrl.training import (
+    _fixed_seed_eval_failure_reasons,
+    _smoke_metric_counts as _training_smoke_metric_counts,
+)
 
 from keqingrl import (
+    ActionSpec,
     ActionType,
     DiscardOnlyMahjongEnv,
     NeuralInteractivePolicy,
+    ObsTensorBatch,
     OpponentPool,
     OpponentPoolEntry,
+    PolicyInput,
     RandomInteractivePolicy,
     evaluate_discard_only_policy,
     evaluate_policy,
@@ -25,6 +36,68 @@ from keqingrl import (
     run_zero_delta_selfplay_smoke,
     run_training,
 )
+
+
+def _rulebase_policy_input(*, metadata: dict[str, object]) -> PolicyInput:
+    return PolicyInput(
+        obs=ObsTensorBatch(
+            tile_obs=torch.zeros((1, 1), dtype=torch.float32),
+            scalar_obs=torch.zeros((1, 1), dtype=torch.float32),
+            extras={},
+        ),
+        legal_action_ids=torch.zeros((1, 1), dtype=torch.long),
+        legal_action_features=torch.zeros((1, 1, 1), dtype=torch.float32),
+        legal_action_mask=torch.ones((1, 1), dtype=torch.bool),
+        rule_context=torch.zeros((1, 1), dtype=torch.float32),
+        prior_logits=torch.zeros((1, 1), dtype=torch.float32),
+        legal_actions=((ActionSpec(ActionType.DISCARD, tile=0),),),
+        metadata=metadata,
+    )
+
+
+
+def test_rulebase_greedy_policy_strict_rejects_missing_rulebase_choice() -> None:
+    policy = RulebaseGreedyPolicy(strict=True)
+    policy_input = _rulebase_policy_input(metadata={})
+
+    with pytest.raises(RuntimeError, match="rulebase_chosen missing"):
+        policy.forward(policy_input)
+
+    assert policy.rulebase_chosen_missing_count == 1
+    assert policy.rulebase_fallback_count == 0
+
+
+def test_rulebase_greedy_policy_non_strict_counts_fallback() -> None:
+    policy = RulebaseGreedyPolicy(strict=False)
+    policy_input = _rulebase_policy_input(metadata={})
+
+    output = policy.forward(policy_input)
+
+    assert output.action_logits.shape == (1, 1)
+    assert policy.rulebase_chosen_missing_count == 1
+    assert policy.rulebase_fallback_count == 1
+
+
+
+def test_smoke_metric_counts_include_opponent_ron_against_learner() -> None:
+    opponent_ron_on_learner = SimpleNamespace(
+        actor=2,
+        action_spec=ActionSpec(ActionType.RON, tile=0, from_who=0),
+        terminal_reason=None,
+    )
+    learner_discard = SimpleNamespace(
+        actor=0,
+        action_spec=ActionSpec(ActionType.DISCARD, tile=0),
+        terminal_reason=None,
+    )
+    episode = SimpleNamespace(steps=(learner_discard, opponent_ron_on_learner))
+
+    for count_fn in (_selfplay_smoke_metric_counts, _training_smoke_metric_counts):
+        counts = count_fn((episode,), (0,))
+        assert counts["learner_step_count"] == 1
+        assert counts["win_count"] == 0
+        assert counts["deal_in_count"] == 1
+
 
 
 def test_evaluate_discard_only_policy_returns_finite_metrics() -> None:
