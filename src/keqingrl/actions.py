@@ -55,6 +55,13 @@ class ActionIdentity:
 
 @dataclass(frozen=True)
 class ActionSpec:
+    """Structured policy action.
+
+    Runtime ActionIdentity is owned by Rust. The Python canonical key remains a
+    parity oracle and stable serialization convenience until all constructors
+    hydrate identities directly from Rust.
+    """
+
     action_type: ActionType
     tile: int | None = None
     consumed: tuple[int, ...] = ()
@@ -159,6 +166,7 @@ def _optional_int(value: object) -> int | None:
 
 
 def make_action_canonical_key(spec: ActionSpec) -> str:
+    """Build the Python parity key; Rust ActionIdentity is the runtime source of truth."""
     consumed = ",".join(str(int(tile)) for tile in spec.consumed)
     tile = -1 if spec.tile is None else int(spec.tile)
     from_who = -1 if spec.from_who is None else int(spec.from_who)

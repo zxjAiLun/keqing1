@@ -1,0 +1,32 @@
+# KeqingRL Controlled Discard-Only Sweep
+
+seed: `24860425`
+configs: `1`
+iterations/config: `5`
+rollout_episodes/config/iter: `8`
+eval_episodes/config: `16`
+
+## Scope
+
+- style_context: neutral
+- action_scope: DISCARD only
+- reward_spec: fixed default
+- opponents: rule_prior_greedy
+- no teacher imitation, no full action RL, no style variants
+
+## Stability Checks
+
+- max illegal_action_rate: 0
+- max fallback_rate: 0
+- max forced_terminal_missed: 0
+- caveat: this is a tiny smoke-scale matrix, not strength evidence
+
+## Top Configs
+
+- id=0 opponent=rule_prior_greedy rule_kl=0.02 entropy=0.01 lr=0.0001 eval_rank_pt=-0.03125 fourth=0.375 deal_in=0 approx_kl=1.77069e-11 clip=0 rule_kl_obs=-2.01907e-08 rule_agree=1 delta_mean=0.000274374 delta_max=0.000539162 top1_changed=0
+
+## Artifacts
+
+- `sweep.json`
+- `summary.csv`
+- `iterations.csv`

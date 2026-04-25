@@ -52,6 +52,47 @@ def _response_raw_legal_actions() -> tuple[MahjongActionSpec, ...]:
     )
 
 
+def test_raw_reach_uses_debug_key_not_canonical_identity() -> None:
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    raw_reach = MahjongActionSpec(type="reach", actor=0)
+
+    assert env._raw_action_canonical_key(raw_reach) is None
+    assert env._raw_action_debug_key(raw_reach) == "raw:reach|actor=0|tile=None"
+
+
+def test_non_discard_self_turn_actions_are_not_autopilot_dispatchable_in_discard_only_scope() -> None:
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+    raw_reach = MahjongActionSpec(type="reach", actor=0)
+    raw_kakan = MahjongActionSpec(type="kakan", actor=0, pai="E", consumed=("E", "E", "E"))
+
+    assert env._is_raw_action_controlled(raw_reach, response=False) is False
+    assert env._is_raw_action_autopilot_dispatchable(raw_reach, response=False) is False
+    assert env._is_raw_action_controlled(raw_kakan, response=False) is False
+    assert env._is_raw_action_autopilot_dispatchable(raw_kakan, response=False) is False
+
+
+def test_runtime_rulebase_missing_capability_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+
+    def _missing_rulebase(*_args, **_kwargs):
+        raise RuntimeError("Rust rulebase capability is not available")
+
+    monkeypatch.setattr(keqing_core, "choose_rulebase_action", _missing_rulebase)
+
+    with pytest.raises(RuntimeError, match="KeqingRL runtime requires Rust rulebase scoring"):
+        env._choose_rulebase_raw_action(
+            _self_turn_snapshot(),
+            0,
+            (MahjongActionSpec(type="dahai", actor=0, pai="4m", tsumogiri=False),),
+        )
+
+    assert env._choose_rulebase_raw_action_optional(
+        _self_turn_snapshot(),
+        0,
+        (MahjongActionSpec(type="dahai", actor=0, pai="4m", tsumogiri=False),),
+    ) is None
+
+
 def test_discard_only_env_keeps_ordered_legal_actions_stable_within_turn() -> None:
     env = DiscardOnlyMahjongEnv(max_kyokus=1)
     state = env.reset(seed=7)

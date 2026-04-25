@@ -104,6 +104,7 @@ class AutopilotTraceEvent:
     terminal_reason: str | None
     rulebase_chosen: str | None
     policy_chosen: str
+    rulebase_debug_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,7 @@ class _TurnContext:
     legal_actions: tuple[ActionSpec, ...]
     dispatch_actions: tuple[tuple[dict[str, object], ...], ...]
     rulebase_chosen: str | None = None
+    rulebase_debug_key: str | None = None
     control_action_types: tuple[str, ...] = ()
 
 
@@ -272,6 +274,7 @@ class DiscardOnlyMahjongEnv:
             legal_actions=(turn.legal_actions,),
             metadata={
                 "rulebase_chosen": turn.rulebase_chosen,
+                "rulebase_debug_key": turn.rulebase_debug_key,
                 "control_action_types": turn.control_action_types,
                 "is_learner_controlled": True,
                 "observation_contract_version": OBSERVATION_CONTRACT_VERSION,
@@ -384,7 +387,7 @@ class DiscardOnlyMahjongEnv:
                     self._dispatch_manager_action(room, actor, forced_response.raw_spec.to_mjai())
                     continue
                 rulebase_response = self._choose_rulebase_raw_action(snapshot, actor, raw_legal_actions)
-                if rulebase_response is not None and not self._is_raw_action_controlled(
+                if rulebase_response is not None and self._is_raw_action_autopilot_dispatchable(
                     rulebase_response,
                     response=True,
                 ):
@@ -408,6 +411,7 @@ class DiscardOnlyMahjongEnv:
                     legal_actions=tuple(action for action, _ in controlled_response_pairs),
                     dispatch_actions=tuple(dispatch for _, dispatch in controlled_response_pairs),
                     rulebase_chosen=self._raw_action_canonical_key(rulebase_response),
+                    rulebase_debug_key=self._raw_action_debug_key(rulebase_response),
                     control_action_types=tuple(action_type.name for action_type in self.response_action_types),
                 )
                 return
@@ -425,7 +429,7 @@ class DiscardOnlyMahjongEnv:
                 continue
 
             rulebase_self_action = self._choose_rulebase_raw_action(snapshot, actor, raw_legal_actions)
-            if rulebase_self_action is not None and not self._is_raw_action_controlled(
+            if rulebase_self_action is not None and self._is_raw_action_autopilot_dispatchable(
                 rulebase_self_action,
                 response=False,
             ):
@@ -452,6 +456,7 @@ class DiscardOnlyMahjongEnv:
                 legal_actions=tuple(action for action, _ in controlled_pairs),
                 dispatch_actions=tuple(dispatch for _, dispatch in controlled_pairs),
                 rulebase_chosen=self._raw_action_canonical_key(rulebase_self_action),
+                rulebase_debug_key=self._raw_action_debug_key(rulebase_self_action),
                 control_action_types=tuple(action_type.name for action_type in self.self_turn_action_types),
             )
             return
@@ -474,6 +479,7 @@ class DiscardOnlyMahjongEnv:
             actor,
             action_spec,
             rulebase_chosen=self._raw_action_canonical_key(rulebase_action),
+            rulebase_debug_key=self._raw_action_debug_key(rulebase_action),
             terminal_reason=terminal_reason if terminal_reason is not None else self._terminal_reason_for_action(action_spec),
         )
         self._autopilot_events.append(
@@ -485,6 +491,7 @@ class DiscardOnlyMahjongEnv:
                 terminal_reason=terminal_reason if terminal_reason is not None else self._terminal_reason_for_action(action_spec),
                 rulebase_chosen=self._raw_action_canonical_key(rulebase_action),
                 policy_chosen=action_spec.canonical_key,
+                rulebase_debug_key=self._raw_action_debug_key(rulebase_action),
             )
         )
 
@@ -495,6 +502,7 @@ class DiscardOnlyMahjongEnv:
         action_spec: ActionSpec,
         *,
         rulebase_chosen: str | None,
+        rulebase_debug_key: str | None,
         terminal_reason: str | None,
     ) -> PolicyInput:
         try:
@@ -535,6 +543,7 @@ class DiscardOnlyMahjongEnv:
             legal_actions=(legal_actions,),
             metadata={
                 "rulebase_chosen": rulebase_chosen,
+                "rulebase_debug_key": rulebase_debug_key,
                 "control_action_types": (),
                 "is_autopilot": True,
                 "is_learner_controlled": False,
@@ -614,12 +623,12 @@ class DiscardOnlyMahjongEnv:
         try:
             chosen_payload = keqing_core.choose_rulebase_action(snapshot, actor, raw_payloads)
         except RuntimeError as exc:
-            if not (
+            if (
                 keqing_core.is_missing_rust_capability_error(exc)
                 or "rulebase capability" in str(exc)
             ):
-                raise
-            return None
+                raise RuntimeError("KeqingRL runtime requires Rust rulebase scoring") from exc
+            raise
         if chosen_payload is None:
             return None
         for raw_spec, payload in zip(raw_legal_actions, raw_payloads):
@@ -638,6 +647,20 @@ class DiscardOnlyMahjongEnv:
             return action_type in self._response_action_type_set
         return action_type in self._self_turn_action_type_set
 
+    def _is_raw_action_autopilot_dispatchable(
+        self,
+        raw_spec: MahjongActionSpec,
+        *,
+        response: bool,
+    ) -> bool:
+        action_type = self._raw_action_type(raw_spec)
+        if not response:
+            return False
+        return (
+            action_type == ActionType.PASS
+            and not self._is_raw_action_controlled(raw_spec, response=True)
+        )
+
     def _raw_action_type(self, raw_spec: MahjongActionSpec) -> ActionType | None:
         if raw_spec.type == "reach":
             return ActionType.REACH_DISCARD
@@ -646,15 +669,36 @@ class DiscardOnlyMahjongEnv:
         except ValueError:
             return None
 
+    def _choose_rulebase_raw_action_optional(
+        self,
+        snapshot: dict[str, object],
+        actor: int,
+        raw_legal_actions: Sequence[MahjongActionSpec],
+    ) -> MahjongActionSpec | None:
+        try:
+            return self._choose_rulebase_raw_action(snapshot, actor, raw_legal_actions)
+        except RuntimeError as exc:
+            if "KeqingRL runtime requires Rust rulebase scoring" in str(exc):
+                return None
+            raise
+
     def _raw_action_canonical_key(self, raw_spec: MahjongActionSpec | None) -> str | None:
         if raw_spec is None:
             return None
-        if raw_spec.type == "reach":
-            return f"{int(ActionType.REACH_DISCARD)}|tile=-1|consumed=|from=-1|flags=0"
         try:
             return action_from_mahjong_spec(raw_spec).canonical_key
         except ValueError:
             return None
+
+    def _raw_action_debug_key(self, raw_spec: MahjongActionSpec | None) -> str | None:
+        if raw_spec is None:
+            return None
+        canonical_key = self._raw_action_canonical_key(raw_spec)
+        if canonical_key is not None:
+            return canonical_key
+        actor = getattr(raw_spec, "actor", None)
+        tile = getattr(raw_spec, "pai", None)
+        return f"raw:{raw_spec.type}|actor={actor}|tile={tile}"
 
     def _is_response_window(self, actor: int) -> bool:
         room = self._require_room()
