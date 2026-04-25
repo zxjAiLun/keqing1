@@ -34,12 +34,17 @@ from scripts.run_keqingrl_discard_research_sweep import RulebaseGreedyPolicy
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run paired eval from saved KeqingRL candidate checkpoints")
-    parser.add_argument("--candidate-summary", type=Path, required=True)
+    parser.add_argument("--mode", choices=("summary", "checkpoint-eval"), default="summary")
+    parser.add_argument("--candidate-summary", type=Path, default=None)
+    parser.add_argument("--checkpoint-path", type=Path, default=None)
+    parser.add_argument("--config-path", type=Path, default=None)
+    parser.add_argument("--source-config-id", type=int, default=None)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--source-config-ids", type=int, nargs="+", default=None)
     parser.add_argument("--eval-episodes", type=int, default=64)
     parser.add_argument("--eval-seed-base", type=int, default=202604250000)
     parser.add_argument("--eval-seed-stride", type=int, default=1)
+    parser.add_argument("--eval-seat-rotation", type=int, nargs="+", default=(0, 1, 2, 3))
     parser.add_argument("--opponents", nargs="+", choices=("rule_prior_greedy", "rulebase"), default=("rule_prior_greedy", "rulebase"))
     parser.add_argument("--max-kyokus", type=int, default=1)
     parser.add_argument("--max-steps", type=int, default=512)
@@ -52,7 +57,7 @@ def main() -> None:
     args = _parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device) if args.device is not None else torch.device("cpu")
-    candidates = _load_candidates(args.candidate_summary, args.source_config_ids, device)
+    candidates = _load_candidate_records(args, device)
     baselines = _build_baselines(candidates, args, device)
     policies = candidates + baselines
 
@@ -84,6 +89,58 @@ def main() -> None:
     print(summary)
 
 
+def _load_candidate_records(args: argparse.Namespace, device: torch.device) -> list[dict[str, Any]]:
+    if args.mode == "checkpoint-eval" or args.checkpoint_path is not None or args.config_path is not None:
+        return [_load_single_checkpoint_candidate(args, device)]
+    if args.candidate_summary is None:
+        raise ValueError("--mode summary requires --candidate-summary")
+    return _load_candidates(args.candidate_summary, args.source_config_ids, device)
+
+
+def _load_single_checkpoint_candidate(args: argparse.Namespace, device: torch.device) -> dict[str, Any]:
+    if args.checkpoint_path is None or args.config_path is None:
+        raise ValueError("--mode checkpoint-eval requires --checkpoint-path and --config-path")
+    checkpoint_path = args.checkpoint_path
+    config_path = args.config_path
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(checkpoint_path)
+    if not config_path.exists():
+        raise FileNotFoundError(config_path)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    policy = RulePriorDeltaPolicy(
+        hidden_dim=int(config["model"]["hidden_dim"]),
+        num_res_blocks=int(config["model"]["num_res_blocks"]),
+        dropout=float(config["model"].get("dropout", 0.0)),
+    ).to(device)
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    policy.load_state_dict(checkpoint["policy_state_dict"])
+    policy.eval()
+    source_config_id = args.source_config_id
+    if source_config_id is None:
+        raw_source = config.get("source_config_id")
+        source_config_id = None if raw_source is None else int(raw_source)
+    config_key = config.get("config_key", {})
+    return {
+        "kind": "candidate",
+        "candidate_id": "checkpoint" if source_config_id is None else str(source_config_id),
+        "source_type": "checkpoint",
+        "source_config_id": source_config_id,
+        "rerun_config_id": config.get("rerun_config_id"),
+        "config_key": config_key,
+        "config_key_label": config.get("config_key_label", json.dumps(config_key, sort_keys=True)),
+        "checkpoint_path": str(checkpoint_path),
+        "checkpoint_sha256": _file_sha256(checkpoint_path),
+        "config_path": str(config_path),
+        "policy": policy,
+        "train_rule_agreement": None,
+        "train_top1_action_changed_rate": None,
+        "train_neural_delta_abs_mean": None,
+        "train_neural_delta_abs_max": None,
+        "train_approx_kl": None,
+        "train_clip_fraction": None,
+    }
+
+
 def _load_candidates(summary_path: Path, source_config_ids: list[int] | None, device: torch.device) -> list[dict[str, Any]]:
     rows = _read_csv(summary_path)
     if source_config_ids is not None:
@@ -110,12 +167,14 @@ def _load_candidates(summary_path: Path, source_config_ids: list[int] | None, de
             {
                 "kind": "candidate",
                 "candidate_id": str(row["source_config_id"]),
+                "source_type": "checkpoint",
                 "source_config_id": int(row["source_config_id"]),
                 "rerun_config_id": int(row["rerun_config_id"]),
                 "config_key": json.loads(row["config_key"]),
                 "config_key_label": row["config_key_label"],
                 "checkpoint_path": str(checkpoint_path),
                 "checkpoint_sha256": row["checkpoint_sha256"],
+                "config_path": str(config_path),
                 "policy": policy,
                 "train_rule_agreement": _optional_float(row.get("rule_agreement")),
                 "train_top1_action_changed_rate": _optional_float(row.get("top1_action_changed_rate")),
@@ -130,7 +189,7 @@ def _load_candidates(summary_path: Path, source_config_ids: list[int] | None, de
 
 def _build_baselines(candidates: list[dict[str, Any]], args: argparse.Namespace, device: torch.device) -> list[dict[str, Any]]:
     first_config = candidates[0]["config_key"]
-    first_checkpoint_config = json.loads(Path(candidates[0]["checkpoint_path"]).with_name("config.json").read_text(encoding="utf-8"))
+    first_checkpoint_config = json.loads(Path(candidates[0]["config_path"]).read_text(encoding="utf-8"))
     zero_policy = RulePriorPolicy()
     untrained = RulePriorDeltaPolicy(
         hidden_dim=int(first_checkpoint_config["model"]["hidden_dim"]),
@@ -148,23 +207,27 @@ def _build_baselines(candidates: list[dict[str, Any]], args: argparse.Namespace,
         {
             "kind": "baseline",
             "candidate_id": "zero_delta_rule_prior",
+            "source_type": "baseline",
             "source_config_id": None,
             "rerun_config_id": None,
             "config_key": {"baseline": "zero_delta_rule_prior", "reference_config_key": first_config},
             "config_key_label": "baseline/zero_delta_rule_prior",
             "checkpoint_path": "",
             "checkpoint_sha256": "",
+            "config_path": "",
             "policy": zero_policy,
         },
         {
             "kind": "baseline",
             "candidate_id": "untrained_rule_prior_delta",
+            "source_type": "baseline",
             "source_config_id": None,
             "rerun_config_id": None,
             "config_key": {"baseline": "untrained_rule_prior_delta", "reference_config_key": first_config},
             "config_key_label": "baseline/untrained_rule_prior_delta",
             "checkpoint_path": "",
             "checkpoint_sha256": "",
+            "config_path": "",
             "policy": untrained,
         },
     ]
@@ -178,7 +241,7 @@ def _evaluate_record(record: dict[str, Any], opponent_name: str, args: argparse.
         num_games=args.eval_episodes,
         seed=args.eval_seed_base,
         seed_stride=args.eval_seed_stride,
-        seat_rotation=(0, 1, 2, 3),
+        seat_rotation=tuple(int(seat) for seat in args.eval_seat_rotation),
         opponent_pool=opponent_pool,
         opponent_name=opponent_name,
         max_steps=args.max_steps,
@@ -190,18 +253,20 @@ def _evaluate_record(record: dict[str, Any], opponent_name: str, args: argparse.
     return {
         "kind": record["kind"],
         "candidate_id": record["candidate_id"],
+        "source_type": record.get("source_type", "checkpoint"),
         "source_config_id": record["source_config_id"],
         "rerun_config_id": record["rerun_config_id"],
         "config_key": record["config_key"],
         "config_key_label": record["config_key_label"],
         "checkpoint_path": record["checkpoint_path"],
         "checkpoint_sha256": record["checkpoint_sha256"],
+        "config_path": record.get("config_path", ""),
         "opponent_name": opponent_name,
         "eval_seed_registry_id": _eval_seed_registry_id(args),
         "eval_seed_hash": _eval_seed_hash(_eval_seed_registry(args)),
         "eval_seed_count": args.eval_episodes,
         "policy_mode": "greedy",
-        "seat_rotation": "0,1,2,3",
+        "seat_rotation": _seat_rotation_label(args),
         "training_rollout_reuse": False,
         "rank_pt": metrics.rank_pt,
         "mean_rank": metrics.average_rank,
@@ -223,6 +288,10 @@ def _evaluate_record(record: dict[str, Any], opponent_name: str, args: argparse.
         "approx_kl": record.get("train_approx_kl"),
         "clip_fraction": record.get("train_clip_fraction"),
         "rulebase_fallback_count": 0,
+        "forced_terminal_preempt_count": metrics.forced_terminal_preempt_count,
+        "autopilot_terminal_count": metrics.autopilot_terminal_count,
+        "learner_seat_step_count": metrics.learner_seat_step_count,
+        "learner_controlled_step_count": metrics.learner_controlled_step_count,
         "illegal_action_rate_fail_closed": metrics.illegal_action_rate_fail_closed,
         "fallback_rate_fail_closed": metrics.fallback_rate_fail_closed,
         "forced_terminal_missed_fail_closed": metrics.forced_terminal_missed_fail_closed,
@@ -237,7 +306,7 @@ def _policy_diagnostics(policy, opponent_pool: OpponentPool, args: argparse.Name
     abs_values: list[float] = []
     changed = 0
     total = 0
-    for seat in (0, 1, 2, 3):
+    for seat in tuple(int(seat) for seat in args.eval_seat_rotation):
         episodes = collect_selfplay_episodes(
             DiscardOnlyMahjongEnv(max_kyokus=args.max_kyokus),
             policy,
@@ -295,11 +364,15 @@ def _opponent_pool(name: str) -> OpponentPool:
 
 def _payload(args: argparse.Namespace, rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
-        "candidate_summary": str(args.candidate_summary),
+        "mode": args.mode,
+        "source_type": "checkpoint",
+        "candidate_summary": None if args.candidate_summary is None else str(args.candidate_summary),
+        "checkpoint_path": None if args.checkpoint_path is None else str(args.checkpoint_path),
+        "config_path": None if args.config_path is None else str(args.config_path),
         "eval_seed_registry_id": _eval_seed_registry_id(args),
         "eval_seed_hash": _eval_seed_hash(_eval_seed_registry(args)),
         "eval_seed_count": args.eval_episodes,
-        "seat_rotation": [0, 1, 2, 3],
+        "seat_rotation": [int(seat) for seat in args.eval_seat_rotation],
         "policy_mode": "greedy",
         "training_rollout_reuse": False,
         "opponents": list(args.opponents),
@@ -321,22 +394,27 @@ def _summary_markdown(args: argparse.Namespace, rows: list[dict[str, Any]]) -> s
     lines = [
         "# KeqingRL Paired Candidate Evaluation",
         "",
+        f"mode: `{args.mode}`",
+        f"source_type: `checkpoint`",
         f"candidate_summary: `{args.candidate_summary}`",
+        f"checkpoint_path: `{args.checkpoint_path}`",
+        f"config_path: `{args.config_path}`",
         f"eval_seed_registry_id: `{_eval_seed_registry_id(args)}`",
         f"eval_seed_hash: `{_eval_seed_hash(_eval_seed_registry(args))}`",
         f"eval_seed_count: `{args.eval_episodes}`",
         f"diagnostic_episode_count: `{args.diagnostic_episodes}`",
-        "seat_rotation: `0,1,2,3`",
+        f"seat_rotation: `{_seat_rotation_label(args)}`",
         "policy_mode: `greedy`",
         "training_rollout_reuse: `false`",
         "",
         "## Required Fields",
         "",
         "- checkpoint_path / checkpoint_sha256",
-        "- source_config_id / config_key",
+        "- source_type / source_config_id / config_key",
         "- eval_seed_registry_id / eval_seed_hash",
         "- learner_deal_in_rate",
         "- rulebase_fallback_count",
+        "- forced_terminal_preempt_count / autopilot_terminal_count",
         "- illegal_action_rate_fail_closed / fallback_rate_fail_closed / forced_terminal_missed_fail_closed",
         "",
         "## Candidate Results",
@@ -346,6 +424,7 @@ def _summary_markdown(args: argparse.Namespace, rows: list[dict[str, Any]]) -> s
         lines.append(
             "- "
             f"opponent={row['opponent_name']} "
+            f"source_type={row['source_type']} "
             f"source_id={row['source_config_id']} "
             f"delta_vs_zero={row['paired_rank_pt_delta_vs_zero_delta']:.6g} "
             f"delta_vs_untrained={row['paired_rank_pt_delta_vs_untrained_rule_prior_delta']:.6g} "
@@ -413,6 +492,18 @@ def _optional_float(value: str | None) -> float | None:
     if value is None or value == "":
         return None
     return float(value)
+
+
+def _seat_rotation_label(args: argparse.Namespace) -> str:
+    return ",".join(str(int(seat)) for seat in args.eval_seat_rotation)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _eval_seed_registry(args: argparse.Namespace) -> list[int]:

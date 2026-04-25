@@ -95,9 +95,37 @@ def test_smoke_metric_counts_include_opponent_ron_against_learner() -> None:
     for count_fn in (_selfplay_smoke_metric_counts, _training_smoke_metric_counts):
         counts = count_fn((episode,), (0,))
         assert counts["learner_step_count"] == 1
+        assert counts["learner_seat_step_count"] == 1
+        assert counts["learner_controlled_step_count"] == 1
         assert counts["win_count"] == 0
         assert counts["deal_in_count"] == 1
 
+
+
+def test_smoke_metric_counts_include_autopilot_terminal_trace() -> None:
+    autopilot_terminal = SimpleNamespace(
+        actor=0,
+        action_spec=ActionSpec(ActionType.TSUMO, tile=0),
+        terminal_reason="tsumo",
+        is_autopilot=True,
+    )
+    learner_discard = SimpleNamespace(
+        actor=0,
+        action_spec=ActionSpec(ActionType.DISCARD, tile=0),
+        terminal_reason=None,
+        is_autopilot=False,
+    )
+    episode = SimpleNamespace(steps=(learner_discard, autopilot_terminal))
+
+    for count_fn in (_selfplay_smoke_metric_counts, _training_smoke_metric_counts):
+        counts = count_fn((episode,), (0,))
+        assert counts["learner_step_count"] == 2
+        assert counts["learner_seat_step_count"] == 2
+        assert counts["learner_controlled_step_count"] == 1
+        assert counts["autopilot_step_count"] == 1
+        assert counts["autopilot_terminal_count"] == 1
+        assert counts["forced_terminal_preempt_count"] == 1
+        assert counts["terminal_reason_count"] == {"tsumo": 1}
 
 
 def test_evaluate_discard_only_policy_returns_finite_metrics() -> None:

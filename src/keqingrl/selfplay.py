@@ -52,6 +52,10 @@ class DiscardOnlyIterationMetrics:
     mean_approx_kl: float
     mean_clip_fraction: float
     terminal_reason_count: dict[str, int] = field(default_factory=dict)
+    learner_seat_step_count: int = 0
+    learner_controlled_step_count: int = 0
+    forced_terminal_preempt_count: int = 0
+    autopilot_terminal_count: int = 0
     avg_decision_latency: float | None = None
     p95_decision_latency: float | None = None
     mean_rank_loss: float | None = None
@@ -663,12 +667,16 @@ def summarize_iteration(
         fourth_rate=sum(1.0 for rank in seat_ranks if rank == 4) / len(seat_ranks),
         win_rate=smoke_counts["win_count"] / max(1, smoke_counts["seat_episode_count"]),
         deal_in_rate=smoke_counts["deal_in_count"] / max(1, smoke_counts["seat_episode_count"]),
-        call_rate=smoke_counts["call_count"] / max(1, smoke_counts["learner_step_count"]),
-        riichi_rate=smoke_counts["riichi_count"] / max(1, smoke_counts["learner_step_count"]),
+        call_rate=smoke_counts["call_count"] / max(1, smoke_counts["learner_controlled_step_count"]),
+        riichi_rate=smoke_counts["riichi_count"] / max(1, smoke_counts["learner_controlled_step_count"]),
         illegal_action_rate=0.0,
         fallback_rate=0.0,
         forced_terminal_missed=0,
         terminal_reason_count=smoke_counts["terminal_reason_count"],
+        learner_seat_step_count=int(smoke_counts["learner_seat_step_count"]),
+        learner_controlled_step_count=int(smoke_counts["learner_controlled_step_count"]),
+        forced_terminal_preempt_count=int(smoke_counts["forced_terminal_preempt_count"]),
+        autopilot_terminal_count=int(smoke_counts["autopilot_terminal_count"]),
         mean_total_loss=sum(loss.total_loss.item() for loss in losses) / len(losses),
         mean_policy_loss=sum(loss.policy_loss.item() for loss in losses) / len(losses),
         mean_value_loss=sum(loss.value_loss.item() for loss in losses) / len(losses),
@@ -691,10 +699,15 @@ def _smoke_metric_counts(
     counts: dict[str, object] = {
         "seat_episode_count": len(episodes) * max(1, len(learner_seat_set)),
         "learner_step_count": 0,
+        "learner_seat_step_count": 0,
+        "learner_controlled_step_count": 0,
         "win_count": 0,
         "deal_in_count": 0,
         "call_count": 0,
         "riichi_count": 0,
+        "autopilot_step_count": 0,
+        "autopilot_terminal_count": 0,
+        "forced_terminal_preempt_count": 0,
         "terminal_reason_count": {},
     }
     terminal_reason_count: dict[str, int] = counts["terminal_reason_count"]  # type: ignore[assignment]
@@ -702,16 +715,25 @@ def _smoke_metric_counts(
         for step in episode.steps:
             if step.terminal_reason is not None:
                 terminal_reason_count[step.terminal_reason] = terminal_reason_count.get(step.terminal_reason, 0) + 1
+            if getattr(step, "is_autopilot", False):
+                counts["autopilot_step_count"] = int(counts["autopilot_step_count"]) + 1
+                if step.terminal_reason is not None:
+                    counts["autopilot_terminal_count"] = int(counts["autopilot_terminal_count"]) + 1
+                    counts["forced_terminal_preempt_count"] = int(counts["forced_terminal_preempt_count"]) + 1
             if step.action_spec.action_type == ActionType.RON and step.action_spec.from_who in learner_seat_set:
                 counts["deal_in_count"] = int(counts["deal_in_count"]) + 1
             if step.actor not in learner_seat_set:
                 continue
-            counts["learner_step_count"] = int(counts["learner_step_count"]) + 1
+            counts["learner_seat_step_count"] = int(counts["learner_seat_step_count"]) + 1
+            counts["learner_step_count"] = int(counts["learner_seat_step_count"])
+            is_controlled = not getattr(step, "is_autopilot", False)
+            if is_controlled:
+                counts["learner_controlled_step_count"] = int(counts["learner_controlled_step_count"]) + 1
             if step.action_spec.action_type in {ActionType.TSUMO, ActionType.RON}:
                 counts["win_count"] = int(counts["win_count"]) + 1
-            if step.action_spec.action_type in {ActionType.CHI, ActionType.PON, ActionType.DAIMINKAN}:
+            if is_controlled and step.action_spec.action_type in {ActionType.CHI, ActionType.PON, ActionType.DAIMINKAN}:
                 counts["call_count"] = int(counts["call_count"]) + 1
-            if step.action_spec.action_type == ActionType.REACH_DISCARD:
+            if is_controlled and step.action_spec.action_type == ActionType.REACH_DISCARD:
                 counts["riichi_count"] = int(counts["riichi_count"]) + 1
     return counts
 

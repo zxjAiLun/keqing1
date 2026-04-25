@@ -52,7 +52,11 @@ class DiscardOnlyEvalMetrics:
     illegal_action_rate: float = 0.0
     fallback_rate: float = 0.0
     forced_terminal_missed: int = 0
+    forced_terminal_preempt_count: int = 0
+    autopilot_terminal_count: int = 0
     terminal_reason_count: dict[str, int] = field(default_factory=dict)
+    learner_seat_step_count: int = 0
+    learner_controlled_step_count: int = 0
 
     @property
     def learner_win_rate(self) -> float:
@@ -118,7 +122,11 @@ class FixedSeedEvaluationSmoke:
     illegal_action_rate: float
     fallback_rate: float
     forced_terminal_missed: int
+    forced_terminal_preempt_count: int
+    autopilot_terminal_count: int
     terminal_reason_count: dict[str, int]
+    learner_seat_step_count: int
+    learner_controlled_step_count: int
     passed_smoke_checks: bool
     failure_reasons: tuple[str, ...]
     per_seat: dict[int, DiscardOnlyEvalMetrics]
@@ -216,6 +224,8 @@ class DiscardOnlyPpoSmokeIterationReport:
     illegal_action_rate: float
     fallback_rate: float
     forced_terminal_missed: int
+    forced_terminal_preempt_count: int
+    autopilot_terminal_count: int
     terminal_reason_count: dict[str, int]
 
     @property
@@ -270,6 +280,7 @@ class ZeroDeltaSelfplaySmokeReport:
     illegal_action_rate: float
     fallback_rate: float
     forced_terminal_missed: int
+    forced_terminal_preempt_count: int
     terminal_reason_count: dict[str, int]
     old_log_prob_finite: bool
     entropy_finite: bool
@@ -336,11 +347,13 @@ def evaluate_policy(
         fourth_place_rate=sum(1.0 for rank in seat_ranks if rank == 4) / len(seat_ranks),
         win_rate=smoke_counts["win_count"] / max(1, smoke_counts["seat_episode_count"]),
         deal_in_rate=smoke_counts["deal_in_count"] / max(1, smoke_counts["seat_episode_count"]),
-        call_rate=smoke_counts["call_count"] / max(1, smoke_counts["learner_step_count"]),
-        riichi_rate=smoke_counts["riichi_count"] / max(1, smoke_counts["learner_step_count"]),
+        call_rate=smoke_counts["call_count"] / max(1, smoke_counts["learner_controlled_step_count"]),
+        riichi_rate=smoke_counts["riichi_count"] / max(1, smoke_counts["learner_controlled_step_count"]),
         illegal_action_rate=0.0,
         fallback_rate=0.0,
         forced_terminal_missed=0,
+        forced_terminal_preempt_count=int(smoke_counts["forced_terminal_preempt_count"]),
+        autopilot_terminal_count=int(smoke_counts["autopilot_terminal_count"]),
         terminal_reason_count=smoke_counts["terminal_reason_count"],
     )
 
@@ -438,11 +451,17 @@ def run_fixed_seed_evaluation_smoke(
     illegal_action_rate = weighted_mean("illegal_action_rate")
     fallback_rate = weighted_mean("fallback_rate")
     forced_terminal_missed = sum(metrics.forced_terminal_missed for metrics in per_seat.values())
+    forced_terminal_preempt_count = sum(metrics.forced_terminal_preempt_count for metrics in per_seat.values())
+    autopilot_terminal_count = sum(metrics.autopilot_terminal_count for metrics in per_seat.values())
+    learner_seat_step_count = sum(metrics.learner_seat_step_count for metrics in per_seat.values())
+    learner_controlled_step_count = sum(metrics.learner_controlled_step_count for metrics in per_seat.values())
     terminal_reason_count = _merge_terminal_reason_counts(per_seat.values())
     failure_reasons = _fixed_seed_eval_failure_reasons(
         illegal_action_rate=illegal_action_rate,
         fallback_rate=fallback_rate,
         forced_terminal_missed=forced_terminal_missed,
+        forced_terminal_preempt_count=forced_terminal_preempt_count,
+        autopilot_terminal_count=autopilot_terminal_count,
         terminal_reason_count=terminal_reason_count,
         fourth_rate=fourth_rate,
         deal_in_rate=deal_in_rate,
@@ -470,7 +489,11 @@ def run_fixed_seed_evaluation_smoke(
         illegal_action_rate=illegal_action_rate,
         fallback_rate=fallback_rate,
         forced_terminal_missed=forced_terminal_missed,
+        forced_terminal_preempt_count=forced_terminal_preempt_count,
+        autopilot_terminal_count=autopilot_terminal_count,
         terminal_reason_count=terminal_reason_count,
+        learner_seat_step_count=learner_seat_step_count,
+        learner_controlled_step_count=learner_controlled_step_count,
         passed_smoke_checks=not failure_reasons,
         failure_reasons=failure_reasons,
         per_seat=per_seat,
@@ -482,6 +505,8 @@ def _fixed_seed_eval_failure_reasons(
     illegal_action_rate: float,
     fallback_rate: float,
     forced_terminal_missed: int,
+    forced_terminal_preempt_count: int = 0,
+    autopilot_terminal_count: int = 0,
     terminal_reason_count: dict[str, int],
     fourth_rate: float,
     deal_in_rate: float,
@@ -513,10 +538,15 @@ def _smoke_metric_counts(episodes, learner_seats: Sequence[int]) -> dict[str, ob
     counts: dict[str, object] = {
         "seat_episode_count": len(episodes) * max(1, len(learner_seat_set)),
         "learner_step_count": 0,
+        "learner_seat_step_count": 0,
+        "learner_controlled_step_count": 0,
         "win_count": 0,
         "deal_in_count": 0,
         "call_count": 0,
         "riichi_count": 0,
+        "autopilot_step_count": 0,
+        "autopilot_terminal_count": 0,
+        "forced_terminal_preempt_count": 0,
         "terminal_reason_count": {},
     }
     terminal_reason_count: dict[str, int] = counts["terminal_reason_count"]  # type: ignore[assignment]
@@ -524,16 +554,25 @@ def _smoke_metric_counts(episodes, learner_seats: Sequence[int]) -> dict[str, ob
         for step in episode.steps:
             if step.terminal_reason is not None:
                 terminal_reason_count[step.terminal_reason] = terminal_reason_count.get(step.terminal_reason, 0) + 1
+            if getattr(step, "is_autopilot", False):
+                counts["autopilot_step_count"] = int(counts["autopilot_step_count"]) + 1
+                if step.terminal_reason is not None:
+                    counts["autopilot_terminal_count"] = int(counts["autopilot_terminal_count"]) + 1
+                    counts["forced_terminal_preempt_count"] = int(counts["forced_terminal_preempt_count"]) + 1
             if step.action_spec.action_type == ActionType.RON and step.action_spec.from_who in learner_seat_set:
                 counts["deal_in_count"] = int(counts["deal_in_count"]) + 1
             if step.actor not in learner_seat_set:
                 continue
-            counts["learner_step_count"] = int(counts["learner_step_count"]) + 1
+            counts["learner_seat_step_count"] = int(counts["learner_seat_step_count"]) + 1
+            counts["learner_step_count"] = int(counts["learner_seat_step_count"])
+            is_controlled = not getattr(step, "is_autopilot", False)
+            if is_controlled:
+                counts["learner_controlled_step_count"] = int(counts["learner_controlled_step_count"]) + 1
             if step.action_spec.action_type in {ActionType.TSUMO, ActionType.RON}:
                 counts["win_count"] = int(counts["win_count"]) + 1
-            if step.action_spec.action_type in {ActionType.CHI, ActionType.PON, ActionType.DAIMINKAN}:
+            if is_controlled and step.action_spec.action_type in {ActionType.CHI, ActionType.PON, ActionType.DAIMINKAN}:
                 counts["call_count"] = int(counts["call_count"]) + 1
-            if step.action_spec.action_type == ActionType.REACH_DISCARD:
+            if is_controlled and step.action_spec.action_type == ActionType.REACH_DISCARD:
                 counts["riichi_count"] = int(counts["riichi_count"]) + 1
     return counts
 
@@ -684,6 +723,7 @@ def run_zero_delta_selfplay_smoke(
         illegal_action_rate=0.0,
         fallback_rate=0.0,
         forced_terminal_missed=0,
+        forced_terminal_preempt_count=int(smoke_counts["forced_terminal_preempt_count"]),
         terminal_reason_count=smoke_counts["terminal_reason_count"],
         old_log_prob_finite=bool(torch.isfinite(old_log_probs).all()),
         entropy_finite=bool(torch.isfinite(entropies).all()),
@@ -1022,6 +1062,8 @@ def run_discard_only_ppo_smoke(
             illegal_action_rate=metrics.illegal_action_rate,
             fallback_rate=metrics.fallback_rate,
             forced_terminal_missed=metrics.forced_terminal_missed,
+            forced_terminal_preempt_count=metrics.forced_terminal_preempt_count,
+            autopilot_terminal_count=metrics.autopilot_terminal_count,
             terminal_reason_count=dict(metrics.terminal_reason_count),
         )
         reports.append(iteration_report)

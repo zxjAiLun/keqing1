@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import random
 import subprocess
 from dataclasses import asdict, is_dataclass, replace
 import json
@@ -39,7 +40,13 @@ from keqingrl.learning_signal import (
     tensor_stats,
     top1_margin_diagnostics,
 )
-from keqingrl.ppo import compute_ppo_loss
+from keqingrl.ppo import compute_ppo_loss, ppo_update
+from keqingrl.selfplay import (
+    DiscardOnlyIterationResult,
+    build_episodes_ppo_batch,
+    collect_selfplay_episodes,
+    summarize_iteration,
+)
 
 
 DEFAULT_RULE_KL_COEFS = (0.0, 0.001, 0.01, 0.02, 0.05)
@@ -53,7 +60,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=("grid", "candidate-rerun", "learning-signal-ablation"), default="grid")
     parser.add_argument("--from-summary", type=Path, default=None)
     parser.add_argument("--source-config-ids", type=int, nargs="+", default=None)
-    parser.add_argument("--shared-eval-seeds", action="store_true")
     parser.add_argument("--seed", type=int, default=20260425)
     parser.add_argument("--repeat-id", type=int, default=0)
     parser.add_argument("--eval-seed-base", type=int, default=202604250000)
@@ -81,6 +87,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--diagnostic-fields", action="store_true")
     parser.add_argument("--diagnostic-seed-base", type=int, default=202604250000)
     parser.add_argument("--diagnostic-seed-stride", type=int, default=1)
+    parser.add_argument("--ablation-profile", choices=("small", "medium", "full"), default="small")
+    parser.add_argument("--max-configs", type=int, default=None)
+    parser.add_argument("--random-subsample", type=int, default=None)
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--rule-kl-coefs", type=float, nargs="+", default=DEFAULT_RULE_KL_COEFS)
     parser.add_argument("--entropy-coefs", type=float, nargs="+", default=DEFAULT_ENTROPY_COEFS)
     parser.add_argument("--lrs", type=float, nargs="+", default=DEFAULT_LRS)
@@ -100,6 +110,11 @@ def main() -> None:
     torch.manual_seed(args.seed)
 
     configs = _build_run_configs(args)
+    if args.dry_run:
+        _write_dry_run(args, configs)
+        print((args.out_dir / "dry_run.md").read_text(encoding="utf-8"))
+        return
+
     rows: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
 
@@ -155,12 +170,15 @@ def main() -> None:
             "style_variants": False,
         },
         "mode": args.mode,
+        "source_type": "retrained_config",
         "seed": args.seed,
         "train_seed_base": args.seed,
         "repeat_id": args.repeat_id,
         "eval_seed_registry_id": _eval_seed_registry_id(args),
         "eval_seed_count": len(eval_seed_registry),
         "eval_seed_hash": _eval_seed_hash(eval_seed_registry),
+        "shared_eval_seeds": True,
+        "eval_seed_policy": "forced_shared_across_configs",
         "grid": {
             "rule_kl_coef": list(args.rule_kl_coefs),
             "entropy_coef": list(args.entropy_coefs),
@@ -179,6 +197,8 @@ def main() -> None:
             "eval_seed_registry_id": _eval_seed_registry_id(args),
             "eval_seed_count": len(eval_seed_registry),
             "eval_seed_hash": _eval_seed_hash(eval_seed_registry),
+            "shared_eval_seeds": True,
+            "eval_seed_policy": "forced_shared_across_configs",
             "learner_seats": [0],
             "opponents": sorted({str(row["opponent_mode"]) for row in summaries}),
         },
@@ -263,26 +283,28 @@ def _build_candidate_rerun_configs(args: argparse.Namespace) -> list[dict[str, A
 def _build_learning_signal_ablation_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
     if args.from_summary is None:
         raise ValueError("--mode learning-signal-ablation requires --from-summary")
-    if not args.source_config_ids:
-        raise ValueError("--mode learning-signal-ablation requires --source-config-ids")
+    source_config_ids = list(args.source_config_ids or _default_ablation_source_ids(args))
+    if not source_config_ids:
+        raise ValueError("--mode learning-signal-ablation requires --source-config-ids or a usable default source set")
     rows = _read_summary_rows(args.from_summary)
     by_source_id: dict[int, dict[str, str]] = {}
     for row in rows:
         by_source_id.setdefault(_row_source_config_id(row), row)
     source_report = str(args.from_summary.parent)
+    profile = _ablation_profile_values(args.ablation_profile)
     configs: list[dict[str, Any]] = []
-    for source_id in args.source_config_ids:
+    for source_id in source_config_ids:
         if source_id not in by_source_id:
             raise ValueError(f"source_config_id {source_id} not found in {args.from_summary}")
         source_row = by_source_id[source_id]
         opponent_mode = str(source_row["opponent_mode"])
-        for normalize_advantages in (True, False):
-            for update_epochs in (1, 4):
-                for rule_kl_coef in (0.0, 0.001):
-                    for entropy_coef in (0.0, 0.001, 0.005):
-                        for lr in (3e-4, 1e-3):
-                            for value_coef in (0.0, 0.5):
-                                for rank_coef in (0.0, 0.05):
+        for normalize_advantages in profile["normalize_advantages"]:
+            for update_epochs in profile["update_epochs"]:
+                for rule_kl_coef in profile["rule_kl_coef"]:
+                    for entropy_coef in profile["entropy_coef"]:
+                        for lr in profile["lr"]:
+                            for value_coef in profile["value_coef"]:
+                                for rank_coef in profile["rank_coef"]:
                                     config_id = len(configs)
                                     configs.append(
                                         {
@@ -290,6 +312,7 @@ def _build_learning_signal_ablation_configs(args: argparse.Namespace) -> list[di
                                             "rerun_config_id": config_id,
                                             "source_config_id": source_id,
                                             "source_report": source_report,
+                                            "ablation_profile": args.ablation_profile,
                                             "opponent_mode": opponent_mode,
                                             "rule_kl_coef": float(rule_kl_coef),
                                             "entropy_coef": float(entropy_coef),
@@ -300,7 +323,71 @@ def _build_learning_signal_ablation_configs(args: argparse.Namespace) -> list[di
                                             "rank_coef": float(rank_coef),
                                         }
                                     )
-    return configs
+    return _limit_ablation_configs(configs, args)
+
+
+def _default_ablation_source_ids(args: argparse.Namespace) -> list[int]:
+    if args.ablation_profile == "small":
+        return [93, 57, 8]
+    return []
+
+
+def _ablation_profile_values(profile: str) -> dict[str, tuple[Any, ...]]:
+    if profile == "small":
+        return {
+            "normalize_advantages": (True,),
+            "update_epochs": (1, 4),
+            "rule_kl_coef": (0.0, 0.001),
+            "entropy_coef": (0.0, 0.005),
+            "lr": (3e-4, 1e-3),
+            "value_coef": (0.5,),
+            "rank_coef": (0.05,),
+        }
+    if profile == "medium":
+        return {
+            "normalize_advantages": (True, False),
+            "update_epochs": (1, 4),
+            "rule_kl_coef": (0.0, 0.001),
+            "entropy_coef": (0.0, 0.001, 0.005),
+            "lr": (3e-4, 1e-3),
+            "value_coef": (0.5,),
+            "rank_coef": (0.0, 0.05),
+        }
+    if profile == "full":
+        return {
+            "normalize_advantages": (True, False),
+            "update_epochs": (1, 4),
+            "rule_kl_coef": (0.0, 0.001),
+            "entropy_coef": (0.0, 0.001, 0.005),
+            "lr": (3e-4, 1e-3),
+            "value_coef": (0.0, 0.5),
+            "rank_coef": (0.0, 0.05),
+        }
+    raise ValueError(f"unsupported ablation profile: {profile}")
+
+
+def _limit_ablation_configs(configs: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
+    limited = list(configs)
+    if args.random_subsample is not None:
+        if args.random_subsample <= 0:
+            raise ValueError("--random-subsample must be positive")
+        rng = random.Random(args.seed)
+        limited = rng.sample(limited, k=min(int(args.random_subsample), len(limited)))
+    if args.max_configs is not None:
+        if args.max_configs <= 0:
+            raise ValueError("--max-configs must be positive")
+        limited = limited[: int(args.max_configs)]
+    return _renumber_configs(limited)
+
+
+def _renumber_configs(configs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    renumbered: list[dict[str, Any]] = []
+    for config_id, config in enumerate(configs):
+        updated = dict(config)
+        updated["config_id"] = config_id
+        updated["rerun_config_id"] = config_id
+        renumbered.append(updated)
+    return renumbered
 
 
 def _read_summary_rows(path: Path) -> list[dict[str, str]]:
@@ -319,9 +406,11 @@ def _candidate_rerun_payload(args: argparse.Namespace, configs: list[dict[str, A
     if args.mode != "candidate-rerun":
         return None
     return {
+        "source_type": "retrained_config",
         "from_summary": None if args.from_summary is None else str(args.from_summary),
         "source_config_ids": list(args.source_config_ids or []),
         "shared_eval_seeds": True,
+        "eval_seed_policy": "forced_shared_across_configs",
         "configs": configs,
     }
 
@@ -341,6 +430,47 @@ def _rerun_config_mapping(configs: list[dict[str, Any]]) -> list[dict[str, Any]]
         }
         for config in configs
     ]
+
+
+def _write_dry_run(args: argparse.Namespace, configs: list[dict[str, Any]]) -> None:
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "mode": args.mode,
+        "dry_run": True,
+        "ablation_profile": args.ablation_profile,
+        "max_configs": args.max_configs,
+        "random_subsample": args.random_subsample,
+        "config_count": len(configs),
+        "configs": configs,
+    }
+    _write_json(args.out_dir / "dry_run.json", payload)
+    _write_csv(args.out_dir / "dry_run_configs.csv", configs)
+    lines = [
+        "# KeqingRL Sweep Dry Run",
+        "",
+        f"mode: `{args.mode}`",
+        f"ablation_profile: `{args.ablation_profile}`",
+        f"config_count: `{len(configs)}`",
+        f"max_configs: `{args.max_configs}`",
+        f"random_subsample: `{args.random_subsample}`",
+        "",
+        "## First Configs",
+        "",
+    ]
+    for config in configs[:20]:
+        lines.append(
+            "- "
+            f"id={config['config_id']} "
+            f"source={config.get('source_config_id')} "
+            f"lr={config['lr']} "
+            f"epochs={config.get('update_epochs')} "
+            f"rule_kl={config['rule_kl_coef']} "
+            f"entropy={config['entropy_coef']} "
+            f"norm_adv={config.get('normalize_advantages')} "
+            f"value={config.get('value_coef')} "
+            f"rank={config.get('rank_coef')}"
+        )
+    (args.out_dir / "dry_run.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _run_config(
@@ -374,38 +504,68 @@ def _run_config(
     iteration_rows: list[dict[str, Any]] = []
     for iteration in range(args.iterations):
         iteration_seed = seed + iteration * 10_000
-        result = run_ppo_iteration(
-            env,
-            policy,
-            optimizer,
-            num_episodes=args.rollout_episodes,
-            opponent_pool=opponent_pool,
-            learner_seats=(0,),
-            update_epochs=update_epochs,
-            seed=iteration_seed,
-            policy_version=iteration,
-            max_steps=args.max_steps,
-            gamma=args.gamma,
-            gae_lambda=args.gae_lambda,
-            include_rank_targets=True,
-            clip_eps=args.clip_eps,
-            value_coef=value_coef,
-            entropy_coef=entropy_coef,
-            rank_coef=rank_coef,
-            rule_kl_coef=rule_kl_coef,
-            prior_kl_eps=args.prior_kl_eps,
-            normalize_advantages=normalize_advantages,
-            max_grad_norm=args.max_grad_norm,
-            device=device,
-            strict_metadata=True,
-        )
+        if _diagnostics_enabled(args):
+            result, diagnostic_fields = _run_ppo_iteration_with_diagnostics(
+                env,
+                policy,
+                optimizer,
+                num_episodes=args.rollout_episodes,
+                opponent_pool=opponent_pool,
+                learner_seats=(0,),
+                update_epochs=update_epochs,
+                seed=iteration_seed,
+                policy_version=iteration,
+                max_steps=args.max_steps,
+                gamma=args.gamma,
+                gae_lambda=args.gae_lambda,
+                include_rank_targets=True,
+                clip_eps=args.clip_eps,
+                value_coef=value_coef,
+                entropy_coef=entropy_coef,
+                rank_coef=rank_coef,
+                rule_kl_coef=rule_kl_coef,
+                prior_kl_eps=args.prior_kl_eps,
+                normalize_advantages=normalize_advantages,
+                max_grad_norm=args.max_grad_norm,
+                device=device,
+                strict_metadata=True,
+                lr=lr,
+                args=args,
+            )
+        else:
+            result = run_ppo_iteration(
+                env,
+                policy,
+                optimizer,
+                num_episodes=args.rollout_episodes,
+                opponent_pool=opponent_pool,
+                learner_seats=(0,),
+                update_epochs=update_epochs,
+                seed=iteration_seed,
+                policy_version=iteration,
+                max_steps=args.max_steps,
+                gamma=args.gamma,
+                gae_lambda=args.gae_lambda,
+                include_rank_targets=True,
+                clip_eps=args.clip_eps,
+                value_coef=value_coef,
+                entropy_coef=entropy_coef,
+                rank_coef=rank_coef,
+                rule_kl_coef=rule_kl_coef,
+                prior_kl_eps=args.prior_kl_eps,
+                normalize_advantages=normalize_advantages,
+                max_grad_norm=args.max_grad_norm,
+                device=device,
+                strict_metadata=True,
+            )
+            diagnostic_fields = {}
         loss = result.losses[-1]
         metrics = result.metrics
         delta_stats = _ppo_delta_smoke_stats(policy, result.batch)
-        diagnostic_fields = _iteration_diagnostic_fields(args, policy, result.batch, normalize_advantages=normalize_advantages)
         iteration_rows.append(
             {
                 "config_id": config_id,
+                "source_type": "retrained_config",
                 "rerun_config_id": rerun_config_id,
                 "source_config_id": source_config_id,
                 "source_report": source_report,
@@ -443,9 +603,11 @@ def _run_config(
                 "forced_terminal_missed_fail_closed": metrics.forced_terminal_missed_fail_closed,
                 "illegal_attempt_count": None,
                 "fallback_policy_count": None,
-                "forced_terminal_preempt_count": None,
-                "forced_terminal_missed_count": None,
-                "autopilot_terminal_count": None,
+                "forced_terminal_preempt_count": metrics.forced_terminal_preempt_count,
+                "forced_terminal_missed_count": metrics.forced_terminal_missed_fail_closed,
+                "autopilot_terminal_count": metrics.autopilot_terminal_count,
+                "learner_seat_step_count": metrics.learner_seat_step_count,
+                "learner_controlled_step_count": metrics.learner_controlled_step_count,
                 **_rulebase_counter_fields(rulebase_policy),
                 **diagnostic_fields,
                 "illegal_action_rate": metrics.illegal_action_rate_fail_closed,
@@ -468,6 +630,7 @@ def _run_config(
     final = iteration_rows[-1]
     summary = {
         "config_id": config_id,
+        "source_type": "retrained_config",
         "rerun_config_id": _rerun_config_id(args, config_id),
         "source_config_id": source_config_id,
         "source_report": source_report,
@@ -479,6 +642,8 @@ def _run_config(
         "eval_seed_registry_id": _eval_seed_registry_id(args),
         "eval_seed_count": args.eval_episodes,
         "eval_seed_hash": _eval_seed_hash(_eval_seed_registry(args)),
+        "shared_eval_seeds": True,
+        "eval_seed_policy": "forced_shared_across_configs",
         "diagnostic_seed_registry_id": _diagnostic_seed_registry_id(args),
         "diagnostic_seed_hash": seed_registry_hash(_diagnostic_seed_registry(args)),
         "rule_kl_coef": rule_kl_coef,
@@ -513,6 +678,7 @@ def _run_config(
         "actor_grad_norm_total": final.get("actor_grad_norm_total"),
         "policy_mlp_final_grad_norm": final.get("policy_mlp_final_grad_norm"),
         "post_update_kl_vs_old": final.get("post_update_kl_vs_old"),
+        **_summary_learning_signal_fields(final),
         "train_rank_pt": final["rank_pt"],
         "train_fourth_rate": final["fourth_rate"],
         "train_learner_win_rate": final["learner_win_rate"],
@@ -537,6 +703,8 @@ def _run_config(
         "forced_terminal_preempt_count": final["forced_terminal_preempt_count"],
         "forced_terminal_missed_count": final["forced_terminal_missed_count"],
         "autopilot_terminal_count": final["autopilot_terminal_count"],
+        "learner_seat_step_count": final.get("learner_seat_step_count"),
+        "learner_controlled_step_count": final.get("learner_controlled_step_count"),
         **_rulebase_counter_fields(rulebase_policy),
         "illegal_action_rate": final["illegal_action_rate_fail_closed"],
         "fallback_rate": final["fallback_rate_fail_closed"],
@@ -592,6 +760,7 @@ def _save_config_artifacts(
 
     config_payload = {
         "config_id": config_id,
+        "source_type": "retrained_config",
         "rerun_config_id": rerun_config_id,
         "source_config_id": source_config_id,
         "source_report": args.source_report,
@@ -602,6 +771,8 @@ def _save_config_artifacts(
         "eval_seed_registry_id": _eval_seed_registry_id(args),
         "eval_seed_count": args.eval_episodes,
         "eval_seed_hash": _eval_seed_hash(_eval_seed_registry(args)),
+        "shared_eval_seeds": True,
+        "eval_seed_policy": "forced_shared_across_configs",
         "model": {
             "class": "RulePriorDeltaPolicy",
             "hidden_dim": args.hidden_dim,
@@ -673,20 +844,123 @@ def _save_config_artifacts(
     }
 
 
-def _iteration_diagnostic_fields(args: argparse.Namespace, policy: RulePriorDeltaPolicy, batch: Any, *, normalize_advantages: bool) -> dict[str, Any]:
-    if not args.diagnostic_fields and args.mode != "learning-signal-ablation":
-        return {}
-    margins = top1_margin_diagnostics(policy, batch)["summary"]
-    probe_rows = ppo_update_probe(
+def _diagnostics_enabled(args: argparse.Namespace) -> bool:
+    return bool(args.diagnostic_fields or args.mode == "learning-signal-ablation")
+
+
+def _run_ppo_iteration_with_diagnostics(
+    env: DiscardOnlyMahjongEnv,
+    policy: RulePriorDeltaPolicy,
+    optimizer: torch.optim.Optimizer,
+    *,
+    num_episodes: int,
+    opponent_pool: OpponentPool | None,
+    learner_seats: tuple[int, ...],
+    update_epochs: int,
+    seed: int | None,
+    policy_version: int,
+    max_steps: int,
+    gamma: float,
+    gae_lambda: float,
+    include_rank_targets: bool,
+    clip_eps: float,
+    value_coef: float,
+    entropy_coef: float,
+    rank_coef: float,
+    rule_kl_coef: float,
+    prior_kl_eps: float,
+    normalize_advantages: bool,
+    max_grad_norm: float | None,
+    device: torch.device | str | None,
+    strict_metadata: bool,
+    lr: float,
+    args: argparse.Namespace,
+) -> tuple[DiscardOnlyIterationResult, dict[str, Any]]:
+    episodes = collect_selfplay_episodes(
+        env,
+        policy,
+        num_episodes=num_episodes,
+        opponent_pool=opponent_pool,
+        learner_seats=learner_seats,
+        seed=seed,
+        greedy=False,
+        policy_version=policy_version,
+        max_steps=max_steps,
+        device=device,
+    )
+    _advantages, _returns, _prepared_steps, batch = build_episodes_ppo_batch(
+        episodes,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+        include_rank_targets=include_rank_targets,
+        strict_metadata=strict_metadata,
+    )
+    target_device = torch.device(device) if device is not None else next(policy.parameters()).device
+    batch = batch.to(target_device)
+    pre_fields = _phase_diagnostic_fields(
+        args,
         policy,
         batch,
-        lrs=(float(batch.policy_input.legal_action_features.new_tensor(0.0003).item()),),
-        update_epochs=(1,),
-        clip_eps=args.clip_eps,
+        prefix="pre_update",
+        lr=lr,
+        update_epochs=update_epochs,
         normalize_advantages=normalize_advantages,
+        include_probe=True,
     )
-    returns = tensor_stats(batch.returns.detach().cpu(), prefix="return")
-    advantages = tensor_stats(batch.advantages.detach().cpu(), prefix="advantage")
+    losses = []
+    for _ in range(update_epochs):
+        losses.append(
+            ppo_update(
+                policy,
+                optimizer,
+                batch,
+                clip_eps=clip_eps,
+                value_coef=value_coef,
+                entropy_coef=entropy_coef,
+                rank_coef=rank_coef,
+                rule_kl_coef=rule_kl_coef,
+                prior_kl_eps=prior_kl_eps,
+                normalize_advantages=normalize_advantages,
+                max_grad_norm=max_grad_norm,
+            )
+        )
+    post_fields = _phase_diagnostic_fields(
+        args,
+        policy,
+        batch,
+        prefix="post_update",
+        lr=lr,
+        update_epochs=update_epochs,
+        normalize_advantages=normalize_advantages,
+        include_probe=False,
+    )
+    post_fields.update(_policy_vs_old_fields(policy, batch, prefix="post_update", clip_eps=clip_eps))
+    metrics = summarize_iteration(episodes, losses, batch, learner_seats=learner_seats)
+    result = DiscardOnlyIterationResult(
+        episodes=episodes,
+        batch=batch,
+        losses=tuple(losses),
+        metrics=metrics,
+    )
+    diagnostic_fields = {**pre_fields, **post_fields}
+    diagnostic_fields.update(_legacy_learning_signal_fields(diagnostic_fields))
+    return result, diagnostic_fields
+
+
+def _phase_diagnostic_fields(
+    args: argparse.Namespace,
+    policy: RulePriorDeltaPolicy,
+    batch: Any,
+    *,
+    prefix: str,
+    lr: float,
+    update_epochs: int,
+    normalize_advantages: bool,
+    include_probe: bool,
+) -> dict[str, Any]:
+    margins = top1_margin_diagnostics(policy, batch)["summary"]
+    returns = tensor_stats(batch.returns.detach().cpu(), prefix=f"{prefix}_return")
+    advantages = tensor_stats(batch.advantages.detach().cpu(), prefix=f"{prefix}_advantage")
     actor_grad_norm = None
     policy_mlp_final_grad_norm = None
     try:
@@ -707,17 +981,143 @@ def _iteration_diagnostic_fields(args: argparse.Namespace, policy: RulePriorDelt
         policy_mlp_final_grad_norm = grads["policy_mlp.final_linear.weight_grad_norm"]
     finally:
         policy.zero_grad(set_to_none=True)
-    return {
+    fields: dict[str, Any] = {
         **advantages,
         **returns,
-        "selected_non_top1_positive_advantage_count": margins["selected_non_top1_positive_advantage_count"],
-        "mean_delta_needed_to_flip_top1": margins["mean_delta_needed_to_flip_top1"],
-        "actor_grad_norm_total": actor_grad_norm,
-        "policy_mlp_final_grad_norm": policy_mlp_final_grad_norm,
-        "post_update_kl_vs_old": None if not probe_rows else probe_rows[-1]["post_approx_kl_vs_old"],
+        f"{prefix}_selected_non_top1_positive_advantage_count": margins["selected_non_top1_positive_advantage_count"],
+        f"{prefix}_mean_delta_needed_to_flip_top1": margins["mean_delta_needed_to_flip_top1"],
+        f"{prefix}_actor_grad_norm": actor_grad_norm,
+        f"{prefix}_policy_mlp_final_grad_norm": policy_mlp_final_grad_norm,
         "diagnostic_seed_registry_id": _diagnostic_seed_registry_id(args),
         "diagnostic_seed_hash": seed_registry_hash(_diagnostic_seed_registry(args)),
     }
+    if include_probe:
+        actual_probe = ppo_update_probe(
+            policy,
+            batch,
+            lrs=(float(lr),),
+            update_epochs=(int(update_epochs),),
+            clip_eps=args.clip_eps,
+            normalize_advantages=normalize_advantages,
+        )
+        standard_probe = ppo_update_probe(
+            policy,
+            batch,
+            lrs=(3e-4,),
+            update_epochs=(1,),
+            clip_eps=args.clip_eps,
+            normalize_advantages=normalize_advantages,
+        )
+        fields.update(_probe_fields(actual_probe, prefix="actual_update_probe"))
+        fields.update(_probe_fields(standard_probe, prefix="standard_probe_lr3e_4_epoch1"))
+    return fields
+
+
+def _probe_fields(rows: list[dict[str, Any]], *, prefix: str) -> dict[str, Any]:
+    if not rows:
+        return {}
+    row = rows[-1]
+    return {
+        f"{prefix}_lr": row.get("lr"),
+        f"{prefix}_update_epochs": row.get("target_update_epochs"),
+        f"{prefix}_post_update_kl_vs_old": row.get("post_approx_kl_vs_old"),
+        f"{prefix}_top1_changed_rate": row.get("top1_action_changed_rate"),
+        f"{prefix}_neural_delta_abs_max": row.get("neural_delta_abs_max"),
+        f"{prefix}_ratio_std": row.get("post_ratio_std"),
+        f"{prefix}_clip_fraction": row.get("post_clip_fraction"),
+    }
+
+
+def _policy_vs_old_fields(policy: RulePriorDeltaPolicy, batch: Any, *, prefix: str, clip_eps: float) -> dict[str, Any]:
+    with torch.no_grad():
+        output = policy(batch.policy_input)
+        dist = MaskedCategorical(output.action_logits, batch.policy_input.legal_action_mask)
+        new_log_prob = dist.log_prob(batch.action_index)
+        ratio = torch.exp(new_log_prob - batch.old_log_prob)
+        mask = batch.policy_input.legal_action_mask.bool()
+        prior_logits = output.aux.get("prior_logits")
+        if prior_logits is None:
+            prior_logits = batch.policy_input.prior_logits
+        if prior_logits is None:
+            top1_changed = 0.0
+            rule_agreement = None
+        else:
+            current = output.action_logits.masked_fill(~mask, torch.finfo(output.action_logits.dtype).min).argmax(dim=-1)
+            prior = prior_logits.masked_fill(~mask, torch.finfo(prior_logits.dtype).min).argmax(dim=-1)
+            top1_changed = float((current != prior).float().mean().detach().cpu())
+            rule_agreement = float((current == prior).float().mean().detach().cpu())
+    return {
+        f"{prefix}_kl_vs_old": float(0.5 * (new_log_prob - batch.old_log_prob).pow(2).mean().detach().cpu()),
+        f"{prefix}_ratio_mean": float(ratio.mean().detach().cpu()),
+        f"{prefix}_ratio_std": float(ratio.std(unbiased=False).detach().cpu()),
+        f"{prefix}_clip_fraction": float(((ratio - 1.0).abs() > float(clip_eps)).float().mean().detach().cpu()),
+        f"{prefix}_top1_action_changed_rate": top1_changed,
+        f"{prefix}_rule_agreement": rule_agreement,
+    }
+
+
+def _legacy_learning_signal_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "advantage_mean": fields.get("pre_update_advantage_mean"),
+        "advantage_std": fields.get("pre_update_advantage_std"),
+        "advantage_min": fields.get("pre_update_advantage_min"),
+        "advantage_max": fields.get("pre_update_advantage_max"),
+        "return_mean": fields.get("pre_update_return_mean"),
+        "return_std": fields.get("pre_update_return_std"),
+        "return_min": fields.get("pre_update_return_min"),
+        "return_max": fields.get("pre_update_return_max"),
+        "selected_non_top1_positive_advantage_count": fields.get("pre_update_selected_non_top1_positive_advantage_count"),
+        "mean_delta_needed_to_flip_top1": fields.get("pre_update_mean_delta_needed_to_flip_top1"),
+        "actor_grad_norm_total": fields.get("pre_update_actor_grad_norm"),
+        "policy_mlp_final_grad_norm": fields.get("pre_update_policy_mlp_final_grad_norm"),
+        "post_update_kl_vs_old": fields.get("post_update_kl_vs_old"),
+        "pre_update_probe_top1_changed_rate": fields.get("actual_update_probe_top1_changed_rate"),
+    }
+
+
+def _summary_learning_signal_fields(final: dict[str, Any]) -> dict[str, Any]:
+    names = (
+        "pre_update_advantage_mean",
+        "pre_update_advantage_std",
+        "pre_update_advantage_min",
+        "pre_update_advantage_max",
+        "pre_update_return_mean",
+        "pre_update_return_std",
+        "pre_update_return_min",
+        "pre_update_return_max",
+        "pre_update_actor_grad_norm",
+        "pre_update_policy_mlp_final_grad_norm",
+        "pre_update_selected_non_top1_positive_advantage_count",
+        "pre_update_mean_delta_needed_to_flip_top1",
+        "pre_update_probe_top1_changed_rate",
+        "actual_update_probe_lr",
+        "actual_update_probe_update_epochs",
+        "actual_update_probe_post_update_kl_vs_old",
+        "actual_update_probe_top1_changed_rate",
+        "actual_update_probe_neural_delta_abs_max",
+        "actual_update_probe_ratio_std",
+        "actual_update_probe_clip_fraction",
+        "standard_probe_lr3e_4_epoch1_lr",
+        "standard_probe_lr3e_4_epoch1_update_epochs",
+        "standard_probe_lr3e_4_epoch1_post_update_kl_vs_old",
+        "standard_probe_lr3e_4_epoch1_top1_changed_rate",
+        "standard_probe_lr3e_4_epoch1_neural_delta_abs_max",
+        "standard_probe_lr3e_4_epoch1_ratio_std",
+        "standard_probe_lr3e_4_epoch1_clip_fraction",
+        "post_update_advantage_mean",
+        "post_update_advantage_std",
+        "post_update_return_mean",
+        "post_update_return_std",
+        "post_update_actor_grad_norm",
+        "post_update_policy_mlp_final_grad_norm",
+        "post_update_mean_delta_needed_to_flip_top1",
+        "post_update_top1_action_changed_rate",
+        "post_update_rule_agreement",
+        "post_update_ratio_mean",
+        "post_update_ratio_std",
+        "post_update_clip_fraction",
+    )
+    return {name: final.get(name) for name in names}
 
 
 def _diagnostic_seed_registry(args: argparse.Namespace) -> list[int]:
@@ -749,6 +1149,10 @@ def _summary_markdown(args: argparse.Namespace, summaries: list[dict[str, Any]])
         f"eval_seed_registry_id: `{_eval_seed_registry_id(args)}`",
         f"eval_seed_count: `{len(_eval_seed_registry(args))}`",
         f"eval_seed_hash: `{_eval_seed_hash(_eval_seed_registry(args))}`",
+        "shared_eval_seeds: `true`",
+        "eval_seed_policy: `forced_shared_across_configs`",
+        "source_type: `retrained_config`",
+        "eval_scope: `single learner seat 0; use paired checkpoint eval for seat rotation validation`",
         "",
         "## Scope",
         "",
@@ -768,7 +1172,8 @@ def _summary_markdown(args: argparse.Namespace, summaries: list[dict[str, Any]])
         f"- max rulebase_chosen_not_found_count: {_max_metric(summaries, 'rulebase_chosen_not_found_count'):.6g}",
         f"- max rulebase_batch_unsupported_count: {_max_metric(summaries, 'rulebase_batch_unsupported_count'):.6g}",
         "- fail-closed note: these are hard raise gates, not observed recoverable event rates",
-        "- trace counters pending: illegal_attempt_count, fallback_policy_count, forced_terminal_preempt_count, forced_terminal_missed_count, autopilot_terminal_count",
+        "- trace counters observed: forced_terminal_preempt_count, autopilot_terminal_count",
+        "- trace counters pending: illegal_attempt_count, fallback_policy_count, forced_terminal_missed_count",
         "- caveat: this is a tiny smoke-scale matrix, not strength evidence",
         "",
         "## Top Configs",
