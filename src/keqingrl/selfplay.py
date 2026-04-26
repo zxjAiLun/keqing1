@@ -192,7 +192,7 @@ def collect_policy_episode(
                 reward_spec_version=policy_input_cpu.metadata.get("reward_spec_version"),
                 style_context_version=policy_input_cpu.metadata.get("style_context_version"),
                 is_autopilot=False,
-                is_learner_controlled=bool(policy_input_cpu.metadata.get("is_learner_controlled", True)),
+                is_learner_controlled=_is_learner_controlled_step(policy_input_cpu, seat_policy),
                 control_action_types=tuple(policy_input_cpu.metadata.get("control_action_types", ())),
                 rulebase_chosen=policy_input_cpu.metadata.get("rulebase_chosen"),
                 policy_chosen=chosen_action.canonical_key,
@@ -753,6 +753,15 @@ def summarize_discard_only_iteration(
 
 def _learner_training_steps(steps: Sequence[RolloutStep]) -> list[RolloutStep]:
     return [step for step in steps if not step.is_autopilot and step.is_learner_controlled]
+
+
+def _is_learner_controlled_step(policy_input, seat_policy: SeatPolicyAssignment) -> bool:
+    if seat_policy.name is not None and seat_policy.name != "learner":
+        return False
+    metadata_value = policy_input.metadata.get("is_learner_controlled")
+    if metadata_value is not None:
+        return bool(metadata_value)
+    return True
 
 
 def _drain_autopilot_events(env) -> tuple[object, ...]:

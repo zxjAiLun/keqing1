@@ -647,6 +647,7 @@ def test_collect_selfplay_episode_uses_opponent_pool_for_nonlearner_seats() -> N
     ]
     assert [step.policy_version for step in episode.steps] == [7, 99]
     assert [step.policy_name for step in episode.steps] == ["learner", "fixed-opponent"]
+    assert [step.is_learner_controlled for step in episode.steps] == [True, False]
 
 
 def test_collect_discard_only_episode_accepts_non_discard_self_turn_actions() -> None:
@@ -971,7 +972,8 @@ def test_run_ppo_iteration_filters_batch_to_learner_seats_with_opponent_pool() -
     assert result.metrics.total_steps == 2
     assert result.metrics.batch_size == 1
     assert [step.policy_version for step in result.episodes[0].steps] == [0, 99]
-    assert [step.policy_name for step in result.episodes[0].steps] == ["learner", None]
+    assert [step.policy_name for step in result.episodes[0].steps] == ["learner", "opponent"]
+    assert [step.is_learner_controlled for step in result.episodes[0].steps] == [True, False]
     assert torch.isfinite(torch.tensor(result.metrics.mean_total_loss))
 
 

@@ -51,6 +51,8 @@ dataset_debug*/
 !reports/keqingrl_rule_score_scale_probe_20260426_step36b_ep16/rule_score_scale_probe.json
 !reports/keqingrl_actor_only_online_probe_20260426_step36c/sweep.json
 !reports/keqingrl_fixed_online_bridge_20260426_step36d/fixed_online_bridge.json
+!reports/keqingrl_fixed_online_bridge_20260426_step36d_learner_only/fixed_online_bridge.json
+!reports/keqingrl_online_stabilization_20260426_source93_learner_only/online_stabilization_sweep.json
 *.jsonl
 *.jsonl.gz
 links.txt

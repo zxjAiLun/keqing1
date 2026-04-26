@@ -101,7 +101,15 @@ def build_selfplay_seat_assignments(
             continue
         if opponent_pool is None:
             raise ValueError(f"missing opponent policy for non-learner seat {seat}")
-        seat_assignments.append(opponent_pool.sample(rng=rng).to_assignment())
+        opponent_assignment = opponent_pool.sample(rng=rng).to_assignment()
+        if opponent_assignment.name is None:
+            opponent_assignment = SeatPolicyAssignment(
+                policy=opponent_assignment.policy,
+                policy_version=opponent_assignment.policy_version,
+                greedy=opponent_assignment.greedy,
+                name="opponent",
+            )
+        seat_assignments.append(opponent_assignment)
     return tuple(seat_assignments)
 
 

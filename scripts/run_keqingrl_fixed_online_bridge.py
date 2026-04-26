@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any, Sequence
 
@@ -18,8 +19,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+import keqing_core
 from keqingrl import DiscardOnlyMahjongEnv
 from keqingrl.learning_signal import seed_registry_hash
+from keqingrl.metadata import default_checkpoint_metadata, validate_checkpoint_metadata
 from keqingrl.ppo import compute_ppo_loss, ppo_update
 from keqingrl.selfplay import build_episodes_ppo_batch, collect_selfplay_episodes
 from scripts.probe_keqingrl_sampling_diversity import (
@@ -59,6 +62,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--online-lr", type=float, default=1e-3)
     parser.add_argument("--online-update-epochs", type=int, default=4)
     parser.add_argument("--online-entropy-coef", type=float, default=0.0)
+    parser.add_argument("--online-rule-kl-coef", type=float, default=0.0)
+    parser.add_argument("--online-value-coef", type=float, default=0.0)
+    parser.add_argument("--online-rank-coef", type=float, default=0.0)
     parser.add_argument("--online-normalize-advantages", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--device", default=None)
@@ -93,15 +99,23 @@ def main() -> None:
         )
         fixed_after_overfit = _policy_delta_stats(overfit_policy, fixed_batch)
         checkpoint_path = args.output_dir / "checkpoints" / f"source_{candidate['source_config_id']}_rerun_{candidate['rerun_config_id']}_fixed_batch_overfit.pt"
+        fixed_checkpoint_metadata = _bridge_checkpoint_metadata(
+            args,
+            candidate,
+            stage="fixed_batch_overfit",
+            overfit_config=overfit_config,
+        )
         torch.save(
             {
                 "source_type": "fixed_batch_overfit_bridge",
                 "candidate": _candidate_summary(candidate),
                 "overfit_config": overfit_config,
+                **_checkpoint_contract_payload_fields(fixed_checkpoint_metadata),
                 "policy_state_dict": overfit_policy.state_dict(),
             },
             checkpoint_path,
         )
+        checkpoint_sha256 = _file_sha256(checkpoint_path)
         online_batch = _collect_batch(
             overfit_policy,
             opponent_pool,
@@ -113,27 +127,40 @@ def main() -> None:
         online_pre = _policy_delta_stats(overfit_policy, online_batch)
         fixed_recheck_pre_online = _policy_delta_stats(overfit_policy, fixed_batch)
         online_losses = _run_online_update(overfit_policy, online_batch, args)
+        online_final_loss = _compute_online_loss(overfit_policy, online_batch, args)
         online_post = _policy_delta_stats(overfit_policy, online_batch)
         fixed_recheck_post_online = _policy_delta_stats(overfit_policy, fixed_batch)
         post_online_checkpoint_path = args.output_dir / "checkpoints" / f"source_{candidate['source_config_id']}_rerun_{candidate['rerun_config_id']}_post_online.pt"
+        online_config = {
+            "lr": float(args.online_lr),
+            "update_epochs": int(args.online_update_epochs),
+            "normalize_advantages": bool(args.online_normalize_advantages),
+            "entropy_coef": float(args.online_entropy_coef),
+            "value_coef": float(args.online_value_coef),
+            "rank_coef": float(args.online_rank_coef),
+            "rule_kl_coef": float(args.online_rule_kl_coef),
+            "max_grad_norm": None if args.max_grad_norm is None else float(args.max_grad_norm),
+        }
+        post_online_checkpoint_metadata = _bridge_checkpoint_metadata(
+            args,
+            candidate,
+            stage="post_online_update",
+            overfit_config=overfit_config,
+            online_config=online_config,
+            parent_checkpoint_sha256=checkpoint_sha256,
+        )
         torch.save(
             {
                 "source_type": "fixed_batch_overfit_bridge_post_online",
                 "candidate": _candidate_summary(candidate),
                 "overfit_config": overfit_config,
-                "online_config": {
-                    "lr": float(args.online_lr),
-                    "update_epochs": int(args.online_update_epochs),
-                    "normalize_advantages": bool(args.online_normalize_advantages),
-                    "entropy_coef": float(args.online_entropy_coef),
-                    "value_coef": 0.0,
-                    "rank_coef": 0.0,
-                    "rule_kl_coef": 0.0,
-                },
+                "online_config": online_config,
+                **_checkpoint_contract_payload_fields(post_online_checkpoint_metadata),
                 "policy_state_dict": overfit_policy.state_dict(),
             },
             post_online_checkpoint_path,
         )
+        post_online_checkpoint_sha256 = _file_sha256(post_online_checkpoint_path)
         row = {
             **_candidate_summary(candidate),
             "source_type": "fixed_batch_overfit_bridge",
@@ -145,9 +172,14 @@ def main() -> None:
             "fixed_episodes": int(args.episodes),
             "online_episodes": int(args.online_episodes),
             "checkpoint_path": str(checkpoint_path),
-            "checkpoint_sha256": _file_sha256(checkpoint_path),
+            "checkpoint_sha256": checkpoint_sha256,
             "post_online_checkpoint_path": str(post_online_checkpoint_path),
-            "post_online_checkpoint_sha256": _file_sha256(post_online_checkpoint_path),
+            "post_online_checkpoint_sha256": post_online_checkpoint_sha256,
+            "checkpoint_metadata_version": fixed_checkpoint_metadata["checkpoint_metadata_version"],
+            "checkpoint_git_commit": fixed_checkpoint_metadata["git_commit"],
+            "checkpoint_git_dirty": fixed_checkpoint_metadata["git_dirty"],
+            "native_schema_name": fixed_checkpoint_metadata["native_schema"]["schema_name"],
+            "native_schema_version": fixed_checkpoint_metadata["native_schema"]["schema_version"],
             **{f"fixed_before_{key}": value for key, value in fixed_before.items()},
             **{f"fixed_after_overfit_{key}": value for key, value in fixed_after_overfit.items()},
             **{f"online_pre_{key}": value for key, value in online_pre.items()},
@@ -161,10 +193,17 @@ def main() -> None:
             "online_lr": float(args.online_lr),
             "online_update_epochs": int(args.online_update_epochs),
             "online_normalize_advantages": bool(args.online_normalize_advantages),
-            "online_final_approx_kl": _loss_float(online_losses[-1].approx_kl) if online_losses else 0.0,
-            "online_final_clip_fraction": _loss_float(online_losses[-1].clip_fraction) if online_losses else 0.0,
-            "online_final_policy_loss": _loss_float(online_losses[-1].policy_loss) if online_losses else 0.0,
+            "online_entropy_coef": float(args.online_entropy_coef),
+            "online_rule_kl_coef": float(args.online_rule_kl_coef),
+            "online_value_coef": float(args.online_value_coef),
+            "online_rank_coef": float(args.online_rank_coef),
+            "online_update_loss_count": len(online_losses),
+            "online_final_approx_kl": _loss_float(online_final_loss.approx_kl),
+            "online_final_clip_fraction": _loss_float(online_final_loss.clip_fraction),
+            "online_final_policy_loss": _loss_float(online_final_loss.policy_loss),
+            "online_final_rule_kl": _loss_float(online_final_loss.rule_kl),
         }
+        row.update(_bridge_classification(row))
         summary_rows.append(row)
         for curve in overfit_curve:
             curve_rows.append({**_candidate_summary(candidate), **curve})
@@ -175,6 +214,7 @@ def main() -> None:
             f"online_pre={row['online_pre_top1_action_changed_rate']:.6g} "
             f"online_post={row['online_post_top1_action_changed_rate']:.6g} "
             f"fixed_post_online={row['fixed_post_online_top1_action_changed_rate']:.6g}",
+            f"status={row['bridge_status']}",
             flush=True,
         )
 
@@ -198,6 +238,7 @@ def main() -> None:
 
 
 def _collect_batch(policy, opponent_pool, args: argparse.Namespace, *, episodes: int, seed: int, device: torch.device):
+    torch.manual_seed(int(seed))
     collected = collect_selfplay_episodes(
         DiscardOnlyMahjongEnv(max_kyokus=args.max_kyokus),
         policy,
@@ -287,15 +328,138 @@ def _run_online_update(policy, online_batch, args: argparse.Namespace):
                 optimizer,
                 online_batch,
                 clip_eps=float(args.clip_eps),
-                value_coef=0.0,
+                value_coef=float(args.online_value_coef),
                 entropy_coef=float(args.online_entropy_coef),
-                rank_coef=0.0,
-                rule_kl_coef=0.0,
+                rank_coef=float(args.online_rank_coef),
+                rule_kl_coef=float(args.online_rule_kl_coef),
                 normalize_advantages=bool(args.online_normalize_advantages),
                 max_grad_norm=float(args.max_grad_norm) if args.max_grad_norm is not None else None,
             )
         )
     return losses
+
+
+def _compute_online_loss(policy, online_batch, args: argparse.Namespace):
+    with torch.no_grad():
+        return compute_ppo_loss(
+            policy,
+            online_batch,
+            clip_eps=float(args.clip_eps),
+            value_coef=float(args.online_value_coef),
+            entropy_coef=float(args.online_entropy_coef),
+            rank_coef=float(args.online_rank_coef),
+            rule_kl_coef=float(args.online_rule_kl_coef),
+            normalize_advantages=bool(args.online_normalize_advantages),
+        )
+
+
+def _bridge_checkpoint_metadata(
+    args: argparse.Namespace,
+    candidate: dict[str, Any],
+    *,
+    stage: str,
+    overfit_config: dict[str, Any],
+    online_config: dict[str, Any] | None = None,
+    parent_checkpoint_sha256: str | None = None,
+) -> dict[str, Any]:
+    ppo_config_hash = _stable_json_hash(
+        {
+            "stage": stage,
+            "source_config_id": candidate.get("source_config_id"),
+            "rerun_config_id": candidate.get("rerun_config_id"),
+            "opponent_mode": candidate.get("opponent_mode"),
+            "gamma": float(args.gamma),
+            "gae_lambda": float(args.gae_lambda),
+            "clip_eps": float(args.clip_eps),
+            "overfit_config": overfit_config,
+            "online_config": online_config,
+        }
+    )
+    contract_metadata = default_checkpoint_metadata(
+        gamma=float(args.gamma),
+        gae_lambda=float(args.gae_lambda),
+        ppo_config_hash=ppo_config_hash,
+    )
+    validate_checkpoint_metadata(contract_metadata)
+    native_schema = keqing_core.require_native_schema()
+    git_info = _git_info()
+    metadata = {
+        "checkpoint_metadata_version": "keqingrl_bridge_checkpoint_metadata_v1",
+        "stage": stage,
+        "source_type": "fixed_batch_overfit_bridge",
+        "source_config_id": int(candidate["source_config_id"]),
+        "rerun_config_id": int(candidate["rerun_config_id"]),
+        "source_report": candidate.get("source_report"),
+        "config_path": candidate.get("config_path"),
+        "source_checkpoint_path": candidate.get("checkpoint_path"),
+        "source_checkpoint_sha256": candidate.get("checkpoint_sha256"),
+        "opponent_mode": candidate.get("opponent_mode"),
+        "native_schema": native_schema,
+        "contract_metadata": contract_metadata,
+        "action_contract_version": contract_metadata["action_contract_version"],
+        "action_feature_contract_version": contract_metadata["action_feature_contract_version"],
+        "reward_spec_version": contract_metadata["reward_spec_version"],
+        "style_context_version": contract_metadata["style_context_version"],
+        "rule_score_version": contract_metadata["rule_score_version"],
+        "rule_context_encoding_version": contract_metadata["rule_context_encoding_version"],
+        "git_commit": git_info["commit"],
+        "git_dirty": git_info["dirty"],
+        "git_status_short": git_info["status_short"],
+        "fixed_seed_registry_id": _seed_registry_id(args),
+        "fixed_seed_hash": seed_registry_hash(_seed_registry(args)),
+        "online_seed_registry_id": _online_seed_registry_id(args),
+        "online_seed_hash": seed_registry_hash(_online_seed_registry(args)),
+        "fixed_episodes": int(args.episodes),
+        "online_episodes": int(args.online_episodes),
+        "seed_stride": int(args.seed_stride),
+        "learner_seats": [int(seat) for seat in args.learner_seats],
+        "overfit_config": dict(overfit_config),
+        "online_config": None if online_config is None else dict(online_config),
+        "parent_checkpoint_sha256": parent_checkpoint_sha256,
+    }
+    return metadata
+
+
+def _checkpoint_contract_payload_fields(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "artifact_metadata": metadata,
+        "native_schema": metadata["native_schema"],
+        "contract_metadata": metadata["contract_metadata"],
+        "action_contract_version": metadata["action_contract_version"],
+        "action_feature_contract_version": metadata["action_feature_contract_version"],
+        "reward_spec_version": metadata["reward_spec_version"],
+        "style_context_version": metadata["style_context_version"],
+        "rule_score_version": metadata["rule_score_version"],
+        "rule_context_encoding_version": metadata["rule_context_encoding_version"],
+        "git_commit": metadata["git_commit"],
+        "git_dirty": metadata["git_dirty"],
+        "git_status_short": metadata["git_status_short"],
+        "fixed_seed_hash": metadata["fixed_seed_hash"],
+        "online_seed_hash": metadata["online_seed_hash"],
+        "parent_checkpoint_sha256": metadata["parent_checkpoint_sha256"],
+    }
+
+
+def _git_info() -> dict[str, Any]:
+    try:
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        status = subprocess.check_output(["git", "status", "--short"], text=True).strip()
+    except Exception as exc:
+        return {
+            "commit": f"unavailable: {exc}",
+            "dirty": True,
+            "status_short": [],
+        }
+    return {
+        "commit": commit,
+        "dirty": bool(status),
+        "status_short": status.splitlines(),
+    }
+
+
+def _stable_json_hash(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
 def _policy_delta_stats(policy, batch) -> dict[str, float]:
@@ -322,6 +486,43 @@ def _policy_delta_stats(policy, batch) -> dict[str, float]:
     }
 
 
+def _bridge_classification(row: dict[str, Any]) -> dict[str, Any]:
+    online_pre = float(row["online_pre_top1_action_changed_rate"])
+    online_post = float(row["online_post_top1_action_changed_rate"])
+    fixed_post_online = float(row["fixed_post_online_top1_action_changed_rate"])
+    online_clip = float(row["online_final_clip_fraction"])
+    online_kl = float(row["online_final_approx_kl"])
+    fixed_after = float(row["fixed_after_overfit_top1_action_changed_rate"])
+
+    transfers_to_online = online_pre > 0.0
+    survives_online_update = transfers_to_online and online_post >= online_pre * 0.8
+    retains_fixed_shift = fixed_post_online > 0.0
+    stable_update = online_clip < 0.3
+    kl_stable = online_kl < 0.03
+
+    if transfers_to_online and survives_online_update and retains_fixed_shift and stable_update and kl_stable:
+        status = "MIGRATES_AND_SURVIVES"
+    elif transfers_to_online and survives_online_update and retains_fixed_shift:
+        status = "MIGRATES_WITH_HIGH_KL"
+    elif transfers_to_online and not survives_online_update:
+        status = "ONLINE_LOSES_FIXED_SHIFT"
+    elif fixed_after > 0.0 and retains_fixed_shift:
+        status = "FIXED_ONLY_WEAK_ONLINE_TRANSFER"
+    elif fixed_after > 0.0:
+        status = "FIXED_ONLY_NO_ONLINE_TRANSFER"
+    else:
+        status = "MOVES_BUT_UNSTABLE"
+
+    return {
+        "bridge_status": status,
+        "transfers_to_online": transfers_to_online,
+        "survives_online_update": survives_online_update,
+        "retains_fixed_shift": retains_fixed_shift,
+        "stable_update": stable_update,
+        "kl_stable": kl_stable,
+    }
+
+
 def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) -> str:
     lines = [
         "# KeqingRL Fixed-Batch To Online Bridge",
@@ -341,6 +542,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             "- "
             f"source={row['source_config_id']} "
             f"rerun={row['rerun_config_id']} "
+            f"status={row['bridge_status']} "
             f"overfit_pass={row['overfit_passed_target']} "
             f"overfit_epochs={row['overfit_epochs']} "
             f"fixed_before={row['fixed_before_top1_action_changed_rate']:.6g} "
@@ -348,7 +550,14 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"online_pre={row['online_pre_top1_action_changed_rate']:.6g} "
             f"online_post={row['online_post_top1_action_changed_rate']:.6g} "
             f"fixed_post_online={row['fixed_post_online_top1_action_changed_rate']:.6g} "
+            f"online_kl={row['online_final_approx_kl']:.6g} "
+            f"online_clip={row['online_final_clip_fraction']:.6g} "
+            f"online_policy_loss={row['online_final_policy_loss']:.6g} "
+            f"online_rule_agreement={row['online_post_rule_agreement']:.6g} "
+            f"online_delta_mean={row['online_post_neural_delta_abs_mean']:.6g} "
             f"online_delta_max={row['online_post_neural_delta_abs_max']:.6g} "
+            f"stable_update={row['stable_update']} "
+            f"kl_stable={row['kl_stable']} "
             f"checkpoint={row['checkpoint_path']} "
             f"post_online_checkpoint={row['post_online_checkpoint_path']}"
         )
