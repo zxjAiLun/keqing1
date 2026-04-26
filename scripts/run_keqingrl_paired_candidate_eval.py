@@ -41,6 +41,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--source-config-id", type=int, default=None)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--source-config-ids", type=int, nargs="+", default=None)
+    parser.add_argument("--rerun-config-ids", type=int, nargs="+", default=None)
     parser.add_argument("--eval-episodes", type=int, default=64)
     parser.add_argument("--eval-seed-base", type=int, default=202604250000)
     parser.add_argument("--eval-seed-stride", type=int, default=1)
@@ -89,12 +90,39 @@ def main() -> None:
     print(summary)
 
 
+
+def _filter_candidate_rows(
+    rows: list[dict[str, str]],
+    source_config_ids: list[int] | None,
+    rerun_config_ids: list[int] | None,
+) -> list[dict[str, str]]:
+    if source_config_ids is not None:
+        source_set = {int(value) for value in source_config_ids}
+        rows = [row for row in rows if int(row["source_config_id"]) in source_set]
+    if rerun_config_ids is not None:
+        rerun_set = {int(value) for value in rerun_config_ids}
+        rows = [row for row in rows if int(row["rerun_config_id"]) in rerun_set]
+    return rows
+
+
+def _has_duplicate_source_ids(rows: list[dict[str, str]]) -> bool:
+    source_ids = [int(row["source_config_id"]) for row in rows]
+    return len(source_ids) != len(set(source_ids))
+
+
+def _candidate_id_from_row(row: dict[str, str], duplicate_source_ids: bool) -> str:
+    source_id = int(row["source_config_id"])
+    if not duplicate_source_ids:
+        return str(source_id)
+    return f"source_{source_id}_rerun_{int(row['rerun_config_id'])}"
+
+
 def _load_candidate_records(args: argparse.Namespace, device: torch.device) -> list[dict[str, Any]]:
     if args.mode == "checkpoint-eval" or args.checkpoint_path is not None or args.config_path is not None:
         return [_load_single_checkpoint_candidate(args, device)]
     if args.candidate_summary is None:
         raise ValueError("--mode summary requires --candidate-summary")
-    return _load_candidates(args.candidate_summary, args.source_config_ids, device)
+    return _load_candidates(args.candidate_summary, args.source_config_ids, args.rerun_config_ids, device)
 
 
 def _load_single_checkpoint_candidate(args: argparse.Namespace, device: torch.device) -> dict[str, Any]:
@@ -141,14 +169,18 @@ def _load_single_checkpoint_candidate(args: argparse.Namespace, device: torch.de
     }
 
 
-def _load_candidates(summary_path: Path, source_config_ids: list[int] | None, device: torch.device) -> list[dict[str, Any]]:
+def _load_candidates(
+    summary_path: Path,
+    source_config_ids: list[int] | None,
+    rerun_config_ids: list[int] | None,
+    device: torch.device,
+) -> list[dict[str, Any]]:
     rows = _read_csv(summary_path)
-    if source_config_ids is not None:
-        source_set = {int(value) for value in source_config_ids}
-        rows = [row for row in rows if int(row["source_config_id"]) in source_set]
+    rows = _filter_candidate_rows(rows, source_config_ids, rerun_config_ids)
     if not rows:
         raise ValueError("no candidates selected")
     selected: list[dict[str, Any]] = []
+    duplicate_source_ids = _has_duplicate_source_ids(rows)
     for row in rows:
         checkpoint_path = Path(row["checkpoint_path"])
         config_path = Path(row["config_path"])
@@ -166,7 +198,7 @@ def _load_candidates(summary_path: Path, source_config_ids: list[int] | None, de
         selected.append(
             {
                 "kind": "candidate",
-                "candidate_id": str(row["source_config_id"]),
+                "candidate_id": _candidate_id_from_row(row, duplicate_source_ids),
                 "source_type": "checkpoint",
                 "source_config_id": int(row["source_config_id"]),
                 "rerun_config_id": int(row["rerun_config_id"]),
@@ -369,6 +401,8 @@ def _payload(args: argparse.Namespace, rows: list[dict[str, Any]]) -> dict[str, 
         "candidate_summary": None if args.candidate_summary is None else str(args.candidate_summary),
         "checkpoint_path": None if args.checkpoint_path is None else str(args.checkpoint_path),
         "config_path": None if args.config_path is None else str(args.config_path),
+        "source_config_ids": args.source_config_ids,
+        "rerun_config_ids": args.rerun_config_ids,
         "eval_seed_registry_id": _eval_seed_registry_id(args),
         "eval_seed_hash": _eval_seed_hash(_eval_seed_registry(args)),
         "eval_seed_count": args.eval_episodes,
@@ -399,6 +433,8 @@ def _summary_markdown(args: argparse.Namespace, rows: list[dict[str, Any]]) -> s
         f"candidate_summary: `{args.candidate_summary}`",
         f"checkpoint_path: `{args.checkpoint_path}`",
         f"config_path: `{args.config_path}`",
+        f"source_config_ids: `{args.source_config_ids}`",
+        f"rerun_config_ids: `{args.rerun_config_ids}`",
         f"eval_seed_registry_id: `{_eval_seed_registry_id(args)}`",
         f"eval_seed_hash: `{_eval_seed_hash(_eval_seed_registry(args))}`",
         f"eval_seed_count: `{args.eval_episodes}`",
@@ -424,6 +460,7 @@ def _summary_markdown(args: argparse.Namespace, rows: list[dict[str, Any]]) -> s
         lines.append(
             "- "
             f"opponent={row['opponent_name']} "
+            f"candidate_id={row['candidate_id']} "
             f"source_type={row['source_type']} "
             f"source_id={row['source_config_id']} "
             f"delta_vs_zero={row['paired_rank_pt_delta_vs_zero_delta']:.6g} "

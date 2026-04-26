@@ -87,7 +87,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--diagnostic-fields", action="store_true")
     parser.add_argument("--diagnostic-seed-base", type=int, default=202604250000)
     parser.add_argument("--diagnostic-seed-stride", type=int, default=1)
-    parser.add_argument("--ablation-profile", choices=("small", "medium", "full"), default="small")
+    parser.add_argument(
+        "--ablation-profile",
+        choices=("small", "medium", "full", "actor-only-small"),
+        default="small",
+    )
     parser.add_argument("--max-configs", type=int, default=None)
     parser.add_argument("--random-subsample", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true")
@@ -159,6 +163,7 @@ def main() -> None:
         )
 
     eval_seed_registry = _eval_seed_registry(args)
+    run_metadata = _run_metadata(args, configs, summaries, eval_seed_registry)
     payload = {
         "scope": {
             "style_context": "neutral",
@@ -179,6 +184,8 @@ def main() -> None:
         "eval_seed_hash": _eval_seed_hash(eval_seed_registry),
         "shared_eval_seeds": True,
         "eval_seed_policy": "forced_shared_across_configs",
+        "config_count": len(configs),
+        **_ablation_metadata(args, configs),
         "grid": {
             "rule_kl_coef": list(args.rule_kl_coefs),
             "entropy_coef": list(args.entropy_coefs),
@@ -187,21 +194,7 @@ def main() -> None:
         },
         "candidate_rerun": _candidate_rerun_payload(args, configs),
         "rerun_config_mapping": _rerun_config_mapping(configs),
-        "run": {
-            "iterations": args.iterations,
-            "rollout_episodes": args.rollout_episodes,
-            "update_epochs": args.update_epochs,
-            "eval_episodes": args.eval_episodes,
-            "eval_seed_base": args.eval_seed_base,
-            "eval_seed_stride": args.eval_seed_stride,
-            "eval_seed_registry_id": _eval_seed_registry_id(args),
-            "eval_seed_count": len(eval_seed_registry),
-            "eval_seed_hash": _eval_seed_hash(eval_seed_registry),
-            "shared_eval_seeds": True,
-            "eval_seed_policy": "forced_shared_across_configs",
-            "learner_seats": [0],
-            "opponents": sorted({str(row["opponent_mode"]) for row in summaries}),
-        },
+        "run": run_metadata,
         "summaries": summaries,
         "iterations": rows,
     }
@@ -221,6 +214,54 @@ def _build_run_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
     if args.mode == "learning-signal-ablation":
         return _build_learning_signal_ablation_configs(args)
     raise ValueError(f"unsupported mode: {args.mode}")
+
+
+def _ablation_metadata(args: argparse.Namespace, configs: list[dict[str, Any]]) -> dict[str, Any]:
+    if args.mode != "learning-signal-ablation":
+        return {}
+    profile_values = _ablation_profile_values(args.ablation_profile)
+    return {
+        "ablation_profile": args.ablation_profile,
+        "profile_config_count": _ablation_profile_config_count(args),
+        "profile_values": {key: list(value) for key, value in profile_values.items()},
+        "max_configs": args.max_configs,
+        "random_subsample": args.random_subsample,
+    }
+
+
+def _ablation_profile_config_count(args: argparse.Namespace) -> int:
+    profile_values = _ablation_profile_values(args.ablation_profile)
+    source_ids = list(args.source_config_ids or _default_ablation_source_ids(args))
+    count = max(1, len(source_ids))
+    for values in profile_values.values():
+        count *= len(values)
+    return count
+
+
+def _run_metadata(
+    args: argparse.Namespace,
+    configs: list[dict[str, Any]],
+    summaries: list[dict[str, Any]],
+    eval_seed_registry: list[int],
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "iterations": args.iterations,
+        "rollout_episodes": args.rollout_episodes,
+        "update_epochs": args.update_epochs,
+        "eval_episodes": args.eval_episodes,
+        "eval_seed_base": args.eval_seed_base,
+        "eval_seed_stride": args.eval_seed_stride,
+        "eval_seed_registry_id": _eval_seed_registry_id(args),
+        "eval_seed_count": len(eval_seed_registry),
+        "eval_seed_hash": _eval_seed_hash(eval_seed_registry),
+        "shared_eval_seeds": True,
+        "eval_seed_policy": "forced_shared_across_configs",
+        "learner_seats": [0],
+        "opponents": sorted({str(row["opponent_mode"]) for row in summaries}),
+        "config_count": len(configs),
+    }
+    metadata.update(_ablation_metadata(args, configs))
+    return metadata
 
 
 def _build_grid_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -327,7 +368,7 @@ def _build_learning_signal_ablation_configs(args: argparse.Namespace) -> list[di
 
 
 def _default_ablation_source_ids(args: argparse.Namespace) -> list[int]:
-    if args.ablation_profile == "small":
+    if args.ablation_profile in {"small", "actor-only-small"}:
         return [93, 57, 8]
     return []
 
@@ -362,6 +403,16 @@ def _ablation_profile_values(profile: str) -> dict[str, tuple[Any, ...]]:
             "lr": (3e-4, 1e-3),
             "value_coef": (0.0, 0.5),
             "rank_coef": (0.0, 0.05),
+        }
+    if profile == "actor-only-small":
+        return {
+            "normalize_advantages": (True, False),
+            "update_epochs": (4, 8),
+            "rule_kl_coef": (0.0,),
+            "entropy_coef": (0.0, 0.005),
+            "lr": (1e-3, 3e-3),
+            "value_coef": (0.0,),
+            "rank_coef": (0.0,),
         }
     raise ValueError(f"unsupported ablation profile: {profile}")
 
@@ -437,11 +488,9 @@ def _write_dry_run(args: argparse.Namespace, configs: list[dict[str, Any]]) -> N
     payload = {
         "mode": args.mode,
         "dry_run": True,
-        "ablation_profile": args.ablation_profile,
-        "max_configs": args.max_configs,
-        "random_subsample": args.random_subsample,
         "config_count": len(configs),
         "configs": configs,
+        **_ablation_metadata(args, configs),
     }
     _write_json(args.out_dir / "dry_run.json", payload)
     _write_csv(args.out_dir / "dry_run_configs.csv", configs)
@@ -1128,6 +1177,20 @@ def _diagnostic_seed_registry_id(args: argparse.Namespace) -> str:
     return f"base={args.diagnostic_seed_base}:stride={args.diagnostic_seed_stride}:count={args.rollout_episodes}"
 
 
+def _summary_ablation_lines(args: argparse.Namespace, config_count: int) -> list[str]:
+    if args.mode != "learning-signal-ablation":
+        return []
+    lines = [
+        f"ablation_profile: `{args.ablation_profile}`",
+        f"profile_config_count: `{_ablation_profile_config_count(args)}`",
+    ]
+    if args.max_configs is not None:
+        lines.append(f"max_configs: `{args.max_configs}`")
+    if args.random_subsample is not None:
+        lines.append(f"random_subsample: `{args.random_subsample}`")
+    return lines
+
+
 def _summary_markdown(args: argparse.Namespace, summaries: list[dict[str, Any]]) -> str:
     ranked = sorted(
         summaries,
@@ -1143,6 +1206,7 @@ def _summary_markdown(args: argparse.Namespace, summaries: list[dict[str, Any]])
         "",
         f"seed: `{args.seed}`",
         f"configs: `{len(summaries)}`",
+        *_summary_ablation_lines(args, len(summaries)),
         f"iterations/config: `{args.iterations}`",
         f"rollout_episodes/config/iter: `{args.rollout_episodes}`",
         f"eval_episodes/config: `{args.eval_episodes}`",
@@ -1152,6 +1216,7 @@ def _summary_markdown(args: argparse.Namespace, summaries: list[dict[str, Any]])
         "shared_eval_seeds: `true`",
         "eval_seed_policy: `forced_shared_across_configs`",
         "source_type: `retrained_config`",
+        "comparison_note: `config repeat only; use checkpoint eval for candidate comparison`",
         "eval_scope: `single learner seat 0; use paired checkpoint eval for seat rotation validation`",
         "",
         "## Scope",

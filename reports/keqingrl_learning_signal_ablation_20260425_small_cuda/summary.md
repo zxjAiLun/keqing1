@@ -2,6 +2,8 @@
 
 seed: `20260425`
 configs: `48`
+ablation_profile: `small`
+profile_config_count: `48`
 iterations/config: `5`
 rollout_episodes/config/iter: `16`
 eval_episodes/config: `16`
@@ -11,6 +13,7 @@ eval_seed_hash: `0f42628c88353290`
 shared_eval_seeds: `true`
 eval_seed_policy: `forced_shared_across_configs`
 source_type: `retrained_config`
+comparison_note: `config repeat only; use checkpoint eval for candidate comparison`
 eval_scope: `single learner seat 0; use paired checkpoint eval for seat rotation validation`
 
 ## Scope

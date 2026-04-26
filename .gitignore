@@ -46,6 +46,11 @@ metrics.json
 dataset/
 dataset_debug*/
 *.json
+!reports/keqingrl_learning_signal_ablation_20260425_small_cuda/sweep.json
+!reports/keqingrl_sampling_diversity_20260426_step36a_ep16/sampling_diversity.json
+!reports/keqingrl_rule_score_scale_probe_20260426_step36b_ep16/rule_score_scale_probe.json
+!reports/keqingrl_actor_only_online_probe_20260426_step36c/sweep.json
+!reports/keqingrl_fixed_online_bridge_20260426_step36d/fixed_online_bridge.json
 *.jsonl
 *.jsonl.gz
 links.txt
