@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import random
 import uuid
+
+import keqing_core
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from mahjong_env.legal_actions import enumerate_legal_action_specs
 from mahjong_env.scoring import score_hora
+from mahjong_env.feature_tracker import SnapshotFeatureTracker
 from mahjong_env.state import GameState, PlayerState, TileStateError, apply_event
 from mahjong_env.tiles import normalize_tile, AKA_DORA_TILES
 from mahjong_env.types import action_dict_to_spec, action_specs_match
@@ -289,7 +292,11 @@ class BattleManager:
             room.state.last_tsumo[actor] = tile
             room.state.last_tsumo_raw[actor] = tile
             room.state.players[actor].rinshan_tsumo = was_rinshan
-            room.state.remaining_wall = room.remaining_wall()
+            if room.state.remaining_wall is None:
+                room.state.remaining_wall = room.remaining_wall()
+            elif not was_rinshan:
+                room.state.remaining_wall = max(0, room.state.remaining_wall - 1)
+            room.state.pending_rinshan_actor = None
             room.events.append(
                 {"type": "tsumo", "actor": actor, "pai": tile, "rinshan": was_rinshan}
             )
@@ -494,6 +501,12 @@ class BattleManager:
         room.state.last_tsumo_raw[actor] = None
         room.state.actor_to_move = actor
         room.pending_rinshan = meld_type in ("daiminkan", "ankan")
+        if room.pending_rinshan:
+            room.state.pending_rinshan_actor = actor
+            if room.state.remaining_wall is not None:
+                room.state.remaining_wall = max(0, room.state.remaining_wall - 1)
+        else:
+            room.state.pending_rinshan_actor = None
         # live battle 中 chi/pon 后只是“副露后待打牌”，不是实际摸牌。
         # replay_draw_actor 仅用于真实 draw/replay draw 的第 14 张展示。
         room.replay_draw_actor = None
@@ -558,6 +571,9 @@ class BattleManager:
         room.state.actor_to_move = actor
         room.pending_kakan = None
         room.pending_rinshan = True
+        room.state.pending_rinshan_actor = actor
+        if room.state.remaining_wall is not None:
+            room.state.remaining_wall = max(0, room.state.remaining_wall - 1)
         room.replay_draw_actor = None
 
         start_idx = len(room.events)
@@ -623,13 +639,22 @@ class BattleManager:
         if not is_oya_tenpai:
             room.state.oya = (oya + 1) % 4
 
+        room.state.actor_to_move = None
+        room.state.last_discard = None
+        room.state.last_kakan = None
+        room.state.pending_rinshan_actor = None
+        room.pending_rinshan = False
+
         room.events.append(
             {
                 "type": "ryukyoku",
                 "deltas": deltas,
                 "scores": room.state.scores[:],
                 "honba": room.state.honba,
+                "state_honba": room.state.honba,
                 "kyotaku": room.state.kyotaku,
+                "state_kyotaku": room.state.kyotaku,
+                "oya": room.state.oya,
                 "tenpai_players": tenpai[:],
             }
         )
@@ -678,6 +703,12 @@ class BattleManager:
         if not is_oya_winner:
             room.state.oya = (oya + 1) % 4
 
+        room.state.actor_to_move = None
+        room.state.last_discard = None
+        room.state.last_kakan = None
+        room.state.pending_rinshan_actor = None
+        room.pending_rinshan = False
+
         room.events.append(
             {
                 "type": "hora",
@@ -693,7 +724,10 @@ class BattleManager:
                 "yaku_details": scoring.yaku_details,
                 "cost": scoring.cost,
                 "honba": hora_honba,
+                "state_honba": room.state.honba,
                 "kyotaku": hora_kyotaku,
+                "state_kyotaku": room.state.kyotaku,
+                "oya": room.state.oya,
                 "ura_dora_markers": ura_dora_markers,
             }
         )
@@ -721,30 +755,78 @@ class BattleManager:
             return []
         return room.ura_indicator_tiles[: len(room.state.dora_markers)]
 
-    def get_snap_with_shanten(self, room: BattleRoom, actor: int) -> Dict:
-        """返回注入了 shanten/waits 的 snapshot，供 legal_actions 判断立直/荣和用。"""
-        from mahjong_env.replay import _calc_shanten_waits
+    def sync_state_from_rust_events(self, room: BattleRoom, actor_hint: int | None = None) -> None:
+        """Refresh the Python room shell from Rust replayed event state."""
+        if not room.events:
+            return
+        actor = actor_hint
+        if actor is None:
+            actor = room.state.actor_to_move if room.state.actor_to_move is not None else 0
+        actor = int(actor)
+        snapshots = [keqing_core.replay_state_snapshot(room.events, seat) for seat in range(4)]
+        base = snapshots[actor]
+        state = room.state
+        state.bakaze = str(base["bakaze"])
+        state.kyoku = int(base["kyoku"])
+        state.honba = int(base["honba"])
+        state.kyotaku = int(base["kyotaku"])
+        state.oya = int(base["oya"])
+        state.scores = [int(score) for score in base.get("scores", state.scores)]
+        state.dora_markers = [str(tile) for tile in base.get("dora_markers", [])]
+        state.ura_dora_markers = [str(tile) for tile in base.get("ura_dora_markers", [])]
+        state.actor_to_move = None if base.get("actor_to_move") is None else int(base["actor_to_move"])
+        state.last_discard = None if base.get("last_discard") is None else dict(base["last_discard"])
+        state.last_kakan = None if base.get("last_kakan") is None else dict(base["last_kakan"])
+        state.last_tsumo = [None if tile is None else str(tile) for tile in base.get("last_tsumo", [None] * 4)]
+        state.last_tsumo_raw = [None if tile is None else str(tile) for tile in base.get("last_tsumo_raw", [None] * 4)]
+        state.remaining_wall = None if base.get("remaining_wall") is None else int(base["remaining_wall"])
+        state.pending_rinshan_actor = None if base.get("pending_rinshan_actor") is None else int(base["pending_rinshan_actor"])
+        state.ryukyoku_tenpai_players = [int(pid) for pid in base.get("ryukyoku_tenpai_players", [])]
+        state.in_game = bool(room.events and room.events[-1].get("type") != "end_game")
+        room.pending_rinshan = state.pending_rinshan_actor is not None
 
+        discards = base.get("discards") or [[], [], [], []]
+        melds = base.get("melds") or [[], [], [], []]
+        reached = base.get("reached") or [False] * 4
+        pending_reach = base.get("pending_reach") or [False] * 4
+        furiten = base.get("furiten") or [False] * 4
+        sutehai_furiten = base.get("sutehai_furiten") or [False] * 4
+        riichi_furiten = base.get("riichi_furiten") or [False] * 4
+        doujun_furiten = base.get("doujun_furiten") or [False] * 4
+        ippatsu_eligible = base.get("ippatsu_eligible") or [False] * 4
+        rinshan_tsumo = base.get("rinshan_tsumo") or [False] * 4
+        for seat in range(4):
+            player = state.players[seat] if seat < len(state.players) else PlayerState()
+            if seat >= len(state.players):
+                state.players.append(player)
+            player.hand = Counter(str(tile) for tile in snapshots[seat].get("hand", []))
+            player.discards = [dict(item) for item in discards[seat]]
+            player.melds = [dict(item) for item in melds[seat]]
+            player.reached = bool(reached[seat])
+            player.pending_reach = bool(pending_reach[seat])
+            player.furiten = bool(furiten[seat])
+            player.sutehai_furiten = bool(sutehai_furiten[seat])
+            player.riichi_furiten = bool(riichi_furiten[seat])
+            player.doujun_furiten = bool(doujun_furiten[seat])
+            player.ippatsu_eligible = bool(ippatsu_eligible[seat])
+            player.rinshan_tsumo = bool(rinshan_tsumo[seat])
+
+    def get_snap_with_shanten(self, room: BattleRoom, actor: int) -> Dict:
+        """返回 Rust shanten/waits 注入后的 snapshot，供 legacy battle callers 使用。"""
         snap = room.state.snapshot(actor)
+        tracker = SnapshotFeatureTracker.from_state(snap, actor=actor)
         try:
-            hand_raw = snap.get("hand", [])
-            hand_list = (
-                hand_raw
-                if isinstance(hand_raw, list)
-                else [t for t, cnt in hand_raw.items() for _ in range(cnt)]
+            shanten, waits_cnt, waits_tiles, *_ = keqing_core.summarize_3n1(
+                tracker.hand_counts34,
+                tracker.visible_counts34,
             )
-            melds_list = (snap.get("melds") or [[], [], [], []])[actor]
-            shanten, waits_cnt, waits_tiles, _ = _calc_shanten_waits(
-                hand_list, melds_list
-            )
-            snap["shanten"] = shanten
-            snap["waits_count"] = waits_cnt
-            snap["waits_tiles"] = waits_tiles
-        except Exception as e:
-            print(f"[WARN] get_snap_with_shanten failed for actor {actor}: {e}")
-            snap["shanten"] = 8
-            snap["waits_count"] = 0
-            snap["waits_tiles"] = [False] * 34
+        except RuntimeError as exc:
+            if keqing_core.is_missing_rust_capability_error(exc):
+                raise RuntimeError("BattleManager runtime requires Rust shanten/waits summary") from exc
+            raise
+        snap["shanten"] = int(shanten)
+        snap["waits_count"] = int(waits_cnt)
+        snap["waits_tiles"] = [bool(value) for value in waits_tiles]
         return snap
 
     def prepare_turn(self, room: BattleRoom, actor: int) -> Optional[str]:
@@ -862,6 +944,13 @@ class BattleManager:
 
     def get_state_for_player(self, room: BattleRoom, player_id: int) -> Dict:
         snap = self.get_snap_with_shanten(room, player_id)
+        tsumo_pai = room.state.last_tsumo[player_id]
+        visible_hand = list(snap["hand"])
+        if tsumo_pai is not None:
+            try:
+                visible_hand.remove(tsumo_pai)
+            except ValueError:
+                pass
 
         # 响应弃牌时（last_discard 来自他家），保留 none（skip）
         # 自己摸牌打牌回合，none 无意义，过滤掉
@@ -923,8 +1012,8 @@ class BattleManager:
             "actor_to_move": room.state.actor_to_move,
             "last_discard": snap["last_discard"],
             "last_kakan": snap.get("last_kakan"),
-            "hand": snap["hand"],
-            "tsumo_pai": room.state.last_tsumo[player_id],
+            "hand": visible_hand,
+            "tsumo_pai": tsumo_pai,
             "discards": [p.discards[:] for p in room.state.players],
             "melds": [p.melds[:] for p in room.state.players],
             "reached": [p.reached for p in room.state.players],

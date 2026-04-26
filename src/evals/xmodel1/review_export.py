@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from keqingv1.action_space import IDX_TO_TILE_NAME
+from mahjong_env.action_space import IDX_TO_TILE_NAME
 
 
 @dataclass(frozen=True)

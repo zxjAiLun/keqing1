@@ -1,37 +1,61 @@
 # Xmodel1 discard-first 默认训练配置
 data_dirs:
-  - processed_xmodel1/ds1
+  - processed_xmodel1_v1c/ds1
+  - processed_xmodel1_v1c/ds2
+  - processed_xmodel1_v1c/ds3
 
-output_dir: artifacts/models/xmodel1
+output_dir: artifacts/xmodel1_runs/v1c_align
 device: cuda
 
 state_tile_channels: 57
-state_scalar_dim: 64
-candidate_feature_dim: 21
-candidate_flag_dim: 10
+state_scalar_dim: 56
+candidate_feature_dim: 22
+candidate_flag_dim: 8
+special_candidate_feature_dim: 19
 
 hidden_dim: 256
 num_res_blocks: 4
 dropout: 0.1
 
-num_epochs: 8
-batch_size: 256
+num_epochs: 20
+batch_size: 512
 learning_rate: 0.0003
 weight_decay: 0.0001
 warmup_steps: 1000
-steps_per_epoch: 1000
+
+# <= 0 时按本轮随机采样样本数与 batch_size 自动推导。
+steps_per_epoch: 0
+
+val_steps_per_epoch: 100
+# Rust full export 后训练集规模已显著扩大；默认按比例随机抽样，
+# 不再固定每个 epoch 只取 350 个文件。
+files_per_epoch_ratio: 0.1
+files_per_epoch_count: 0
 
 val_ratio: 0.05
-num_workers: 2
-buffer_size: 512
-log_interval: 100
+num_workers: 8
+pin_memory: false
+persistent_workers: false
+buffer_size: 128
+log_interval: 200
 
 ce_loss_weight: 1.0
+action_ce_loss_weight: 0.25
 rank_loss_weight: 0.5
 hard_bad_loss_weight: 0.25
-value_loss_weight: 0.5
-score_delta_loss_weight: 0.25
-win_loss_weight: 0.2
-dealin_loss_weight: 0.2
-offense_quality_loss_weight: 0.3
+# Stage 1 分解 EV:win/dealin BCE + pts_given_{win,dealin} 条件回归
+win_loss_weight: 0.65
+dealin_loss_weight: 0.35
+pts_win_loss_weight: 0.4
+pts_dealin_loss_weight: 0.2
+opp_tenpai_loss_weight: 0.25
 ranking_temperature: 1.0
+
+placement:
+  rank_loss_weight: 0.05
+  final_score_delta_loss_weight: 0.05
+  rank_pt_value_loss_weight: 0.01
+  rank_bonus: [90.0, 45.0, 0.0, -135.0]
+  rank_bonus_norm: 90.0
+  rank_score_scale: 0.0
+  score_norm: 30000.0

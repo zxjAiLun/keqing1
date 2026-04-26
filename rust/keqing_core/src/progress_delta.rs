@@ -121,7 +121,21 @@ mod tests {
 
     #[test]
     fn required_tiles_contains_wait_for_tenpai_hand() {
-        let counts = hand(&[(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (9, 1), (10, 1), (12, 1), (13, 2)]);
+        let counts = hand(&[
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (5, 1),
+            (6, 1),
+            (7, 1),
+            (8, 1),
+            (9, 1),
+            (10, 1),
+            (12, 1),
+            (13, 2),
+        ]);
         let visible = counts;
         let required = calc_required_tiles(&counts, &visible, 4);
         assert!(!required.is_empty());
@@ -132,6 +146,8 @@ mod tests {
         let counts = hand(&[(0, 1), (1, 1), (2, 1), (27, 2)]);
         let deltas = calc_discard_deltas(&counts, 1);
         assert_eq!(deltas.len(), 4);
-        assert!(deltas.iter().all(|item| matches!(item.tile34, 0 | 1 | 2 | 27)));
+        assert!(deltas
+            .iter()
+            .all(|item| matches!(item.tile34, 0 | 1 | 2 | 27)));
     }
 }

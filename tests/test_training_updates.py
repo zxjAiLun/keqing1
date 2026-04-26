@@ -1,23 +1,8 @@
-import numpy as np
+import pytest
 
-from training.cached_dataset import V3AuxAdapter
+pytest.importorskip("torch")
+
 from training.trainer import _format_nonfinite_debug, _is_finite_scalar, _meld_metric_from_stats
-
-
-def test_v3_aux_adapter_permute_scalar_swaps_aka_and_suit_ratios():
-    adapter = V3AuxAdapter()
-    scalar = [0.0] * 56
-    scalar[18] = 0.1  # aka_m
-    scalar[19] = 0.2  # aka_p
-    scalar[20] = 0.3  # aka_s
-    scalar[30] = 0.4  # man ratio
-    scalar[31] = 0.5  # pin ratio
-    scalar[32] = 0.6  # sou ratio
-
-    permuted = adapter.permute_scalar(scalar=np.array(scalar, dtype=np.float32), perm=(2, 0, 1))
-
-    assert list(permuted[18:21]) == [0.3, 0.1, 0.2]
-    assert list(permuted[30:33]) == [0.6, 0.4, 0.5]
 
 
 def test_meld_metric_uses_only_response_window_types():

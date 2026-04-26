@@ -1,47 +1,102 @@
 from pathlib import Path
+import json
 
-from keqingv3.cached_dataset import split_cached_files
-from keqingv31.model import KeqingV31Model
-from keqingv31.trainer import train
+import numpy as np
+import torch
+
+from keqingv4.cached_dataset import CachedMjaiDatasetV4
+from keqingv4.checkpoint import resolve_keqingv4_placement_semantics, validate_keqingv4_checkpoint_metadata
+from keqingv4.model import KeqingV4Model
+from keqingv4.trainer import train
 from torch.utils.data import DataLoader
-from keqingv3.cached_dataset import CachedMjaiDatasetV3
+from training.preprocess import KeqingV4PreprocessAdapter, events_to_cached_arrays
 
 
-def test_keqingv31_training_smoke(tmp_path: Path):
-    data_root = Path('processed_v3_fixaux/ds1')
-    train_files, val_files = split_cached_files([data_root], val_ratio=0.2, seed=7)
-    train_files = train_files[:1]
-    val_files = val_files[:1]
+def test_keqingv4_training_smoke(tmp_path: Path):
+    events = [
+        {"type": "start_game", "names": ["A", "B", "C", "D"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 0,
+            "kyotaku": 0,
+            "oya": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "dora_marker": "1m",
+            "tehais": [
+                ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "2p", "3p"],
+                ["1s"] * 13,
+                ["2s"] * 13,
+                ["3s"] * 13,
+            ],
+        },
+        {"type": "tsumo", "actor": 0, "pai": "5s"},
+        {"type": "dahai", "actor": 0, "pai": "5s", "tsumogiri": True},
+    ]
+    arrays = events_to_cached_arrays(
+        events,
+        adapter=KeqingV4PreprocessAdapter(),
+        value_strategy="mc_return",
+        encode_module="training.state_features",
+    )
+    assert arrays is not None
+    assert "v4_opportunity" in arrays
+    assert "rule_context" in arrays
+    assert arrays["rule_context"].shape[1] == 6
+    assert np.any(arrays["event_history"][0, :, 1] != 0)
+    data_root = tmp_path / "processed_v4" / "ds1"
+    data_root.mkdir(parents=True)
+    cache_path = data_root / "sample.npz"
+    np.savez(cache_path, **{k: v for k, v in arrays.items() if not k.startswith("_")})
+    train_files = [cache_path]
+    val_files = [cache_path]
 
     val_loader = DataLoader(
-        CachedMjaiDatasetV3(val_files, shuffle=False, seed=7, aug_perms=1, buffer_size=16),
+        CachedMjaiDatasetV4(val_files, shuffle=False, seed=7, aug_perms=1, buffer_size=16),
         batch_size=8,
-        collate_fn=CachedMjaiDatasetV3.collate,
+        collate_fn=CachedMjaiDatasetV4.collate,
         num_workers=0,
     )
 
-    model = KeqingV31Model(hidden_dim=64, num_res_blocks=2, action_embed_dim=16, dropout=0.0)
+    model = KeqingV4Model(
+        hidden_dim=64,
+        num_res_blocks=2,
+        action_embed_dim=16,
+        context_dim=12,
+        dropout=0.0,
+    )
     cfg = {
-        'learning_rate': 3e-4,
-        'weight_decay': 1e-4,
-        'num_epochs': 1,
-        'batch_size': 8,
-        'buffer_size': 16,
-        'prefetch_factor': 2,
-        'pin_memory': False,
-        'persistent_workers': False,
-        'warmup_steps': 1,
-        'steps_per_epoch': 2,
-        'log_interval': 1,
-        'score_loss_weight': 0.3,
-        'win_loss_weight': 0.2,
-        'dealin_loss_weight': 0.2,
-        'offense_loss_weight': 0.2,
-        'defense_loss_weight': 0.2,
-        'gate_reg_weight': 0.0,
+        "learning_rate": 3e-4,
+        "weight_decay": 1e-4,
+        "num_epochs": 1,
+        "batch_size": 8,
+        "buffer_size": 16,
+        "prefetch_factor": 2,
+        "pin_memory": False,
+        "persistent_workers": False,
+        "warmup_steps": 1,
+        "steps_per_epoch": 2,
+        "log_interval": 1,
+        "value_loss_weight": 0.0,
+        "win_loss_weight": 0.2,
+        "dealin_loss_weight": 0.2,
+        "pts_given_win_loss_weight": 0.3,
+        "pts_given_dealin_loss_weight": 0.3,
+        "opp_tenpai_loss_weight": 0.25,
+        "mc_reg_loss_weight": 0.01,
+        "placement": {
+            "rank_loss_weight": 0.05,
+            "final_score_delta_loss_weight": 0.05,
+            "rank_pt_value_loss_weight": 0.01,
+            "rank_bonus": [90.0, 45.0, 0.0, -135.0],
+            "rank_bonus_norm": 90.0,
+            "rank_score_scale": 0.0,
+            "score_norm": 30000.0,
+        },
     }
 
-    out_dir = tmp_path / 'v4_smoke'
+    out_dir = tmp_path / "v4_smoke"
     train(
         model=model,
         val_loader=val_loader,
@@ -57,5 +112,31 @@ def test_keqingv31_training_smoke(tmp_path: Path):
         files_per_epoch_ratio=1.0,
     )
 
-    assert (out_dir / 'last.pth').exists()
-    assert (out_dir / 'train_log.jsonl').exists()
+    assert (out_dir / "last.pth").exists()
+    checkpoint = torch.load(out_dir / "last.pth", map_location="cpu", weights_only=False)
+    validate_keqingv4_checkpoint_metadata(
+        checkpoint,
+        checkpoint_label=f"keqingv4 smoke checkpoint {out_dir / 'last.pth'}",
+    )
+    assert checkpoint["placement_semantics"] == resolve_keqingv4_placement_semantics(cfg)
+    assert checkpoint["rule_context_dim"] == 6
+    assert (out_dir / "train_log.jsonl").exists()
+    rows = [
+        json.loads(line)
+        for line in (out_dir / "train_log.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows
+    last = rows[-1]
+    assert "train_typed_rank_loss" in last
+    assert "val_typed_rank_loss" in last
+    assert "train_final_rank_loss" in last
+    assert "val_final_rank_loss" in last
+    assert "train_final_score_delta_loss" in last
+    assert "val_rank_pt_loss" in last
+    assert "train_final_rank_acc" in last
+    assert "val_rank1_prob_mean" in last
+    assert "train_mc_reg_loss" in last
+    assert "val_composed_ev_mean" in last
+    assert "train_reach_opp_rate" in last
+    assert "val_special_slice_acc" in last

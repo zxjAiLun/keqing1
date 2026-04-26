@@ -29,8 +29,8 @@ def inject_shanten_waits(
     from mahjong_env.tiles import tile_to_34 as _tile_to_34
 
     shanten, waits_cnt, waits_tiles, _ = _calc_shanten_waits(hand_list, melds_list)
-    if model_version in {"keqingv3", "keqingv31"}:
-        from keqingv3.progress_oracle import calc_standard_shanten_from_counts
+    if model_version == "keqingv4":
+        from mahjong_env.progress_oracle import calc_standard_shanten_from_counts
 
         counts34 = [0] * 34
         for tile in hand_list:
@@ -64,6 +64,7 @@ class RuntimeBot:
         score_delta_lambda: float = 0.20,
         win_prob_lambda: float = 0.20,
         dealin_prob_lambda: float = 0.25,
+        rank_pt_lambda: float = 0.0,
         model_version: Optional[str] = None,
     ):
         self.player_id = player_id
@@ -77,6 +78,7 @@ class RuntimeBot:
         self.score_delta_lambda = score_delta_lambda
         self.win_prob_lambda = win_prob_lambda
         self.dealin_prob_lambda = dealin_prob_lambda
+        self.rank_pt_lambda = rank_pt_lambda
 
         self._adapter = KeqingModelAdapter.from_checkpoint(
             model_path,
@@ -117,7 +119,10 @@ class RuntimeBot:
             score_delta_lambda=self.score_delta_lambda,
             win_prob_lambda=self.win_prob_lambda,
             dealin_prob_lambda=self.dealin_prob_lambda,
+            rank_pt_lambda=self.rank_pt_lambda,
         )
+        self.beam_lambda = getattr(self._scorer, "beam_lambda", self.beam_lambda)
+        self.rank_pt_lambda = getattr(self._scorer, "rank_pt_lambda", self.rank_pt_lambda)
         self._review_exporter = DefaultRuntimeReviewExporter()
 
     def reset(self):

@@ -5,13 +5,15 @@ import { fetchWithTimeout } from "../api/battleApi";
 import { PageHeader, PageShell, SectionTitle } from "../components/Layout/PageScaffold";
 import { subtleButtonStyle } from "../components/Layout/layoutStyles";
 import type { BattleState } from "../types/battle";
+import type { BotType } from "../types/bot";
+import { BOT_CATALOG, DEFAULT_BOT_TYPE, getBotCatalogEntry } from "../utils/botCatalog";
 
 export function BotBattlePage() {
   const [gameId, setGameId] = useState<string | null>(null);
   const [state, setState] = useState<BattleState | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [botModel, setBotModel] = useState("keqingv1");
+  const [botModel, setBotModel] = useState<BotType>(DEFAULT_BOT_TYPE);
   const pollingRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
 
@@ -74,13 +76,15 @@ export function BotBattlePage() {
     }
   };
 
+  const selectedBot = getBotCatalogEntry(botModel);
+
   if (!state) {
     return (
       <PageShell width={720}>
         <PageHeader
           eyebrow="Bot Arena"
           title="4 Bot 对战"
-          description="用于观察模型之间的完整对局流程。适合快速回看回合推进和导出实验牌谱。"
+          description="用于观察当前活跃模型线之间的完整对局流程。适合快速回看回合推进、兼容面表现和导出实验牌谱。"
         />
         <div
           style={{
@@ -118,26 +122,34 @@ export function BotBattlePage() {
             <label style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}>
               Bot 类型
             </label>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {["keqingv1", "keqingv2", "keqingv3", "keqingv31", "rulebase"].map((m) => (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {BOT_CATALOG.map((bot) => (
                 <button
-                  key={m}
-                  onClick={() => setBotModel(m)}
+                  key={bot.value}
+                  onClick={() => setBotModel(bot.value)}
                   style={{
-                    padding: "5px 12px",
-                    borderRadius: 6,
+                    padding: "10px 12px",
+                    borderRadius: 8,
                     fontSize: 13,
                     fontWeight: 500,
-                    border: `2px solid ${botModel === m ? "#8e44ad" : "var(--border-muted)"}`,
-                    background: botModel === m ? "#8e44ad" : "var(--surface-subtle)",
-                    color: botModel === m ? "#fff" : "var(--text-secondary)",
+                    border: `2px solid ${botModel === bot.value ? "#8e44ad" : "var(--border-muted)"}`,
+                    background: botModel === bot.value ? "rgba(142,68,173,0.08)" : "var(--surface-subtle)",
+                    color: "var(--text-primary)",
                     cursor: "pointer",
                     transition: "all var(--transition)",
+                    textAlign: "left",
                   }}
                 >
-                  {m}
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+                    <span style={{ fontWeight: 700 }}>{bot.label}</span>
+                    <span style={{ fontSize: 11, color: botModel === bot.value ? "#8e44ad" : "var(--text-muted)" }}>{bot.badge}</span>
+                  </div>
+                  <div style={{ marginTop: 3, fontSize: 12, color: "var(--text-muted)" }}>{bot.description}</div>
                 </button>
               ))}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+              当前选择：{selectedBot.label}，{selectedBot.description}
             </div>
           </div>
           <button
@@ -166,7 +178,7 @@ export function BotBattlePage() {
         </div>
 
         <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
-          4个 AI 自动对战
+          默认观察 xmodel1 主线；需要 backup/baseline 对照时再切换。
         </p>
         </div>
       </PageShell>
@@ -178,7 +190,7 @@ export function BotBattlePage() {
       <PageHeader
         eyebrow="Bot Arena"
         title="4 Bot 对战"
-        description="实时观察自动对战流程。结束后可以直接导出 Mjai 或 Tenhou6 牌谱。"
+        description="实时观察自动对战流程。结束后可以直接导出 Mjai 或 Tenhou6 牌谱。当前默认模型线为 xmodel1。"
       />
       {state.phase === "ended" && (
         <div

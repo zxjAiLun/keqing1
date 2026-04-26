@@ -5,6 +5,12 @@ from pathlib import Path
 import torch
 
 from replay.api import run_replay_single_raw
+from training.cache_schema import (
+    XMODEL1_CANDIDATE_FEATURE_DIM,
+    XMODEL1_CANDIDATE_FLAG_DIM,
+    XMODEL1_SCHEMA_NAME,
+    XMODEL1_SCHEMA_VERSION,
+)
 from xmodel1.model import Xmodel1Model
 
 
@@ -12,8 +18,8 @@ def _save_xmodel1_ckpt(path: Path) -> None:
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=64,
-        candidate_feature_dim=21,
-        candidate_flag_dim=10,
+        candidate_feature_dim=XMODEL1_CANDIDATE_FEATURE_DIM,
+        candidate_flag_dim=XMODEL1_CANDIDATE_FLAG_DIM,
         hidden_dim=64,
         num_res_blocks=2,
         dropout=0.0,
@@ -25,12 +31,17 @@ def _save_xmodel1_ckpt(path: Path) -> None:
                 "model_name": "xmodel1",
                 "state_tile_channels": 57,
                 "state_scalar_dim": 64,
-                "candidate_feature_dim": 21,
-                "candidate_flag_dim": 10,
+                "candidate_feature_dim": XMODEL1_CANDIDATE_FEATURE_DIM,
+                "candidate_flag_dim": XMODEL1_CANDIDATE_FLAG_DIM,
                 "hidden_dim": 64,
                 "num_res_blocks": 2,
                 "dropout": 0.0,
+                "schema_name": XMODEL1_SCHEMA_NAME,
+                "schema_version": XMODEL1_SCHEMA_VERSION,
             },
+            "model_version": "xmodel1",
+            "schema_name": XMODEL1_SCHEMA_NAME,
+            "schema_version": XMODEL1_SCHEMA_VERSION,
         },
         path,
     )

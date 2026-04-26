@@ -23,6 +23,7 @@ def normalize_replay_decisions(decisions: dict, meta: dict | None = None) -> dic
             continue
         chosen = pending.get("chosen") or {}
         candidates = pending.get("candidates", [])
+        current_action = entry.get("gt_action") or entry.get("chosen") or {}
         has_none_candidate = any(
             c.get("action", {}).get("type") == "none" for c in candidates
         )
@@ -33,10 +34,16 @@ def normalize_replay_decisions(decisions: dict, meta: dict | None = None) -> dic
             pending["gt_action"] = {"type": "none", "actor": player_id}
             pending_idx = None
         elif chosen.get("type") in _RESPONSE_ACTION_TYPES and has_none_candidate:
-            pending["gt_action"] = {
-                **chosen,
-                "actor": chosen.get("actor", player_id),
-            }
+            # 仅在后续条目明确确认了相同副露/和牌时，才把响应动作补成 chosen。
+            # 否则保守地视为错过该响应窗口（实际为 none），避免把“可碰但没碰”
+            # 误标成“实际碰了”，导致后续手牌/副露状态和动作标签互相矛盾。
+            if same_action(current_action, chosen):
+                pending["gt_action"] = {
+                    **current_action,
+                    "actor": current_action.get("actor", chosen.get("actor", player_id)),
+                }
+            else:
+                pending["gt_action"] = {"type": "none", "actor": player_id}
             pending_idx = None
 
     own_log = [e for e in log if not e.get("is_obs")]

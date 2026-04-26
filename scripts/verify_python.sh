@@ -16,7 +16,7 @@ fi
 
 uv run python -m py_compile \
   src/keqing_core/__init__.py \
-  src/keqingv3/progress_oracle.py \
+  src/mahjong_env/progress_oracle.py \
   tests/test_progress_oracle_rust.py \
   scripts/benchmark_progress_oracle_rust.py \
   rust/keqing_core/build.py

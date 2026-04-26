@@ -4,45 +4,22 @@ from pathlib import Path
 
 import numpy as np
 
+from training.cache_schema import XMODEL1_CANDIDATE_FEATURE_DIM, XMODEL1_CANDIDATE_FLAG_DIM
+from tests.xmodel1_test_utils import write_xmodel1_v3_npz
 from xmodel1.model import Xmodel1Model
 from xmodel1.cached_dataset import Xmodel1DiscardDataset
 from xmodel1.trainer import train
 
 
 def _write_sample_npz(path: Path) -> None:
-    n = 8
-    candidate_mask = np.concatenate(
-        [np.ones((n, 3), dtype=np.uint8), np.zeros((n, 11), dtype=np.uint8)],
-        axis=1,
-    )
-    candidate_tile_id = np.full((n, 14), -1, dtype=np.int16)
-    candidate_tile_id[:, 0] = 1
-    candidate_tile_id[:, 1] = 2
-    candidate_tile_id[:, 2] = 3
-    np.savez(
-        path,
-        state_tile_feat=np.random.randn(n, 57, 34).astype(np.float16),
-        state_scalar=np.random.randn(n, 64).astype(np.float16),
-        candidate_feat=np.random.randn(n, 14, 21).astype(np.float16),
-        candidate_tile_id=candidate_tile_id,
-        candidate_mask=candidate_mask,
-        candidate_flags=np.zeros((n, 14, 10), dtype=np.uint8),
-        chosen_candidate_idx=np.zeros((n,), dtype=np.int16),
-        candidate_quality_score=np.zeros((n, 14), dtype=np.float32),
-        candidate_rank_bucket=np.zeros((n, 14), dtype=np.int8),
-        candidate_hard_bad_flag=np.zeros((n, 14), dtype=np.uint8),
-        global_value_target=np.zeros((n,), dtype=np.float32),
-        score_delta_target=np.zeros((n,), dtype=np.float32),
-        win_target=np.zeros((n,), dtype=np.float32),
-        dealin_target=np.zeros((n,), dtype=np.float32),
-        offense_quality_target=np.zeros((n,), dtype=np.float32),
-        sample_type=np.zeros((n,), dtype=np.int8),
-        actor=np.zeros((n,), dtype=np.int8),
-        event_index=np.zeros((n,), dtype=np.int32),
-        kyoku=np.ones((n,), dtype=np.int8),
-        honba=np.zeros((n,), dtype=np.int8),
-        is_open_hand=np.zeros((n,), dtype=np.uint8),
-    )
+    payload = write_xmodel1_v3_npz(path, n=20)
+    payload["state_tile_feat"][:] = np.random.randn(20, 57, 34).astype(np.float16)
+    payload["state_scalar"][:] = np.random.randn(20, 64).astype(np.float16)
+    payload["candidate_feat"][:] = np.random.randn(20, 14, XMODEL1_CANDIDATE_FEATURE_DIM).astype(np.float16)
+    payload["candidate_tile_id"][:, 0] = 1
+    payload["candidate_tile_id"][:, 1] = 2
+    payload["candidate_tile_id"][:, 2] = 3
+    np.savez(path, **payload)
 
 
 def test_xmodel1_train_smoke(tmp_path: Path):
@@ -66,8 +43,8 @@ def test_xmodel1_train_smoke(tmp_path: Path):
     model = Xmodel1Model(
         state_tile_channels=57,
         state_scalar_dim=64,
-        candidate_feature_dim=21,
-        candidate_flag_dim=10,
+        candidate_feature_dim=XMODEL1_CANDIDATE_FEATURE_DIM,
+        candidate_flag_dim=XMODEL1_CANDIDATE_FLAG_DIM,
         hidden_dim=64,
         num_res_blocks=2,
         dropout=0.0,
@@ -77,7 +54,9 @@ def test_xmodel1_train_smoke(tmp_path: Path):
         "learning_rate": 1e-3,
         "weight_decay": 0.0,
         "warmup_steps": 1,
+        "accumulation_steps": 1,
         "steps_per_epoch": 2,
+        "val_steps_per_epoch": 1,
         "log_interval": 1,
     }
     output_dir = tmp_path / "artifacts"
@@ -92,3 +71,11 @@ def test_xmodel1_train_smoke(tmp_path: Path):
     assert trained is not None
     assert (output_dir / "last.pth").exists()
     assert (output_dir / "best.pth").exists()
+    rows = [
+        __import__("json").loads(line)
+        for line in (output_dir / "train_log.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows[-1]["step"] == 2
+    assert rows[-1]["train"]["num_batches"] == 2
+    assert rows[-1]["val"]["num_batches"] == 1

@@ -12,7 +12,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import keqing_core
-from keqingv3.progress_oracle import (
+from mahjong_env.progress_oracle import (
     analyze_normal_progress_from_counts,
     calc_standard_shanten_from_counts,
     clear_progress_caches,

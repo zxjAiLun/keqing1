@@ -1,3 +1,5 @@
+import type { BotType } from './bot';
+
 // src/replay_ui/src/types/replay.ts
 
 export interface DiscardEntry {
@@ -111,13 +113,13 @@ export interface ReplayData {
   rating: number | null;
   player_id: number;
   player_names?: string[];
-  bot_type?: 'keqingv1' | 'keqingv2' | 'keqingv3' | 'keqingv31';
+  bot_type?: BotType;
 }
 
 export interface ReplayMeta {
   replay_id: string;
   created_at: string;
-  bot_type: 'keqingv1' | 'keqingv2' | 'keqingv3' | 'keqingv31';
+  bot_type: BotType;
   kyoku_count: number;
   total_steps: number;
   player_names: string[];
@@ -127,7 +129,7 @@ export interface ReplayMeta {
 export interface ReplaySubmitRequest {
   input_type: 'tenhou_url' | 'tenhou6_json' | 'mjson_file' | 'mjson_text';
   content: string;
-  bot_type: 'keqingv1' | 'keqingv2' | 'keqingv3' | 'keqingv31';
+  bot_type: BotType;
   player_ids: number[];
   checkpoint?: string;
 }

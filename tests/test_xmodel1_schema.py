@@ -5,18 +5,22 @@ import pytest
 from training.cache_schema import (
     XMODEL1_CANDIDATE_FEATURE_DIM,
     XMODEL1_CANDIDATE_FLAG_DIM,
+    XMODEL1_HISTORY_SUMMARY_DIM,
     XMODEL1_MAX_CANDIDATES,
+    XMODEL1_MAX_RESPONSE_CANDIDATES,
     XMODEL1_SCHEMA_NAME,
     XMODEL1_SCHEMA_VERSION,
 )
 
 
 def test_xmodel1_python_schema_constants_are_stable():
-    assert XMODEL1_SCHEMA_NAME == "xmodel1_discard_v1"
-    assert XMODEL1_SCHEMA_VERSION == 1
+    assert XMODEL1_SCHEMA_NAME == "xmodel1_discard_v6"
+    assert XMODEL1_SCHEMA_VERSION == 6
     assert XMODEL1_MAX_CANDIDATES == 14
-    assert XMODEL1_CANDIDATE_FEATURE_DIM == 21
-    assert XMODEL1_CANDIDATE_FLAG_DIM == 10
+    assert XMODEL1_CANDIDATE_FEATURE_DIM == 22
+    assert XMODEL1_CANDIDATE_FLAG_DIM == 8
+    assert XMODEL1_HISTORY_SUMMARY_DIM == 20
+    assert XMODEL1_MAX_RESPONSE_CANDIDATES == 8
 
 
 def test_xmodel1_rust_schema_info_matches_python_constants():

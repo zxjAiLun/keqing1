@@ -5,11 +5,31 @@
 //! small so the Python and Rust layers can converge on the same field contract
 //! before the export logic is filled in.
 
-pub const XMODEL1_SCHEMA_NAME: &str = "xmodel1_discard_v1";
-pub const XMODEL1_SCHEMA_VERSION: u32 = 1;
+pub const XMODEL1_SCHEMA_NAME: &str = "xmodel1_discard_v6";
+pub const XMODEL1_SCHEMA_VERSION: u32 = 6;
 pub const XMODEL1_MAX_CANDIDATES: usize = 14;
-pub const XMODEL1_CANDIDATE_FEATURE_DIM: usize = 21;
-pub const XMODEL1_CANDIDATE_FLAG_DIM: usize = 10;
+pub const XMODEL1_CANDIDATE_FEATURE_DIM: usize = 22;
+pub const XMODEL1_CANDIDATE_FLAG_DIM: usize = 8;
+pub const XMODEL1_MAX_SPECIAL_CANDIDATES: usize = 12;
+pub const XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM: usize = 19;
+pub const XMODEL1_HISTORY_SUMMARY_DIM: usize = 20;
+pub const XMODEL1_MAX_RESPONSE_CANDIDATES: usize = 8;
+
+pub const XMODEL1_SPECIAL_TYPE_REACH: i16 = 0;
+pub const XMODEL1_SPECIAL_TYPE_DAMA: i16 = 1;
+pub const XMODEL1_SPECIAL_TYPE_HORA: i16 = 2;
+pub const XMODEL1_SPECIAL_TYPE_CHI_LOW: i16 = 3;
+pub const XMODEL1_SPECIAL_TYPE_CHI_MID: i16 = 4;
+pub const XMODEL1_SPECIAL_TYPE_CHI_HIGH: i16 = 5;
+pub const XMODEL1_SPECIAL_TYPE_PON: i16 = 6;
+pub const XMODEL1_SPECIAL_TYPE_DAIMINKAN: i16 = 7;
+pub const XMODEL1_SPECIAL_TYPE_ANKAN: i16 = 8;
+pub const XMODEL1_SPECIAL_TYPE_KAKAN: i16 = 9;
+pub const XMODEL1_SPECIAL_TYPE_RYUKYOKU: i16 = 10;
+pub const XMODEL1_SPECIAL_TYPE_NONE: i16 = 11;
+
+pub const XMODEL1_SPECIAL_TYPE_CHI: i16 = XMODEL1_SPECIAL_TYPE_CHI_LOW;
+pub const XMODEL1_SPECIAL_TYPE_KAN: i16 = XMODEL1_SPECIAL_TYPE_DAIMINKAN;
 
 pub fn validate_candidate_mask_and_choice(
     chosen_candidate_idx: i16,
@@ -35,8 +55,7 @@ pub fn validate_candidate_mask_and_choice(
     if idx >= XMODEL1_MAX_CANDIDATES {
         return Err(format!(
             "chosen_candidate_idx {} out of range for {} candidates",
-            chosen_candidate_idx,
-            XMODEL1_MAX_CANDIDATES
+            chosen_candidate_idx, XMODEL1_MAX_CANDIDATES
         ));
     }
     if candidate_mask[idx] == 0 {

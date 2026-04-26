@@ -1,0 +1,13 @@
+# Xmodel1 中小规模预处理配置
+# 目标：
+# - 仅使用 ds3
+# - 只导出前 1000 份牌谱，作为 smoke / 性能 / bug 排查子集
+data_dirs:
+  - artifacts/converted_mjai/ds3
+
+output_dir: processed_xmodel1_v1c_probe_ds3_1000
+limit_files: 1000
+progress_every: 25
+jobs: 0  # 0 = auto (use available CPU cores)
+preflight_files_per_shard: 2
+preflight_seed: 20260421

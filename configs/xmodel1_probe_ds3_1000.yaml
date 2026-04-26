@@ -1,0 +1,65 @@
+# Xmodel1 中小规模 smoke 训练配置
+# 输入：processed_xmodel1_v1c_probe_ds3_1000
+# 约束：
+# - 从预处理后的子集中只取前 500 个缓存文件
+# - 对这 500 个文件全量训练，不做每轮文件抽样
+# - 默认跑 1 个 epoch，保留中等 val 步数用于快速验收
+data_dirs:
+  - processed_xmodel1_v1c_probe_ds3_1000/ds3
+
+output_dir: artifacts/xmodel1_runs/v1c_probe_ds3_1000
+device: cuda
+limit_files: 500
+
+state_tile_channels: 57
+state_scalar_dim: 56
+candidate_feature_dim: 22
+candidate_flag_dim: 8
+special_candidate_feature_dim: 19
+
+hidden_dim: 256
+num_res_blocks: 4
+dropout: 0.1
+
+num_epochs: 1
+batch_size: 256
+learning_rate: 0.0003
+weight_decay: 0.0001
+warmup_steps: 200
+accumulation_steps: 2
+
+# 训练集文件不抽样；这里会对 limit_files 选中的 500 个缓存文件全量使用。
+files_per_epoch_ratio: 1.0
+files_per_epoch_count: 0
+
+# 训练部分走完整个 500 文件子集 epoch；验证只取固定批次，避免 smoke 时间过长。
+steps_per_epoch: 0
+val_steps_per_epoch: 16
+val_ratio: 0.1
+
+num_workers: 2
+pin_memory: true
+persistent_workers: false
+prefetch_factor: 1
+buffer_size: 64
+log_interval: 20
+
+ce_loss_weight: 1.0
+action_ce_loss_weight: 0.25
+rank_loss_weight: 0.5
+hard_bad_loss_weight: 0.25
+win_loss_weight: 0.65
+dealin_loss_weight: 0.35
+pts_win_loss_weight: 0.4
+pts_dealin_loss_weight: 0.2
+opp_tenpai_loss_weight: 0.25
+ranking_temperature: 1.0
+
+placement:
+  rank_loss_weight: 0.05
+  final_score_delta_loss_weight: 0.05
+  rank_pt_value_loss_weight: 0.01
+  rank_bonus: [90.0, 45.0, 0.0, -135.0]
+  rank_bonus_norm: 90.0
+  rank_score_scale: 0.0
+  score_norm: 30000.0

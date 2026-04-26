@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import asyncio
 
 import gateway.riichi_dev_client as rdc
 
@@ -49,12 +50,13 @@ def test_keqing_agent_scores_request_action_from_observation(monkeypatch) -> Non
             assert ctx.model_snap["actor"] == 2
             return type("Decision", (), {"chosen": {"type": "none"}})()
 
+    class FakeAdapter:
+        @classmethod
+        def from_checkpoint(cls, *args, **kwargs):
+            return object()
+
     monkeypatch.setattr(rdc, "_decode_observation", fake_decode)
-    monkeypatch.setattr(
-        rdc.KeqingModelAdapter,
-        "from_checkpoint",
-        classmethod(lambda cls, *args, **kwargs: object()),
-    )
+    monkeypatch.setattr(rdc, "KeqingModelAdapter", FakeAdapter)
     monkeypatch.setattr(rdc, "DefaultActionScorer", lambda **kwargs: FakeScorer())
 
     agent = rdc.ObservationScoringAgent(model_path=Path("fake.pth"), device="cpu")
@@ -196,11 +198,12 @@ def test_agent_converts_string_device_before_building_adapter(monkeypatch) -> No
         def score(self, ctx):
             return type("Decision", (), {"chosen": {"type": "none"}})()
 
-    monkeypatch.setattr(
-        rdc.KeqingModelAdapter,
-        "from_checkpoint",
-        classmethod(fake_from_checkpoint),
-    )
+    class FakeAdapter:
+        @classmethod
+        def from_checkpoint(cls, *args, **kwargs):
+            return fake_from_checkpoint(cls, *args, **kwargs)
+
+    monkeypatch.setattr(rdc, "KeqingModelAdapter", FakeAdapter)
     monkeypatch.setattr(rdc, "DefaultActionScorer", lambda **kwargs: FakeScorer())
 
     rdc.ObservationScoringAgent(model_path=Path("fake.pth"), device="cpu")
@@ -215,7 +218,44 @@ def test_resolve_ws_url_accepts_https_base_url() -> None:
     )
 
 
-def test_create_agent_supports_non_keqingv3_model_path(monkeypatch) -> None:
+def test_resolve_default_token_prefers_lattekey(monkeypatch) -> None:
+    monkeypatch.setenv("LATTEKEY", "latte-token")
+
+    assert rdc._resolve_default_token("xmodel1") == "latte-token"
+
+
+def test_resolve_default_token_uses_lattekey_for_other_bots(monkeypatch) -> None:
+    monkeypatch.setenv("LATTEKEY", "latte-token")
+    assert rdc._resolve_default_token("keqingv4") == "latte-token"
+
+
+def test_resolve_default_token_with_source_prefers_lattekey(monkeypatch) -> None:
+    monkeypatch.setenv("LATTEKEY", "latte-token")
+
+    assert rdc._resolve_default_token_with_source("xmodel1") == ("latte-token", "LATTEKEY")
+
+
+def test_resolve_model_path_uses_default_checkpoint() -> None:
+    assert rdc._resolve_model_path(
+        bot_name="keqingv4",
+        project_root=Path("/tmp/project"),
+        model_path=None,
+    ) == Path("/tmp/project/artifacts/models/keqingv4/best.pth")
+
+
+def test_decode_jwt_payload_unverified_reads_name_and_bot_id() -> None:
+    token = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+        "eyJuYW1lIjoibW9jaGEiLCJ0eXBlIjoiYm90IiwiYm90X2lkIjoiYm90LTEyMyJ9."
+        "sig"
+    )
+
+    payload = rdc._decode_jwt_payload_unverified(token)
+
+    assert payload == {"name": "mocha", "type": "bot", "bot_id": "bot-123"}
+
+
+def test_create_agent_supports_xmodel1_spec(monkeypatch) -> None:
     created = {}
 
     class FakeObservationAgent:
@@ -224,7 +264,7 @@ def test_create_agent_supports_non_keqingv3_model_path(monkeypatch) -> None:
 
     monkeypatch.setattr(rdc, "ObservationScoringAgent", FakeObservationAgent)
     agent = rdc.create_riichi_dev_agent(
-        bot_name="keqingv31",
+        bot_name="xmodel1",
         project_root=Path("."),
         model_path=None,
         device="cpu",
@@ -232,24 +272,65 @@ def test_create_agent_supports_non_keqingv3_model_path(monkeypatch) -> None:
     )
 
     assert isinstance(agent, FakeObservationAgent)
-    assert created["model_version"] == "keqingv31"
+    assert created["model_version"] == "xmodel1"
+    assert created["hidden_dim"] == rdc.DEFAULT_DECISION_AGENT_SPEC.hidden_dim
+    assert created["num_res_blocks"] == rdc.DEFAULT_DECISION_AGENT_SPEC.num_res_blocks
+
+
+def test_create_agent_supports_keqingv4_spec(monkeypatch) -> None:
+    created = {}
+
+    class FakeObservationAgent:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+
+    monkeypatch.setattr(rdc, "ObservationScoringAgent", FakeObservationAgent)
+    agent = rdc.create_riichi_dev_agent(
+        bot_name="keqingv4",
+        project_root=Path("."),
+        model_path=None,
+        device="cpu",
+        verbose=False,
+    )
+
+    assert isinstance(agent, FakeObservationAgent)
+    assert created["model_version"] == "keqingv4"
     assert created["hidden_dim"] == 320
     assert created["num_res_blocks"] == 6
+    assert created["rank_pt_lambda"] == 0.0
 
 
-def test_create_agent_rejects_rulebase() -> None:
-    try:
-        rdc.create_riichi_dev_agent(
-            bot_name="rulebase",
-            project_root=Path("."),
-            model_path=None,
-            device="cpu",
-            verbose=False,
-        )
-    except ValueError as exc:
-        assert "rulebase" in str(exc)
-    else:
-        raise AssertionError("expected rulebase to be rejected")
+def test_create_agent_allows_rank_pt_lambda_override(monkeypatch) -> None:
+    created = {}
+
+    class FakeObservationAgent:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+
+    monkeypatch.setattr(rdc, "ObservationScoringAgent", FakeObservationAgent)
+    agent = rdc.create_riichi_dev_agent(
+        bot_name="keqingv4",
+        project_root=Path("."),
+        model_path=None,
+        device="cpu",
+        verbose=False,
+        rank_pt_lambda=0.1,
+    )
+
+    assert isinstance(agent, FakeObservationAgent)
+    assert created["rank_pt_lambda"] == 0.1
+
+
+def test_create_agent_supports_rulebase() -> None:
+    agent = rdc.create_riichi_dev_agent(
+        bot_name="rulebase",
+        project_root=Path("."),
+        model_path=None,
+        device="cpu",
+        verbose=False,
+    )
+
+    assert isinstance(agent, rdc.RulebaseObservationAgent)
 
 
 def test_local_game_returns_summary(monkeypatch) -> None:
@@ -300,6 +381,55 @@ def test_local_game_returns_summary(monkeypatch) -> None:
     assert result["step_count"] == 1
 
 
+def test_rulebase_agent_replies_with_pending_reach_discard(monkeypatch) -> None:
+    fake_obs = FakeObservation(player_id=2)
+
+    def fake_decode(message):
+        assert message["observation"] == "encoded"
+        snap = fake_obs.to_dict()
+        snap["actor"] = 2
+        return fake_obs, snap
+
+    class FakeRulebaseModule:
+        def __init__(self):
+            self.calls = 0
+
+        def choose_rulebase_action(self, snap, actor, legal_actions):
+            self.calls += 1
+            if any(action.get("type") == "reach" for action in legal_actions):
+                return {"type": "reach", "actor": actor}
+            return {"type": "dahai", "actor": actor, "pai": "7p", "tsumogiri": False}
+
+    import sys
+    import types
+
+    fake_module = FakeRulebaseModule()
+    monkeypatch.setattr(rdc, "_decode_observation", fake_decode)
+    monkeypatch.setitem(
+        sys.modules,
+        "keqing_core",
+        types.SimpleNamespace(choose_rulebase_action=fake_module.choose_rulebase_action),
+    )
+
+    agent = rdc.RulebaseObservationAgent()
+    action = agent.select_action(
+        {
+            "type": "request_action",
+            "observation": "encoded",
+            "possible_actions": [
+                {"type": "reach", "actor": 2},
+                {"type": "dahai", "actor": 2, "pai": "7p", "tsumogiri": False},
+            ],
+        },
+        seat=2,
+    )
+    followup = agent.select_action({"type": "reach", "actor": 2}, seat=2)
+
+    assert action == {"type": "reach", "actor": 2}
+    assert followup == {"type": "dahai", "actor": 2, "pai": "7p", "tsumogiri": False}
+    assert fake_module.calls == 2
+
+
 def test_create_agent_passes_model_version_and_weights(monkeypatch) -> None:
     captured = {}
 
@@ -328,6 +458,49 @@ def test_create_agent_passes_model_version_and_weights(monkeypatch) -> None:
     assert captured["dealin_prob_lambda"] == rdc.DEFAULT_DECISION_AGENT_SPEC.dealin_prob_lambda
 
 
+def test_riichi_dev_client_leaves_rank_pt_lambda_unset_when_config_omits_override(monkeypatch) -> None:
+    captured = {}
+
+    def fake_create_agent(**kwargs):
+        captured.update(kwargs)
+        return StubAgent({"type": "none"})
+
+    monkeypatch.setattr(rdc, "create_riichi_dev_agent", fake_create_agent)
+
+    client = rdc.RiichiDevBotClient(
+        rdc.RiichiDevClientConfig(
+            token="t",
+            bot_name="keqingv4",
+            model_path=Path("fake.pth"),
+        )
+    )
+
+    assert isinstance(client.agent, StubAgent)
+    assert captured["rank_pt_lambda"] is None
+
+
+def test_riichi_dev_client_config_rank_pt_lambda_overrides_spec(monkeypatch) -> None:
+    captured = {}
+
+    def fake_create_agent(**kwargs):
+        captured.update(kwargs)
+        return StubAgent({"type": "none"})
+
+    monkeypatch.setattr(rdc, "create_riichi_dev_agent", fake_create_agent)
+
+    client = rdc.RiichiDevBotClient(
+        rdc.RiichiDevClientConfig(
+            token="t",
+            bot_name="keqingv4",
+            model_path=Path("fake.pth"),
+            rank_pt_lambda=0.25,
+        )
+    )
+
+    assert isinstance(client.agent, StubAgent)
+    assert captured["rank_pt_lambda"] == 0.25
+
+
 def test_audit_logger_writes_jsonl(tmp_path: Path) -> None:
     log_path = tmp_path / "audit.jsonl"
     logger = rdc.RiichiDevAuditLogger(log_path)
@@ -339,6 +512,16 @@ def test_audit_logger_writes_jsonl(tmp_path: Path) -> None:
     assert payload["kind"] == "event"
     assert payload["message"]["type"] == "start_game"
     assert "ts" in payload
+
+
+def test_enrich_message_for_audit_adds_observation_hash_without_state_on_decode_failure(monkeypatch) -> None:
+    monkeypatch.setattr(rdc, "_decode_observation", lambda message: (_ for _ in ()).throw(ValueError("bad obs")))
+
+    enriched = rdc._enrich_message_for_audit({"type": "request_action", "observation": "encoded"})
+
+    assert enriched["_observation_sha256"]
+    assert "ValueError: bad obs" == enriched["_observation_decode_error"]
+    assert "_normalized_observation" not in enriched
 
 
 def test_client_logs_request_action(tmp_path: Path) -> None:
@@ -376,6 +559,7 @@ def test_client_logs_request_action(tmp_path: Path) -> None:
         bot_name=client.config.bot_name,
         model_version=client.config.model_version,
         seat=client.seat,
+        request_seq=7,
         message=message,
         response=response,
         latency_ms=12.34,
@@ -386,7 +570,133 @@ def test_client_logs_request_action(tmp_path: Path) -> None:
     assert payload["kind"] == "request_action"
     assert payload["response"] == {"type": "dahai", "pai": "3m", "actor": 1}
     assert payload["possible_actions"] == [{"type": "none"}]
+    assert payload["possible_action_count"] == 1
+    assert payload["request_seq"] == 7
+    assert payload["message_meta"]["type"] == "request_action"
     assert payload["state"]["hand"] == ["1m"]
+    assert payload["normalized_observation"]["actor"] == 1
+
+
+def test_audit_logger_logs_send_result(tmp_path: Path) -> None:
+    logger = rdc.RiichiDevAuditLogger(tmp_path / "riichi.jsonl")
+
+    logger.log_send_result(
+        queue="ranked",
+        bot_name="keqingv4",
+        model_version=None,
+        seat=0,
+        request_seq=11,
+        response={"type": "dahai", "actor": 0, "pai": "S"},
+        success=False,
+        error="RuntimeError: socket closed",
+    )
+
+    payload = json.loads((tmp_path / "riichi.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert payload["kind"] == "send_result"
+    assert payload["request_seq"] == 11
+    assert payload["success"] is False
+    assert "socket closed" in payload["error"]
+
+
+def test_audit_logger_logs_protocol_action(tmp_path: Path) -> None:
+    logger = rdc.RiichiDevAuditLogger(tmp_path / "riichi.jsonl")
+
+    logger.log_protocol_action(
+        queue="ranked",
+        bot_name="xmodel1",
+        model_version=None,
+        seat=0,
+        trigger_message={"type": "reach", "actor": 0},
+        response={"type": "dahai", "actor": 0, "pai": "4m", "tsumogiri": False},
+        latency_ms=1.23,
+    )
+
+    payload = json.loads((tmp_path / "riichi.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert payload["kind"] == "protocol_action"
+    assert payload["trigger_type"] == "reach"
+    assert payload["response"]["pai"] == "4m"
+
+
+def test_observation_agent_reuses_cached_reach_discard(monkeypatch) -> None:
+    fake_obs = FakeObservation(player_id=1)
+
+    def fake_decode(message):
+        return fake_obs, fake_obs.to_dict()
+
+    class FakeScorer:
+        def score(self, ctx):
+            from inference.contracts import DecisionResult, ScoredCandidate, ModelAuxOutputs
+
+            return DecisionResult(
+                chosen={"type": "reach", "actor": 1},
+                candidates=[
+                    ScoredCandidate(
+                        action={"type": "reach", "actor": 1},
+                        logit=1.0,
+                        final_score=2.0,
+                        beam_score=2.0,
+                        meta={"reach_discard": {"type": "dahai", "actor": 1, "pai": "3p", "tsumogiri": False}},
+                    )
+                ],
+                model_value=0.0,
+                model_aux=ModelAuxOutputs(),
+            )
+
+    class FakeAdapter:
+        @classmethod
+        def from_checkpoint(cls, *args, **kwargs):
+            return object()
+
+    monkeypatch.setattr(rdc, "_decode_observation", fake_decode)
+    monkeypatch.setattr(rdc, "KeqingModelAdapter", FakeAdapter)
+    monkeypatch.setattr(rdc, "DefaultActionScorer", lambda **kwargs: FakeScorer())
+
+    agent = rdc.ObservationScoringAgent(model_path=Path("fake.pth"), device="cpu")
+    first = agent.select_action(
+        {"type": "request_action", "observation": "encoded", "possible_actions": [{"type": "reach", "actor": 1}]},
+        seat=1,
+    )
+    second = agent.select_action({"type": "reach", "actor": 1}, seat=1)
+
+    assert first == {"type": "reach", "actor": 1}
+    assert second == {"type": "dahai", "actor": 1, "pai": "3p", "tsumogiri": False}
+
+
+def test_client_forwards_reach_event_to_agent_followup() -> None:
+    class ReachFollowupAgent(rdc.RiichiDevDecisionAgent):
+        def __init__(self):
+            self.calls = []
+
+        def select_action(self, message, seat):
+            self.calls.append((message, seat))
+            if message.get("type") == "reach":
+                return {"type": "dahai", "actor": seat, "pai": "4m", "tsumogiri": False}
+            return {"type": "reach", "actor": seat}
+
+    agent = ReachFollowupAgent()
+    client = rdc.RiichiDevBotClient(
+        rdc.RiichiDevClientConfig(token="t", model_path=Path("fake.pth")),
+        agent=agent,
+    )
+
+    client.handle_message({"type": "start_game", "id": 1})
+    response = client.handle_message({"type": "reach", "actor": 1})
+
+    assert response == {"type": "dahai", "actor": 1, "pai": "4m", "tsumogiri": False}
+    assert agent.calls[-1] == ({"type": "reach", "actor": 1}, 1)
+
+
+def test_observation_agent_ignores_non_request_reach_without_pending_followup() -> None:
+    agent = rdc.ObservationScoringAgent.__new__(rdc.ObservationScoringAgent)
+    agent._pending_reach_discard = None
+
+    response = rdc.ObservationScoringAgent.select_action(
+        agent,
+        {"type": "reach", "actor": 1},
+        seat=1,
+    )
+
+    assert response == {"type": "none"}
 
 
 def test_validation_safe_agent_prefers_tsumogiri_when_legal() -> None:
@@ -414,3 +724,258 @@ def test_validation_safe_agent_falls_back_to_none() -> None:
     )
 
     assert action == {"type": "none"}
+
+
+def test_disconnect_message_mentions_validate_queue(tmp_path: Path) -> None:
+    message = rdc._format_connection_closed_message("validate", 1005, None)
+
+    assert "validate connection closed by server" in message
+    assert "validate queue request" in message
+
+
+def test_log_startup_self_check_rejects_missing_model_path(caplog) -> None:
+    try:
+        rdc._log_startup_self_check(
+            queue="validate",
+            bot_name="keqingv4",
+            model_version=None,
+            token=(
+                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+                "eyJuYW1lIjoibW9jaGEiLCJ0eXBlIjoiYm90IiwiYm90X2lkIjoiYm90LTEyMyJ9."
+                "sig"
+            ),
+            token_source="LATTEKEY",
+            project_root=Path("/tmp/project"),
+            model_path=Path("/tmp/project/missing.pth"),
+            validation_safe=False,
+        )
+    except SystemExit as exc:
+        assert "model checkpoint not found" in str(exc)
+    else:
+        raise AssertionError("expected missing model checkpoint to stop startup")
+
+
+def test_log_startup_self_check_is_silent_without_debug(caplog) -> None:
+    rdc._log_startup_self_check(
+        queue="validate",
+        bot_name="keqingv4",
+        model_version=None,
+        token=(
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+            "eyJuYW1lIjoibW9jaGEiLCJ0eXBlIjoiYm90IiwiYm90X2lkIjoiYm90LTEyMyJ9."
+            "sig"
+        ),
+        token_source="LATTEKEY",
+        project_root=Path("."),
+        model_path=None,
+        validation_safe=True,
+    )
+
+    assert "startup self-check" not in caplog.text
+
+
+def test_client_auto_reconnects_after_end_game_1005_and_resets_agent(tmp_path: Path) -> None:
+    class ResetAwareAgent(StubAgent):
+        def __init__(self):
+            super().__init__({"type": "none"})
+            self.reset_calls = 0
+
+        def reset(self) -> None:
+            self.reset_calls += 1
+
+    class FakeConnectionClosed(Exception):
+        def __init__(self, code: int, reason: str | None):
+            self.code = code
+            self.reason = reason
+
+    class FakeWebSocket:
+        def __init__(self, messages):
+            self._messages = iter(messages)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._messages)
+            except StopIteration:
+                raise StopAsyncIteration
+
+        async def send(self, payload):
+            return None
+
+    class FakeConnect:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, *args, **kwargs):
+            self.calls += 1
+            return self
+
+        async def __aenter__(self):
+            return FakeWebSocket(['{"type":"start_game","id":0}', '{"type":"end_game"}'])
+
+        async def __aexit__(self, exc_type, exc, tb):
+            if self.calls == 1:
+                raise FakeConnectionClosed(1005, None)
+            raise StopAsyncIteration
+
+    agent = ResetAwareAgent()
+    client = rdc.RiichiDevBotClient(
+        rdc.RiichiDevClientConfig(
+            token="t",
+            queue="ranked",
+            model_path=Path("fake.pth"),
+            audit_log_path=tmp_path / "riichi.jsonl",
+            reconnect_delay_sec=0.0,
+        ),
+        agent=agent,
+    )
+
+    fake_connect = FakeConnect()
+    original_connect = rdc.websockets.connect
+    original_connection_closed = rdc.ConnectionClosed
+    original_sleep = rdc.asyncio.sleep
+    rdc.websockets.connect = fake_connect
+    rdc.ConnectionClosed = FakeConnectionClosed
+    rdc.asyncio.sleep = lambda _: original_sleep(0)
+    try:
+        try:
+            asyncio.run(client.run())
+        except StopAsyncIteration:
+            pass
+    finally:
+        rdc.websockets.connect = original_connect
+        rdc.ConnectionClosed = original_connection_closed
+        rdc.asyncio.sleep = original_sleep
+
+    assert fake_connect.calls == 2
+    assert agent.reset_calls == 2
+
+
+def test_client_auto_reconnects_ranked_queue_wait_1006_before_start_game(tmp_path: Path) -> None:
+    class ResetAwareAgent(StubAgent):
+        def __init__(self):
+            super().__init__({"type": "none"})
+            self.reset_calls = 0
+
+        def reset(self) -> None:
+            self.reset_calls += 1
+
+    class FakeConnectionClosed(Exception):
+        def __init__(self, code: int, reason: str | None):
+            self.code = code
+            self.reason = reason
+
+    class FakeWebSocket:
+        def __init__(self, messages):
+            self._messages = iter(messages)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._messages)
+            except StopIteration:
+                raise StopAsyncIteration
+
+        async def send(self, payload):
+            return None
+
+    class FakeConnect:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, *args, **kwargs):
+            self.calls += 1
+            return self
+
+        async def __aenter__(self):
+            return FakeWebSocket([])
+
+        async def __aexit__(self, exc_type, exc, tb):
+            if self.calls == 1:
+                raise FakeConnectionClosed(1006, None)
+            raise StopAsyncIteration
+
+    agent = ResetAwareAgent()
+    client = rdc.RiichiDevBotClient(
+        rdc.RiichiDevClientConfig(
+            token="t",
+            queue="ranked",
+            model_path=Path("fake.pth"),
+            audit_log_path=tmp_path / "riichi.jsonl",
+            reconnect_delay_sec=0.0,
+        ),
+        agent=agent,
+    )
+
+    fake_connect = FakeConnect()
+    original_connect = rdc.websockets.connect
+    original_connection_closed = rdc.ConnectionClosed
+    original_sleep = rdc.asyncio.sleep
+    rdc.websockets.connect = fake_connect
+    rdc.ConnectionClosed = FakeConnectionClosed
+    rdc.asyncio.sleep = lambda _: original_sleep(0)
+    try:
+        try:
+            asyncio.run(client.run())
+        except StopAsyncIteration:
+            pass
+    finally:
+        rdc.websockets.connect = original_connect
+        rdc.ConnectionClosed = original_connection_closed
+        rdc.asyncio.sleep = original_sleep
+
+    assert fake_connect.calls == 2
+    assert agent.reset_calls == 2
+
+
+def test_client_auto_reconnects_ranked_open_timeout_before_start_game(tmp_path: Path) -> None:
+    class ResetAwareAgent(StubAgent):
+        def __init__(self):
+            super().__init__({"type": "none"})
+            self.reset_calls = 0
+
+        def reset(self) -> None:
+            self.reset_calls += 1
+
+    class FakeConnect:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError
+            raise StopAsyncIteration
+
+    agent = ResetAwareAgent()
+    client = rdc.RiichiDevBotClient(
+        rdc.RiichiDevClientConfig(
+            token="t",
+            queue="ranked",
+            model_path=Path("fake.pth"),
+            audit_log_path=tmp_path / "riichi.jsonl",
+            reconnect_delay_sec=0.0,
+        ),
+        agent=agent,
+    )
+
+    fake_connect = FakeConnect()
+    original_connect = rdc.websockets.connect
+    original_sleep = rdc.asyncio.sleep
+    rdc.websockets.connect = fake_connect
+    rdc.asyncio.sleep = lambda _: original_sleep(0)
+    try:
+        try:
+            asyncio.run(client.run())
+        except StopAsyncIteration:
+            pass
+    finally:
+        rdc.websockets.connect = original_connect
+        rdc.asyncio.sleep = original_sleep
+
+    assert fake_connect.calls == 2
+    assert agent.reset_calls == 2

@@ -7,14 +7,13 @@ import math
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from keqingv1.model import MahjongModel
 from training.specs import TaskSpec
 
 # action index → 类型名（dahai 合并为一个大类，chi_*/kan 系列合并显示）
@@ -40,18 +39,41 @@ def _action_type_name(idx: int) -> str:
     return f"unknown_{idx}"
 
 
-def save_checkpoint(path: Path, model: MahjongModel, optimizer, scheduler, epoch: int, step: int, best_val_loss: float):
-    torch.save({
+def save_checkpoint(
+    path: Path,
+    model: nn.Module,
+    optimizer,
+    scheduler,
+    epoch: int,
+    step: int,
+    best_val_loss: float,
+    *,
+    cfg: Optional[Dict[str, Any]] = None,
+    payload_builder=None,
+):
+    payload = {
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "epoch": epoch,
         "step": step,
         "best_val_loss": best_val_loss,
-    }, path)
+    }
+    if payload_builder is not None:
+        payload = payload_builder(
+            base_payload=payload,
+            cfg=cfg or {},
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=epoch,
+            step=step,
+            best_val_loss=best_val_loss,
+        )
+    torch.save(payload, path)
 
 
-def load_checkpoint(path: Path, model: MahjongModel, optimizer, scheduler):
+def load_checkpoint(path: Path, model: nn.Module, optimizer, scheduler):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt["model"], strict=False)
     optimizer.load_state_dict(ckpt["optimizer"])
@@ -102,18 +124,20 @@ def _format_nonfinite_debug(
 
 
 def _run_epoch(
-    model: MahjongModel,
+    model: nn.Module,
     loader: DataLoader,
     optimizer,
     scheduler,
     scaler,
     device: torch.device,
     accumulation_steps: int,
+    policy_loss_weight: float,
     value_loss_weight: float,
     task: TaskSpec,
     is_train: bool,
     step: int,
     log_interval: int = 100,
+    max_batches: int | None = None,
 ) -> Dict:
     import sys
 
@@ -136,21 +160,24 @@ def _run_epoch(
     ctx = torch.enable_grad() if is_train else torch.no_grad()
     with ctx:
         for i, batch in enumerate(loader):
+            if max_batches is not None and max_batches > 0 and n_batches >= max_batches:
+                break
             batch_data = task.unpack_batch(batch, device)
             tile_feat = batch_data["tile_feat"]
             scalar = batch_data["scalar"]
             mask = batch_data["mask"]
             action_idx = batch_data["action_idx"]
             value_target = batch_data["value_target"]
+            model_kwargs = batch_data.get("model_kwargs", {})
 
             with torch.amp.autocast(device_type=device.type, enabled=(device.type == "cuda")):
-                policy_logits, value_pred = model(tile_feat, scalar)
+                policy_logits, value_pred = model(tile_feat, scalar, **model_kwargs)
                 ce = masked_ce_loss(policy_logits, action_idx, mask)
                 val_loss = nn.functional.mse_loss(value_pred.squeeze(-1), value_target)
                 extra_loss, extra_metrics = task.compute_extra_loss(
                     model, device, batch_data, is_train, i
                 )
-                loss = ce + value_loss_weight * val_loss + extra_loss
+                loss = policy_loss_weight * ce + value_loss_weight * val_loss + extra_loss
 
             if is_train:
                 loss_value = float(loss.detach().item())
@@ -265,8 +292,9 @@ def _run_epoch(
         "ce": total_ce / n,
         "val_loss": total_val_loss / n,
         "extra_loss": total_extra_loss / n,
-        "objective": (total_ce / n) + value_loss_weight * (total_val_loss / n) + (total_extra_loss / n),
+        "objective": policy_loss_weight * (total_ce / n) + value_loss_weight * (total_val_loss / n) + (total_extra_loss / n),
         "acc": total_acc / n,
+        "num_batches": n_batches,
         "grad_norm": (total_grad_norm / grad_norm_steps if grad_norm_steps > 0 else None),
         "nonfinite_steps": nonfinite_steps,
         "step": step,
@@ -302,7 +330,7 @@ def _meld_metric_from_stats(stats: Dict) -> float | None:
 
 
 def train_model(
-    model: MahjongModel,
+    model: nn.Module,
     *,
     train_loader: Optional[DataLoader],
     train_loader_factory: Optional[Callable[[int], DataLoader]],
@@ -313,7 +341,9 @@ def train_model(
     resume_path: Optional[Path] = None,
     weights_only: bool = False,
     device_str: str = "cuda",
-) -> MahjongModel:
+    checkpoint_payload_builder=None,
+    checkpoint_loader=None,
+) -> nn.Module:
     if train_loader is None and train_loader_factory is None:
         raise ValueError("train_loader or train_loader_factory is required")
 
@@ -331,6 +361,7 @@ def train_model(
     warmup_steps = cfg.get("warmup_steps", 500)
     steps_per_epoch_cfg = cfg.get("steps_per_epoch", None)
     steps_per_epoch = steps_per_epoch_cfg if steps_per_epoch_cfg is not None else 5000
+    val_steps_per_epoch_cfg = cfg.get("val_steps_per_epoch", None)
     total_steps = steps_per_epoch * num_epochs
 
     scheduler = build_scheduler(optimizer, warmup_steps, total_steps)
@@ -342,15 +373,38 @@ def train_model(
     best_meld = -float("inf")
 
     if resume_path is not None and resume_path.exists():
+        checkpoint_label = f"checkpoint {resume_path}"
         if weights_only:
             ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
-            model.load_state_dict(ckpt["model"], strict=False)
+            if checkpoint_loader is not None:
+                checkpoint_loader(
+                    ckpt,
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    checkpoint_label=checkpoint_label,
+                    weights_only=True,
+                )
+            else:
+                model.load_state_dict(ckpt["model"], strict=False)
             print(f"Loaded weights from {resume_path} (optimizer/scheduler/epoch reset)")
         else:
-            start_epoch, global_step, best_metric = load_checkpoint(resume_path, model, optimizer, scheduler)
+            if checkpoint_loader is not None:
+                ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
+                start_epoch, global_step, best_metric = checkpoint_loader(
+                    ckpt,
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    checkpoint_label=checkpoint_label,
+                    weights_only=False,
+                )
+            else:
+                start_epoch, global_step, best_metric = load_checkpoint(resume_path, model, optimizer, scheduler)
             print(f"Resumed from {resume_path} (epoch={start_epoch}, step={global_step})")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    policy_loss_weight = cfg.get("policy_loss_weight", 1.0)
     value_loss_weight = cfg.get("value_loss_weight", 0.5)
     log_interval = cfg.get("log_interval", 100)
 
@@ -362,8 +416,9 @@ def train_model(
         current_train_loader = train_loader_factory(epoch) if train_loader_factory is not None else train_loader
         train_stats = _run_epoch(
             model, current_train_loader, optimizer, scheduler, scaler,
-            device, accumulation_steps, value_loss_weight,
+            device, accumulation_steps, policy_loss_weight, value_loss_weight,
             task, is_train=True, step=global_step, log_interval=log_interval,
+            max_batches=int(steps_per_epoch_cfg) if steps_per_epoch_cfg is not None else None,
         )
         if epoch == start_epoch and steps_per_epoch_cfg is None:
             actual_spe = train_stats["step"] - global_step
@@ -375,8 +430,9 @@ def train_model(
 
         val_stats = _run_epoch(
             model, val_loader, optimizer, scheduler, scaler,
-            device, accumulation_steps, value_loss_weight,
+            device, accumulation_steps, policy_loss_weight, value_loss_weight,
             task, is_train=False, step=global_step, log_interval=log_interval,
+            max_batches=int(val_steps_per_epoch_cfg) if val_steps_per_epoch_cfg is not None else None,
         )
 
         elapsed = time.time() - t0
@@ -404,6 +460,8 @@ def train_model(
         save_checkpoint(
             output_dir / "last.pth", model, optimizer, scheduler,
             epoch + 1, global_step, best_metric,
+            cfg=cfg,
+            payload_builder=checkpoint_payload_builder,
         )
 
         metric_value = val_stats[task.best_metric_name]
@@ -412,6 +470,8 @@ def train_model(
             save_checkpoint(
                 output_dir / "best.pth", model, optimizer, scheduler,
                 epoch + 1, global_step, best_metric,
+                cfg=cfg,
+                payload_builder=checkpoint_payload_builder,
             )
             print(f"  [best checkpoint saved, val_{task.best_metric_name}={best_metric:.4f}]")
 
@@ -421,6 +481,8 @@ def train_model(
             save_checkpoint(
                 output_dir / "best_meld.pth", model, optimizer, scheduler,
                 epoch + 1, global_step, best_meld,
+                cfg=cfg,
+                payload_builder=checkpoint_payload_builder,
             )
             print(f"  [best_meld checkpoint saved, val_meld={best_meld:.4f}]")
 
@@ -432,6 +494,7 @@ def train_model(
             "train_extra_loss": train_stats["extra_loss"],
             "train_objective": train_stats["objective"],
             "train_acc": train_stats["acc"],
+            "train_num_batches": train_stats.get("num_batches"),
             "train_grad_norm": train_stats.get("grad_norm"),
             "train_nonfinite_steps": train_stats.get("nonfinite_steps", 0),
             "val_ce": val_stats["ce"],
@@ -439,6 +502,7 @@ def train_model(
             "val_extra_loss": val_stats["extra_loss"],
             "val_objective": val_stats["objective"],
             "val_acc": val_stats["acc"],
+            "val_num_batches": val_stats.get("num_batches"),
             "lr": optimizer.param_groups[0]["lr"],
             "val_acc_by_type": val_stats.get("acc_by_type", {}),
             "val_total_by_type": val_stats.get("total_by_type", {}),

@@ -1,29 +1,24 @@
 from __future__ import annotations
 
-import copy
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol, Sequence, Set
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from mahjong.shanten import Shanten
-from keqingv3.progress_oracle import (
+from mahjong_env.feature_tracker import SnapshotFeatureTracker
+from mahjong_env.progress_oracle import (
     NormalProgressInfo,
     analyze_normal_progress_from_counts as _oracle_calc_normal_progress_from_counts,
     calc_shanten_waits_from_counts as _oracle_calc_shanten_waits_from_counts,
 )
-from mahjong_env.legal_actions import enumerate_legal_action_specs
 from mahjong_env.replay_normalizer import (
-    is_replay_meta_event,
     normalize_replay_events,
     normalize_replay_label_for_legal_compare,
     replay_label_matches_legal,
-    replay_label_to_legal_mjai,
 )
-from mahjong_env.state import GameState, apply_event
 from mahjong_env.tiles import AKA_DORA_TILES, tile_to_34 as _to_34
 from mahjong_env.types import MjaiEvent
-from mahjong_env.types import ActionSpec
 
 # ---------------------------------------------------------------------------
 # generic 3n+1 / 3n+2 standard-hand shanten/waits helpers
@@ -177,6 +172,77 @@ def _calc_shanten_waits(hand: List[str], melds: List[dict]):
         return 8, 0, [False] * 34, tehai_count
 
 
+def _expand_hand_counter(counter) -> List[str]:
+    """把 PlayerState.hand (Counter) 展开成 list[tile_str] 供 _calc_shanten_waits 使用。"""
+    hand_list: List[str] = []
+    for tile, cnt in sorted(counter.items()):
+        hand_list.extend([tile] * int(cnt))
+    return hand_list
+
+
+def _compute_opp_tenpai_target(
+    sample_state: "GameState",
+    actor: int,
+) -> Tuple[float, float, float]:
+    """在决策时刻从上帝视角计算 3 个对手的 tenpai 状态。
+
+    顺序相对 actor:(actor+1)%4, (actor+2)%4, (actor+3)%4。
+    这是 xmodel1 opp_tenpai_head 的 BCE 监督标签。
+
+    实现:用 `keqing_core.calc_shanten_all`(Rust shanten 表)对对手 counts34 做判断,
+    shanten ≤ 0 视为 tenpai。这样和 Rust preprocess (`xmodel1_export.rs` 中同名逻辑)
+    使用**同一个 shanten source of truth**,保证 Python/Rust 两端导出的标签逐元素一致。
+
+    之前用 `_calc_shanten_waits` 的 Python 递归版本,在 degenerate fixture
+    (例如全 13 张同一种 tile) 下会和 Rust 表产生分歧;对合法牌局无差异,但会污染
+    parity 测试。改用 Rust 后该问题消失。
+
+    如果 Rust 扩展不可用或调用异常,退化为 shanten=8(非 tenpai),安全兜底。
+    """
+    try:
+        from keqing_core import calc_shanten_all as _rust_calc_shanten_all
+    except ImportError:  # pragma: no cover - Rust 扩展缺失时兜底
+        _rust_calc_shanten_all = None
+
+    result: List[float] = []
+    for rel in (1, 2, 3):
+        opp_idx = (actor + rel) % 4
+        if opp_idx < 0 or opp_idx >= len(sample_state.players):
+            result.append(0.0)
+            continue
+        player = sample_state.players[opp_idx]
+        hand_list = _expand_hand_counter(player.hand)
+        melds_opp = list(player.melds)
+        if not hand_list and not melds_opp:
+            result.append(0.0)
+            continue
+
+        counts34 = _hand_tile34_counts(hand_list)
+        # 与 Rust tracker (`apply_hand_count_delta` 的 clamp(0,4)) 对齐:
+        # 实战数据一张 tile 最多 4 张,但测试 fixture 可能造出 >4 张同牌的
+        # degenerate 状态。Rust preprocess 对这类状态会 clamp,如果 Python
+        # 不 clamp,Rust/Python 两端算出的 shanten 就会分叉,破坏 parity。
+        counts34 = [min(c, 4) for c in counts34]
+        tile_sum = sum(counts34)
+        if tile_sum == 0:
+            result.append(0.0)
+            continue
+
+        shanten_opp: int
+        if _rust_calc_shanten_all is not None:
+            try:
+                shanten_opp = int(_rust_calc_shanten_all(list(counts34)))
+            except Exception:
+                shanten_opp = 8
+        else:  # pragma: no cover - 依赖 riichienv 的 fallback 路径
+            try:
+                shanten_opp, *_ = _calc_shanten_waits(hand_list, melds_opp)
+            except Exception:
+                shanten_opp = 8
+        result.append(1.0 if shanten_opp is not None and shanten_opp <= 0 else 0.0)
+    return (result[0], result[1], result[2])
+
+
 def _meld_tile34_counts(melds: List[dict]) -> List[int]:
     counts = [0] * 34
     for meld in melds:
@@ -304,182 +370,145 @@ class ReplaySample:
     score_delta_target: float = 0.0
     win_target: float = 0.0
     dealin_target: float = 0.0
+    pts_given_win_target: float = 0.0
+    pts_given_dealin_target: float = 0.0
     ryukyoku_tenpai_target: float = 0.0
+    # 决策时刻 3 个对手的 tenpai 状态 (相对 actor,顺序为下家/对家/上家 = (actor+1)%4, (actor+2)%4, (actor+3)%4)。
+    # 作为 xmodel1 opp_tenpai_head 的 BCE 监督标签,1.0 表示该对手当前向听 ≤ 0。
+    # Stage 2 Python 原型:这个字段曾由旧 replay sample builder 在样本产出时通过 _calc_shanten_waits
+    # 对上帝视角下的对手手牌直接计算;Stage 2 Rust 迁移后改由 Rust preprocess emit。
+    opp_tenpai_target: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    score_before_action: int = 0
+    final_score_delta_points_target: int = 0
+    final_rank_target: int = 0
+    # 触发该监督样本的原始 replay 事件索引。xmodel1 preprocess 构造 event_history
+    # 时必须使用真实事件位置，而不是样本序号。
+    event_index: int = 0
+    # 规范化后的原始事件序,供 parity / smoke preprocess 构造与生产一致的
+    # event_history。
+    events: Optional[List[MjaiEvent]] = None
 
 
 class IllegalLabelActionError(ValueError):
     """Raised when a replay label action is not contained in the reconstructed legal set."""
 
 
-@dataclass
-class ValueComputationContext:
-    event_index: int
-    event: MjaiEvent
-    actor: int
-    delta_shanten: float
-    delta_waits: float
-    delta_tehai: float
-    events: List[MjaiEvent]
+def _inject_replay_sample_snapshot_features(snapshot: Dict, label_action: Dict, actor: int) -> Dict:
+    snap = dict(snapshot)
+    if label_action.get("type") != "none":
+        snap["tsumo_pai"] = None
+    hand = snap.get("hand", [])
+    melds = (snap.get("melds") or [[], [], [], []])[actor]
+    shanten, waits_count, waits_tiles, _ = _calc_shanten_waits(hand, melds)
+    snap["shanten"] = shanten
+    snap["waits_count"] = waits_count
+    snap["waits_tiles"] = waits_tiles
+    if label_action.get("type") == "hora":
+        if label_action.get("is_haitei") is True:
+            snap["_hora_is_haitei"] = True
+        if label_action.get("is_houtei") is True:
+            snap["_hora_is_houtei"] = True
+        if label_action.get("is_rinshan") is True:
+            snap["_hora_is_rinshan"] = True
+        if label_action.get("is_chankan") is True:
+            snap["_hora_is_chankan"] = True
+    if "feature_tracker" not in snap:
+        snap["feature_tracker"] = asdict(SnapshotFeatureTracker.from_state(snap, actor))
+    else:
+        tracker = dict(snap["feature_tracker"])
+        for key in ("hand_counts34", "meld_counts34", "visible_counts34", "suit_counts", "aka_counts"):
+            if key in tracker:
+                tracker[key] = tuple(tracker[key])
+        snap["feature_tracker"] = tracker
+    return snap
 
 
-@dataclass
-class PendingValueSample:
-    sample: ReplaySample
-    round_step_index: int
-
-
-def _finalize_aux_targets(
-    pending_samples: List[PendingValueSample],
-    terminal_event: Optional[MjaiEvent],
+def _illegal_label_message(
     *,
-    score_norm: float = 30000.0,
-) -> None:
-    if not pending_samples:
-        return
-
-    score_deltas = None
-    hora_actor = None
-    hora_target = None
-    ryukyoku_tenpai_players: set[int] = set()
-    if terminal_event is not None:
-        score_deltas = terminal_event.get("deltas") or terminal_event.get("score_delta")
-        if terminal_event.get("type") == "hora":
-            hora_actor = terminal_event.get("actor")
-            hora_target = terminal_event.get("target")
-        elif terminal_event.get("type") == "ryukyoku":
-            ryukyoku_tenpai_players = {
-                int(pid) for pid in (terminal_event.get("tenpai_players") or []) if pid is not None
-            }
-
-    for pending in pending_samples:
-        actor = pending.sample.actor
-        if isinstance(score_deltas, list) and len(score_deltas) == 4:
-            pending.sample.score_delta_target = float(score_deltas[actor]) / score_norm
-        else:
-            pending.sample.score_delta_target = 0.0
-        pending.sample.win_target = 1.0 if hora_actor == actor else 0.0
-        pending.sample.dealin_target = 1.0 if (hora_target == actor and hora_actor != actor) else 0.0
-        pending.sample.ryukyoku_tenpai_target = 1.0 if actor in ryukyoku_tenpai_players else 0.0
+    event_index: int,
+    actor: int,
+    actor_name: str,
+    label: Dict,
+    legal_dicts: List[Dict],
+    snapshot: Dict,
+) -> str:
+    melds = (snapshot.get("melds") or [[], [], [], []])[actor]
+    return (
+        "replay label action not in reconstructed legal set: "
+        f"event_index={event_index} actor={actor} actor_name={actor_name} "
+        f"label={label} legal={legal_dicts} "
+        f"snap={{'bakaze': {snapshot.get('bakaze')!r}, 'kyoku': {snapshot.get('kyoku')!r}, "
+        f"'honba': {snapshot.get('honba')!r}, 'hand': {snapshot.get('hand')!r}, "
+        f"'last_discard': {snapshot.get('last_discard')!r}, 'melds': {melds!r}}}"
+    )
 
 
-class ValueTargetStrategy(Protocol):
-    def initial_value(self, ctx: ValueComputationContext) -> float:
-        ...
+def build_replay_samples_mc_return(
+    events: List[MjaiEvent],
+    actor_filter: Optional[Set[int]] = None,
+    actor_name_filter: Optional[Set[str]] = None,
+    strict_legal_labels: bool = True,
+) -> List[ReplaySample]:
+    events = normalize_replay_events(events)
+    try:
+        import keqing_core
+    except ImportError:
+        raise RuntimeError("keqing_core native replay sample builder is not available")
 
-    def finalize_round(
-        self,
-        pending_samples: List[PendingValueSample],
-        terminal_event: Optional[MjaiEvent],
-    ) -> None:
-        ...
+    try:
+        native_records = keqing_core.build_replay_decision_records_mc_return(events)
+    except Exception as exc:
+        if keqing_core.is_missing_rust_capability_error(exc):
+            raise RuntimeError("keqing_core native replay sample builder capability is not available") from exc
+        raise
 
+    actor_names = extract_actor_names(events)
+    samples: List[ReplaySample] = []
+    for record in native_records:
+        actor = int(record["actor"])
+        if actor_filter is not None and actor not in actor_filter:
+            continue
+        actor_name = actor_names[actor] if 0 <= actor < len(actor_names) else f"p{actor}"
+        if actor_name_filter is not None and actor_name not in actor_name_filter:
+            continue
 
-class HeuristicValueStrategy:
-    def __init__(self):
-        self.w_shanten = 0.05
-        self.w_waits = 0.008
-        self.w_call_tehai = 0.003
-        self.value_norm = 30000.0
-        self.call_actions = {"chi", "pon", "daiminkan", "ankan", "kakan"}
-
-    def initial_value(self, ctx: ValueComputationContext) -> float:
-        et = ctx.event["type"]
-        actor = ctx.actor
-        delta_shanten = ctx.delta_shanten
-        delta_waits = ctx.delta_waits
-        delta_tehai = ctx.delta_tehai
-
-        if et == "hora":
-            sd = ctx.event.get("deltas") or ctx.event.get("score_delta")
-            if isinstance(sd, list) and len(sd) == 4:
-                return float(sd[actor]) / self.value_norm * 1.5
-            return float(self.w_shanten * delta_shanten + self.w_waits * delta_waits)
-
-        if et == "ryukyoku":
-            sd = ctx.event.get("deltas")
-            if isinstance(sd, list) and len(sd) == 4:
-                base = float(sd[actor]) / self.value_norm
-                if base != 0.0:
-                    return base
-            tenpai_players = {int(pid) for pid in (ctx.event.get("tenpai_players") or []) if pid is not None}
-            if tenpai_players:
-                return 0.05 if actor in tenpai_players else -0.05
-            return 0.0
-
-        value = float(self.w_shanten * delta_shanten + self.w_waits * delta_waits)
-        if et in self.call_actions:
-            value += float(self.w_call_tehai * delta_tehai)
-            value = max(min(value, 10.0), -10.0)
-
-        if et == "dahai":
-            next_ev = _next_meaningful_event(ctx.events, ctx.event_index)
-            if (
-                next_ev is not None
-                and next_ev.get("type") == "hora"
-                and next_ev.get("actor") != actor
-            ):
-                sd = next_ev.get("deltas") or next_ev.get("score_delta")
-                if isinstance(sd, list) and len(sd) == 4:
-                    return float(sd[actor]) / self.value_norm
-        return value
-
-    def finalize_round(
-        self,
-        pending_samples: List[PendingValueSample],
-        terminal_event: Optional[MjaiEvent],
-    ) -> None:
-        del pending_samples, terminal_event
-
-
-class MCReturnValueStrategy:
-    def __init__(self, gamma: float = 0.99, value_norm: float = 30000.0):
-        self.gamma = gamma
-        self.value_norm = value_norm
-
-    def initial_value(self, ctx: ValueComputationContext) -> float:
-        del ctx
-        return 0.0
-
-    def finalize_round(
-        self,
-        pending_samples: List[PendingValueSample],
-        terminal_event: Optional[MjaiEvent],
-    ) -> None:
-        if not pending_samples or terminal_event is None:
-            return
-        sd = terminal_event.get("deltas") or terminal_event.get("score_delta")
-        if not (isinstance(sd, list) and len(sd) == 4):
-            return
-        last_step = pending_samples[-1].round_step_index
-        for pending in pending_samples:
-            actor = pending.sample.actor
-            steps_remaining = max(0, last_step - pending.round_step_index)
-            pending.sample.value_target = float(sd[actor]) / self.value_norm * (
-                self.gamma ** steps_remaining
+        label = normalize_replay_label_for_legal_compare(dict(record["label_action"]))
+        legal_dicts = [dict(item) for item in record["legal_actions"]]
+        snapshot = _inject_replay_sample_snapshot_features(dict(record["state"]), label, actor)
+        if strict_legal_labels and not replay_label_matches_legal(label, legal_dicts):
+            raise IllegalLabelActionError(
+                _illegal_label_message(
+                    event_index=int(record["event_index"]),
+                    actor=actor,
+                    actor_name=actor_name,
+                    label=label,
+                    legal_dicts=legal_dicts,
+                    snapshot=snapshot,
+                )
             )
-
-
-def _resolve_value_strategy(
-    value_strategy: str | ValueTargetStrategy | None,
-) -> ValueTargetStrategy:
-    if value_strategy is None or value_strategy == "heuristic":
-        return HeuristicValueStrategy()
-    if value_strategy == "mc_return":
-        return MCReturnValueStrategy()
-    return value_strategy
-
-
-ACTION_TYPES_FOR_LABEL = {
-    "dahai",
-    "chi",
-    "pon",
-    "daiminkan",
-    "ankan",
-    "kakan",
-    "reach",
-    "hora",
-    "ryukyoku",
-}
+        samples.append(
+            ReplaySample(
+                state=snapshot,
+                actor=actor,
+                actor_name=actor_name,
+                label_action=label,
+                legal_actions=legal_dicts,
+                value_target=float(record.get("value_target", 0.0)),
+                score_delta_target=float(record.get("score_delta_target", 0.0)),
+                win_target=float(record.get("win_target", 0.0)),
+                dealin_target=float(record.get("dealin_target", 0.0)),
+                pts_given_win_target=float(record.get("pts_given_win_target", 0.0)),
+                pts_given_dealin_target=float(record.get("pts_given_dealin_target", 0.0)),
+                ryukyoku_tenpai_target=float(record.get("ryukyoku_tenpai_target", 0.0)),
+                opp_tenpai_target=tuple(float(v) for v in record.get("opp_tenpai_target", (0.0, 0.0, 0.0))),
+                score_before_action=int(record.get("score_before_action", snapshot.get("scores", [0, 0, 0, 0])[actor])),
+                final_score_delta_points_target=int(record.get("final_score_delta_points_target", 0)),
+                final_rank_target=int(record.get("final_rank_target", 0)),
+                event_index=int(record.get("event_index", 0)),
+                events=events,
+            )
+        )
+    return samples
 
 
 def read_mjai_jsonl(path: str | Path) -> List[MjaiEvent]:
@@ -502,297 +531,3 @@ def extract_actor_names(events: Sequence[MjaiEvent]) -> List[str]:
         ):
             return [str(x) for x in e["names"]]
     return ["p0", "p1", "p2", "p3"]
-
-
-def _next_meaningful_event(events: List[MjaiEvent], i: int) -> Optional[MjaiEvent]:
-    """跳过 reach_accepted/dora 等元事件，返回 i 之后第一个有意义的事件。"""
-    for j in range(i + 1, len(events)):
-        if not is_replay_meta_event(events[j]):
-            return events[j]
-    return None
-
-
-def _next_actor_dahai(
-    events: List[MjaiEvent], i: int, actor: int
-) -> Optional[MjaiEvent]:
-    """在副露事件 i 后找到同 actor 的 dahai 事件（副露后必须打牌）。"""
-    for j in range(i + 1, len(events)):
-        ev = events[j]
-        if is_replay_meta_event(ev):
-            continue
-        if ev.get("type") == "dahai" and ev.get("actor") == actor:
-            return ev
-        # 如果遇到非 skip 的其他事件则停止（副露后紧接着就是 dahai）
-        break
-    return None
-
-
-def build_supervised_samples(
-    events: List[MjaiEvent],
-    actor_filter: Optional[Set[int]] = None,
-    actor_name_filter: Optional[Set[str]] = None,
-    value_strategy: str | ValueTargetStrategy | None = None,
-    strict_legal_labels: bool = True,
-) -> List[ReplaySample]:
-    events = normalize_replay_events(events)
-    state = GameState()
-    samples: List[ReplaySample] = []
-    strategy = _resolve_value_strategy(value_strategy)
-    actor_names = extract_actor_names(events)
-    pending_round_samples: List[PendingValueSample] = []
-    round_step_index = 0
-    call_actions = {"chi", "pon", "daiminkan", "ankan", "kakan"}
-    multi_ron_base_state: Optional[GameState] = None
-    round_terminal_finalized = False
-
-    for i, event in enumerate(events):
-        et = event["type"]
-        actor = event.get("actor")
-        next_ev = _next_meaningful_event(events, i)
-
-        if et == "start_kyoku":
-            pending_round_samples.clear()
-            round_step_index = 0
-            multi_ron_base_state = None
-            round_terminal_finalized = False
-
-        if et == "hora" and multi_ron_base_state is None and next_ev is not None and next_ev.get("type") == "hora":
-            multi_ron_base_state = copy.deepcopy(state)
-
-        collect_sample = (
-            actor is not None
-            and et in ACTION_TYPES_FOR_LABEL
-            and state.in_game
-            and (actor_filter is None or actor in actor_filter)
-            # 立直后摸切（reached=True 时的 dahai）无决策价值，跳过
-            and not (et == "dahai" and 0 <= actor < 4 and state.players[actor].reached)
-        )
-        if collect_sample and actor_name_filter is not None:
-            actor_name = (
-                actor_names[actor] if 0 <= actor < len(actor_names) else f"p{actor}"
-            )
-            collect_sample = actor_name in actor_name_filter
-
-        shanten_before: Optional[int] = None
-        waits_before_cnt: Optional[int] = None
-        tehai_before_cnt: Optional[int] = None
-        if collect_sample:
-            sample_state = multi_ron_base_state if (et == "hora" and multi_ron_base_state is not None) else state
-            snap_before = sample_state.snapshot(actor)
-            hand_before = snap_before.get("hand", [])
-            melds_before = (snap_before.get("melds") or [[], [], [], []])[actor]
-            shanten_before, waits_before_cnt, _waits_before_bools, tehai_before_cnt = (
-                _calc_shanten_waits(hand_before, melds_before)
-            )
-
-        if collect_sample:
-            # Apply event first so we can compute after-state
-            apply_event(state, event)
-            snap_after = state.snapshot(actor)
-            hand_after = snap_after.get("hand", [])
-            melds_after = (snap_after.get("melds") or [[], [], [], []])[actor]
-            shanten_after, waits_after_cnt, _waits_after_bools, tehai_after_cnt = (
-                _calc_shanten_waits(hand_after, melds_after)
-            )
-            # 副露+打牌联合 value_target：找到紧接着的 dahai，用副露+打牌后的状态计算 delta
-            # snap[waits_count] 使用副露+打牌联合后的值（waits_after_cnt_vt），
-            # 与 value_target 计算保持一致
-            shanten_after_vt = shanten_after
-            waits_after_cnt_vt = waits_after_cnt
-            tehai_after_cnt_vt = tehai_after_cnt
-            if et in call_actions and et not in ("ankan", "kakan"):
-                next_dahai = _next_actor_dahai(events, i, actor)
-                if next_dahai is not None:
-                    discard_tile = _normalize_or_keep_aka(next_dahai["pai"])
-                    hand_after_dahai = list(hand_after)
-                    try:
-                        hand_after_dahai.remove(discard_tile)
-                    except ValueError:
-                        norm = (
-                            discard_tile[:-1]
-                            if discard_tile.endswith("r")
-                            else discard_tile
-                        )
-                        try:
-                            hand_after_dahai.remove(norm)
-                        except ValueError:
-                            pass
-                    shanten_after_vt, waits_after_cnt_vt, _, tehai_after_cnt_vt = (
-                        _calc_shanten_waits(hand_after_dahai, melds_after)
-                    )
-        if collect_sample:
-            delta_shanten = shanten_before - shanten_after_vt  # type: ignore[operator]
-            delta_waits = waits_after_cnt_vt - waits_before_cnt  # type: ignore[operator]
-            delta_tehai = tehai_after_cnt_vt - tehai_before_cnt  # type: ignore[operator]
-            value_ctx = ValueComputationContext(
-                event_index=i,
-                event=event,
-                actor=actor,
-                delta_shanten=float(delta_shanten),
-                delta_waits=float(delta_waits),
-                delta_tehai=float(delta_tehai),
-                events=events,
-            )
-            value_target_local = strategy.initial_value(value_ctx)
-
-            # Keep local value proxy computed above.
-            actor_name = (
-                actor_names[actor] if 0 <= actor < len(actor_names) else f"p{actor}"
-            )
-            snap = dict(snap_before)
-            # Only collect supervised samples when the actor hand is visible.
-            if snap["hand"]:
-                # Attach shanten/waits features for the policy/value model.
-                snap["shanten"] = shanten_before if shanten_before is not None else 0
-                # tsumo_pai：摸牌事件时注入当前摸到的牌（raw，含赤宝牌），其余为 None
-                snap["tsumo_pai"] = event.get("pai") if et == "tsumo" else None
-                if et == "hora":
-                    if event.get("is_haitei") is True:
-                        snap["_hora_is_haitei"] = True
-                    if event.get("is_houtei") is True:
-                        snap["_hora_is_houtei"] = True
-                    if event.get("is_rinshan") is True:
-                        snap["_hora_is_rinshan"] = True
-                    if event.get("is_chankan") is True:
-                        snap["_hora_is_chankan"] = True
-                # waits_count/waits_tiles: 与 snap_before（决策时刻）对应，两者保持同一时间点
-                snap["waits_count"] = (
-                    waits_before_cnt if waits_before_cnt is not None else 0
-                )
-                snap["waits_tiles"] = (
-                    _waits_before_bools  # length-34 bool list, before action
-                )
-
-                legal_specs = enumerate_legal_action_specs(snap, actor)
-                label = normalize_replay_label_for_legal_compare(event)
-                legal_dicts = [spec.to_mjai() for spec in legal_specs]
-                if strict_legal_labels and not replay_label_matches_legal(label, legal_dicts):
-                    raise IllegalLabelActionError(
-                        "replay label action not in reconstructed legal set: "
-                        f"event_index={i} actor={actor} actor_name={actor_name} "
-                        f"label={label} legal={legal_dicts} "
-                        f"snap={{'bakaze': {snap.get('bakaze')!r}, 'kyoku': {snap.get('kyoku')!r}, "
-                        f"'honba': {snap.get('honba')!r}, 'hand': {snap.get('hand')!r}, "
-                        f"'last_discard': {snap.get('last_discard')!r}, 'melds': {(snap.get('melds') or [[], [], [], []])[actor]!r}}}"
-                    )
-
-                sample = ReplaySample(
-                    state=snap,
-                    actor=actor,
-                    actor_name=actor_name,
-                    label_action=label,
-                    legal_actions=legal_dicts,
-                    value_target=float(value_target_local),
-                    score_delta_target=0.0,
-                    win_target=0.0,
-                    dealin_target=0.0,
-                    ryukyoku_tenpai_target=0.0,
-                )
-                samples.append(sample)
-                pending_round_samples.append(
-                    PendingValueSample(
-                        sample=sample,
-                        round_step_index=round_step_index,
-                    )
-                )
-                round_step_index += 1
-
-        if not collect_sample:
-            apply_event(state, event)
-
-        # 生成 none/pass 样本：他家打牌后，有鸣牌机会但主动放弃的玩家
-        if et == "dahai" and state.in_game:
-            discarder = event.get("actor")
-            if next_ev is not None:
-                next_type = next_ev.get("type")
-                next_actor = next_ev.get("actor")
-                # 只有下一个事件是 tsumo（无人鸣/荣）才是主动 pass
-                is_next_tsumo = next_type == "tsumo"
-                for p in range(4):
-                    if p == discarder:
-                        continue
-                    if actor_filter is not None and p not in actor_filter:
-                        continue
-                    if actor_name_filter is not None:
-                        p_name = (
-                            actor_names[p] if 0 <= p < len(actor_names) else f"p{p}"
-                        )
-                        if p_name not in actor_name_filter:
-                            continue
-                    snap_p = state.snapshot(p)
-                    if not snap_p["hand"]:
-                        continue
-                    legal_p_specs = enumerate_legal_action_specs(snap_p, p)
-                    non_none_p = [a for a in legal_p_specs if a.type != "none"]
-                    if not non_none_p:
-                        continue
-                    if not is_next_tsumo:
-                        continue
-                    # 注入 shanten
-                    hand_p = snap_p.get("hand", [])
-                    melds_p = (snap_p.get("melds") or [[], [], [], []])[p]
-                    shanten_p, waits_cnt_p, waits_tiles_p, _ = _calc_shanten_waits(
-                        hand_p, melds_p
-                    )
-                    snap_p["shanten"] = shanten_p
-                    snap_p["waits_count"] = waits_cnt_p
-                    snap_p["waits_tiles"] = waits_tiles_p
-                    sample = ReplaySample(
-                        state=snap_p,
-                        actor=p,
-                        actor_name=actor_names[p]
-                        if 0 <= p < len(actor_names)
-                        else f"p{p}",
-                        label_action={"type": "none", "actor": p},
-                        legal_actions=[spec.to_mjai() for spec in legal_p_specs],
-                        value_target=0.0,
-                        score_delta_target=0.0,
-                        win_target=0.0,
-                        dealin_target=0.0,
-                        ryukyoku_tenpai_target=0.0,
-                    )
-                    samples.append(sample)
-                    pending_round_samples.append(
-                        PendingValueSample(
-                            sample=sample,
-                            round_step_index=round_step_index,
-                        )
-                    )
-                    round_step_index += 1
-
-        if et in {"hora", "ryukyoku"}:
-            strategy.finalize_round(pending_round_samples, event)
-            _finalize_aux_targets(pending_round_samples, event)
-            round_terminal_finalized = True
-        if et == "end_kyoku":
-            if not round_terminal_finalized:
-                strategy.finalize_round(pending_round_samples, None)
-                _finalize_aux_targets(pending_round_samples, None)
-            pending_round_samples.clear()
-            round_step_index = 0
-            multi_ron_base_state = None
-            round_terminal_finalized = False
-
-        if et == "hora" and not (next_ev is not None and next_ev.get("type") == "hora"):
-            multi_ron_base_state = None
-
-    return samples
-
-
-def replay_validate_label_legal(samples: List[ReplaySample]) -> List[str]:
-    errors: List[str] = []
-    for idx, sample in enumerate(samples):
-        label = sample.label_action
-        legal = sample.legal_actions
-        found = replay_label_matches_legal(label, legal)
-        if not found:
-            errors.append(f"sample#{idx}: label {label} not in legal set")
-    return errors
-
-
-def _label_matches_legal(label: Dict, legal_actions: List[Dict]) -> bool:
-    return replay_label_matches_legal(label, legal_actions)
-
-
-def _label_to_legal_mjai(label: Dict, actor: int) -> Dict:
-    return replay_label_to_legal_mjai(label, actor)

@@ -17,33 +17,18 @@ import yaml
 
 from mahjong_env.replay import (
     IllegalLabelActionError,
-    build_supervised_samples,
+    build_replay_samples_mc_return,
     read_mjai_jsonl,
 )
-from keqingv1.action_space import (
-    ANKAN_IDX,
-    CHI_HIGH_IDX,
-    CHI_LOW_IDX,
-    CHI_MID_IDX,
-    DAIMINKAN_IDX,
-    KAKAN_IDX,
-    NONE_IDX,
-    PON_IDX,
-    action_to_idx,
-    build_legal_mask,
+from mahjong_env.action_space import action_to_idx, build_legal_mask
+from mahjong_env.event_history import compute_event_history
+from training.state_features import encode
+from training.cache_schema import (
+    KEQINGV4_EVENT_HISTORY_DIM,
+    KEQINGV4_EVENT_HISTORY_LEN,
+    KEQINGV4_OPPORTUNITY_DIM,
+    KEQINGV4_RULE_CONTEXT_DIM,
 )
-from keqingv1.features import encode
-
-_MELD_ACTION_IDXS = {
-    CHI_LOW_IDX,
-    CHI_MID_IDX,
-    CHI_HIGH_IDX,
-    PON_IDX,
-    DAIMINKAN_IDX,
-    ANKAN_IDX,
-    KAKAN_IDX,
-}
-_MELD_TYPES = {"chi", "pon", "daiminkan", "ankan", "kakan"}
 
 _SUIT_PERMS = [
     (0, 1, 2),
@@ -108,11 +93,11 @@ def _get_clear_progress_caches_hook(module_name: str):
     hook = _WORKER_CLEAR_CACHE_HOOKS.get(module_name)
     if hook is not None or module_name in _WORKER_CLEAR_CACHE_HOOKS:
         return hook
-    if module_name != "keqingv3.features":
+    if module_name != "training.state_features":
         _WORKER_CLEAR_CACHE_HOOKS[module_name] = None
         return None
     try:
-        hook = importlib.import_module("keqingv3.progress_oracle").clear_progress_caches
+        hook = importlib.import_module("mahjong_env.progress_oracle").clear_progress_caches
     except Exception:
         hook = None
     _WORKER_CLEAR_CACHE_HOOKS[module_name] = hook
@@ -137,81 +122,130 @@ class BasePreprocessAdapter:
             if name in result
         }
 
-
-class MeldRankPreprocessAdapter(BasePreprocessAdapter):
-    extra_field_names = ("snap_json",)
-
-    @staticmethod
-    def _permute_snap_json(snap_json_str: str, perm: tuple) -> str:
-        if not snap_json_str:
-            return snap_json_str
-        return _permute_mjson_text(snap_json_str, perm)
-
-    @staticmethod
-    def _snap_min(state: dict, actor: int, label_action: dict, legal_dicts: list) -> str:
-        meld_candidate: Optional[dict] = None
-        action_idx_val = action_to_idx(label_action)
-        if action_idx_val == NONE_IDX:
-            meld_priority = ["daiminkan", "ankan", "kakan", "pon", "chi"]
-            candidates = {a.get("type"): a for a in legal_dicts if a.get("type") in _MELD_TYPES}
-            for mtype in meld_priority:
-                if mtype in candidates:
-                    meld_candidate = candidates[mtype]
-                    break
-
-        snap = {
-            "hand": state.get("hand", []),
-            "melds": state.get("melds", [[], [], [], []]),
-            "discards": state.get("discards", [[], [], [], []]),
-            "dora_markers": state.get("dora_markers", []),
-            "reached": state.get("reached", [False, False, False, False]),
-            "scores": state.get("scores", [25000, 25000, 25000, 25000]),
-            "bakaze": state.get("bakaze", "E"),
-            "kyoku": state.get("kyoku", 1),
-            "honba": state.get("honba", 0),
-            "kyotaku": state.get("kyotaku", 0),
-            "jikaze": state.get("jikaze", 0),
-            "oya": state.get("oya", 0),
-            "actor": actor,
-            "label_action": label_action,
-            "meld_candidate": meld_candidate,
-        }
-        return json.dumps(snap, ensure_ascii=False)
-
-    def init_rows(self) -> Dict[str, list]:
-        return {"snap_json": []}
-
-    def sample_extras(self, sample, action_idx: int) -> Dict[str, object]:
-        if action_idx in _MELD_ACTION_IDXS or action_idx == NONE_IDX:
-            snap_json_str = self._snap_min(
-                sample.state,
-                sample.actor,
-                sample.label_action,
-                sample.legal_actions,
-            )
-        else:
-            snap_json_str = ""
-        return {"snap_json": snap_json_str}
-
-    def permute_result_extras(self, result: Dict[str, np.ndarray], perm: tuple) -> Dict[str, np.ndarray]:
-        if "snap_json" not in result:
-            return {}
-        return {
-            "snap_json": np.array(
-                [self._permute_snap_json(s, perm) for s in result["snap_json"]],
-                dtype=object,
-            )
-        }
+    def finalize_result_extras(self, rows: Dict[str, list]) -> Dict[str, np.ndarray]:
+        result: Dict[str, np.ndarray] = {}
+        for key in self.extra_field_names:
+            result[key] = np.array(rows[key], dtype=object)
+        return result
 
 
-class V3PreprocessAdapter(BasePreprocessAdapter):
-    extra_field_names = ("score_delta_target", "win_target", "dealin_target")
+class KeqingV4PreprocessAdapter(BasePreprocessAdapter):
+    extra_field_names = (
+        "score_delta_target",
+        "win_target",
+        "dealin_target",
+        "pts_given_win_target",
+        "pts_given_dealin_target",
+        "opp_tenpai_target",
+        "final_rank_target",
+        "final_score_delta_points_target",
+        "event_history",
+        "v4_opportunity",
+        "v4_discard_summary",
+        "v4_call_summary",
+        "v4_special_summary",
+        "rule_context",
+    )
 
     def init_rows(self) -> Dict[str, list]:
         return {
             "score_delta_target": [],
             "win_target": [],
             "dealin_target": [],
+            "pts_given_win_target": [],
+            "pts_given_dealin_target": [],
+            "opp_tenpai_target": [],
+            "final_rank_target": [],
+            "final_score_delta_points_target": [],
+            "event_history": [],
+            "v4_opportunity": [],
+            "v4_discard_summary": [],
+            "v4_call_summary": [],
+            "v4_special_summary": [],
+            "rule_context": [],
+        }
+
+    def sample_extras(self, sample, action_idx: int) -> Dict[str, object]:
+        del action_idx
+        from keqingv4.preprocess_features import build_typed_action_summaries
+
+        if not getattr(sample, "events", None):
+            raise PreprocessBuildError(
+                "keqingv4 preprocess sample is missing normalized replay events required for event_history"
+            )
+        event_history = compute_event_history(sample.events, int(sample.event_index))
+        if event_history.shape != (KEQINGV4_EVENT_HISTORY_LEN, KEQINGV4_EVENT_HISTORY_DIM):
+            raise PreprocessBuildError(
+                "keqingv4 preprocess event_history shape drift: "
+                f"expected {(KEQINGV4_EVENT_HISTORY_LEN, KEQINGV4_EVENT_HISTORY_DIM)}, got {event_history.shape}"
+            )
+
+        discard_summary, call_summary, special_summary, v4_opportunity = build_typed_action_summaries(
+            sample.state,
+            sample.actor,
+            sample.legal_actions,
+        )
+        return {
+            "score_delta_target": float(np.clip(sample.score_delta_target, -1.0, 1.0)),
+            "win_target": float(sample.win_target),
+            "dealin_target": float(sample.dealin_target),
+            "pts_given_win_target": float(getattr(sample, "pts_given_win_target", 0.0)),
+            "pts_given_dealin_target": float(getattr(sample, "pts_given_dealin_target", 0.0)),
+            "opp_tenpai_target": np.asarray(
+                getattr(sample, "opp_tenpai_target", (0.0, 0.0, 0.0)),
+                dtype=np.float32,
+            ).reshape(3),
+            "final_rank_target": int(getattr(sample, "final_rank_target", 0)),
+            "final_score_delta_points_target": int(getattr(sample, "final_score_delta_points_target", 0)),
+            "event_history": event_history,
+            "v4_opportunity": np.asarray(v4_opportunity, dtype=np.uint8).reshape(KEQINGV4_OPPORTUNITY_DIM),
+            "v4_discard_summary": discard_summary.astype(np.float16),
+            "v4_call_summary": call_summary.astype(np.float16),
+            "v4_special_summary": special_summary.astype(np.float16),
+            "rule_context": np.zeros((KEQINGV4_RULE_CONTEXT_DIM,), dtype=np.float32),
+        }
+
+    def finalize_result_extras(self, rows: Dict[str, list]) -> Dict[str, np.ndarray]:
+        return {
+            "score_delta_target": np.array(rows["score_delta_target"], dtype=np.float16),
+            "win_target": np.array(rows["win_target"], dtype=np.float16),
+            "dealin_target": np.array(rows["dealin_target"], dtype=np.float16),
+            "pts_given_win_target": np.array(rows["pts_given_win_target"], dtype=np.float32),
+            "pts_given_dealin_target": np.array(rows["pts_given_dealin_target"], dtype=np.float32),
+            "opp_tenpai_target": np.stack(rows["opp_tenpai_target"]).astype(np.float32),
+            "final_rank_target": np.array(rows["final_rank_target"], dtype=np.int8),
+            "final_score_delta_points_target": np.array(rows["final_score_delta_points_target"], dtype=np.int32),
+            "event_history": np.stack(rows["event_history"]).astype(np.int16),
+            "v4_opportunity": np.stack(rows["v4_opportunity"]).astype(np.uint8),
+            "v4_discard_summary": np.stack(rows["v4_discard_summary"]).astype(np.float16),
+            "v4_call_summary": np.stack(rows["v4_call_summary"]).astype(np.float16),
+            "v4_special_summary": np.stack(rows["v4_special_summary"]).astype(np.float16),
+            "rule_context": np.stack(rows["rule_context"]).astype(np.float32),
+        }
+
+
+class Xmodel2PreprocessAdapter(BasePreprocessAdapter):
+    extra_field_names = (
+        "score_delta_target",
+        "win_target",
+        "dealin_target",
+        "pts_given_win_target",
+        "pts_given_dealin_target",
+        "opp_tenpai_target",
+        "final_rank_target",
+        "final_score_delta_points_target",
+    )
+
+    def init_rows(self) -> Dict[str, list]:
+        return {
+            "score_delta_target": [],
+            "win_target": [],
+            "dealin_target": [],
+            "pts_given_win_target": [],
+            "pts_given_dealin_target": [],
+            "opp_tenpai_target": [],
+            "final_rank_target": [],
+            "final_score_delta_points_target": [],
         }
 
     def sample_extras(self, sample, action_idx: int) -> Dict[str, object]:
@@ -220,6 +254,26 @@ class V3PreprocessAdapter(BasePreprocessAdapter):
             "score_delta_target": float(np.clip(sample.score_delta_target, -1.0, 1.0)),
             "win_target": float(sample.win_target),
             "dealin_target": float(sample.dealin_target),
+            "pts_given_win_target": float(getattr(sample, "pts_given_win_target", 0.0)),
+            "pts_given_dealin_target": float(getattr(sample, "pts_given_dealin_target", 0.0)),
+            "opp_tenpai_target": np.asarray(
+                getattr(sample, "opp_tenpai_target", (0.0, 0.0, 0.0)),
+                dtype=np.float32,
+            ).reshape(3),
+            "final_rank_target": int(getattr(sample, "final_rank_target", 0)),
+            "final_score_delta_points_target": int(getattr(sample, "final_score_delta_points_target", 0)),
+        }
+
+    def finalize_result_extras(self, rows: Dict[str, list]) -> Dict[str, np.ndarray]:
+        return {
+            "score_delta_target": np.array(rows["score_delta_target"], dtype=np.float32),
+            "win_target": np.array(rows["win_target"], dtype=np.float32),
+            "dealin_target": np.array(rows["dealin_target"], dtype=np.float32),
+            "pts_given_win_target": np.array(rows["pts_given_win_target"], dtype=np.float32),
+            "pts_given_dealin_target": np.array(rows["pts_given_dealin_target"], dtype=np.float32),
+            "opp_tenpai_target": np.stack(rows["opp_tenpai_target"]).astype(np.float32),
+            "final_rank_target": np.array(rows["final_rank_target"], dtype=np.int8),
+            "final_score_delta_points_target": np.array(rows["final_score_delta_points_target"], dtype=np.int32),
         }
 
 
@@ -227,10 +281,10 @@ def create_preprocess_adapter(name: str) -> BasePreprocessAdapter:
     normalized = name.strip().lower()
     if normalized == "base":
         return BasePreprocessAdapter()
-    if normalized == "meld_rank":
-        return MeldRankPreprocessAdapter()
-    if normalized == "v3_aux":
-        return V3PreprocessAdapter()
+    if normalized == "keqingv4_aux":
+        return KeqingV4PreprocessAdapter()
+    if normalized == "xmodel2_aux":
+        return Xmodel2PreprocessAdapter()
     raise ValueError(f"unknown preprocess adapter: {name}")
 
 
@@ -239,8 +293,8 @@ def events_to_cached_arrays(
     *,
     actor_name_filter=None,
     adapter: Optional[BasePreprocessAdapter] = None,
-    value_strategy: str = "heuristic",
-    encode_module: str = "keqingv1.features",
+    value_strategy: str = "mc_return",
+    encode_module: str = "training.state_features",
 ) -> Optional[Dict[str, np.ndarray]]:
     """Public helper for event-stream -> cache-array conversion.
 
@@ -269,8 +323,8 @@ def save_events_to_cache_file(
     actor_name_filter=None,
     adapter: Optional[BasePreprocessAdapter] = None,
     adapter_name: str = "base",
-    value_strategy: str = "heuristic",
-    encode_module: str = "keqingv1.features",
+    value_strategy: str = "mc_return",
+    encode_module: str = "training.state_features",
     compress_output: bool = True,
 ) -> bool:
     chosen_adapter = adapter or create_preprocess_adapter(adapter_name)
@@ -299,7 +353,7 @@ def _parse_events_to_arrays(
     *,
     actor_name_filter=None,
     adapter: BasePreprocessAdapter,
-    value_strategy: str = "heuristic",
+    value_strategy: str = "mc_return",
     encode_fn=encode,
     encode_timed_fn=None,
 ) -> Optional[Dict[str, np.ndarray]]:
@@ -332,10 +386,11 @@ def _parse_events_to_arrays(
 
     try:
         t_build0 = time.perf_counter()
-        samples = build_supervised_samples(
+        if value_strategy != "mc_return":
+            raise PreprocessBuildError(f"unsupported value_strategy: {value_strategy}")
+        samples = build_replay_samples_mc_return(
             events,
             actor_name_filter=actor_name_filter,
-            value_strategy=value_strategy,
         )
         timings["sample_build_s"] = time.perf_counter() - t_build0
     except IllegalLabelActionError:
@@ -390,11 +445,7 @@ def _parse_events_to_arrays(
         "action_idx": np.array(rows["action_idx"], dtype=np.int16),
         "value": np.array(rows["value"], dtype=np.float16),
     }
-    for key in adapter.extra_field_names:
-        if key in {"score_delta_target", "win_target", "dealin_target"}:
-            result[key] = np.array(rows[key], dtype=np.float16)
-        else:
-            result[key] = np.array(rows[key], dtype=object)
+    result.update(adapter.finalize_result_extras(rows))
     result["_timings"] = timings
     return result
 
@@ -550,8 +601,8 @@ def run_preprocess(
     *,
     default_output_dir: str,
     adapter: BasePreprocessAdapter,
-    default_value_strategy: str = "heuristic",
-    encode_module: str = "keqingv1.features",
+    default_value_strategy: str = "mc_return",
+    encode_module: str = "training.state_features",
 ) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=None)
@@ -572,7 +623,7 @@ def run_preprocess(
         "--value-strategy",
         type=str,
         default=None,
-        choices=["heuristic", "mc_return"],
+        choices=["mc_return"],
     )
     args = parser.parse_args()
 
@@ -717,9 +768,9 @@ def run_preprocess(
 
 __all__ = [
     "BasePreprocessAdapter",
-    "MeldRankPreprocessAdapter",
     "create_preprocess_adapter",
-    "V3PreprocessAdapter",
+    "KeqingV4PreprocessAdapter",
+    "Xmodel2PreprocessAdapter",
     "events_to_cached_arrays",
     "save_events_to_cache_file",
     "run_preprocess",

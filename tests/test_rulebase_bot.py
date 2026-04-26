@@ -85,3 +85,43 @@ def test_rulebase_bot_tsumogiris_after_riichi(monkeypatch):
     assert chosen["pai"] == "5m"
     assert chosen["tsumogiri"] is True
 
+
+def test_rulebase_bot_betaoris_with_genbutsu_against_riichi(monkeypatch):
+    bot = RulebaseBot(player_id=0)
+    ctx = _ctx(
+        legal_actions=[
+            {"type": "dahai", "actor": 0, "pai": "9p", "tsumogiri": False},
+            {"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False},
+        ],
+        runtime_snap={
+            "hand": ["1m", "9p", "1p", "2p", "4s", "5s", "7s", "E", "S", "W", "N", "P", "F", "C"],
+            "discards": [[], [{"pai": "1m"}], [], []],
+            "reached": [False, True, False, False],
+            "last_tsumo": ["C", None, None, None],
+        },
+    )
+    monkeypatch.setattr(bot._context_builder, "build", lambda state, actor, event: ctx)
+
+    chosen = bot.react({"type": "tsumo", "actor": 0, "pai": "C"})
+    assert chosen is not None
+    assert chosen["type"] == "dahai"
+    assert chosen["pai"] == "1m"
+
+
+def test_rulebase_bot_declines_open_chi_without_secured_yakuhai(monkeypatch):
+    bot = RulebaseBot(player_id=0)
+    ctx = _ctx(
+        legal_actions=[
+            {"type": "chi", "actor": 0, "pai": "4m", "consumed": ["2m", "3m"], "target": 1},
+            {"type": "none", "actor": 0},
+        ],
+        runtime_snap={
+            "hand": ["2m", "3m", "5m", "6m", "7m", "8m", "1p", "2p", "3p", "4s", "5s", "6s", "9s"],
+            "last_discard": {"pai": "4m", "actor": 1},
+        },
+    )
+    monkeypatch.setattr(bot._context_builder, "build", lambda state, actor, event: ctx)
+
+    chosen = bot.react({"type": "dahai", "actor": 1, "pai": "4m"})
+    assert chosen is not None
+    assert chosen["type"] == "none"

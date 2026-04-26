@@ -2,26 +2,38 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import os
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import torch
 import websockets
 from dotenv import load_dotenv
 from websockets.exceptions import ConnectionClosed
 from riichienv import Observation, Observation3P, RiichiEnv
 
-from inference.contracts import DecisionContext
-from inference.bot_registry import SUPPORTED_BOT_NAMES
-from inference.keqing_adapter import KeqingModelAdapter
-from inference.scoring import DefaultActionScorer
-from keqingv1.action_space import IDX_TO_TILE_NAME
+from mahjong_env.action_space import IDX_TO_TILE_NAME
 from mahjong.tile import FIVE_RED_MAN, FIVE_RED_PIN, FIVE_RED_SOU
+
+torch = None
+DecisionContext = None
+DecisionResult = None
+
+
+class _KeqingModelAdapterPlaceholder:
+    @classmethod
+    def from_checkpoint(cls, *args, **kwargs):
+        raise RuntimeError("KeqingModelAdapter is not loaded")
+
+
+KeqingModelAdapter = _KeqingModelAdapterPlaceholder
+DefaultActionScorer = None
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -39,6 +51,45 @@ _MELD_TYPE_MAP = {
 }
 
 
+def _ensure_model_runtime_imports() -> None:
+    global torch, DecisionContext, DecisionResult, KeqingModelAdapter, DefaultActionScorer
+    if torch is None:
+        import torch as _torch
+
+        torch = _torch
+    if DecisionContext is None or DecisionResult is None:
+        from inference.contracts import (
+            DecisionContext as _DecisionContext,
+            DecisionResult as _DecisionResult,
+        )
+
+        if DecisionContext is None:
+            DecisionContext = _DecisionContext
+        if DecisionResult is None:
+            DecisionResult = _DecisionResult
+    placeholder_from_checkpoint = getattr(
+        _KeqingModelAdapterPlaceholder.from_checkpoint,
+        "__func__",
+        _KeqingModelAdapterPlaceholder.from_checkpoint,
+    )
+    current_from_checkpoint = getattr(
+        KeqingModelAdapter.from_checkpoint,
+        "__func__",
+        KeqingModelAdapter.from_checkpoint,
+    )
+    if (
+        KeqingModelAdapter is _KeqingModelAdapterPlaceholder
+        and current_from_checkpoint is placeholder_from_checkpoint
+    ):
+        from inference.keqing_adapter import KeqingModelAdapter as _KeqingModelAdapter
+
+        KeqingModelAdapter = _KeqingModelAdapter
+    if DefaultActionScorer is None:
+        from inference.scoring import DefaultActionScorer as _DefaultActionScorer
+
+        DefaultActionScorer = _DefaultActionScorer
+
+
 def _resolve_ws_url(base_url: str, queue: str) -> str:
     normalized = base_url.rstrip("/")
     if normalized.startswith("https://"):
@@ -50,6 +101,100 @@ def _resolve_ws_url(base_url: str, queue: str) -> str:
     if queue == "ranked":
         return f"{normalized}{DEFAULT_RANKED_PATH}"
     raise ValueError(f"unsupported queue: {queue}")
+
+
+def _resolve_default_token(bot_name: str) -> str:
+    return os.getenv("LATTEKEY", os.getenv("RIICHI_BOT_TOKEN", ""))
+
+
+def _resolve_default_token_with_source(bot_name: str) -> tuple[str, str]:
+    if os.getenv("LATTEKEY"):
+        return os.getenv("LATTEKEY", ""), "LATTEKEY"
+    return os.getenv("RIICHI_BOT_TOKEN", ""), "RIICHI_BOT_TOKEN"
+
+
+def _format_connection_closed_message(queue: str, code: int, reason: str | None) -> str:
+    return (
+        f"{queue} connection closed by server "
+        f"(code={code}, reason={reason or 'none'}). "
+        "Likely causes: bot is not active yet, another session is using the same bot, "
+        f"or the server rejected the {queue} queue request."
+    )
+
+
+def _resolve_model_path(
+    *,
+    bot_name: str,
+    project_root: str | Path,
+    model_path: str | Path | None,
+) -> Path | None:
+    if bot_name == "rulebase":
+        return None
+    if model_path is not None:
+        return Path(model_path)
+    return Path(project_root) / "artifacts" / "models" / bot_name / "best.pth"
+
+
+def _decode_jwt_payload_unverified(token: str) -> dict[str, Any] | None:
+    parts = token.split(".")
+    if len(parts) < 2 or not parts[1]:
+        return None
+    padded = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        payload = base64.urlsafe_b64decode(padded.encode("ascii"))
+        decoded = json.loads(payload.decode("utf-8"))
+    except Exception:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _log_startup_self_check(
+    *,
+    queue: str,
+    bot_name: str,
+    model_version: str | None,
+    token: str,
+    token_source: str,
+    project_root: Path,
+    model_path: Path | None,
+    validation_safe: bool,
+) -> None:
+    should_log = logger.isEnabledFor(logging.DEBUG)
+    token_payload = _decode_jwt_payload_unverified(token)
+    token_name = token_payload.get("name") if token_payload else None
+    token_bot_id = token_payload.get("bot_id") if token_payload else None
+    token_type = token_payload.get("type") if token_payload else None
+    token_summary = (
+        f"name={token_name or 'unknown'} "
+        f"type={token_type or 'unknown'} "
+        f"bot_id={token_bot_id or 'unknown'}"
+    )
+    if should_log:
+        logger.info(
+            "startup self-check: queue=%s bot_name=%s model_version=%s token_source=%s token_identity=%s",
+            queue,
+            bot_name,
+            model_version or bot_name,
+            token_source,
+            token_summary,
+        )
+        logger.info("startup self-check: project_root=%s", project_root)
+    if validation_safe:
+        if should_log:
+            logger.info("startup self-check: validation_safe=true, model checkpoint skipped")
+        return
+    if model_path is None:
+        if should_log:
+            logger.info("startup self-check: model checkpoint skipped for bot_name=%s", bot_name)
+        return
+    if should_log:
+        logger.info(
+            "startup self-check: model_path=%s exists=%s",
+            model_path,
+            model_path.exists(),
+        )
+    if not model_path.exists():
+        raise SystemExit(f"model checkpoint not found: {model_path}")
 
 
 def _decode_observation(message: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -68,6 +213,37 @@ def _decode_observation(message: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         except Exception:
             obs = Observation3P.deserialize_from_base64(encoded)
     return obs, _normalize_observation_state(obs, obs.to_dict())
+
+
+def _hash_observation_payload(encoded: str | None) -> str | None:
+    if not encoded:
+        return None
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _audit_message_meta(message: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": message.get("type"),
+        "seat": message.get("seat"),
+        "player_count": message.get("player_count"),
+        "has_observation": isinstance(message.get("observation"), str) and bool(message.get("observation")),
+        "observation_sha256": message.get("_observation_sha256"),
+        "decode_error": message.get("_observation_decode_error"),
+    }
+
+
+def _enrich_message_for_audit(message: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(message)
+    encoded = enriched.get("observation")
+    if isinstance(encoded, str) and encoded:
+        enriched["_observation_sha256"] = _hash_observation_payload(encoded)
+        if "_normalized_observation" not in enriched:
+            try:
+                _obs, normalized = _decode_observation(enriched)
+                enriched["_normalized_observation"] = normalized
+            except Exception as exc:
+                enriched["_observation_decode_error"] = f"{type(exc).__name__}: {exc}"
+    return enriched
 
 
 def _sanitize_action(action: dict[str, Any], actor_hint: int | None) -> dict[str, Any]:
@@ -225,6 +401,9 @@ def _normalize_observation_state(obs: Any, raw_state: dict[str, Any]) -> dict[st
 
 
 class RiichiDevDecisionAgent:
+    def reset(self) -> None:
+        return None
+
     def act(self, obs: Any):
         raise NotImplementedError
 
@@ -274,6 +453,7 @@ class RiichiDevAuditLogger:
         bot_name: str,
         model_version: str | None,
         seat: int | None,
+        request_seq: int | None,
         message: dict[str, Any],
         response: dict[str, Any],
         latency_ms: float,
@@ -286,11 +466,97 @@ class RiichiDevAuditLogger:
                 "bot_name": bot_name,
                 "model_version": model_version,
                 "seat": seat,
+                "request_seq": request_seq,
                 "message_type": message.get("type"),
+                "message_meta": _audit_message_meta(message),
                 "response": response,
                 "latency_ms": round(latency_ms, 3),
+                "possible_action_count": len(possible_actions),
                 "possible_actions": possible_actions,
                 "state": self._state_summary(message),
+                "normalized_observation": message.get("_normalized_observation"),
+            }
+        )
+
+    def log_send_result(
+        self,
+        *,
+        queue: str,
+        bot_name: str,
+        model_version: str | None,
+        seat: int | None,
+        request_seq: int | None,
+        response: dict[str, Any],
+        success: bool,
+        error: str | None = None,
+    ) -> None:
+        self.write(
+            {
+                "kind": "send_result",
+                "queue": queue,
+                "bot_name": bot_name,
+                "model_version": model_version,
+                "seat": seat,
+                "request_seq": request_seq,
+                "success": success,
+                "response": response,
+                "error": error,
+            }
+        )
+
+    def log_protocol_action(
+        self,
+        *,
+        queue: str,
+        bot_name: str,
+        model_version: str | None,
+        seat: int | None,
+        trigger_message: dict[str, Any],
+        response: dict[str, Any],
+        latency_ms: float,
+    ) -> None:
+        self.write(
+            {
+                "kind": "protocol_action",
+                "queue": queue,
+                "bot_name": bot_name,
+                "model_version": model_version,
+                "seat": seat,
+                "trigger_type": trigger_message.get("type"),
+                "message_meta": _audit_message_meta(trigger_message),
+                "response": response,
+                "latency_ms": round(latency_ms, 3),
+                "state": self._state_summary(trigger_message),
+                "normalized_observation": trigger_message.get("_normalized_observation"),
+            }
+        )
+
+    def log_agent_error(
+        self,
+        *,
+        queue: str,
+        bot_name: str,
+        model_version: str | None,
+        seat: int | None,
+        request_seq: int | None,
+        message: dict[str, Any],
+        error: str,
+        traceback_text: str,
+    ) -> None:
+        self.write(
+            {
+                "kind": "agent_error",
+                "queue": queue,
+                "bot_name": bot_name,
+                "model_version": model_version,
+                "seat": seat,
+                "request_seq": request_seq,
+                "message_meta": _audit_message_meta(message),
+                "possible_actions": message.get("possible_actions") or [],
+                "state": self._state_summary(message),
+                "normalized_observation": message.get("_normalized_observation"),
+                "error": error,
+                "traceback": traceback_text,
             }
         )
 
@@ -330,14 +596,12 @@ class DecisionAgentSpec:
     score_delta_lambda: float = 0.20
     win_prob_lambda: float = 0.20
     dealin_prob_lambda: float = 0.25
+    rank_pt_lambda: float = 0.0
 
 
-DEFAULT_DECISION_AGENT_SPEC = DecisionAgentSpec(model_version="keqingv3")
+DEFAULT_DECISION_AGENT_SPEC = DecisionAgentSpec(model_version="xmodel1")
 DECISION_AGENT_SPECS: dict[str, DecisionAgentSpec] = {
-    "keqingv1": DecisionAgentSpec(model_version="keqingv1"),
-    "keqingv2": DecisionAgentSpec(model_version="keqingv2"),
-    "keqingv3": DecisionAgentSpec(model_version="keqingv3"),
-    "keqingv31": DecisionAgentSpec(model_version="keqingv31", hidden_dim=320, num_res_blocks=6),
+    "keqingv4": DecisionAgentSpec(model_version="keqingv4", hidden_dim=320, num_res_blocks=6),
     "xmodel1": DecisionAgentSpec(
         model_version="xmodel1",
         beam_k=0,
@@ -353,6 +617,10 @@ class ValidationSafeAgent(RiichiDevDecisionAgent):
     def __init__(self) -> None:
         self._seat: int | None = None
         self._last_tsumo: str | None = None
+
+    def reset(self) -> None:
+        self._seat = None
+        self._last_tsumo = None
 
     def act(self, obs: Any):
         legal_actions = [_action_to_mjai_dict(action) for action in obs.legal_actions()]
@@ -399,6 +667,89 @@ class ValidationSafeAgent(RiichiDevDecisionAgent):
         return {"type": "none"}
 
 
+class RulebaseObservationAgent(RiichiDevDecisionAgent):
+    def __init__(self) -> None:
+        self._pending_reach_discard: dict[str, Any] | None = None
+
+    def reset(self) -> None:
+        self._pending_reach_discard = None
+
+    def _remember_reach_followup(
+        self,
+        *,
+        snap: dict[str, Any],
+        actor: int,
+        legal_actions: list[dict[str, Any]],
+        chosen: dict[str, Any],
+    ) -> None:
+        self._pending_reach_discard = None
+        if chosen.get("type") != "reach":
+            return
+
+        import keqing_core
+
+        followup_legal_actions = [
+            action for action in legal_actions if action.get("type") != "reach"
+        ]
+        if not followup_legal_actions:
+            return
+        followup = keqing_core.choose_rulebase_action(
+            snap,
+            actor,
+            followup_legal_actions,
+        )
+        if followup and followup.get("type") == "dahai":
+            self._pending_reach_discard = _sanitize_action(followup, actor)
+
+    def choose_mjai_action(
+        self,
+        *,
+        snap: dict[str, Any],
+        legal_actions: list[dict[str, Any]],
+        actor: int,
+    ) -> dict[str, Any]:
+        import keqing_core
+
+        if not legal_actions:
+            self._pending_reach_discard = None
+            return {"type": "none"}
+        chosen = keqing_core.choose_rulebase_action(snap, actor, legal_actions)
+        if chosen is None:
+            self._pending_reach_discard = None
+            return {"type": "none"}
+        self._remember_reach_followup(
+            snap=snap,
+            actor=actor,
+            legal_actions=legal_actions,
+            chosen=chosen,
+        )
+        return _sanitize_action(chosen, actor)
+
+    def select_action(self, message: dict[str, Any], seat: int | None) -> dict[str, Any]:
+        mtype = message.get("type")
+        if mtype != "request_action":
+            if (
+                mtype == "reach"
+                and seat is not None
+                and message.get("actor") == seat
+                and self._pending_reach_discard is not None
+            ):
+                discard = self._pending_reach_discard
+                self._pending_reach_discard = None
+                return discard
+            return {"type": "none"}
+        _obs, snap = _decode_observation(message)
+        legal_actions = list(message.get("possible_actions") or [])
+        actor = seat if seat is not None else int(snap.get("actor", 0))
+        if not legal_actions:
+            legal_actions = [{"type": "none"}]
+        return self.choose_mjai_action(
+            snap=snap,
+            legal_actions=[_action_to_mjai_dict(action) for action in legal_actions],
+            actor=actor,
+        )
+
+
 class ObservationScoringAgent(RiichiDevDecisionAgent):
     def __init__(
         self,
@@ -412,8 +763,10 @@ class ObservationScoringAgent(RiichiDevDecisionAgent):
         score_delta_lambda: float = 0.20,
         win_prob_lambda: float = 0.20,
         dealin_prob_lambda: float = 0.25,
-        model_version: str | None = "keqingv3",
+        rank_pt_lambda: float = 0.0,
+        model_version: str | None = "xmodel1",
     ):
+        _ensure_model_runtime_imports()
         resolved_device = torch.device(
             device if device == "cpu" or torch.cuda.is_available() else "cpu"
         )
@@ -432,7 +785,25 @@ class ObservationScoringAgent(RiichiDevDecisionAgent):
             score_delta_lambda=score_delta_lambda,
             win_prob_lambda=win_prob_lambda,
             dealin_prob_lambda=dealin_prob_lambda,
+            rank_pt_lambda=rank_pt_lambda,
         )
+        self._pending_reach_discard: dict[str, Any] | None = None
+
+    def reset(self) -> None:
+        self._pending_reach_discard = None
+
+    def _remember_reach_followup(self, decision: DecisionResult, actor: int) -> None:
+        self._pending_reach_discard = None
+        if decision.chosen.get("type") != "reach":
+            return
+        for candidate in decision.candidates:
+            if candidate.action.get("type") != "reach":
+                continue
+            reach_discard = candidate.meta.get("reach_discard")
+            if not reach_discard:
+                continue
+            self._pending_reach_discard = _sanitize_action(reach_discard, actor)
+            return
 
     def choose_mjai_action(
         self,
@@ -451,6 +822,7 @@ class ObservationScoringAgent(RiichiDevDecisionAgent):
             legal_actions=legal_actions,
         )
         decision = self._scorer.score(ctx)
+        self._remember_reach_followup(decision, actor)
         return _sanitize_action(decision.chosen, actor)
 
     def act(self, obs: Any):
@@ -464,6 +836,18 @@ class ObservationScoringAgent(RiichiDevDecisionAgent):
         return obs.select_action_from_mjai(json.dumps(chosen, ensure_ascii=False))
 
     def select_action(self, message: dict[str, Any], seat: int | None) -> dict[str, Any]:
+        mtype = message.get("type")
+        if mtype != "request_action":
+            if (
+                mtype == "reach"
+                and seat is not None
+                and message.get("actor") == seat
+                and self._pending_reach_discard is not None
+            ):
+                discard = self._pending_reach_discard
+                self._pending_reach_discard = None
+                return discard
+            return {"type": "none"}
         obs, snap = _decode_observation(message)
         legal_actions = list(message.get("possible_actions") or [])
         if not legal_actions:
@@ -486,16 +870,20 @@ def create_riichi_dev_agent(
     device: str,
     verbose: bool,
     model_version: str | None = None,
+    rank_pt_lambda: float | None = None,
     validation_safe: bool = False,
 ) -> RiichiDevDecisionAgent:
     if validation_safe:
         return ValidationSafeAgent()
     if bot_name == "rulebase":
-        raise ValueError("rulebase is not supported by the riichi.dev observation gateway")
+        return RulebaseObservationAgent()
     spec = DECISION_AGENT_SPECS.get(model_version or bot_name)
     if spec is None:
         inferred_version = model_version or bot_name
         spec = DecisionAgentSpec(model_version=inferred_version)
+    effective_rank_pt_lambda = (
+        spec.rank_pt_lambda if rank_pt_lambda is None else float(rank_pt_lambda)
+    )
     resolved_model_path = (
         Path(model_path)
         if model_path is not None
@@ -511,6 +899,7 @@ def create_riichi_dev_agent(
         score_delta_lambda=spec.score_delta_lambda,
         win_prob_lambda=spec.win_prob_lambda,
         dealin_prob_lambda=spec.dealin_prob_lambda,
+        rank_pt_lambda=effective_rank_pt_lambda,
         model_version=spec.model_version,
     )
 
@@ -518,7 +907,7 @@ def create_riichi_dev_agent(
 @dataclass(slots=True)
 class RiichiDevClientConfig:
     token: str
-    bot_name: str = "keqingv3"
+    bot_name: str = "xmodel1"
     model_version: str | None = None
     queue: str = "ranked"
     base_url: str = DEFAULT_BASE_URL
@@ -526,6 +915,7 @@ class RiichiDevClientConfig:
     model_path: Path | None = None
     project_root: Path = Path.cwd()
     device: str = "cuda"
+    rank_pt_lambda: float | None = None
     verbose: bool = False
     origin: str | None = None
     user_agent: str = "keqing1-riichi-dev-client/0.1"
@@ -533,6 +923,8 @@ class RiichiDevClientConfig:
     open_timeout: float = 10.0
     ping_interval: float = 20.0
     ping_timeout: float = 20.0
+    auto_reconnect: bool = True
+    reconnect_delay_sec: float = 1.0
 
     def ws_url(self) -> str:
         if self.ws_url_override:
@@ -555,89 +947,206 @@ class RiichiDevBotClient:
             device=config.device,
             verbose=config.verbose,
             model_version=config.model_version,
+            rank_pt_lambda=config.rank_pt_lambda,
             validation_safe=False,
         )
         self.seat: int | None = None
+        self._saw_start_game = False
+        self._saw_end_game = False
+        self._request_seq = 0
         default_audit_path = Path("logs/riichi_dev") / f"{self.config.queue}-{self.config.bot_name}.jsonl"
         self.audit_logger = RiichiDevAuditLogger(self.config.audit_log_path or default_audit_path)
 
-    def handle_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
-        mtype = message.get("type")
-        if mtype == "start_game":
-            seat = message.get("id", message.get("seat"))
-            if seat is not None:
-                self.seat = int(seat)
-            return None
-        if mtype != "request_action":
-            return None
-        if "observation" in message:
-            try:
-                _obs, normalized = _decode_observation(message)
-                message = dict(message)
-                message["_normalized_observation"] = normalized
-            except Exception:
-                pass
-        return self.agent.select_action(message, self.seat)
+    def _reset_session_state(self) -> None:
+        self.seat = None
+        self._saw_start_game = False
+        self._saw_end_game = False
+        self._request_seq = 0
+        self.agent.reset()
 
-    async def run(self) -> None:
+    async def _run_once(self) -> None:
+        self._reset_session_state()
         headers = {
             "Authorization": f"Bearer {self.config.token}",
             "User-Agent": self.config.user_agent,
         }
         logger.info("connecting to %s", self.config.ws_url())
-        try:
-            async with websockets.connect(
-                self.config.ws_url(),
-                extra_headers=headers,
-                origin=self.config.origin,
-                open_timeout=self.config.open_timeout,
-                ping_interval=self.config.ping_interval,
-                ping_timeout=self.config.ping_timeout,
-            ) as websocket:
-                async for raw_message in websocket:
-                    message = json.loads(raw_message)
-                    t0 = time.perf_counter()
+        async with websockets.connect(
+            self.config.ws_url(),
+            extra_headers=headers,
+            origin=self.config.origin,
+            open_timeout=self.config.open_timeout,
+            ping_interval=self.config.ping_interval,
+            ping_timeout=self.config.ping_timeout,
+        ) as websocket:
+            async for raw_message in websocket:
+                message = _enrich_message_for_audit(json.loads(raw_message))
+                request_seq: int | None = None
+                if message.get("type") == "request_action":
+                    self._request_seq += 1
+                    request_seq = self._request_seq
+                t0 = time.perf_counter()
+                try:
                     response = self.handle_message(message)
+                except Exception as exc:
                     latency_ms = (time.perf_counter() - t0) * 1000.0
-                    if message.get("type") == "request_action" and response is not None:
-                        self.audit_logger.log_request_action(
-                            queue=self.config.queue,
-                            bot_name=self.config.bot_name,
-                            model_version=self.config.model_version,
-                            seat=self.seat,
-                            message=message,
-                            response=response,
-                            latency_ms=latency_ms,
-                        )
-                    elif message.get("type") in {"start_game", "start_kyoku", "end_kyoku", "end_game", "validation_result", "error"}:
-                        self.audit_logger.log_event(
-                            queue=self.config.queue,
-                            bot_name=self.config.bot_name,
-                            model_version=self.config.model_version,
-                            seat=self.seat,
-                            message=message,
-                        )
+                    self.audit_logger.log_agent_error(
+                        queue=self.config.queue,
+                        bot_name=self.config.bot_name,
+                        model_version=self.config.model_version,
+                        seat=self.seat,
+                        request_seq=request_seq,
+                        message=message,
+                        error=f"{type(exc).__name__}: {exc}",
+                        traceback_text=traceback.format_exc(),
+                    )
                     if self.config.verbose:
-                        logger.info("recv: %s", message.get("type"))
-                        if response is not None:
-                            logger.info("send: %s latency_ms=%.1f", response, latency_ms)
+                        logger.exception(
+                            "agent decision failed for request_seq=%s latency_ms=%.1f",
+                            request_seq,
+                            latency_ms,
+                        )
+                    raise
+                latency_ms = (time.perf_counter() - t0) * 1000.0
+                if message.get("type") == "request_action" and response is not None:
+                    self.audit_logger.log_request_action(
+                        queue=self.config.queue,
+                        bot_name=self.config.bot_name,
+                        model_version=self.config.model_version,
+                        seat=self.seat,
+                        request_seq=request_seq,
+                        message=message,
+                        response=response,
+                        latency_ms=latency_ms,
+                    )
+                elif response is not None:
+                    self.audit_logger.log_protocol_action(
+                        queue=self.config.queue,
+                        bot_name=self.config.bot_name,
+                        model_version=self.config.model_version,
+                        seat=self.seat,
+                        trigger_message=message,
+                        response=response,
+                        latency_ms=latency_ms,
+                    )
+                elif message.get("type") in {"start_game", "start_kyoku", "end_kyoku", "end_game", "validation_result", "error"}:
+                    self.audit_logger.log_event(
+                        queue=self.config.queue,
+                        bot_name=self.config.bot_name,
+                        model_version=self.config.model_version,
+                        seat=self.seat,
+                        message=message,
+                    )
+                if self.config.verbose:
+                    logger.info("recv: %s", message.get("type"))
                     if response is not None:
+                        logger.info("send: %s latency_ms=%.1f", response, latency_ms)
+                if response is not None:
+                    try:
                         await websocket.send(json.dumps(response, ensure_ascii=False))
-        except ConnectionClosed as exc:
-            self.audit_logger.log_disconnect(
-                queue=self.config.queue,
-                bot_name=self.config.bot_name,
-                model_version=self.config.model_version,
-                seat=self.seat,
-                code=exc.code,
-                reason=exc.reason or "",
-            )
-            raise SystemExit(
-                "ranked connection closed by server "
-                f"(code={exc.code}, reason={exc.reason or 'none'}). "
-                "Likely causes: bot is not active yet, another session is using the same bot, "
-                "or the server rejected the ranked queue request."
-            ) from None
+                    except Exception as exc:
+                        self.audit_logger.log_send_result(
+                            queue=self.config.queue,
+                            bot_name=self.config.bot_name,
+                            model_version=self.config.model_version,
+                            seat=self.seat,
+                            request_seq=request_seq,
+                            response=response,
+                            success=False,
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                        raise
+                    else:
+                        self.audit_logger.log_send_result(
+                            queue=self.config.queue,
+                            bot_name=self.config.bot_name,
+                            model_version=self.config.model_version,
+                            seat=self.seat,
+                            request_seq=request_seq,
+                            response=response,
+                            success=True,
+                        )
+
+    def handle_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        mtype = message.get("type")
+        if mtype == "start_game":
+            self._saw_start_game = True
+            seat = message.get("id", message.get("seat"))
+            if seat is not None:
+                self.seat = int(seat)
+            return None
+        if mtype == "end_game":
+            self._saw_end_game = True
+            return None
+        if mtype == "reach":
+            return self.agent.select_action(message, self.seat)
+        if mtype != "request_action":
+            return None
+        return self.agent.select_action(message, self.seat)
+
+    def _should_retry_disconnect(self, code: int) -> bool:
+        retryable_disconnect = code in {1005, 1006}
+        retry_after_game = self._saw_end_game and retryable_disconnect
+        retry_ranked_queue_wait = (
+            self.config.queue == "ranked"
+            and not self._saw_start_game
+            and retryable_disconnect
+        )
+        return self.config.auto_reconnect and (retry_after_game or retry_ranked_queue_wait)
+
+    async def run(self) -> None:
+        while True:
+            try:
+                await self._run_once()
+            except ConnectionClosed as exc:
+                self.audit_logger.log_disconnect(
+                    queue=self.config.queue,
+                    bot_name=self.config.bot_name,
+                    model_version=self.config.model_version,
+                    seat=self.seat,
+                    code=exc.code,
+                    reason=exc.reason or "",
+                )
+                if self._should_retry_disconnect(exc.code):
+                    if self.config.verbose:
+                        logger.info(
+                            "server closed %s connection (code=%s); reconnecting in %.1fs",
+                            self.config.queue,
+                            exc.code,
+                            self.config.reconnect_delay_sec,
+                        )
+                    await asyncio.sleep(self.config.reconnect_delay_sec)
+                    continue
+                raise SystemExit(
+                    _format_connection_closed_message(self.config.queue, exc.code, exc.reason)
+                ) from None
+            except TimeoutError:
+                should_retry_timeout = (
+                    self.config.auto_reconnect
+                    and self.config.queue == "ranked"
+                    and not self._saw_start_game
+                )
+                if should_retry_timeout:
+                    if self.config.verbose:
+                        logger.info(
+                            "opening %s connection timed out; reconnecting in %.1fs",
+                            self.config.queue,
+                            self.config.reconnect_delay_sec,
+                        )
+                    await asyncio.sleep(self.config.reconnect_delay_sec)
+                    continue
+                raise SystemExit(
+                    f"timed out while opening {self.config.queue} connection"
+                ) from None
+            if not self.config.auto_reconnect or not self._saw_end_game:
+                return
+            if self.config.verbose:
+                logger.info(
+                    "%s session ended cleanly after end_game; reconnecting in %.1fs",
+                    self.config.queue,
+                    self.config.reconnect_delay_sec,
+                )
+            await asyncio.sleep(self.config.reconnect_delay_sec)
 
 
 def run_local_game(
@@ -679,8 +1188,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run supported keqing bots on riichi.dev")
     parser.add_argument(
         "--bot-name",
-        default="keqingv3",
-        help="bot family / checkpoint namespace to run (e.g. keqingv3, keqingv31, xmodel1)",
+        default="xmodel1",
+        help="bot family / checkpoint namespace to run (xmodel1, keqingv4, rulebase)",
     )
     parser.add_argument(
         "--model-version",
@@ -689,8 +1198,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--token",
-        default=os.getenv("LATTEKEY", os.getenv("RIICHI_BOT_TOKEN", "")),
-        help="riichi.dev bot token; defaults to LATTEKEY from project .env",
+        default="",
+        help="riichi.dev bot token; if omitted, resolve from env based on --bot-name",
     )
     parser.add_argument(
         "--mode",
@@ -735,6 +1244,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="inference device preference",
     )
     parser.add_argument(
+        "--rank-pt-lambda",
+        type=float,
+        default=0.0,
+        help="keqingv4 runtime placement rerank scale; default disabled",
+    )
+    parser.add_argument(
         "--origin",
         default=os.getenv("RIICHI_BOT_ORIGIN", ""),
         help="optional Origin header for the WebSocket handshake",
@@ -752,22 +1267,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--game-mode", type=int, default=2, help="local RiichiEnv game mode")
     parser.add_argument("--seed", type=int, default=42, help="local RiichiEnv seed")
     parser.add_argument("--max-steps", type=int, default=10000, help="local test safety cap")
+    parser.add_argument(
+        "--no-auto-reconnect",
+        action="store_true",
+        help="exit after the current online session instead of reconnecting for the next game",
+    )
+    parser.add_argument(
+        "--reconnect-delay-sec",
+        type=float,
+        default=1.0,
+        help="delay before reconnecting after an online game ends or the server closes with code 1005",
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser
 
 
 async def _async_main(args: argparse.Namespace) -> None:
-    agent = create_riichi_dev_agent(
-        bot_name=args.bot_name,
-        project_root=Path(args.project_root),
-        model_path=Path(args.model_path) if args.model_path else None,
-        device=args.device,
-        verbose=args.verbose,
-        model_version=args.model_version or None,
-        validation_safe=args.validation_safe,
-    )
+    project_root = Path(args.project_root)
+    explicit_model_path = Path(args.model_path) if args.model_path else None
 
     if args.mode == "local":
+        agent = create_riichi_dev_agent(
+            bot_name=args.bot_name,
+            project_root=project_root,
+            model_path=explicit_model_path,
+            device=args.device,
+            verbose=args.verbose,
+            model_version=args.model_version or None,
+            rank_pt_lambda=args.rank_pt_lambda,
+            validation_safe=args.validation_safe,
+        )
         result = run_local_game(
             agent=agent,
             game_mode=args.game_mode,
@@ -777,8 +1306,39 @@ async def _async_main(args: argparse.Namespace) -> None:
         print(json.dumps(result, ensure_ascii=False))
         return
 
+    token_source = "cli"
     if not args.token:
-        raise SystemExit("missing bot token; pass --token or set LATTEKEY in project .env")
+        args.token, token_source = _resolve_default_token_with_source(args.bot_name)
+
+    if not args.token:
+        raise SystemExit("missing bot token; pass --token or set LATTEKEY/RIICHI_BOT_TOKEN in project .env")
+
+    resolved_model_path = _resolve_model_path(
+        bot_name=args.bot_name,
+        project_root=project_root,
+        model_path=explicit_model_path,
+    )
+    _log_startup_self_check(
+        queue=args.queue,
+        bot_name=args.bot_name,
+        model_version=args.model_version or None,
+        token=args.token,
+        token_source=token_source,
+        project_root=project_root,
+        model_path=resolved_model_path,
+        validation_safe=args.validation_safe,
+    )
+
+    agent = create_riichi_dev_agent(
+        bot_name=args.bot_name,
+        project_root=project_root,
+        model_path=explicit_model_path,
+        device=args.device,
+        verbose=args.verbose,
+        model_version=args.model_version or None,
+        rank_pt_lambda=args.rank_pt_lambda,
+        validation_safe=args.validation_safe,
+    )
 
     config = RiichiDevClientConfig(
         token=args.token,
@@ -787,13 +1347,16 @@ async def _async_main(args: argparse.Namespace) -> None:
         queue=args.queue,
         base_url=args.base_url,
         ws_url_override=args.ws_url or None,
-        model_path=Path(args.model_path) if args.model_path else None,
-        project_root=Path(args.project_root),
+        model_path=explicit_model_path,
+        project_root=project_root,
         device=args.device,
+        rank_pt_lambda=args.rank_pt_lambda,
         verbose=args.verbose,
         origin=args.origin or None,
         user_agent=args.user_agent,
         audit_log_path=Path(args.audit_log_path) if args.audit_log_path else None,
+        auto_reconnect=not args.no_auto_reconnect,
+        reconnect_delay_sec=args.reconnect_delay_sec,
     )
     client = RiichiDevBotClient(config, agent=agent)
     await client.run()

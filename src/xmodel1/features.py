@@ -2,20 +2,36 @@
 
 from __future__ import annotations
 
-from collections import Counter
-from typing import Iterable, Tuple
+from collections.abc import Iterable
 
 import numpy as np
 
-from keqingv3.feature_tracker import SnapshotFeatureTracker
-from keqingv3.features import C_TILE, N_SCALAR, encode as _encode_state, encode_with_timings
-from keqingv3.progress_oracle import analyze_normal_progress_from_counts
+from keqing_core import (
+    build_xmodel1_runtime_tensors as _build_xmodel1_runtime_tensors,
+    is_missing_rust_capability_error,
+)
+from mahjong_env.history_summary import (
+    HISTORY_SUMMARY_DIM,
+    compute_history_summary,
+    empty_history_summary,
+)
 from mahjong_env.legal_actions import enumerate_legal_actions
-from mahjong_env.replay import _calc_shanten_waits
-from mahjong_env.tiles import normalize_tile, tile_to_34
+from mahjong_env.tiles import tile_to_34
+from training.cache_schema import (
+    XMODEL1_CANDIDATE_FEATURE_DIM,
+    XMODEL1_CANDIDATE_FLAG_DIM,
+    XMODEL1_MAX_CANDIDATES,
+    XMODEL1_MAX_RESPONSE_CANDIDATES,
+    XMODEL1_MAX_SPECIAL_CANDIDATES,
+    XMODEL1_RULE_CONTEXT_DIM,
+    XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+)
+from training.state_features import C_TILE, N_SCALAR, encode as _encode_state, encode_with_timings
+from xmodel1.call_response import build_response_action_states
+from xmodel1.candidate_quality import build_candidate_features, build_special_candidate_arrays, iter_legal_discards
 
 
-def encode(state: dict, actor: int, *, state_scalar_dim: int = 64):
+def encode(state: dict, actor: int, *, state_scalar_dim: int = N_SCALAR):
     tile_feat, scalar = _encode_state(state, actor)
     if scalar.shape[0] < state_scalar_dim:
         padded = np.zeros((state_scalar_dim,), dtype=np.float32)
@@ -26,62 +42,275 @@ def encode(state: dict, actor: int, *, state_scalar_dim: int = 64):
     return tile_feat, scalar.astype(np.float32)
 
 
-def _combined_hand(state: dict) -> list[str]:
-    hand = list(state.get("hand", []))
-    tsumo = state.get("tsumo_pai")
-    if tsumo:
-        hand.append(tsumo)
-    return hand
+def resolve_runtime_history_summary(snap: dict) -> np.ndarray:
+    value = snap.get("history_summary")
+    if value is None:
+        return empty_history_summary()
+    arr = np.asarray(value, dtype=np.float16)
+    if arr.shape != (HISTORY_SUMMARY_DIM,):
+        raise ValueError(f"history_summary shape {arr.shape} != ({HISTORY_SUMMARY_DIM},)")
+    return arr
 
 
-def _counts34_from_hand(hand: list[str]) -> list[int]:
-    counts = [0] * 34
-    for tile in hand:
-        idx = tile_to_34(normalize_tile(tile))
-        if idx >= 0:
-            counts[idx] += 1
-    return counts
+def default_rule_context() -> np.ndarray:
+    return np.asarray((1.0, 0.5, 0.0, -1.5, 0.0, 1.0), dtype=np.float32)
 
 
-def _seat_and_round_yakuhai_ids(state: dict, actor: int) -> set[int]:
-    bakaze = state.get("bakaze", "E")
-    oya = int(state.get("oya", 0))
-    wind_map = {"E": 27, "S": 28, "W": 29, "N": 30}
-    ids = {31, 32, 33}
-    if bakaze in wind_map:
-        ids.add(wind_map[bakaze])
-    ids.add(27 + ((actor - oya) % 4))
-    return ids
+def resolve_runtime_rule_context(snap: dict) -> np.ndarray:
+    value = snap.get("rule_context")
+    if value is None:
+        return default_rule_context()
+    arr = np.asarray(value, dtype=np.float32)
+    if arr.shape != (XMODEL1_RULE_CONTEXT_DIM,):
+        raise ValueError(f"rule_context shape {arr.shape} != ({XMODEL1_RULE_CONTEXT_DIM},)")
+    return arr
 
 
-def _simulate_discard_hand(state: dict, discard34: int) -> list[str]:
-    hand = _combined_hand(state)
-    removed = False
-    out: list[str] = []
-    for tile in hand:
-        if not removed and tile_to_34(normalize_tile(tile)) == discard34:
-            removed = True
-            continue
-        out.append(tile)
-    return out if removed else hand
+def _normalize_legal_actions(
+    state: dict,
+    actor: int,
+    legal_actions: Iterable[dict] | None,
+) -> list[dict]:
+    if legal_actions is None:
+        return [a.to_mjai() for a in enumerate_legal_actions(state, actor)]
+    return [dict(a) for a in legal_actions]
 
 
-def _candidate_order_tile_ids(state: dict, legal_actions: Iterable[dict] | None = None) -> list[int]:
-    if legal_actions is not None:
-        tile_ids: list[int] = []
-        for action in legal_actions:
-            if action.get("type") != "dahai":
-                continue
-            pai = action.get("pai")
-            if not pai:
-                continue
-            idx = tile_to_34(normalize_tile(pai))
-            if idx >= 0 and idx not in tile_ids:
-                tile_ids.append(idx)
-        if tile_ids:
-            return tile_ids
-    counts = _counts34_from_hand(_combined_hand(state))
-    return [idx for idx, count in enumerate(counts) if count > 0]
+def _python_runtime_tensor_payload(
+    state: dict,
+    actor: int,
+    legal_actions: list[dict],
+    *,
+    max_candidates: int,
+    candidate_feature_dim: int,
+    candidate_flag_dim: int,
+) -> dict[str, np.ndarray]:
+    discard_actions = iter_legal_discards(legal_actions)
+    candidate_feat = np.zeros((max_candidates, candidate_feature_dim), dtype=np.float32)
+    candidate_tile_id = np.full((max_candidates,), -1, dtype=np.int16)
+    candidate_mask = np.zeros((max_candidates,), dtype=np.uint8)
+    candidate_flags = np.zeros((max_candidates, candidate_flag_dim), dtype=np.uint8)
+    for slot, action in enumerate(discard_actions[:max_candidates]):
+        feat, flags, _quality, _rank, _hard_bad = build_candidate_features(state, actor, action)
+        candidate_feat[slot] = feat.astype(np.float32, copy=False)
+        candidate_tile_id[slot] = int(tile_to_34(action["pai"]))
+        candidate_mask[slot] = 1
+        candidate_flags[slot] = flags.astype(np.uint8, copy=False)
+
+    response_action_idx = np.full((XMODEL1_MAX_RESPONSE_CANDIDATES,), -1, dtype=np.int16)
+    response_action_mask = np.zeros((XMODEL1_MAX_RESPONSE_CANDIDATES,), dtype=np.uint8)
+    response_post_candidate_feat = np.zeros(
+        (
+            XMODEL1_MAX_RESPONSE_CANDIDATES,
+            max_candidates,
+            candidate_feature_dim,
+        ),
+        dtype=np.float32,
+    )
+    response_post_candidate_tile_id = np.full(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+        -1,
+        dtype=np.int16,
+    )
+    response_post_candidate_mask = np.zeros(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+        dtype=np.uint8,
+    )
+    response_post_candidate_flags = np.zeros(
+        (
+            XMODEL1_MAX_RESPONSE_CANDIDATES,
+            max_candidates,
+            candidate_flag_dim,
+        ),
+        dtype=np.uint8,
+    )
+    response_post_candidate_quality_score = np.zeros(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+        dtype=np.float32,
+    )
+    response_post_candidate_hard_bad_flag = np.zeros(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+        dtype=np.uint8,
+    )
+    response_teacher_discard_idx = np.full(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES,),
+        -1,
+        dtype=np.int16,
+    )
+    response_human_discard_idx = np.full(
+        (XMODEL1_MAX_RESPONSE_CANDIDATES,),
+        -1,
+        dtype=np.int16,
+    )
+    response_states = build_response_action_states(state, actor, legal_actions)
+    for response_idx, response_state in enumerate(response_states[:XMODEL1_MAX_RESPONSE_CANDIDATES]):
+        response_action_idx[response_idx] = np.int16(response_state.action_idx)
+        response_action_mask[response_idx] = 1
+        best_teacher_idx = -1
+        best_teacher_quality = -1e9
+        for discard_idx, action in enumerate(response_state.post_discard_actions[:max_candidates]):
+            feat, flags, quality, _rank, hard_bad = build_candidate_features(
+                response_state.after_snapshot,
+                actor,
+                action,
+            )
+            response_post_candidate_feat[response_idx, discard_idx] = feat.astype(np.float32, copy=False)
+            response_post_candidate_tile_id[response_idx, discard_idx] = int(tile_to_34(action["pai"]))
+            response_post_candidate_mask[response_idx, discard_idx] = 1
+            response_post_candidate_flags[response_idx, discard_idx] = flags.astype(np.uint8, copy=False)
+            response_post_candidate_quality_score[response_idx, discard_idx] = quality
+            response_post_candidate_hard_bad_flag[response_idx, discard_idx] = hard_bad
+            if quality > best_teacher_quality:
+                best_teacher_quality = float(quality)
+                best_teacher_idx = discard_idx
+        response_teacher_discard_idx[response_idx] = np.int16(best_teacher_idx)
+    return {
+        "candidate_feat": candidate_feat,
+        "candidate_tile_id": candidate_tile_id,
+        "candidate_mask": candidate_mask,
+        "candidate_flags": candidate_flags,
+        "response_action_idx": response_action_idx,
+        "response_action_mask": response_action_mask,
+        "response_post_candidate_feat": response_post_candidate_feat,
+        "response_post_candidate_tile_id": response_post_candidate_tile_id,
+        "response_post_candidate_mask": response_post_candidate_mask,
+        "response_post_candidate_flags": response_post_candidate_flags,
+        "response_post_candidate_quality_score": response_post_candidate_quality_score,
+        "response_post_candidate_hard_bad_flag": response_post_candidate_hard_bad_flag,
+        "response_teacher_discard_idx": response_teacher_discard_idx,
+        "response_human_discard_idx": response_human_discard_idx,
+        "history_summary": resolve_runtime_history_summary(state),
+        "rule_context": resolve_runtime_rule_context(state),
+    }
+
+
+def resolve_runtime_tensor_payload(
+    state: dict,
+    actor: int,
+    legal_actions: Iterable[dict] | None = None,
+    *,
+    max_candidates: int = XMODEL1_MAX_CANDIDATES,
+    candidate_feature_dim: int = XMODEL1_CANDIDATE_FEATURE_DIM,
+    candidate_flag_dim: int = XMODEL1_CANDIDATE_FLAG_DIM,
+) -> dict[str, np.ndarray]:
+    resolved_legal_actions = _normalize_legal_actions(state, actor, legal_actions)
+    try:
+        payload = _build_xmodel1_runtime_tensors(
+            state,
+            actor,
+            resolved_legal_actions,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        if (
+            not is_missing_rust_capability_error(exc)
+            and "failed to parse xmodel1 runtime snapshot" not in message
+        ):
+            raise
+    else:
+        return {
+            "candidate_feat": np.asarray(payload["candidate_feat"], dtype=np.float32).reshape(
+                max_candidates,
+                candidate_feature_dim,
+            ),
+            "candidate_tile_id": np.asarray(payload["candidate_tile_id"], dtype=np.int16).reshape(max_candidates),
+            "candidate_mask": np.asarray(payload["candidate_mask"], dtype=np.uint8).reshape(max_candidates),
+            "candidate_flags": np.asarray(payload["candidate_flags"], dtype=np.uint8).reshape(
+                max_candidates,
+                candidate_flag_dim,
+            ),
+            "response_action_idx": np.asarray(
+                payload.get("response_action_idx", np.full((XMODEL1_MAX_RESPONSE_CANDIDATES,), -1, dtype=np.int16)),
+                dtype=np.int16,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES),
+            "response_action_mask": np.asarray(
+                payload.get("response_action_mask", np.zeros((XMODEL1_MAX_RESPONSE_CANDIDATES,), dtype=np.uint8)),
+                dtype=np.uint8,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES),
+            "response_post_candidate_feat": np.asarray(
+                payload.get(
+                    "response_post_candidate_feat",
+                    np.zeros(
+                        (
+                            XMODEL1_MAX_RESPONSE_CANDIDATES,
+                            max_candidates,
+                            candidate_feature_dim,
+                        ),
+                        dtype=np.float32,
+                    ),
+                ),
+                dtype=np.float32,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates, candidate_feature_dim),
+            "response_post_candidate_tile_id": np.asarray(
+                payload.get(
+                    "response_post_candidate_tile_id",
+                    np.full((XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates), -1, dtype=np.int16),
+                ),
+                dtype=np.int16,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+            "response_post_candidate_mask": np.asarray(
+                payload.get(
+                    "response_post_candidate_mask",
+                    np.zeros((XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates), dtype=np.uint8),
+                ),
+                dtype=np.uint8,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+            "response_post_candidate_flags": np.asarray(
+                payload.get(
+                    "response_post_candidate_flags",
+                    np.zeros(
+                        (
+                            XMODEL1_MAX_RESPONSE_CANDIDATES,
+                            max_candidates,
+                            candidate_flag_dim,
+                        ),
+                        dtype=np.uint8,
+                    ),
+                ),
+                dtype=np.uint8,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates, candidate_flag_dim),
+            "response_post_candidate_quality_score": np.asarray(
+                payload.get(
+                    "response_post_candidate_quality_score",
+                    np.zeros((XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates), dtype=np.float32),
+                ),
+                dtype=np.float32,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+            "response_post_candidate_hard_bad_flag": np.asarray(
+                payload.get(
+                    "response_post_candidate_hard_bad_flag",
+                    np.zeros((XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates), dtype=np.uint8),
+                ),
+                dtype=np.uint8,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES, max_candidates),
+            "response_teacher_discard_idx": np.asarray(
+                payload.get(
+                    "response_teacher_discard_idx",
+                    np.full((XMODEL1_MAX_RESPONSE_CANDIDATES,), -1, dtype=np.int16),
+                ),
+                dtype=np.int16,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES),
+            "response_human_discard_idx": np.asarray(
+                payload.get(
+                    "response_human_discard_idx",
+                    np.full((XMODEL1_MAX_RESPONSE_CANDIDATES,), -1, dtype=np.int16),
+                ),
+                dtype=np.int16,
+            ).reshape(XMODEL1_MAX_RESPONSE_CANDIDATES),
+            "history_summary": np.asarray(payload["history_summary"], dtype=np.float16).reshape(HISTORY_SUMMARY_DIM),
+            "rule_context": np.asarray(
+                payload.get("rule_context", resolve_runtime_rule_context(state)),
+                dtype=np.float32,
+            ).reshape(XMODEL1_RULE_CONTEXT_DIM),
+        }
+    return _python_runtime_tensor_payload(
+        state,
+        actor,
+        resolved_legal_actions,
+        max_candidates=max_candidates,
+        candidate_feature_dim=candidate_feature_dim,
+        candidate_flag_dim=candidate_flag_dim,
+    )
 
 
 def build_runtime_candidate_arrays(
@@ -89,123 +318,59 @@ def build_runtime_candidate_arrays(
     actor: int,
     legal_actions: Iterable[dict] | None = None,
     *,
-    max_candidates: int,
-    candidate_feature_dim: int,
-    candidate_flag_dim: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    if legal_actions is None:
-        legal_actions = [a.to_mjai() for a in enumerate_legal_actions(state, actor)]
-    tile_ids = _candidate_order_tile_ids(state, legal_actions)
+    max_candidates: int = XMODEL1_MAX_CANDIDATES,
+    candidate_feature_dim: int = XMODEL1_CANDIDATE_FEATURE_DIM,
+    candidate_flag_dim: int = XMODEL1_CANDIDATE_FLAG_DIM,
+):
+    payload = resolve_runtime_tensor_payload(
+        state,
+        actor,
+        legal_actions,
+        max_candidates=max_candidates,
+        candidate_feature_dim=candidate_feature_dim,
+        candidate_flag_dim=candidate_flag_dim,
+    )
+    return (
+        payload["candidate_feat"],
+        payload["candidate_tile_id"],
+        payload["candidate_mask"],
+        payload["candidate_flags"],
+    )
 
-    candidate_feat = np.zeros((max_candidates, candidate_feature_dim), dtype=np.float32)
-    candidate_tile_id = np.full((max_candidates,), -1, dtype=np.int16)
-    candidate_mask = np.zeros((max_candidates,), dtype=np.uint8)
-    candidate_flags = np.zeros((max_candidates, candidate_flag_dim), dtype=np.uint8)
 
-    tracker = SnapshotFeatureTracker.from_state(state, actor)
-    yakuhai_ids = _seat_and_round_yakuhai_ids(state, actor)
-    visible_before = list(tracker.visible_counts34)
-    current_shanten = int(state.get("shanten", 8))
-    current_waits_count = int(state.get("waits_count", 0))
-
-    for slot, discard34 in enumerate(tile_ids[:max_candidates]):
-        after_hand = _simulate_discard_hand(state, discard34)
-        after_counts34 = _counts34_from_hand(after_hand)
-        visible_after = list(visible_before)
-        visible_after[discard34] = min(4, visible_after[discard34] + 1)
-        progress = analyze_normal_progress_from_counts(tuple(after_counts34), tuple(visible_after))
-        after_shanten, after_waits_cnt, after_waits_tiles, _ = _calc_shanten_waits(
-            after_hand,
-            (state.get("melds") or [[], [], [], []])[actor],
-        )
-        wait_live_count = sum(
-            max(0, 4 - visible_after[t34])
-            for t34, flag in enumerate(after_waits_tiles)
-            if flag
-        )
-        pair_count = sum(1 for c in after_counts34 if c >= 2)
-        taatsu_count = 0
-        for base in (0, 9, 18):
-            suit = after_counts34[base : base + 9]
-            for i in range(8):
-                if suit[i] > 0 and suit[i + 1] > 0:
-                    taatsu_count += 1
-            for i in range(7):
-                if suit[i] > 0 and suit[i + 2] > 0:
-                    taatsu_count += 1
-
-        yakuhai_pair_preserved = 1.0 if any(after_counts34[idx] >= 2 for idx in yakuhai_ids) else 0.0
-        dual_pon_value = 1.0 if any(after_counts34[idx] >= 2 and idx in yakuhai_ids for idx in yakuhai_ids) else 0.0
-        tile_counter = Counter(idx for idx, c in enumerate(after_counts34) for _ in range(c))
-        tanyao_path = 1.0 if tile_counter and all(idx not in {0, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33} for idx in tile_counter) else 0.0
-        suit_presence = [sum(after_counts34[base : base + 9]) > 0 for base in (0, 9, 18)]
-        flush_path = 1.0 if sum(1 for v in suit_presence if v) <= 1 else 0.0
-        confirmed_han_floor = float(yakuhai_pair_preserved + tanyao_path)
-
-        break_tenpai = 1 if current_shanten == 0 and after_shanten != 0 else 0
-        break_best_wait = 1 if current_shanten == 0 and after_waits_cnt < current_waits_count else 0
-        break_meld_structure = 1 if current_shanten <= 1 and after_shanten > current_shanten else 0
-        drop_open_yakuhai_pair = 1 if tracker.meld_count > 0 and discard34 in yakuhai_ids and yakuhai_pair_preserved == 0.0 else 0
-        drop_dual_pon_value = 1 if tracker.meld_count > 0 and discard34 in yakuhai_ids and dual_pon_value == 0.0 else 0
-
-        is_honor = 1 if discard34 >= 27 else 0
-        is_terminal = 1 if discard34 in {0, 8, 9, 17, 18, 26} else 0
-        is_yakuhai = 1 if discard34 in yakuhai_ids else 0
-
-        feat = np.array(
-            [
-                after_shanten / 8.0,
-                1.0 if after_shanten == 0 else 0.0,
-                after_waits_cnt / 34.0,
-                wait_live_count / 136.0,
-                progress.ukeire_type_count / 34.0,
-                progress.ukeire_live_count / 136.0,
-                progress.good_shape_ukeire_live_count / 136.0,
-                wait_live_count / 136.0,
-                pair_count / 7.0,
-                taatsu_count / 6.0,
-                max(0.0, min(1.0, (pair_count + taatsu_count) / 8.0)),
-                min(confirmed_han_floor / 8.0, 1.0),
-                1.0 if tracker.meld_count == 0 or confirmed_han_floor > 0 else 0.0,
-                yakuhai_pair_preserved,
-                dual_pon_value,
-                tanyao_path,
-                flush_path,
-                1.0 if any(flag for idx, flag in enumerate(state.get("reached", [False] * 4)) if idx != actor) else 0.0,
-                0.0,
-                0.0,
-                1.0 if visible_after[discard34] >= 3 else 0.0,
-            ],
-            dtype=np.float32,
-        )
-        flags = np.array(
-            [
-                break_tenpai,
-                break_best_wait,
-                break_meld_structure,
-                drop_open_yakuhai_pair,
-                drop_dual_pon_value,
-                is_honor,
-                is_terminal,
-                0,
-                0,
-                is_yakuhai,
-            ],
-            dtype=np.uint8,
-        )
-
-        candidate_feat[slot] = feat
-        candidate_tile_id[slot] = discard34
-        candidate_mask[slot] = 1
-        candidate_flags[slot] = flags
-
-    return candidate_feat, candidate_tile_id, candidate_mask, candidate_flags
+def build_runtime_special_candidate_arrays(
+    state: dict,
+    actor: int,
+    legal_actions: Iterable[dict] | None = None,
+    *,
+    max_candidates: int = XMODEL1_MAX_SPECIAL_CANDIDATES,
+    feature_dim: int = XMODEL1_SPECIAL_CANDIDATE_FEATURE_DIM,
+):
+    resolved_legal_actions = _normalize_legal_actions(state, actor, legal_actions)
+    feat, type_id, mask, _quality, _rank, _hard_bad, _chosen_idx = build_special_candidate_arrays(
+        state,
+        actor,
+        resolved_legal_actions,
+        chosen_action=None,
+        max_candidates=max_candidates,
+        feature_dim=feature_dim,
+        include_terminal_actions=True,
+    )
+    return feat, type_id, mask
 
 
 __all__ = [
     "C_TILE",
     "N_SCALAR",
+    "HISTORY_SUMMARY_DIM",
+    "compute_history_summary",
+    "default_rule_context",
+    "empty_history_summary",
+    "resolve_runtime_history_summary",
+    "resolve_runtime_rule_context",
+    "resolve_runtime_tensor_payload",
     "encode",
     "encode_with_timings",
     "build_runtime_candidate_arrays",
+    "build_runtime_special_candidate_arrays",
 ]

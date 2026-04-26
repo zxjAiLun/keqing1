@@ -990,6 +990,7 @@ function CenterPanel({
 export function MahjongTable({
   state, onAction, isMyTurn, selectedTile, selectedTileIdx, onTileSelect,
   autoHora, setAutoHora, noMeld, setNoMeld, autoTsumogiri, setAutoTsumogiri,
+  suppressActionBar = false,
   actionPending,
   mode = "battle",
   logitData,
@@ -1008,6 +1009,7 @@ export function MahjongTable({
   setNoMeld: (v: boolean) => void;
   autoTsumogiri: boolean;
   setAutoTsumogiri: (v: boolean) => void;
+  suppressActionBar?: boolean;
   actionPending?: boolean;
   mode?: "battle" | "replay";
   logitData?: LogitTileData[];
@@ -1029,7 +1031,7 @@ export function MahjongTable({
   const oppLeft  = (humanId + 3) % 4;
 
   const [tablecloth, setTablecloth]             = useState<TableclothId>("default");
-  const showActionBar = mode === "battle" && isMyTurn && !reachPending && !state.pending_reach[humanId];
+  const showActionBar = mode === "battle" && isMyTurn && !reachPending && !state.pending_reach[humanId] && !suppressActionBar;
   const showReachBanner = mode === "battle" && isMyTurn && (reachPending || state.pending_reach[humanId]);
   const replayPendingReachActor = mode === "replay"
     ? state.pending_reach.findIndex(Boolean)
@@ -1129,7 +1131,7 @@ export function MahjongTable({
 
   useEffect(() => {
     const applyPreference = () => {
-      const stored = window.localStorage.getItem("keqing.tablecloth");
+      const stored = window.localStorage.getItem("keqing1.tablecloth") ?? window.localStorage.getItem("keqing.tablecloth");
       if (stored && TABLECLOTH_OPTIONS.some((opt) => opt.id === stored)) {
         setTablecloth(stored as typeof tablecloth);
       } else {
@@ -1138,7 +1140,7 @@ export function MahjongTable({
     };
     applyPreference();
     const onStorage = (event: StorageEvent) => {
-      if (event.key === "keqing.tablecloth") applyPreference();
+      if (event.key === "keqing1.tablecloth" || event.key === "keqing.tablecloth") applyPreference();
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);

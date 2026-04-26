@@ -11,6 +11,27 @@ class ModelAuxOutputs:
     score_delta: float = 0.0
     win_prob: float = 0.0
     dealin_prob: float = 0.0
+    rank_probs: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    final_score_delta: float = 0.0
+    rank_pt_value: float = 0.0
+
+
+@dataclass(frozen=True)
+class Xmodel1RuntimeOutputs:
+    discard_logits: np.ndarray
+    candidate_tile_id: np.ndarray
+    candidate_mask: np.ndarray
+    response_logits: np.ndarray
+    response_action_idx: np.ndarray
+    response_action_mask: np.ndarray
+    response_post_candidate_feat: np.ndarray
+    response_post_candidate_mask: np.ndarray
+    response_teacher_discard_idx: np.ndarray
+    win_prob: float
+    dealin_prob: float
+    pts_given_win: float
+    pts_given_dealin: float
+    opp_tenpai_probs: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -18,6 +39,7 @@ class ModelForwardResult:
     policy_logits: np.ndarray
     value: float
     aux: ModelAuxOutputs = field(default_factory=ModelAuxOutputs)
+    xmodel1: Xmodel1RuntimeOutputs | None = None
 
 
 @dataclass(frozen=True)

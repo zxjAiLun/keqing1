@@ -38,8 +38,8 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=2, help="How many bot clients to start")
     parser.add_argument(
         "--bot",
-        default="keqingv2",
-        help="Bot type: keqingv1/keqingv2/keqingv3/keqingv31/rulebase",
+        default="xmodel1",
+        help="Bot type: xmodel1/keqingv4/rulebase",
     )
     parser.add_argument(
         "--name-prefix", default="NoName", help="Prefix for bot display names"

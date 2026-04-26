@@ -1,3 +1,5 @@
+import type { BotType } from './bot';
+
 // src/replay_ui/src/types/battle.ts
 
 export interface PlayerInfo {
@@ -99,7 +101,7 @@ export interface StartBattleRequest {
   player_name: string;
   bot_count?: number;
   seed?: number;
-  bot_model?: string; // "keqingv1" | "keqingv2" | "keqingv3" | "keqingv31" | "rulebase"
+  bot_model?: BotType;
 }
 
 export interface StartBattleResponse {

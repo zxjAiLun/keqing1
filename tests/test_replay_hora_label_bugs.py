@@ -9,7 +9,7 @@ Root cause: preprocessor's snap_before has actor_to_move=None instead of 3,
 import pytest
 from collections import Counter
 
-from mahjong_env.replay import _label_matches_legal
+from mahjong_env.replay_normalizer import replay_label_matches_legal
 from mahjong_env.types import (
     action_dict_to_spec,
     action_specs_match,
@@ -27,19 +27,19 @@ class TestHoraLabelMatching:
         """hora label 没有 pai 字段时，只要 target 匹配就应通过。"""
         label = {"type": "hora", "actor": 3, "target": 1}
         legal = [{"type": "hora", "actor": 3, "target": 1, "pai": "5mr"}]
-        assert _label_matches_legal(label, legal) is True
+        assert replay_label_matches_legal(label, legal) is True
 
     def test_hora_label_target_only(self):
         """只有 target 相同时，hora label 应匹配。"""
         label = {"type": "hora", "actor": 0, "target": 0}
         legal = [{"type": "hora", "actor": 0, "target": 0, "pai": "9m"}]
-        assert _label_matches_legal(label, legal) is True
+        assert replay_label_matches_legal(label, legal) is True
 
     def test_hora_label_target_mismatch(self):
         """hora label target 不同时应不匹配。"""
         label = {"type": "hora", "actor": 0, "target": 1}
         legal = [{"type": "hora", "actor": 0, "target": 2, "pai": "5mr"}]
-        assert _label_matches_legal(label, legal) is False
+        assert replay_label_matches_legal(label, legal) is False
 
 
 class TestTsumoHoraPreprocessorBug:
@@ -133,7 +133,7 @@ class TestTsumoHoraPreprocessorBug:
 
         # BUG: 由于 actor_to_move=None，legal 只有 [none]
         # 导致 label 不在 legal 中
-        assert not _label_matches_legal(label, legal_dicts), \
+        assert not replay_label_matches_legal(label, legal_dicts), \
             "BUG: label should NOT match when actor_to_move=None"
 
 

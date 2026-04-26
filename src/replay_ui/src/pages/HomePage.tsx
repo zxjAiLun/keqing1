@@ -9,9 +9,9 @@ export function HomePage() {
     <PageShell width={720}>
       <div style={{ textAlign: 'center' }}>
         <PageHeader
-          eyebrow="Legacy Home"
-          title="Keqing"
-          description="这是旧首页入口，保留给直接访问 `/home` 的场景。主流程建议从仪表盘进入。"
+          eyebrow="Compatibility Entry"
+          title="Keqing1"
+          description="这是兼容保留的 `/home` 入口。当前 GUI 默认围绕 xmodel1 主线、keqingv4 备线和 rulebase 基线组织。"
         />
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14, alignItems: 'center' }}>

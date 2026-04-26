@@ -16,7 +16,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Re-download and reconvert failed ds1 mjson logs")
     parser.add_argument(
         "--bad-list",
-        default="processed_v3_fixaux/bad_mjson_paths.txt",
+        required=True,
         help="Text file listing failed .mjson paths",
     )
     parser.add_argument(

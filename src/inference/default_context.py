@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import keqing_core
+
+from mahjong_env.event_history import compute_event_history
+from mahjong_env.history_summary import compute_history_summary
+from mahjong_env.replay_normalizer import normalize_replay_events
 from mahjong_env.legal_actions import enumerate_legal_actions
 from mahjong_env.state import apply_event
 
@@ -21,53 +26,78 @@ class DefaultDecisionContextBuilder:
         self.riichi_state = riichi_state
         self._inject_shanten_waits = inject_shanten_waits
         self._enumerate_legal_actions = enumerate_legal_actions_fn
+        self._event_log: list[dict[str, Any]] = []
+
+    def _snapshot_for_actor(
+        self,
+        state,
+        actor: int,
+        *,
+        events: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
+        history = self._event_log if events is None else events
+        if not history or not keqing_core.is_enabled():
+            return state.snapshot(actor)
+        try:
+            snapshot = keqing_core.replay_state_snapshot(history, actor)
+        except Exception as exc:
+            if keqing_core.is_missing_rust_capability_error(exc):
+                return state.snapshot(actor)
+            raise
+        if not isinstance(snapshot, dict):
+            raise RuntimeError("Rust replay snapshot contract drift: payload must be a dict")
+        return snapshot
 
     def build(self, state, actor: int, event: dict[str, Any]) -> Optional[DecisionContext]:
         etype = event.get("type", "")
+        if etype == "start_game":
+            self._event_log = []
 
         decision_base_snap: Optional[dict[str, Any]] = None
         pre_apply_hand: Optional[list] = None
         pre_apply_melds: Optional[list] = None
 
         if etype == "tsumo" and event.get("actor") == actor:
-            decision_base_snap = state.snapshot(actor)
+            decision_base_snap = self._snapshot_for_actor(state, actor)
             pre_apply_hand = decision_base_snap.get("hand", [])
             pre_apply_melds = (
                 (decision_base_snap.get("melds") or [[], [], [], []])[actor]
             )
             apply_event(state, event)
         elif etype == "dahai" and event.get("actor") != actor:
-            pre_snap = state.snapshot(actor)
+            pre_snap = self._snapshot_for_actor(state, actor)
             pre_apply_hand = pre_snap.get("hand", [])
             pre_apply_melds = (pre_snap.get("melds") or [[], [], [], []])[actor]
             apply_event(state, event)
         elif etype == "kakan" and event.get("actor") != actor:
-            pre_snap = state.snapshot(actor)
+            pre_snap = self._snapshot_for_actor(state, actor)
             pre_apply_hand = pre_snap.get("hand", [])
             pre_apply_melds = (pre_snap.get("melds") or [[], [], [], []])[actor]
             apply_event(state, event)
         elif etype in ("chi", "pon", "daiminkan") and event.get("actor") == actor:
-            pre_snap = state.snapshot(actor)
+            pre_snap = self._snapshot_for_actor(state, actor)
             pre_apply_hand = pre_snap.get("hand", [])
             pre_apply_melds = (pre_snap.get("melds") or [[], [], [], []])[actor]
             apply_event(state, event)
         elif etype == "reach" and event.get("actor") == actor:
-            pre_snap = state.snapshot(actor)
+            pre_snap = self._snapshot_for_actor(state, actor)
             pre_apply_hand = pre_snap.get("hand", [])
             pre_apply_melds = (pre_snap.get("melds") or [[], [], [], []])[actor]
             apply_event(state, event)
         else:
             apply_event(state, event)
+            self._event_log.append(dict(event))
             return None
 
-        runtime_snap = state.snapshot(actor)
+        self._event_log.append(dict(event))
+
+        runtime_snap = self._snapshot_for_actor(state, actor)
         injected = False
         if (
             self.riichi_state is not None
             and etype == "tsumo"
             and event.get("actor") == actor
             and decision_base_snap is None
-            and self.model_version != "keqingv3"
         ):
             try:
                 runtime_snap["shanten"] = int(self.riichi_state.shanten)
@@ -109,6 +139,24 @@ class DefaultDecisionContextBuilder:
             model_snap["tsumo_pai"] = event.get("pai")
         else:
             model_snap["tsumo_pai"] = event.get("pai") if etype == "tsumo" else None
+
+        if self.model_version == "xmodel1":
+            normalized_history = normalize_replay_events(self._event_log)
+            history_summary = compute_history_summary(
+                normalized_history,
+                len(normalized_history) - 1,
+                actor,
+            )
+            runtime_snap["history_summary"] = history_summary.copy()
+            model_snap["history_summary"] = history_summary.copy()
+        elif self.model_version == "keqingv4":
+            normalized_history = normalize_replay_events(self._event_log)
+            event_history = compute_event_history(
+                normalized_history,
+                len(normalized_history) - 1,
+            )
+            runtime_snap["event_history"] = event_history.copy()
+            model_snap["event_history"] = event_history.copy()
 
         return DecisionContext(
             actor=actor,
