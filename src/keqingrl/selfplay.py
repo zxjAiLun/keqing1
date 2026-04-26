@@ -180,6 +180,7 @@ def collect_policy_episode(
                 learner_policy_version=seat_policy.policy_version,
                 env_seed=seed,
                 terminal_reason="terminal" if final_result.done else None,
+                behavior_temperature=_sample_behavior_temperature(sample),
                 observation_contract_version=policy_input_cpu.metadata.get("observation_contract_version"),
                 action_feature_contract_version=policy_input_cpu.metadata.get("action_feature_contract_version"),
                 env_contract_version=policy_input_cpu.metadata.get("env_contract_version"),
@@ -756,12 +757,21 @@ def _learner_training_steps(steps: Sequence[RolloutStep]) -> list[RolloutStep]:
 
 
 def _is_learner_controlled_step(policy_input, seat_policy: SeatPolicyAssignment) -> bool:
-    if seat_policy.name is not None and seat_policy.name != "learner":
+    if not seat_policy.is_learner:
         return False
     metadata_value = policy_input.metadata.get("is_learner_controlled")
     if metadata_value is not None:
         return bool(metadata_value)
     return True
+
+
+def _sample_behavior_temperature(sample) -> float | None:
+    value = sample.aux.get("sampling_temperature")
+    if value is None:
+        return None
+    if hasattr(value, "detach"):
+        return float(value.detach().flatten()[0].cpu())
+    return float(value)
 
 
 def _drain_autopilot_events(env) -> tuple[object, ...]:
@@ -818,6 +828,7 @@ def _append_autopilot_trace_steps(
                 learner_policy_version=0,
                 env_seed=seed,
                 terminal_reason=event.terminal_reason,
+                behavior_temperature=None,
                 observation_contract_version=policy_input.metadata.get("observation_contract_version"),
                 action_feature_contract_version=policy_input.metadata.get("action_feature_contract_version"),
                 env_contract_version=policy_input.metadata.get("env_contract_version"),

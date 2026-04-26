@@ -183,7 +183,7 @@ def _load_bridge_policy(row: dict[str, str], device: torch.device) -> RulePriorD
 
 
 def _collect_online_batch(policy, opponent_pool, args: argparse.Namespace, device: torch.device):
-    torch.manual_seed(int(args.online_seed_base))
+    _seed_torch_sampling(int(args.online_seed_base))
     episodes = collect_selfplay_episodes(
         DiscardOnlyMahjongEnv(max_kyokus=args.max_kyokus),
         policy,
@@ -204,6 +204,12 @@ def _collect_online_batch(policy, opponent_pool, args: argparse.Namespace, devic
         strict_metadata=True,
     )
     return batch.to(device)
+
+
+def _seed_torch_sampling(seed: int) -> None:
+    torch.manual_seed(int(seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed))
 
 
 def _compute_online_loss(

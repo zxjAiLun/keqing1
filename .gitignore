@@ -53,6 +53,9 @@ dataset_debug*/
 !reports/keqingrl_fixed_online_bridge_20260426_step36d/fixed_online_bridge.json
 !reports/keqingrl_fixed_online_bridge_20260426_step36d_learner_only/fixed_online_bridge.json
 !reports/keqingrl_online_stabilization_20260426_source93_learner_only/online_stabilization_sweep.json
+!reports/keqingrl_sampling_diversity_20260426/sampling_diversity.json
+!reports/keqingrl_temperature_pilot_20260426_source93/temperature_pilot.json
+!reports/keqingrl_tempered_ratio_pilot_20260426_source93/tempered_ratio_pilot.json
 *.jsonl
 *.jsonl.gz
 links.txt

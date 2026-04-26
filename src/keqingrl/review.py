@@ -49,6 +49,7 @@ class StepReview:
     entropy: float | None
     recorded_log_prob: float | None
     recomputed_log_prob: float | None
+    behavior_temperature: float | None
     reward: float
     done: bool
     is_autopilot: bool = False
@@ -187,6 +188,7 @@ def review_rollout_step(
         entropy=None if step.is_autopilot else float(entropy),
         recorded_log_prob=None if step.is_autopilot else float(step.log_prob),
         recomputed_log_prob=None if step.is_autopilot else float(recomputed_log_prob),
+        behavior_temperature=step.behavior_temperature,
         reward=float(step.reward),
         done=bool(step.done),
         is_autopilot=bool(step.is_autopilot),
@@ -331,6 +333,7 @@ def _step_review_dict(step_review: StepReview) -> dict[str, object]:
         "entropy": step_review.entropy,
         "recorded_log_prob": step_review.recorded_log_prob,
         "recomputed_log_prob": step_review.recomputed_log_prob,
+        "behavior_temperature": step_review.behavior_temperature,
         "reward": step_review.reward,
         "done": step_review.done,
         "is_autopilot": step_review.is_autopilot,

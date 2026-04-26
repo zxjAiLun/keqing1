@@ -62,6 +62,7 @@ class InteractivePolicy(nn.Module):
             entropy=entropy,
             value=output.value,
             rank_probs=rank_probs,
+            aux=output.aux,
         )
 
 

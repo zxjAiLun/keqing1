@@ -170,6 +170,7 @@ def batch_diagnostic_rows(
                 "advantage_normalized": float(normalized_advantages[idx]),
                 "final_rank": _seat_tuple_value(final_ranks, step.actor),
                 "terminal_reward": _seat_tuple_value(terminal_rewards, step.actor),
+                "behavior_temperature": step.behavior_temperature,
                 **margin,
             }
         )

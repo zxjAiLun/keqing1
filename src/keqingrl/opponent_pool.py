@@ -15,6 +15,7 @@ class SeatPolicyAssignment:
     policy_version: int = 0
     greedy: bool = False
     name: str | None = None
+    is_learner: bool = False
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class OpponentPoolEntry:
             policy_version=self.policy_version,
             greedy=self.greedy,
             name=self.name,
+            is_learner=False,
         )
 
 
@@ -91,6 +93,7 @@ def build_selfplay_seat_assignments(
         policy_version=learner_policy_version,
         greedy=learner_greedy,
         name=learner_name,
+        is_learner=True,
     )
     learner_seat_set = set(learner_seat_tuple)
 
@@ -108,6 +111,7 @@ def build_selfplay_seat_assignments(
                 policy_version=opponent_assignment.policy_version,
                 greedy=opponent_assignment.greedy,
                 name="opponent",
+                is_learner=False,
             )
         seat_assignments.append(opponent_assignment)
     return tuple(seat_assignments)

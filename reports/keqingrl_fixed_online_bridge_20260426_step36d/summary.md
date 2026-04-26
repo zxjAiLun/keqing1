@@ -1,5 +1,10 @@
 # KeqingRL Fixed-Batch To Online Bridge
 
+> INVALIDATED: this report is invalidated_by_opponent_step_leak.
+> Opponent-controlled steps leaked into the learner PPO batch before
+> `SeatPolicyAssignment.is_learner` became the learner-step source of truth.
+> Do not use this report or its checkpoints as research evidence.
+
 source_type: `fixed_batch_overfit_bridge`
 candidate_summary: `reports/keqingrl_discard_research_20260425_candidates_checkpoint_rerun/summary.csv`
 fixed_episodes: `16`

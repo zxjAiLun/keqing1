@@ -238,7 +238,7 @@ def main() -> None:
 
 
 def _collect_batch(policy, opponent_pool, args: argparse.Namespace, *, episodes: int, seed: int, device: torch.device):
-    torch.manual_seed(int(seed))
+    _seed_torch_sampling(int(seed))
     collected = collect_selfplay_episodes(
         DiscardOnlyMahjongEnv(max_kyokus=args.max_kyokus),
         policy,
@@ -259,6 +259,12 @@ def _collect_batch(policy, opponent_pool, args: argparse.Namespace, *, episodes:
         strict_metadata=True,
     )
     return batch.to(device)
+
+
+def _seed_torch_sampling(seed: int) -> None:
+    torch.manual_seed(int(seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed))
 
 
 def _overfit_until_move(base_policy, fixed_batch, args: argparse.Namespace):

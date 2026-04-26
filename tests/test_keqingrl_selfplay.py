@@ -977,6 +977,63 @@ def test_run_ppo_iteration_filters_batch_to_learner_seats_with_opponent_pool() -
     assert torch.isfinite(torch.tensor(result.metrics.mean_total_loss))
 
 
+def test_opponent_named_learner_is_not_learner_controlled() -> None:
+    learner_policy = NeuralInteractivePolicy(
+        hidden_dim=32,
+        num_res_blocks=1,
+        c_tile=4,
+        n_scalar=6,
+        dropout=0.0,
+    )
+    opponent_policy = _ChosenIndexPolicy(0)
+    optimizer = torch.optim.Adam(learner_policy.parameters(), lr=1e-3)
+    env = _TwoStepActorEnv(
+        {
+            0: PolicyInput(
+                obs=ObsTensorBatch(
+                    tile_obs=torch.zeros((1, 4, 34), dtype=torch.float32),
+                    scalar_obs=torch.zeros((1, 6), dtype=torch.float32),
+                ),
+                legal_action_ids=torch.tensor([[10, 20]], dtype=torch.long),
+                legal_action_features=torch.zeros((1, 2, 8), dtype=torch.float32),
+                legal_action_mask=torch.tensor([[True, True]], dtype=torch.bool),
+                rule_context=torch.zeros((1, 6), dtype=torch.float32),
+                legal_actions=((ActionSpec(ActionType.DISCARD, tile=0), ActionSpec(ActionType.DISCARD, tile=1)),),
+            ),
+            1: PolicyInput(
+                obs=ObsTensorBatch(
+                    tile_obs=torch.zeros((1, 4, 34), dtype=torch.float32),
+                    scalar_obs=torch.zeros((1, 6), dtype=torch.float32),
+                ),
+                legal_action_ids=torch.tensor([[30, 40]], dtype=torch.long),
+                legal_action_features=torch.zeros((1, 2, 8), dtype=torch.float32),
+                legal_action_mask=torch.tensor([[True, True]], dtype=torch.bool),
+                rule_context=torch.zeros((1, 6), dtype=torch.float32),
+                legal_actions=((ActionSpec(ActionType.PASS), ActionSpec(ActionType.RON, tile=1, from_who=0)),),
+            ),
+        }
+    )
+    opponent_pool = OpponentPool(
+        (OpponentPoolEntry(policy=opponent_policy, policy_version=99, greedy=True, name="learner"),)
+    )
+
+    result = run_ppo_iteration(
+        env,
+        learner_policy,
+        optimizer,
+        num_episodes=1,
+        opponent_pool=opponent_pool,
+        learner_seats=(0,),
+        update_epochs=1,
+        seed=29,
+        strict_metadata=False,
+    )
+
+    assert result.metrics.batch_size == 1
+    assert [step.policy_name for step in result.episodes[0].steps] == ["learner", "learner"]
+    assert [step.is_learner_controlled for step in result.episodes[0].steps] == [True, False]
+
+
 def test_ppo_update_runs_on_collected_mahjong_episode() -> None:
     torch.manual_seed(1)
     env = DiscardOnlyMahjongEnv(max_kyokus=1)

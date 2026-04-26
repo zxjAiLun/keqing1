@@ -52,6 +52,7 @@ class ActionSample:
     entropy: torch.Tensor
     value: torch.Tensor
     rank_probs: torch.Tensor
+    aux: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
 __all__ = ["ActionSample", "ObsTensorBatch", "PolicyInput", "PolicyOutput"]

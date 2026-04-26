@@ -37,6 +37,7 @@ class RolloutStep:
     learner_policy_version: int | None = None
     env_seed: int | None = None
     terminal_reason: str | None = None
+    behavior_temperature: float | None = None
     observation_contract_version: str | None = None
     action_feature_contract_version: str | None = None
     env_contract_version: str | None = None
@@ -152,6 +153,7 @@ def rollout_step_policy_input(
             "behavior_policy_id": step.behavior_policy_id,
             "env_seed": step.env_seed,
             "terminal_reason": step.terminal_reason,
+            "behavior_temperature": step.behavior_temperature,
             "observation_contract_version": step.observation_contract_version,
             "action_feature_contract_version": step.action_feature_contract_version,
             "env_contract_version": step.env_contract_version,
