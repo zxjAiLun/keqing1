@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from keqingrl.contracts import ActionSample, PolicyInput, PolicyOutput
 from keqingrl.distribution import MaskedCategorical
+from keqingrl.metadata import DEFAULT_RULE_SCORE_SCALE
 from keqingrl.rule_score import (
     DEFAULT_RULE_SCORE_CONFIG,
     RuleScoreConfig,
@@ -87,6 +88,7 @@ class RandomInteractivePolicy(InteractivePolicy):
                 "prior_logits": torch.zeros_like(logits),
                 "neural_delta": torch.zeros_like(logits),
                 "final_logits": logits,
+                "rule_score_scale": torch.tensor(DEFAULT_RULE_SCORE_SCALE, device=device, dtype=dtype),
             },
         )
 

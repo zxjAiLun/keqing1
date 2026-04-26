@@ -10,6 +10,7 @@ from torch.nn.parameter import UninitializedParameter
 
 from keqingrl.buffer import PPOBatch
 from keqingrl.distribution import MaskedCategorical
+from keqingrl.metadata import resolve_rule_score_scale_metadata
 from keqingrl.policy import InteractivePolicy
 from keqingrl.rule_score import smoothed_prior_probs
 
@@ -53,6 +54,7 @@ def compute_ppo_loss(
     prior_kl_eps: float = 1e-4,
     normalize_advantages: bool = True,
 ) -> PPOLossBreakdown:
+    validate_ppo_batch_rule_score_scale(policy, batch, strict_metadata=True)
     output = policy(batch.policy_input)
     dist = MaskedCategorical(output.action_logits, batch.policy_input.legal_action_mask)
     new_log_prob = dist.log_prob(batch.action_index)
@@ -118,6 +120,7 @@ def compute_critic_pretrain_loss(
     value_coef: float = 1.0,
     rank_coef: float = 1.0,
 ) -> CriticPretrainLossBreakdown:
+    validate_ppo_batch_rule_score_scale(policy, batch, strict_metadata=True)
     output = policy(batch.policy_input)
     value_loss = F.smooth_l1_loss(output.value, batch.returns)
     total_loss = float(value_coef) * value_loss
@@ -244,6 +247,20 @@ def _delta_metrics_from_output(output, batch: PPOBatch) -> tuple[torch.Tensor | 
     return legal_delta.abs().mean(), legal_delta.pow(2).mean().sqrt()
 
 
+def validate_ppo_batch_rule_score_scale(
+    policy: InteractivePolicy,
+    batch: PPOBatch,
+    *,
+    strict_metadata: bool,
+) -> float:
+    expected = getattr(policy, "rule_score_scale", None)
+    return resolve_rule_score_scale_metadata(
+        batch.policy_input.metadata,
+        strict_metadata=strict_metadata if expected is not None else False,
+        expected_rule_score_scale=None if expected is None else float(expected),
+    )
+
+
 def _initialize_lazy_parameters_for_training(policy: InteractivePolicy, policy_input) -> None:
     if _uninitialized_parameter_names(policy):
         with torch.no_grad():
@@ -333,4 +350,5 @@ __all__ = [
     "compute_ppo_loss",
     "critic_pretrain_update",
     "ppo_update",
+    "validate_ppo_batch_rule_score_scale",
 ]

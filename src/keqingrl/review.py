@@ -12,6 +12,7 @@ import torch
 from keqingrl.actions import ACTION_FLAG_REACH, ACTION_FLAG_TSUMOGIRI, ActionSpec, ActionType
 from keqingrl.buffer import _assert_rollout_action_order
 from keqingrl.distribution import MaskedCategorical
+from keqingrl.metadata import resolve_rule_score_scale_metadata
 from keqingrl.policy import InteractivePolicy
 from keqingrl.rollout import RolloutEpisode, RolloutStep, rollout_step_policy_input
 from mahjong_env.action_space import IDX_TO_TILE_NAME
@@ -50,6 +51,8 @@ class StepReview:
     recorded_log_prob: float | None
     recomputed_log_prob: float | None
     behavior_temperature: float | None
+    rule_score_scale: float | None
+    rule_score_scale_version: str | None
     reward: float
     done: bool
     is_autopilot: bool = False
@@ -81,6 +84,8 @@ class ReviewPolicyFieldSummary:
     entropy_count: int
     log_prob_count: int
     neural_delta_count: int
+    rule_score_scale_count: int
+    rule_score_scale_values: tuple[float, ...]
     mean_entropy: float | None
     mean_recorded_log_prob: float | None
     mean_chosen_neural_delta: float | None
@@ -132,6 +137,12 @@ def review_rollout_step(
     policy_input = rollout_step_policy_input(step, device=target_device)
     with torch.no_grad():
         output = active_policy(policy_input)
+        _assert_review_rule_score_scale(
+            step,
+            active_policy,
+            output,
+            strict_metadata=strict_metadata,
+        )
         dist = MaskedCategorical(output.action_logits, policy_input.legal_action_mask)
         probs = dist.probs()[0].detach().cpu()
         logits = output.action_logits[0].detach().cpu()
@@ -189,6 +200,8 @@ def review_rollout_step(
         recorded_log_prob=None if step.is_autopilot else float(step.log_prob),
         recomputed_log_prob=None if step.is_autopilot else float(recomputed_log_prob),
         behavior_temperature=step.behavior_temperature,
+        rule_score_scale=step.rule_score_scale,
+        rule_score_scale_version=step.rule_score_scale_version,
         reward=float(step.reward),
         done=bool(step.done),
         is_autopilot=bool(step.is_autopilot),
@@ -258,6 +271,13 @@ def summarize_review_policy_fields(episode_review: EpisodeReview) -> ReviewPolic
         for step in learner_steps
         if step.chosen_action.neural_delta is not None
     ]
+    rule_score_scale_values = sorted(
+        {
+            round(float(step.rule_score_scale), 12)
+            for step in episode_review.steps
+            if step.rule_score_scale is not None
+        }
+    )
     return ReviewPolicyFieldSummary(
         learner_step_count=len(learner_steps),
         autopilot_step_count=len(autopilot_steps),
@@ -266,6 +286,8 @@ def summarize_review_policy_fields(episode_review: EpisodeReview) -> ReviewPolic
         entropy_count=len(entropies),
         log_prob_count=len(log_probs),
         neural_delta_count=len(deltas),
+        rule_score_scale_count=len(rule_score_scale_values),
+        rule_score_scale_values=tuple(float(value) for value in rule_score_scale_values),
         mean_entropy=_mean_optional(entropies),
         mean_recorded_log_prob=_mean_optional(log_probs),
         mean_chosen_neural_delta=_mean_optional(deltas),
@@ -334,6 +356,8 @@ def _step_review_dict(step_review: StepReview) -> dict[str, object]:
         "recorded_log_prob": step_review.recorded_log_prob,
         "recomputed_log_prob": step_review.recomputed_log_prob,
         "behavior_temperature": step_review.behavior_temperature,
+        "rule_score_scale": step_review.rule_score_scale,
+        "rule_score_scale_version": step_review.rule_score_scale_version,
         "reward": step_review.reward,
         "done": step_review.done,
         "is_autopilot": step_review.is_autopilot,
@@ -355,6 +379,31 @@ def _optional_row(
     if tensor is None:
         return None
     return tensor[0].detach().cpu()
+
+
+def _assert_review_rule_score_scale(
+    step: RolloutStep,
+    policy: InteractivePolicy,
+    output,
+    *,
+    strict_metadata: bool,
+) -> None:
+    expected = getattr(policy, "rule_score_scale", None)
+    output_scale = output.aux.get("rule_score_scale")
+    if expected is None and output_scale is not None:
+        expected = (
+            float(output_scale.detach().flatten()[0].cpu())
+            if hasattr(output_scale, "detach")
+            else float(output_scale)
+        )
+    resolve_rule_score_scale_metadata(
+        {
+            "rule_score_scale": step.rule_score_scale,
+            "rule_score_scale_version": step.rule_score_scale_version,
+        },
+        strict_metadata=strict_metadata if expected is not None else False,
+        expected_rule_score_scale=None if expected is None else float(expected),
+    )
 
 
 def _mean_optional(values: Sequence[float | None]) -> float | None:

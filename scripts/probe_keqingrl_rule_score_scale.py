@@ -20,6 +20,7 @@ from keqingrl import DiscardOnlyMahjongEnv, run_fixed_seed_evaluation_smoke
 from keqingrl.distribution import MaskedCategorical
 from keqingrl.learning_signal import seed_registry_hash, tensor_stats
 from keqingrl.selfplay import build_episodes_ppo_batch, collect_selfplay_episodes
+from keqingrl.metadata import RULE_SCORE_SCALE_VERSION
 from scripts.probe_keqingrl_sampling_diversity import (
     _candidate_summary,
     _load_candidates,
@@ -113,10 +114,13 @@ def main() -> None:
                 "training": False,
                 "diagnostic_only": True,
                 "rule_score_scale": float(scale),
+                "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
                 "episodes": int(args.episodes),
                 "eval_episodes": int(args.eval_episodes),
                 "learner_seats": list(int(seat) for seat in args.learner_seats),
                 "eval_seat_rotation": list(int(seat) for seat in args.eval_seat_rotation),
+                "eval_scope": _eval_scope(args),
+                "eval_strength_note": "sanity check only; not duplicate strength evidence",
                 "seed_registry_id": _seed_registry_id(args),
                 "seed_hash": seed_registry_hash(_seed_registry(args)),
                 "eval_rank_pt": eval_metrics.rank_pt,
@@ -153,8 +157,11 @@ def main() -> None:
         "source_config_ids": list(args.source_config_ids or ()),
         "rerun_config_ids": args.rerun_config_ids,
         "scales": [float(value) for value in args.scales],
+        "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
         "episodes": int(args.episodes),
         "eval_episodes": int(args.eval_episodes),
+        "eval_scope": _eval_scope(args),
+        "eval_strength_note": "sanity check only; not duplicate strength evidence",
         "seed_registry_id": _seed_registry_id(args),
         "seed_hash": seed_registry_hash(_seed_registry(args)),
         "summaries": summary_rows,
@@ -163,6 +170,12 @@ def main() -> None:
     _write_csv(args.output_dir / "summary.csv", summary_rows)
     (args.output_dir / "summary.md").write_text(_summary_markdown(args, summary_rows), encoding="utf-8")
     print((args.output_dir / "summary.md").read_text(encoding="utf-8"))
+
+
+def _eval_scope(args: argparse.Namespace) -> str:
+    seats = ",".join(str(int(seat)) for seat in args.eval_seat_rotation)
+    noun = "seat" if len(tuple(args.eval_seat_rotation)) == 1 else "seats"
+    return f"fixed-seed smoke; learner {noun} {seats} only"
 
 
 def _scale_diagnostics(policy, batch, *, clip_eps: float) -> dict[str, Any]:
@@ -248,8 +261,11 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
         f"episodes: `{args.episodes}`",
         f"eval_episodes: `{args.eval_episodes}`",
         f"scales: `{','.join(str(float(value)) for value in args.scales)}`",
+        f"rule_score_scale_version: `{RULE_SCORE_SCALE_VERSION}`",
         f"seed_registry_id: `{_seed_registry_id(args)}`",
         f"seed_hash: `{seed_registry_hash(_seed_registry(args))}`",
+        f"eval_scope: `{_eval_scope(args)}`",
+        "eval_strength_note: `sanity check only; not duplicate strength evidence`",
         "",
         "## Results",
         "",

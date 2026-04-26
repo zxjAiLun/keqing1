@@ -25,6 +25,7 @@ from keqingrl import (
     NATIVE_TERMINAL_RESOLVER_VERSION,
     OBSERVATION_CONTRACT_VERSION,
     REWARD_SPEC_VERSION,
+    RULE_SCORE_SCALE_VERSION,
     RULE_SCORE_VERSION,
     STYLE_CONTEXT_VERSION,
     bind_reach_discard,
@@ -105,6 +106,8 @@ def _synthetic_review_step() -> RolloutStep:
         native_legal_enumeration_version=NATIVE_LEGAL_ENUMERATION_VERSION,
         native_terminal_resolver_version=NATIVE_TERMINAL_RESOLVER_VERSION,
         rule_score_version=RULE_SCORE_VERSION,
+        rule_score_scale=1.0,
+        rule_score_scale_version=RULE_SCORE_SCALE_VERSION,
         reward_spec_version=REWARD_SPEC_VERSION,
         style_context_version=STYLE_CONTEXT_VERSION,
     )
@@ -157,6 +160,8 @@ def _synthetic_response_review_step() -> RolloutStep:
         native_legal_enumeration_version=NATIVE_LEGAL_ENUMERATION_VERSION,
         native_terminal_resolver_version=NATIVE_TERMINAL_RESOLVER_VERSION,
         rule_score_version=RULE_SCORE_VERSION,
+        rule_score_scale=1.0,
+        rule_score_scale_version=RULE_SCORE_SCALE_VERSION,
         reward_spec_version=REWARD_SPEC_VERSION,
         style_context_version=STYLE_CONTEXT_VERSION,
     )
@@ -205,6 +210,8 @@ def _synthetic_ryukyoku_review_step() -> RolloutStep:
         native_legal_enumeration_version=NATIVE_LEGAL_ENUMERATION_VERSION,
         native_terminal_resolver_version=NATIVE_TERMINAL_RESOLVER_VERSION,
         rule_score_version=RULE_SCORE_VERSION,
+        rule_score_scale=1.0,
+        rule_score_scale_version=RULE_SCORE_SCALE_VERSION,
         reward_spec_version=REWARD_SPEC_VERSION,
         style_context_version=STYLE_CONTEXT_VERSION,
     )
@@ -252,6 +259,8 @@ def _synthetic_mixed_policy_episode() -> RolloutEpisode:
                 native_legal_enumeration_version=NATIVE_LEGAL_ENUMERATION_VERSION,
                 native_terminal_resolver_version=NATIVE_TERMINAL_RESOLVER_VERSION,
                 rule_score_version=RULE_SCORE_VERSION,
+                rule_score_scale=1.0,
+                rule_score_scale_version=RULE_SCORE_SCALE_VERSION,
                 reward_spec_version=REWARD_SPEC_VERSION,
                 style_context_version=STYLE_CONTEXT_VERSION,
             ),
@@ -286,6 +295,8 @@ def _synthetic_mixed_policy_episode() -> RolloutEpisode:
                 native_legal_enumeration_version=NATIVE_LEGAL_ENUMERATION_VERSION,
                 native_terminal_resolver_version=NATIVE_TERMINAL_RESOLVER_VERSION,
                 rule_score_version=RULE_SCORE_VERSION,
+                rule_score_scale=1.0,
+                rule_score_scale_version=RULE_SCORE_SCALE_VERSION,
                 reward_spec_version=REWARD_SPEC_VERSION,
                 style_context_version=STYLE_CONTEXT_VERSION,
             ),
@@ -323,6 +334,8 @@ def test_review_rollout_episode_exposes_top_k_and_chosen_action(tmp_path) -> Non
     payload = json.loads(lines[0])
     assert payload["chosen_action"]["action"] == first.chosen_action.action_label
     assert payload["top_k"]
+    assert payload["rule_score_scale"] == 1.0
+    assert payload["rule_score_scale_version"] == RULE_SCORE_SCALE_VERSION
 
 
 def test_review_rollout_step_and_export_support_atomic_self_turn_actions(tmp_path) -> None:

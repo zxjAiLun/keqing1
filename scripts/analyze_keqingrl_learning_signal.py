@@ -30,6 +30,7 @@ from keqingrl.learning_signal import (
     top1_margin_diagnostics,
 )
 from keqingrl.ppo import compute_ppo_loss
+from keqingrl.metadata import resolve_rule_score_scale_metadata
 from keqingrl.selfplay import build_episodes_ppo_batch, collect_selfplay_episodes, summarize_iteration
 from scripts.run_keqingrl_discard_research_sweep import _build_opponent_pool, _file_sha256
 
@@ -205,8 +206,25 @@ def _load_policy(config_path: Path, checkpoint_path: Path, device: torch.device)
         dropout=float(config["model"].get("dropout", 0.0)),
     ).to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device)
+    policy.rule_score_scale = _checkpoint_rule_score_scale(checkpoint)
     policy.load_state_dict(checkpoint["policy_state_dict"])
     return policy
+
+
+def _checkpoint_rule_score_scale(checkpoint: dict[str, Any]) -> float:
+    metadata = checkpoint.get("contract_metadata")
+    if metadata is None:
+        artifact_metadata = checkpoint.get("artifact_metadata")
+        if isinstance(artifact_metadata, dict):
+            metadata = artifact_metadata.get("contract_metadata")
+    if metadata is None:
+        metadata = {
+            "rule_score_scale": checkpoint.get("rule_score_scale"),
+            "rule_score_scale_version": checkpoint.get("rule_score_scale_version"),
+        }
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return resolve_rule_score_scale_metadata(metadata, strict_metadata=False)
 
 
 def _run_overfit_matrix(

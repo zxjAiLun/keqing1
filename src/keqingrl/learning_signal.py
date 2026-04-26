@@ -171,6 +171,8 @@ def batch_diagnostic_rows(
                 "final_rank": _seat_tuple_value(final_ranks, step.actor),
                 "terminal_reward": _seat_tuple_value(terminal_rewards, step.actor),
                 "behavior_temperature": step.behavior_temperature,
+                "rule_score_scale": step.rule_score_scale,
+                "rule_score_scale_version": step.rule_score_scale_version,
                 **margin,
             }
         )
@@ -182,8 +184,17 @@ def batch_diagnostic_summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     returns = torch.tensor([float(row["return"]) for row in rows], dtype=torch.float32)
     advantages = torch.tensor([float(row["advantage_raw"]) for row in rows], dtype=torch.float32)
     deltas = torch.tensor([float(row["delta_needed_to_flip_top1"]) for row in rows], dtype=torch.float32)
+    scale_values = sorted(
+        {
+            round(float(row["rule_score_scale"]), 12)
+            for row in rows
+            if row.get("rule_score_scale") is not None
+        }
+    )
     return {
         "batch_size": len(rows),
+        "rule_score_scale": scale_values[0] if len(scale_values) == 1 else None,
+        "rule_score_scale_values": tuple(float(value) for value in scale_values),
         "reward_nonzero_count": int((rewards != 0.0).sum().item()) if rewards.numel() else 0,
         **tensor_stats(rewards, prefix="reward"),
         **tensor_stats(returns, prefix="return"),

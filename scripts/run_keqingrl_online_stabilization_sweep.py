@@ -18,6 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from keqingrl import DiscardOnlyMahjongEnv, RulePriorDeltaPolicy, run_fixed_seed_evaluation_smoke
+from keqingrl.metadata import resolve_rule_score_scale_metadata
 from keqingrl.ppo import compute_ppo_loss, ppo_update
 from keqingrl.selfplay import build_episodes_ppo_batch, collect_selfplay_episodes
 from scripts.probe_keqingrl_sampling_diversity import (
@@ -69,6 +70,7 @@ def main() -> None:
     device = torch.device(args.device) if args.device is not None else torch.device("cpu")
     bridge_row = _select_bridge_row(args.bridge_summary, args.source_config_id)
     base_policy = _load_bridge_policy(bridge_row, device)
+    rule_score_scale = float(getattr(base_policy, "rule_score_scale", 1.0))
     opponent_pool = _opponent_pool(str(bridge_row["opponent_mode"]))
     online_batch = _collect_online_batch(base_policy, opponent_pool, args, device)
     pre_stats = _policy_delta_stats(base_policy, online_batch)
@@ -113,6 +115,8 @@ def main() -> None:
                             "bridge_checkpoint_sha256": bridge_row.get("checkpoint_sha256") or _file_sha256(Path(bridge_row["checkpoint_path"])),
                             "config_path": bridge_row["config_path"],
                             "opponent_mode": bridge_row["opponent_mode"],
+                            "rule_score_scale": rule_score_scale,
+                            "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
                             "online_lr": float(lr),
                             "online_update_epochs": int(update_epochs),
                             "online_rule_kl_coef": float(rule_kl_coef),
@@ -149,6 +153,8 @@ def main() -> None:
         "source_config_id": int(args.source_config_id),
         "bridge_summary": str(args.bridge_summary),
         "online_seed_registry_id": _online_seed_registry_id(args),
+        "rule_score_scale": rule_score_scale,
+        "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
         "grid_count": len(rows),
         "eval_count": len(eval_rows),
         "summaries": rows,
@@ -177,9 +183,26 @@ def _load_bridge_policy(row: dict[str, str], device: torch.device) -> RulePriorD
         dropout=float(config["model"].get("dropout", 0.0)),
     ).to(device)
     checkpoint = torch.load(Path(row["checkpoint_path"]), map_location=device)
+    policy.rule_score_scale = _checkpoint_rule_score_scale(checkpoint)
     policy.load_state_dict(checkpoint["policy_state_dict"])
     policy.eval()
     return policy
+
+
+def _checkpoint_rule_score_scale(checkpoint: dict[str, Any]) -> float:
+    metadata = checkpoint.get("contract_metadata")
+    if metadata is None:
+        artifact_metadata = checkpoint.get("artifact_metadata")
+        if isinstance(artifact_metadata, dict):
+            metadata = artifact_metadata.get("contract_metadata")
+    if metadata is None:
+        metadata = {
+            "rule_score_scale": checkpoint.get("rule_score_scale"),
+            "rule_score_scale_version": checkpoint.get("rule_score_scale_version"),
+        }
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return resolve_rule_score_scale_metadata(metadata, strict_metadata=False)
 
 
 def _collect_online_batch(policy, opponent_pool, args: argparse.Namespace, device: torch.device):
@@ -313,11 +336,15 @@ def _evaluate_selected(
         eval_rows.append(
             {
                 **{key: row[key] for key in row if key.startswith("online_") or key in {"source_config_id", "rerun_config_id", "stabilization_status", "max_grad_norm", "moves_top1", "kl_stable", "clip_stable", "delta_non_explosive"}},
+                "rule_score_scale": row["rule_score_scale"],
+                "rule_score_scale_version": row["rule_score_scale_version"],
                 "eval_rank_pt": metrics.rank_pt,
                 "eval_mean_rank": metrics.average_rank,
                 "eval_fourth_rate": metrics.fourth_rate,
                 "eval_learner_deal_in_rate": metrics.learner_deal_in_rate,
                 "eval_learner_win_rate": metrics.learner_win_rate,
+                "eval_scope": f"fixed-seed smoke; learner seats {','.join(str(int(seat)) for seat in args.eval_seat_rotation)} only",
+                "eval_strength_note": "sanity check only; not duplicate strength evidence",
                 "illegal_action_rate_fail_closed": metrics.illegal_action_rate_fail_closed,
                 "fallback_rate_fail_closed": metrics.fallback_rate_fail_closed,
                 "forced_terminal_missed_fail_closed": metrics.forced_terminal_missed_fail_closed,
@@ -354,6 +381,10 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]], 
         f"grid_count: `{len(rows)}`",
         f"eval_count: `{len(eval_rows)}`",
         f"online_seed_registry_id: `{_online_seed_registry_id(args)}`",
+        f"rule_score_scale: `{rows[0]['rule_score_scale'] if rows else 1.0}`",
+        "rule_score_scale_version: `keqingrl_rule_score_scale_v1`",
+        f"eval_scope: `fixed-seed smoke; learner seats {','.join(str(int(seat)) for seat in args.eval_seat_rotation)} only`",
+        "eval_strength_note: `sanity check only; not duplicate strength evidence`",
         f"stable_kl_threshold: `{args.stable_kl_threshold}`",
         f"stable_clip_threshold: `{args.stable_clip_threshold}`",
         f"status_counts: `{status_counts}`",

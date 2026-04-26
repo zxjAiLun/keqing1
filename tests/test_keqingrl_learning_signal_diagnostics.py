@@ -4,6 +4,7 @@ import torch
 
 from keqingrl.buffer import PPOBatch
 from keqingrl.contracts import ObsTensorBatch, PolicyInput, PolicyOutput
+from keqingrl.metadata import RULE_SCORE_SCALE_VERSION
 from keqingrl.learning_signal import (
     PpoDiagnosticConfig,
     batch_diagnostic_summary,
@@ -75,6 +76,10 @@ def _batch_and_policy() -> tuple[RulePriorDeltaPolicy, PPOBatch]:
         legal_action_mask=torch.ones(batch_size, action_count, dtype=torch.bool),
         rule_context=torch.zeros(batch_size, 6),
         prior_logits=torch.tensor([[0.2, 0.0, -0.5], [0.1, 0.0, -0.2]], dtype=torch.float32),
+        metadata={
+            "rule_score_scale": 1.0,
+            "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
+        },
     )
     with torch.no_grad():
         output = policy(policy_input)

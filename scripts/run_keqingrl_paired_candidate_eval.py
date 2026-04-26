@@ -28,6 +28,7 @@ from keqingrl import (
 )
 from keqingrl.selfplay import collect_selfplay_episodes
 from keqingrl.rollout import rollout_step_policy_input
+from keqingrl.metadata import resolve_rule_score_scale_metadata
 from keqingrl.training import _initialize_policy_from_env_observation
 from scripts.run_keqingrl_discard_research_sweep import RulebaseGreedyPolicy
 
@@ -141,6 +142,7 @@ def _load_single_checkpoint_candidate(args: argparse.Namespace, device: torch.de
         dropout=float(config["model"].get("dropout", 0.0)),
     ).to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device)
+    policy.rule_score_scale = _checkpoint_rule_score_scale(checkpoint)
     policy.load_state_dict(checkpoint["policy_state_dict"])
     policy.eval()
     source_config_id = args.source_config_id
@@ -193,6 +195,7 @@ def _load_candidates(
             dropout=float(config["model"].get("dropout", 0.0)),
         ).to(device)
         checkpoint = torch.load(checkpoint_path, map_location=device)
+        policy.rule_score_scale = _checkpoint_rule_score_scale(checkpoint)
         policy.load_state_dict(checkpoint["policy_state_dict"])
         policy.eval()
         selected.append(
@@ -217,6 +220,22 @@ def _load_candidates(
             }
         )
     return selected
+
+
+def _checkpoint_rule_score_scale(checkpoint: dict[str, Any]) -> float:
+    metadata = checkpoint.get("contract_metadata")
+    if metadata is None:
+        artifact_metadata = checkpoint.get("artifact_metadata")
+        if isinstance(artifact_metadata, dict):
+            metadata = artifact_metadata.get("contract_metadata")
+    if metadata is None:
+        metadata = {
+            "rule_score_scale": checkpoint.get("rule_score_scale"),
+            "rule_score_scale_version": checkpoint.get("rule_score_scale_version"),
+        }
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return resolve_rule_score_scale_metadata(metadata, strict_metadata=False)
 
 
 def _build_baselines(candidates: list[dict[str, Any]], args: argparse.Namespace, device: torch.device) -> list[dict[str, Any]]:
@@ -300,6 +319,8 @@ def _evaluate_record(record: dict[str, Any], opponent_name: str, args: argparse.
         "policy_mode": "greedy",
         "seat_rotation": _seat_rotation_label(args),
         "training_rollout_reuse": False,
+        "rule_score_scale": float(getattr(record["policy"], "rule_score_scale", 1.0)),
+        "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
         "rank_pt": metrics.rank_pt,
         "mean_rank": metrics.average_rank,
         "fourth_rate": metrics.fourth_rate,

@@ -1,0 +1,39 @@
+# KeqingRL Tempered-Ratio PPO Diagnostic
+
+source_type: `checkpoint`
+ratio_mode: `tempered_current_logits`
+candidate_summary: `reports/keqingrl_discard_research_20260425_candidates_checkpoint_rerun/summary.csv`
+source_config_ids: `93`
+episodes: `16`
+iterations: `3`
+rule_score_scales: `0.25`
+rule_score_scale_version: `keqingrl_rule_score_scale_v1`
+temperatures: `1.25`
+lrs: `0.003`
+update_epochs_values: `4`
+clip_eps_values: `0.2`
+rule_kl_coef_values: `0.005,0.01`
+delta_l2_coef_values: `0.0,0.001`
+delta_clip_values: `0.0`
+delta_clip_coef_values: `0.0`
+entropy_coef: `0.005`
+pass_criteria: `{'min_top1_changed': 0.02, 'max_top1_changed': 0.25, 'max_tempered_kl': 0.03, 'max_tempered_clip': 0.3, 'max_untempered_clip': 0.8, 'max_eval_fourth': 0.5, 'max_eval_deal_in': 0.25}`
+eval_seed_registry_id: `base=202604320000:stride=1:count=16`
+eval_seed_hash: `720865d483c78a30`
+eval_scope: `fixed-seed smoke; learner seat 0 only`
+eval_strength_note: `sanity check only; not duplicate strength evidence`
+
+## Results
+
+- cfg=0 source=93 scale=0.25 temp=1.25 lr=0.003 epochs=4 clip=0.2 rule_kl=0.005 delta_l2=0 delta_clip=0/0 pass=False non_top1=193 non_top1_pos=123 top1_changed=0.00816326 effective_margin=0.445108 scaled_prior_margin=0.750043 t_kl=0.00287593 t_clip=0.00816326 u_kl=0.00782882 u_clip=0.130612 delta_max=0.825898 eval_fourth=0.25 deal_in=0.0625
+- cfg=1 source=93 scale=0.25 temp=1.25 lr=0.003 epochs=4 clip=0.2 rule_kl=0.005 delta_l2=0.001 delta_clip=0/0 pass=False non_top1=189 non_top1_pos=138 top1_changed=0 effective_margin=0.745895 scaled_prior_margin=0.750035 t_kl=0.000149284 t_clip=0 u_kl=0.00173932 u_clip=0 delta_max=0.0411505 eval_fourth=0.25 deal_in=0.0625
+- cfg=2 source=93 scale=0.25 temp=1.25 lr=0.003 epochs=4 clip=0.2 rule_kl=0.01 delta_l2=0 delta_clip=0/0 pass=False non_top1=196 non_top1_pos=126 top1_changed=0 effective_margin=0.4723 scaled_prior_margin=0.75006 t_kl=0.0029989 t_clip=0.00423729 u_kl=0.0085751 u_clip=0.127119 delta_max=0.500713 eval_fourth=0.25 deal_in=0.0625
+- cfg=3 source=93 scale=0.25 temp=1.25 lr=0.003 epochs=4 clip=0.2 rule_kl=0.01 delta_l2=0.001 delta_clip=0/0 pass=True non_top1=193 non_top1_pos=154 top1_changed=0.0510638 effective_margin=0.474612 scaled_prior_margin=0.750028 t_kl=0.00278182 t_clip=0.0297872 u_kl=0.00856164 u_clip=0.114894 delta_max=0.76543 eval_fourth=0.3125 deal_in=0.125
+
+## Artifacts
+
+- `tempered_ratio_pilot.json`
+- `summary.csv`
+- `iterations.csv`
+- `batch_steps.csv`
+- `advantage_audit.csv`

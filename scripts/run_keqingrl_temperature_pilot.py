@@ -83,6 +83,7 @@ def main() -> None:
         for temperature in args.temperatures:
             for lr in args.lrs:
                 policy = copy.deepcopy(source_policy).to(device)
+                rule_score_scale = float(getattr(policy, "rule_score_scale", 1.0))
                 optimizer = torch.optim.Adam(policy.parameters(), lr=float(lr))
                 config_rows: list[dict[str, Any]] = []
                 for iteration in range(int(args.iterations)):
@@ -144,6 +145,8 @@ def main() -> None:
                         **_candidate_summary(candidate),
                         "pilot_config_id": config_id,
                         "iteration": int(iteration),
+                        "rule_score_scale": rule_score_scale,
+                        "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
                         "behavior_temperature": float(temperature),
                         "lr": float(lr),
                         "episodes": int(args.episodes),
@@ -174,6 +177,8 @@ def main() -> None:
                                 **_candidate_summary(candidate),
                                 "pilot_config_id": config_id,
                                 "iteration": int(iteration),
+                                "rule_score_scale": rule_score_scale,
+                                "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
                                 "behavior_temperature": float(temperature),
                                 "lr": float(lr),
                                 **row,
@@ -185,6 +190,8 @@ def main() -> None:
                                 **_candidate_summary(candidate),
                                 "pilot_config_id": config_id,
                                 "iteration": int(iteration),
+                                "rule_score_scale": rule_score_scale,
+                                "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
                                 "behavior_temperature": float(temperature),
                                 "lr": float(lr),
                                 **row,
@@ -220,6 +227,8 @@ def main() -> None:
                     {
                         **_candidate_summary(candidate),
                         "pilot_config_id": config_id,
+                        "rule_score_scale": rule_score_scale,
+                        "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
                         "behavior_temperature": float(temperature),
                         "lr": float(lr),
                         "iterations": int(args.iterations),
@@ -227,6 +236,8 @@ def main() -> None:
                         "eval_episodes": int(args.eval_episodes),
                         "eval_seed_registry_id": _eval_seed_registry_id(args),
                         "eval_seed_hash": seed_registry_hash(_eval_seed_registry(args)),
+                        "eval_scope": _eval_scope(args),
+                        "eval_strength_note": "sanity check only; not duplicate strength evidence",
                         "source_checkpoint_sha256": candidate.get("checkpoint_sha256") or _file_sha256(Path(candidate["checkpoint_path"])),
                         **{f"final_{key}": value for key, value in final_row.items() if _summary_metric_key(key)},
                         "eval_rank_pt": eval_metrics.rank_pt,
@@ -247,9 +258,13 @@ def main() -> None:
         "candidate_summary": str(args.candidate_summary),
         "source_config_ids": [int(value) for value in args.source_config_ids],
         "temperatures": [float(value) for value in args.temperatures],
+        "rule_score_scale_values": sorted({float(row["rule_score_scale"]) for row in summary_rows}),
+        "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
         "lrs": [float(value) for value in args.lrs],
         "iteration_count": int(args.iterations),
         "episodes": int(args.episodes),
+        "eval_scope": _eval_scope(args),
+        "eval_strength_note": "sanity check only; not duplicate strength evidence",
         "summaries": summary_rows,
         "iteration_rows": iteration_rows,
         "advantage_audit": advantage_rows,
@@ -359,6 +374,12 @@ def _eval_seed_registry_id(args: argparse.Namespace) -> str:
     return f"base={args.eval_seed_base}:stride={args.seed_stride}:count={args.eval_episodes}"
 
 
+def _eval_scope(args: argparse.Namespace) -> str:
+    seats = ",".join(str(int(seat)) for seat in args.eval_seat_rotation)
+    noun = "seat" if len(tuple(args.eval_seat_rotation)) == 1 else "seats"
+    return f"fixed-seed smoke; learner {noun} {seats} only"
+
+
 def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) -> str:
     lines = [
         "# KeqingRL Train-Time Temperature Pilot",
@@ -369,11 +390,15 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
         f"episodes: `{args.episodes}`",
         f"iterations: `{args.iterations}`",
         f"temperatures: `{','.join(str(float(value)) for value in args.temperatures)}`",
+        f"rule_score_scale_values: `{','.join(str(value) for value in sorted({float(row['rule_score_scale']) for row in rows})) if rows else ''}`",
+        "rule_score_scale_version: `keqingrl_rule_score_scale_v1`",
         f"lrs: `{','.join(str(float(value)) for value in args.lrs)}`",
         f"rule_kl_coef: `{args.rule_kl_coef}`",
         f"entropy_coef: `{args.entropy_coef}`",
         f"eval_seed_registry_id: `{_eval_seed_registry_id(args)}`",
         f"eval_seed_hash: `{seed_registry_hash(_eval_seed_registry(args))}`",
+        f"eval_scope: `{_eval_scope(args)}`",
+        "eval_strength_note: `sanity check only; not duplicate strength evidence`",
         "",
         "## Results",
         "",
@@ -383,6 +408,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             "- "
             f"cfg={row['pilot_config_id']} "
             f"source={row['source_config_id']} "
+            f"scale={row['rule_score_scale']:g} "
             f"temp={row['behavior_temperature']:g} "
             f"lr={row['lr']:g} "
             f"non_top1={row['final_non_top1_selected_count']} "

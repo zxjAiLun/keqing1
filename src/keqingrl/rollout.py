@@ -47,6 +47,8 @@ class RolloutStep:
     native_legal_enumeration_version: int | None = None
     native_terminal_resolver_version: int | None = None
     rule_score_version: str | None = None
+    rule_score_scale: float | None = None
+    rule_score_scale_version: str | None = None
     reward_spec_version: str | None = None
     style_context_version: str | None = None
     is_autopilot: bool = False
@@ -163,6 +165,8 @@ def rollout_step_policy_input(
             "native_legal_enumeration_version": step.native_legal_enumeration_version,
             "native_terminal_resolver_version": step.native_terminal_resolver_version,
             "rule_score_version": step.rule_score_version,
+            "rule_score_scale": step.rule_score_scale,
+            "rule_score_scale_version": step.rule_score_scale_version,
             "reward_spec_version": step.reward_spec_version,
             "style_context_version": step.style_context_version,
         },

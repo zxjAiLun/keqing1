@@ -17,8 +17,10 @@ from keqingrl.metadata import (
     NATIVE_TERMINAL_RESOLVER_VERSION,
     OBSERVATION_CONTRACT_VERSION,
     REWARD_SPEC_VERSION,
+    RULE_SCORE_SCALE_VERSION,
     RULE_SCORE_VERSION,
     STYLE_CONTEXT_VERSION,
+    resolve_rule_score_scale_metadata,
 )
 from keqingrl.rollout import RolloutStep
 
@@ -171,6 +173,11 @@ def build_ppo_batch(
             "native_legal_enumeration_version": NATIVE_LEGAL_ENUMERATION_VERSION,
             "native_terminal_resolver_version": NATIVE_TERMINAL_RESOLVER_VERSION,
             "rule_score_version": RULE_SCORE_VERSION,
+            "rule_score_scale": _resolve_batch_rule_score_scale(
+                steps,
+                strict_metadata=strict_metadata,
+            ),
+            "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
             "reward_spec_version": REWARD_SPEC_VERSION,
             "style_context_version": STYLE_CONTEXT_VERSION,
         },
@@ -324,6 +331,19 @@ def _assert_rollout_action_order(steps: list[RolloutStep], *, strict_metadata: b
             strict_metadata=strict_metadata,
         )
         _assert_contract_version(
+            step.rule_score_scale_version,
+            RULE_SCORE_SCALE_VERSION,
+            "rule score scale contract",
+            strict_metadata=strict_metadata,
+        )
+        resolve_rule_score_scale_metadata(
+            {
+                "rule_score_scale": step.rule_score_scale,
+                "rule_score_scale_version": step.rule_score_scale_version,
+            },
+            strict_metadata=strict_metadata,
+        )
+        _assert_contract_version(
             step.reward_spec_version,
             REWARD_SPEC_VERSION,
             "reward spec contract",
@@ -335,6 +355,25 @@ def _assert_rollout_action_order(steps: list[RolloutStep], *, strict_metadata: b
             "style context contract",
             strict_metadata=strict_metadata,
         )
+
+
+def _resolve_batch_rule_score_scale(steps: list[RolloutStep], *, strict_metadata: bool) -> float:
+    scales = [
+        resolve_rule_score_scale_metadata(
+            {
+                "rule_score_scale": step.rule_score_scale,
+                "rule_score_scale_version": step.rule_score_scale_version,
+            },
+            strict_metadata=strict_metadata,
+        )
+        for step in steps
+    ]
+    first = scales[0]
+    mismatched = [scale for scale in scales if abs(float(scale) - float(first)) > 1e-9]
+    if mismatched:
+        unique = sorted({float(scale) for scale in scales})
+        raise ValueError(f"PPO batch mixes rule score scales: {unique}")
+    return float(first)
 
 
 def _assert_contract_version(

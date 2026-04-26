@@ -7,8 +7,11 @@ candidate_summary: `reports/keqingrl_discard_research_20260425_candidates_checkp
 episodes: `16`
 eval_episodes: `16`
 scales: `1.0,0.5,0.25,0.1`
+rule_score_scale_version: `keqingrl_rule_score_scale_v1`
 seed_registry_id: `base=202604260000:stride=1:count=16`
 seed_hash: `1a118258d3dc9335`
+eval_scope: `fixed-seed smoke; learner seat 0 only`
+eval_strength_note: `sanity check only; not duplicate strength evidence`
 
 ## Results
 

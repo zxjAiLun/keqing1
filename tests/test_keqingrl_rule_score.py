@@ -3,7 +3,11 @@ from __future__ import annotations
 import torch
 
 from keqingrl.actions import ActionSpec, ActionType
-from keqingrl.metadata import default_checkpoint_metadata, validate_checkpoint_metadata
+from keqingrl.metadata import (
+    RULE_SCORE_SCALE_VERSION,
+    default_checkpoint_metadata,
+    validate_checkpoint_metadata,
+)
 from keqingrl.rewards import RuleContext, build_rule_context
 from keqingrl.rule_score import RuleScoreConfig, prior_logits_from_raw_scores, smoothed_prior_probs
 
@@ -49,11 +53,14 @@ def test_action_spec_canonical_key_can_guard_rollout_order() -> None:
 def test_checkpoint_metadata_rejects_contract_version_mismatch() -> None:
     metadata = default_checkpoint_metadata()
     validate_checkpoint_metadata(metadata)
+    assert metadata["rule_score_scale"] == 1.0
+    assert metadata["rule_score_scale_version"] == RULE_SCORE_SCALE_VERSION
 
     for key, old_value in (
         ("action_contract_version", "old-action-contract"),
         ("reward_spec_version", "old-reward-spec"),
         ("style_context_version", "old-style-context"),
+        ("rule_score_scale_version", "old-rule-score-scale"),
     ):
         mismatched = dict(metadata)
         mismatched[key] = old_value
@@ -63,3 +70,15 @@ def test_checkpoint_metadata_rejects_contract_version_mismatch() -> None:
             assert key in str(exc)
         else:  # pragma: no cover - defensive
             raise AssertionError(f"expected checkpoint {key} mismatch")
+
+
+def test_checkpoint_metadata_rejects_rule_score_scale_mismatch() -> None:
+    metadata = default_checkpoint_metadata(rule_score_scale=0.25)
+
+    validate_checkpoint_metadata(metadata, expected_rule_score_scale=0.25)
+    try:
+        validate_checkpoint_metadata(metadata, expected_rule_score_scale=1.0)
+    except ValueError as exc:
+        assert "rule score scale mismatch" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected checkpoint rule_score_scale mismatch")

@@ -3,8 +3,11 @@
   "diagnostic_only": true,
   "episodes": 16,
   "eval_episodes": 16,
+  "eval_scope": "fixed-seed smoke; learner seat 0 only",
+  "eval_strength_note": "sanity check only; not duplicate strength evidence",
   "mode": "rule_score_scale_probe",
   "rerun_config_ids": null,
+  "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
   "scales": [
     1.0,
     0.5,
@@ -44,9 +47,11 @@
       "eval_learner_win_rate": 0.1875,
       "eval_mean_rank": 2.4375,
       "eval_rank_pt": -0.15625,
+      "eval_scope": "fixed-seed smoke; learner seat 0 only",
       "eval_seat_rotation": [
         0
       ],
+      "eval_strength_note": "sanity check only; not duplicate strength evidence",
       "fallback_rate_fail_closed": 0.0,
       "forced_terminal_missed_fail_closed": 0,
       "forced_terminal_preempt_count": 12,
@@ -69,6 +74,7 @@
       "rule_agreement": 1.0,
       "rule_kl_coef": 0.01,
       "rule_score_scale": 1.0,
+      "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
       "scaled_prior_margin_mean": 3.0001208782196045,
       "scaled_prior_margin_p50": 3.0,
       "seed_hash": "1a118258d3dc9335",
@@ -102,9 +108,11 @@
       "eval_learner_win_rate": 0.1875,
       "eval_mean_rank": 2.4375,
       "eval_rank_pt": -0.15625,
+      "eval_scope": "fixed-seed smoke; learner seat 0 only",
       "eval_seat_rotation": [
         0
       ],
+      "eval_strength_note": "sanity check only; not duplicate strength evidence",
       "fallback_rate_fail_closed": 0.0,
       "forced_terminal_missed_fail_closed": 0,
       "forced_terminal_preempt_count": 12,
@@ -127,6 +135,7 @@
       "rule_agreement": 1.0,
       "rule_kl_coef": 0.01,
       "rule_score_scale": 0.5,
+      "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
       "scaled_prior_margin_mean": 1.5000646114349365,
       "scaled_prior_margin_p50": 1.5,
       "seed_hash": "1a118258d3dc9335",
@@ -160,9 +169,11 @@
       "eval_learner_win_rate": 0.1875,
       "eval_mean_rank": 2.4375,
       "eval_rank_pt": -0.15625,
+      "eval_scope": "fixed-seed smoke; learner seat 0 only",
       "eval_seat_rotation": [
         0
       ],
+      "eval_strength_note": "sanity check only; not duplicate strength evidence",
       "fallback_rate_fail_closed": 0.0,
       "forced_terminal_missed_fail_closed": 0,
       "forced_terminal_preempt_count": 12,
@@ -185,6 +196,7 @@
       "rule_agreement": 1.0,
       "rule_kl_coef": 0.01,
       "rule_score_scale": 0.25,
+      "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
       "scaled_prior_margin_mean": 0.7500339150428772,
       "scaled_prior_margin_p50": 0.75,
       "seed_hash": "1a118258d3dc9335",
@@ -218,9 +230,11 @@
       "eval_learner_win_rate": 0.1875,
       "eval_mean_rank": 2.4375,
       "eval_rank_pt": -0.15625,
+      "eval_scope": "fixed-seed smoke; learner seat 0 only",
       "eval_seat_rotation": [
         0
       ],
+      "eval_strength_note": "sanity check only; not duplicate strength evidence",
       "fallback_rate_fail_closed": 0.0,
       "forced_terminal_missed_fail_closed": 0,
       "forced_terminal_preempt_count": 12,
@@ -243,6 +257,7 @@
       "rule_agreement": 1.0,
       "rule_kl_coef": 0.01,
       "rule_score_scale": 0.1,
+      "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
       "scaled_prior_margin_mean": 0.3000149428844452,
       "scaled_prior_margin_p50": 0.30000001192092896,
       "seed_hash": "1a118258d3dc9335",
@@ -276,9 +291,11 @@
       "eval_learner_win_rate": 0.1875,
       "eval_mean_rank": 2.4375,
       "eval_rank_pt": -0.15625,
+      "eval_scope": "fixed-seed smoke; learner seat 0 only",
       "eval_seat_rotation": [
         0
       ],
+      "eval_strength_note": "sanity check only; not duplicate strength evidence",
       "fallback_rate_fail_closed": 0.0,
       "forced_terminal_missed_fail_closed": 0,
       "forced_terminal_preempt_count": 12,
@@ -301,6 +318,7 @@
       "rule_agreement": 1.0,
       "rule_kl_coef": 0.05,
       "rule_score_scale": 1.0,
+      "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
       "scaled_prior_margin_mean": 3.000126600265503,
       "scaled_prior_margin_p50": 3.0,
       "seed_hash": "1a118258d3dc9335",
@@ -334,9 +352,11 @@
       "eval_learner_win_rate": 0.1875,
       "eval_mean_rank": 2.4375,
       "eval_rank_pt": -0.15625,
+      "eval_scope": "fixed-seed smoke; learner seat 0 only",
       "eval_seat_rotation": [
         0
       ],
+      "eval_strength_note": "sanity check only; not duplicate strength evidence",
       "fallback_rate_fail_closed": 0.0,
       "forced_terminal_missed_fail_closed": 0,
       "forced_terminal_preempt_count": 12,
@@ -359,6 +379,7 @@
       "rule_agreement": 1.0,
       "rule_kl_coef": 0.05,
       "rule_score_scale": 0.5,
+      "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
       "scaled_prior_margin_mean": 1.5000696182250977,
       "scaled_prior_margin_p50": 1.5,
       "seed_hash": "1a118258d3dc9335",
@@ -392,9 +413,11 @@
       "eval_learner_win_rate": 0.1875,
       "eval_mean_rank": 2.4375,
       "eval_rank_pt": -0.15625,
+      "eval_scope": "fixed-seed smoke; learner seat 0 only",
       "eval_seat_rotation": [
         0
       ],
+      "eval_strength_note": "sanity check only; not duplicate strength evidence",
       "fallback_rate_fail_closed": 0.0,
       "forced_terminal_missed_fail_closed": 0,
       "forced_terminal_preempt_count": 12,
@@ -417,6 +440,7 @@
       "rule_agreement": 1.0,
       "rule_kl_coef": 0.05,
       "rule_score_scale": 0.25,
+      "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
       "scaled_prior_margin_mean": 0.7500329613685608,
       "scaled_prior_margin_p50": 0.75,
       "seed_hash": "1a118258d3dc9335",
@@ -450,9 +474,11 @@
       "eval_learner_win_rate": 0.1875,
       "eval_mean_rank": 2.4375,
       "eval_rank_pt": -0.15625,
+      "eval_scope": "fixed-seed smoke; learner seat 0 only",
       "eval_seat_rotation": [
         0
       ],
+      "eval_strength_note": "sanity check only; not duplicate strength evidence",
       "fallback_rate_fail_closed": 0.0,
       "forced_terminal_missed_fail_closed": 0,
       "forced_terminal_preempt_count": 12,
@@ -475,6 +501,7 @@
       "rule_agreement": 1.0,
       "rule_kl_coef": 0.05,
       "rule_score_scale": 0.1,
+      "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
       "scaled_prior_margin_mean": 0.3000134527683258,
       "scaled_prior_margin_p50": 0.30000001192092896,
       "seed_hash": "1a118258d3dc9335",
@@ -508,9 +535,11 @@
       "eval_learner_win_rate": 0.1875,
       "eval_mean_rank": 2.4375,
       "eval_rank_pt": -0.15625,
+      "eval_scope": "fixed-seed smoke; learner seat 0 only",
       "eval_seat_rotation": [
         0
       ],
+      "eval_strength_note": "sanity check only; not duplicate strength evidence",
       "fallback_rate_fail_closed": 0.0,
       "forced_terminal_missed_fail_closed": 0,
       "forced_terminal_preempt_count": 12,
@@ -533,6 +562,7 @@
       "rule_agreement": 1.0,
       "rule_kl_coef": 0.0,
       "rule_score_scale": 1.0,
+      "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
       "scaled_prior_margin_mean": 3.000140905380249,
       "scaled_prior_margin_p50": 3.0,
       "seed_hash": "1a118258d3dc9335",
@@ -566,9 +596,11 @@
       "eval_learner_win_rate": 0.1875,
       "eval_mean_rank": 2.4375,
       "eval_rank_pt": -0.15625,
+      "eval_scope": "fixed-seed smoke; learner seat 0 only",
       "eval_seat_rotation": [
         0
       ],
+      "eval_strength_note": "sanity check only; not duplicate strength evidence",
       "fallback_rate_fail_closed": 0.0,
       "forced_terminal_missed_fail_closed": 0,
       "forced_terminal_preempt_count": 12,
@@ -591,6 +623,7 @@
       "rule_agreement": 1.0,
       "rule_kl_coef": 0.0,
       "rule_score_scale": 0.5,
+      "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
       "scaled_prior_margin_mean": 1.5000624656677246,
       "scaled_prior_margin_p50": 1.5,
       "seed_hash": "1a118258d3dc9335",
@@ -624,9 +657,11 @@
       "eval_learner_win_rate": 0.1875,
       "eval_mean_rank": 2.4375,
       "eval_rank_pt": -0.15625,
+      "eval_scope": "fixed-seed smoke; learner seat 0 only",
       "eval_seat_rotation": [
         0
       ],
+      "eval_strength_note": "sanity check only; not duplicate strength evidence",
       "fallback_rate_fail_closed": 0.0,
       "forced_terminal_missed_fail_closed": 0,
       "forced_terminal_preempt_count": 12,
@@ -649,6 +684,7 @@
       "rule_agreement": 1.0,
       "rule_kl_coef": 0.0,
       "rule_score_scale": 0.25,
+      "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
       "scaled_prior_margin_mean": 0.750035285949707,
       "scaled_prior_margin_p50": 0.75,
       "seed_hash": "1a118258d3dc9335",
@@ -682,9 +718,11 @@
       "eval_learner_win_rate": 0.1875,
       "eval_mean_rank": 2.4375,
       "eval_rank_pt": -0.15625,
+      "eval_scope": "fixed-seed smoke; learner seat 0 only",
       "eval_seat_rotation": [
         0
       ],
+      "eval_strength_note": "sanity check only; not duplicate strength evidence",
       "fallback_rate_fail_closed": 0.0,
       "forced_terminal_missed_fail_closed": 0,
       "forced_terminal_preempt_count": 12,
@@ -707,6 +745,7 @@
       "rule_agreement": 1.0,
       "rule_kl_coef": 0.0,
       "rule_score_scale": 0.1,
+      "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
       "scaled_prior_margin_mean": 0.30001160502433777,
       "scaled_prior_margin_p50": 0.30000001192092896,
       "seed_hash": "1a118258d3dc9335",

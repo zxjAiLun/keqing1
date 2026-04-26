@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 from pathlib import Path
 import sys
 from typing import Any, Sequence
@@ -19,7 +20,12 @@ if str(_REPO_ROOT) not in sys.path:
 from keqingrl import DiscardOnlyMahjongEnv, run_fixed_seed_evaluation_smoke
 from keqingrl.distribution import MaskedCategorical
 from keqingrl.learning_signal import batch_diagnostic_rows, seed_registry_hash
-from keqingrl.ppo import PPOLossBreakdown, compute_ppo_loss
+from keqingrl.metadata import (
+    RULE_SCORE_SCALE_VERSION,
+    default_checkpoint_metadata,
+    validate_checkpoint_metadata,
+)
+from keqingrl.ppo import PPOLossBreakdown, compute_ppo_loss, validate_ppo_batch_rule_score_scale
 from keqingrl.rule_score import smoothed_prior_probs
 from keqingrl.selfplay import build_episodes_ppo_batch, collect_selfplay_episodes
 from scripts.probe_keqingrl_sampling_diversity import (
@@ -33,8 +39,10 @@ from scripts.probe_keqingrl_sampling_diversity import (
     _write_json,
 )
 from scripts.run_keqingrl_fixed_online_bridge import _file_sha256, _loss_float, _policy_delta_stats
+from scripts.run_keqingrl_discard_research_sweep import _stable_json_hash, _to_jsonable
 from scripts.run_keqingrl_temperature_pilot import (
     _advantage_audit_rows,
+    _eval_scope,
     _eval_seed_registry,
     _eval_seed_registry_id,
     _iteration_seed,
@@ -61,9 +69,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--update-epochs", type=int, default=1)
     parser.add_argument("--update-epochs-values", type=int, nargs="+", default=None)
     parser.add_argument("--rule-kl-coef", type=float, default=0.001)
+    parser.add_argument("--rule-kl-coef-values", type=float, nargs="+", default=None)
     parser.add_argument("--entropy-coef", type=float, default=0.005)
     parser.add_argument("--value-coef", type=float, default=0.0)
     parser.add_argument("--rank-coef", type=float, default=0.0)
+    parser.add_argument("--delta-l2-coef-values", type=float, nargs="+", default=(0.0,))
+    parser.add_argument("--delta-clip-values", type=float, nargs="+", default=(0.0,))
+    parser.add_argument("--delta-clip-coef-values", type=float, nargs="+", default=(0.0,))
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--normalize-advantages", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed-base", type=int, default=202604300000)
@@ -77,6 +89,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=512)
     parser.add_argument("--gamma", type=float, default=1.0)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
+    parser.add_argument("--pass-min-top1-changed", type=float, default=0.02)
+    parser.add_argument("--pass-max-top1-changed", type=float, default=0.25)
+    parser.add_argument("--pass-max-tempered-kl", type=float, default=0.03)
+    parser.add_argument("--pass-max-tempered-clip", type=float, default=0.3)
+    parser.add_argument("--pass-max-untempered-clip", type=float, default=0.8)
+    parser.add_argument("--pass-max-eval-fourth", type=float, default=0.5)
+    parser.add_argument("--pass-max-eval-deal-in", type=float, default=0.25)
+    parser.add_argument("--adaptive-recovery-gate", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--recovery-max-extra-epochs", type=int, default=0)
+    parser.add_argument("--recovery-min-top1-changed", type=float, default=None)
+    parser.add_argument("--recovery-max-top1-changed", type=float, default=None)
+    parser.add_argument("--recovery-max-tempered-kl", type=float, default=None)
+    parser.add_argument("--recovery-max-tempered-clip", type=float, default=None)
+    parser.add_argument("--recovery-max-untempered-clip", type=float, default=None)
+    parser.add_argument("--save-final-checkpoint", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--device", default=None)
     return parser.parse_args()
 
@@ -90,9 +117,23 @@ def main() -> None:
     iteration_rows: list[dict[str, Any]] = []
     step_rows: list[dict[str, Any]] = []
     advantage_rows: list[dict[str, Any]] = []
+    checkpoint_rows: list[dict[str, Any]] = []
     config_id = 0
     update_epochs_values = _update_epochs_values(args)
     rule_score_scales = _rule_score_scales(args)
+    rule_kl_coef_values = _rule_kl_coef_values(args)
+    delta_l2_coef_values = _nonnegative_float_values(
+        args.delta_l2_coef_values,
+        name="delta_l2_coef",
+    )
+    delta_clip_values = _nonnegative_float_values(
+        args.delta_clip_values,
+        name="delta_clip",
+    )
+    delta_clip_coef_values = _nonnegative_float_values(
+        args.delta_clip_coef_values,
+        name="delta_clip_coef",
+    )
 
     for candidate in candidates:
         source_policy = _load_policy(candidate, device)
@@ -102,23 +143,32 @@ def main() -> None:
                 for lr in args.lrs:
                     for update_epochs in update_epochs_values:
                         for clip_eps in args.clip_eps_values:
-                            config_id = _run_tempered_ratio_config(
-                                args,
-                                candidate,
-                                source_policy,
-                                opponent_pool,
-                                device,
-                                config_id,
-                                rule_score_scale=float(rule_score_scale),
-                                temperature=float(temperature),
-                                lr=float(lr),
-                                update_epochs=int(update_epochs),
-                                clip_eps=float(clip_eps),
-                                summary_rows=summary_rows,
-                                iteration_rows=iteration_rows,
-                                step_rows=step_rows,
-                                advantage_rows=advantage_rows,
-                            )
+                            for rule_kl_coef in rule_kl_coef_values:
+                                for delta_l2_coef in delta_l2_coef_values:
+                                    for delta_clip in delta_clip_values:
+                                        for delta_clip_coef in delta_clip_coef_values:
+                                            config_id = _run_tempered_ratio_config(
+                                                args,
+                                                candidate,
+                                                source_policy,
+                                                opponent_pool,
+                                                device,
+                                                config_id,
+                                                rule_score_scale=float(rule_score_scale),
+                                                temperature=float(temperature),
+                                                lr=float(lr),
+                                                update_epochs=int(update_epochs),
+                                                clip_eps=float(clip_eps),
+                                                rule_kl_coef=float(rule_kl_coef),
+                                                delta_l2_coef=float(delta_l2_coef),
+                                                delta_clip=float(delta_clip),
+                                                delta_clip_coef=float(delta_clip_coef),
+                                                summary_rows=summary_rows,
+                                                iteration_rows=iteration_rows,
+                                                step_rows=step_rows,
+                                                advantage_rows=advantage_rows,
+                                                checkpoint_rows=checkpoint_rows,
+                                            )
 
     payload = {
         "mode": "tempered_ratio_ppo_diagnostic",
@@ -126,13 +176,23 @@ def main() -> None:
         "candidate_summary": str(args.candidate_summary),
         "source_config_ids": [int(value) for value in args.source_config_ids],
         "rule_score_scales": [float(value) for value in rule_score_scales],
+        "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
         "temperatures": [float(value) for value in args.temperatures],
         "lrs": [float(value) for value in args.lrs],
         "clip_eps_values": [float(value) for value in args.clip_eps_values],
         "update_epochs_values": [int(value) for value in update_epochs_values],
+        "rule_kl_coef_values": [float(value) for value in rule_kl_coef_values],
+        "delta_l2_coef_values": [float(value) for value in delta_l2_coef_values],
+        "delta_clip_values": [float(value) for value in delta_clip_values],
+        "delta_clip_coef_values": [float(value) for value in delta_clip_coef_values],
+        "pass_criteria": _pass_criteria(args),
+        "adaptive_recovery": _adaptive_recovery_config(args),
         "iteration_count": int(args.iterations),
         "episodes": int(args.episodes),
+        "eval_scope": _eval_scope(args),
+        "eval_strength_note": "sanity check only; not duplicate strength evidence",
         "summaries": summary_rows,
+        "checkpoints": checkpoint_rows,
         "iteration_rows": iteration_rows,
         "advantage_audit": advantage_rows,
     }
@@ -141,6 +201,7 @@ def main() -> None:
     _write_csv(args.output_dir / "iterations.csv", iteration_rows)
     _write_csv(args.output_dir / "batch_steps.csv", step_rows)
     _write_csv(args.output_dir / "advantage_audit.csv", advantage_rows)
+    _write_csv(args.output_dir / "checkpoint_summary.csv", checkpoint_rows)
     (args.output_dir / "summary.md").write_text(_summary_markdown(args, summary_rows), encoding="utf-8")
     print((args.output_dir / "summary.md").read_text(encoding="utf-8"))
 
@@ -158,10 +219,15 @@ def _run_tempered_ratio_config(
     lr: float,
     update_epochs: int,
     clip_eps: float,
+    rule_kl_coef: float,
+    delta_l2_coef: float,
+    delta_clip: float,
+    delta_clip_coef: float,
     summary_rows: list[dict[str, Any]],
     iteration_rows: list[dict[str, Any]],
     step_rows: list[dict[str, Any]],
     advantage_rows: list[dict[str, Any]],
+    checkpoint_rows: list[dict[str, Any]],
 ) -> int:
     policy = copy.deepcopy(source_policy).to(device)
     policy.rule_score_scale = float(rule_score_scale)
@@ -197,6 +263,8 @@ def _run_tempered_ratio_config(
         _assert_behavior_temperature(diagnostic_rows, float(temperature))
         pre_stats = _policy_delta_stats(policy, batch)
         pre_margin_stats = _effective_margin_stats(policy, batch)
+        iteration_pre_state = copy.deepcopy(policy.state_dict())
+        iteration_pre_optimizer_state = copy.deepcopy(optimizer.state_dict())
         for _epoch in range(int(update_epochs)):
             _tempered_ppo_update(
                 policy,
@@ -207,30 +275,54 @@ def _run_tempered_ratio_config(
                 value_coef=float(args.value_coef),
                 entropy_coef=float(args.entropy_coef),
                 rank_coef=float(args.rank_coef),
-                rule_kl_coef=float(args.rule_kl_coef),
+                rule_kl_coef=float(rule_kl_coef),
+                delta_l2_coef=float(delta_l2_coef),
+                delta_clip=float(delta_clip),
+                delta_clip_coef=float(delta_clip_coef),
                 normalize_advantages=bool(args.normalize_advantages),
                 max_grad_norm=float(args.max_grad_norm) if args.max_grad_norm is not None else None,
             )
-        tempered_post_loss = _compute_tempered_ppo_loss(
+        tempered_post_loss, untempered_post_loss, post_stats, post_margin_stats = _post_update_metrics(
             policy,
             batch,
+            args,
             temperature=float(temperature),
             clip_eps=float(clip_eps),
-            value_coef=float(args.value_coef),
-            entropy_coef=float(args.entropy_coef),
-            rank_coef=float(args.rank_coef),
-            rule_kl_coef=float(args.rule_kl_coef),
-            normalize_advantages=bool(args.normalize_advantages),
+            rule_kl_coef=float(rule_kl_coef),
+            delta_l2_coef=float(delta_l2_coef),
+            delta_clip=float(delta_clip),
+            delta_clip_coef=float(delta_clip_coef),
         )
-        untempered_post_loss = _compute_untempered_loss(policy, batch, args, clip_eps=float(clip_eps))
-        post_stats = _policy_delta_stats(policy, batch)
-        post_margin_stats = _effective_margin_stats(policy, batch)
+        recovery_result = _apply_adaptive_recovery_gate(
+            policy,
+            batch,
+            optimizer,
+            args,
+            temperature=float(temperature),
+            clip_eps=float(clip_eps),
+            rule_kl_coef=float(rule_kl_coef),
+            delta_l2_coef=float(delta_l2_coef),
+            delta_clip=float(delta_clip),
+            delta_clip_coef=float(delta_clip_coef),
+            tempered_post_loss=tempered_post_loss,
+            untempered_post_loss=untempered_post_loss,
+            post_stats=post_stats,
+            post_margin_stats=post_margin_stats,
+            iteration_pre_state=iteration_pre_state,
+            iteration_pre_optimizer_state=iteration_pre_optimizer_state,
+            base_update_epochs=int(update_epochs),
+        )
+        tempered_post_loss = recovery_result["tempered_post_loss"]
+        untempered_post_loss = recovery_result["untempered_post_loss"]
+        post_stats = recovery_result["post_stats"]
+        post_margin_stats = recovery_result["post_margin_stats"]
         iter_row = {
             **_candidate_summary(candidate),
             "pilot_config_id": int(config_id),
             "iteration": int(iteration),
             "ratio_mode": "tempered_current_logits",
             "rule_score_scale": float(rule_score_scale),
+            "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
             "behavior_temperature": float(temperature),
             "lr": float(lr),
             "clip_eps": float(clip_eps),
@@ -240,11 +332,28 @@ def _run_tempered_ratio_config(
             "seed_registry_id": _iteration_seed_registry_id(args, config_id, iteration),
             "seed_hash": seed_registry_hash(_iteration_seed_registry(args, config_id, iteration)),
             "update_epochs": int(update_epochs),
-            "rule_kl_coef": float(args.rule_kl_coef),
+            "rule_kl_coef": float(rule_kl_coef),
+            "delta_l2_coef": float(delta_l2_coef),
+            "delta_clip": float(delta_clip),
+            "delta_clip_coef": float(delta_clip_coef),
             "entropy_coef": float(args.entropy_coef),
             "value_coef": float(args.value_coef),
             "rank_coef": float(args.rank_coef),
             "max_grad_norm": float(args.max_grad_norm) if args.max_grad_norm is not None else "",
+            "adaptive_recovery_enabled": bool(args.adaptive_recovery_gate),
+            "recovery_extra_epochs": int(recovery_result["extra_epochs"]),
+            "recovery_attempted_epochs": int(recovery_result["attempted_epochs"]),
+            "recovery_stop_reason": str(recovery_result["stop_reason"]),
+            "recovery_rejected_epochs": int(recovery_result["rejected_epochs"]),
+            "recovery_pre_top1_changed": float(recovery_result["pre_top1_changed"]),
+            "recovery_pre_tempered_kl": float(recovery_result["pre_tempered_kl"]),
+            "recovery_pre_tempered_clip": float(recovery_result["pre_tempered_clip"]),
+            "recovery_pre_untempered_clip": float(recovery_result["pre_untempered_clip"]),
+            "recovery_min_top1_changed": _recovery_min_top1_changed(args),
+            "recovery_max_top1_changed": _recovery_max_top1_changed(args),
+            "recovery_max_tempered_kl": _recovery_max_tempered_kl(args),
+            "recovery_max_tempered_clip": _recovery_max_tempered_clip(args),
+            "recovery_max_untempered_clip": _recovery_max_untempered_clip(args),
             **diagnostic_summary,
             **sampling_summary,
             **{f"untempered_pre_{key}": value for key, value in pre_stats.items()},
@@ -268,10 +377,15 @@ def _run_tempered_ratio_config(
                     "iteration": int(iteration),
                     "ratio_mode": "tempered_current_logits",
                     "rule_score_scale": float(rule_score_scale),
+                    "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
                     "behavior_temperature": float(temperature),
                     "lr": float(lr),
                     "clip_eps": float(clip_eps),
                     "update_epochs": int(update_epochs),
+                    "rule_kl_coef": float(rule_kl_coef),
+                    "delta_l2_coef": float(delta_l2_coef),
+                    "delta_clip": float(delta_clip),
+                    "delta_clip_coef": float(delta_clip_coef),
                     **row,
                 }
             )
@@ -283,10 +397,15 @@ def _run_tempered_ratio_config(
                     "iteration": int(iteration),
                     "ratio_mode": "tempered_current_logits",
                     "rule_score_scale": float(rule_score_scale),
+                    "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
                     "behavior_temperature": float(temperature),
                     "lr": float(lr),
                     "clip_eps": float(clip_eps),
                     "update_epochs": int(update_epochs),
+                    "rule_kl_coef": float(rule_kl_coef),
+                    "delta_l2_coef": float(delta_l2_coef),
+                    "delta_clip": float(delta_clip),
+                    "delta_clip_coef": float(delta_clip_coef),
                     **row,
                 }
             )
@@ -296,13 +415,18 @@ def _run_tempered_ratio_config(
             f"scale={float(rule_score_scale):g} "
             f"temp={float(temperature):g} lr={float(lr):g} "
             f"epochs={int(update_epochs)} clip={float(clip_eps):g} "
+            f"rule_kl={float(rule_kl_coef):g} "
+            f"delta_l2={float(delta_l2_coef):g} "
+            f"delta_clip={float(delta_clip):g}/{float(delta_clip_coef):g} "
             f"iter={iteration + 1}/{args.iterations} "
             f"non_top1={sampling_summary['non_top1_selected_count']} "
             f"non_top1_pos={sampling_summary['non_top1_positive_advantage_count']} "
             f"top1_changed={post_stats['top1_action_changed_rate']:.6g} "
             f"t_kl={_loss_float(tempered_post_loss.approx_kl):.6g} "
             f"t_clip={_loss_float(tempered_post_loss.clip_fraction):.6g} "
-            f"delta_max={post_stats['neural_delta_abs_max']:.6g}",
+            f"delta_max={post_stats['neural_delta_abs_max']:.6g} "
+            f"recovery_extra={int(recovery_result['extra_epochs'])} "
+            f"recovery_stop={recovery_result['stop_reason']}",
             flush=True,
         )
 
@@ -327,18 +451,27 @@ def _run_tempered_ratio_config(
             "pilot_config_id": int(config_id),
             "ratio_mode": "tempered_current_logits",
             "rule_score_scale": float(rule_score_scale),
+            "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
             "behavior_temperature": float(temperature),
             "lr": float(lr),
             "clip_eps": float(clip_eps),
+            "rule_kl_coef": float(rule_kl_coef),
+            "delta_l2_coef": float(delta_l2_coef),
+            "delta_clip": float(delta_clip),
+            "delta_clip_coef": float(delta_clip_coef),
             "update_epochs": int(update_epochs),
             "iterations": int(args.iterations),
             "episodes": int(args.episodes),
             "eval_episodes": int(args.eval_episodes),
             "eval_seed_registry_id": _eval_seed_registry_id(args),
             "eval_seed_hash": seed_registry_hash(_eval_seed_registry(args)),
+            "eval_scope": _eval_scope(args),
+            "eval_strength_note": "sanity check only; not duplicate strength evidence",
             "source_checkpoint_sha256": candidate.get("checkpoint_sha256")
             or _file_sha256(Path(candidate["checkpoint_path"])),
             **{f"final_{key}": value for key, value in final_row.items() if _summary_metric_key(key)},
+            "final_recovery_stop_reason": final_row.get("recovery_stop_reason", ""),
+            "adaptive_recovery_enabled": bool(args.adaptive_recovery_gate),
             "eval_rank_pt": eval_metrics.rank_pt,
             "eval_mean_rank": eval_metrics.average_rank,
             "eval_fourth_rate": eval_metrics.fourth_rate,
@@ -349,7 +482,342 @@ def _run_tempered_ratio_config(
             "forced_terminal_missed_fail_closed": eval_metrics.forced_terminal_missed_fail_closed,
         }
     )
+    _annotate_step38a_status(summary_rows[-1], args)
+    if bool(args.save_final_checkpoint):
+        checkpoint_rows.append(
+            _save_tempered_ratio_checkpoint(
+                args,
+                candidate,
+                policy,
+                optimizer,
+                config_id=int(config_id),
+                rule_score_scale=float(rule_score_scale),
+                temperature=float(temperature),
+                lr=float(lr),
+                update_epochs=int(update_epochs),
+                clip_eps=float(clip_eps),
+                rule_kl_coef=float(rule_kl_coef),
+                delta_l2_coef=float(delta_l2_coef),
+                delta_clip=float(delta_clip),
+                delta_clip_coef=float(delta_clip_coef),
+                summary_row=summary_rows[-1],
+            )
+        )
     return int(config_id) + 1
+
+
+def _save_tempered_ratio_checkpoint(
+    args: argparse.Namespace,
+    candidate: dict[str, Any],
+    policy,
+    optimizer,
+    *,
+    config_id: int,
+    rule_score_scale: float,
+    temperature: float,
+    lr: float,
+    update_epochs: int,
+    clip_eps: float,
+    rule_kl_coef: float,
+    delta_l2_coef: float,
+    delta_clip: float,
+    delta_clip_coef: float,
+    summary_row: dict[str, Any],
+) -> dict[str, Any]:
+    checkpoint_dir = args.output_dir / f"checkpoint_config_{config_id:03d}"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    source_config = json.loads(Path(candidate["config_path"]).read_text(encoding="utf-8"))
+    ppo_config_hash = _stable_json_hash(
+        {
+            "mode": "tempered_ratio_adaptive_recovery_gate",
+            "source_config_id": int(candidate["source_config_id"]),
+            "rerun_config_id": int(candidate["rerun_config_id"]),
+            "rule_score_scale": float(rule_score_scale),
+            "behavior_temperature": float(temperature),
+            "lr": float(lr),
+            "update_epochs": int(update_epochs),
+            "clip_eps": float(clip_eps),
+            "rule_kl_coef": float(rule_kl_coef),
+            "delta_l2_coef": float(delta_l2_coef),
+            "delta_clip": float(delta_clip),
+            "delta_clip_coef": float(delta_clip_coef),
+            "adaptive_recovery": _adaptive_recovery_config(args),
+            "iterations": int(args.iterations),
+            "episodes": int(args.episodes),
+            "seed_base": int(args.seed_base),
+            "torch_seed_base": int(args.torch_seed_base),
+        }
+    )
+    contract_metadata = default_checkpoint_metadata(
+        rule_score_scale=float(rule_score_scale),
+        gamma=float(args.gamma),
+        gae_lambda=float(args.gae_lambda),
+        ppo_config_hash=ppo_config_hash,
+    )
+    validate_checkpoint_metadata(contract_metadata, expected_rule_score_scale=float(rule_score_scale))
+    config_payload = {
+        **source_config,
+        "source_type": "tempered_ratio_adaptive_recovery_gate",
+        "source_config_id": int(candidate["source_config_id"]),
+        "rerun_config_id": int(candidate["rerun_config_id"]),
+        "parent_checkpoint_path": candidate.get("checkpoint_path"),
+        "parent_checkpoint_sha256": candidate.get("checkpoint_sha256")
+        or _file_sha256(Path(candidate["checkpoint_path"])),
+        "rule_score_scale": float(rule_score_scale),
+        "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
+        "tempered_ratio_config": {
+            "behavior_temperature": float(temperature),
+            "lr": float(lr),
+            "update_epochs": int(update_epochs),
+            "clip_eps": float(clip_eps),
+            "rule_kl_coef": float(rule_kl_coef),
+            "delta_l2_coef": float(delta_l2_coef),
+            "delta_clip": float(delta_clip),
+            "delta_clip_coef": float(delta_clip_coef),
+            "entropy_coef": float(args.entropy_coef),
+            "value_coef": float(args.value_coef),
+            "rank_coef": float(args.rank_coef),
+            "adaptive_recovery": _adaptive_recovery_config(args),
+        },
+        "run": {
+            **dict(source_config.get("run", {})),
+            "iterations": int(args.iterations),
+            "rollout_episodes": int(args.episodes),
+            "update_epochs": int(update_epochs),
+            "eval_episodes": int(args.eval_episodes),
+            "max_steps": int(args.max_steps),
+            "clip_eps": float(clip_eps),
+            "value_coef": float(args.value_coef),
+            "rank_coef": float(args.rank_coef),
+            "gamma": float(args.gamma),
+            "gae_lambda": float(args.gae_lambda),
+            "max_grad_norm": float(args.max_grad_norm) if args.max_grad_norm is not None else None,
+        },
+    }
+    config_path = checkpoint_dir / "config.json"
+    policy_path = checkpoint_dir / "policy_final.pt"
+    optimizer_path = checkpoint_dir / "optimizer_final.pt"
+    _write_json(config_path, config_payload)
+    torch.save(
+        {
+            "policy_state_dict": policy.state_dict(),
+            "config": config_payload,
+            "contract_metadata": contract_metadata,
+            "rule_score_scale": contract_metadata["rule_score_scale"],
+            "rule_score_scale_version": contract_metadata["rule_score_scale_version"],
+            "summary": _to_jsonable(summary_row),
+        },
+        policy_path,
+    )
+    torch.save(
+        {
+            "optimizer_state_dict": optimizer.state_dict(),
+            "config": config_payload,
+        },
+        optimizer_path,
+    )
+    return {
+        "config_id": int(config_id),
+        "rerun_config_id": int(candidate["rerun_config_id"]),
+        "source_config_id": int(candidate["source_config_id"]),
+        "source_report": candidate.get("source_report"),
+        "config_key": json.dumps(config_payload.get("config_key", {}), sort_keys=True, separators=(",", ":")),
+        "config_key_label": f"adaptive_gate/{candidate.get('config_key_label', '')}",
+        "checkpoint_path": str(policy_path),
+        "checkpoint_sha256": _file_sha256(policy_path),
+        "config_path": str(config_path),
+        "optimizer_path": str(optimizer_path),
+        "optimizer_sha256": _file_sha256(optimizer_path),
+        "rule_score_scale": float(rule_score_scale),
+        "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
+        "top1_action_changed_rate": float(summary_row["final_untempered_post_top1_action_changed_rate"]),
+        "rule_agreement": float(summary_row["final_untempered_post_rule_agreement"]),
+        "neural_delta_abs_mean": float(summary_row["final_untempered_post_neural_delta_abs_mean"]),
+        "neural_delta_abs_max": float(summary_row["final_untempered_post_neural_delta_abs_max"]),
+        "approx_kl": float(summary_row["final_tempered_post_update_approx_kl"]),
+        "clip_fraction": float(summary_row["final_tempered_post_update_clip_fraction"]),
+        "eval_rank_pt": float(summary_row["eval_rank_pt"]),
+        "eval_mean_rank": float(summary_row["eval_mean_rank"]),
+        "eval_fourth_rate": float(summary_row["eval_fourth_rate"]),
+        "eval_learner_deal_in_rate": float(summary_row["eval_learner_deal_in_rate"]),
+    }
+
+
+def _post_update_metrics(
+    policy,
+    batch,
+    args: argparse.Namespace,
+    *,
+    temperature: float,
+    clip_eps: float,
+    rule_kl_coef: float,
+    delta_l2_coef: float,
+    delta_clip: float,
+    delta_clip_coef: float,
+) -> tuple[PPOLossBreakdown, PPOLossBreakdown, dict[str, float], dict[str, float]]:
+    tempered_post_loss = _compute_tempered_ppo_loss(
+        policy,
+        batch,
+        temperature=float(temperature),
+        clip_eps=float(clip_eps),
+        value_coef=float(args.value_coef),
+        entropy_coef=float(args.entropy_coef),
+        rank_coef=float(args.rank_coef),
+        rule_kl_coef=float(rule_kl_coef),
+        delta_l2_coef=float(delta_l2_coef),
+        delta_clip=float(delta_clip),
+        delta_clip_coef=float(delta_clip_coef),
+        normalize_advantages=bool(args.normalize_advantages),
+    )
+    untempered_post_loss = _compute_untempered_loss(
+        policy,
+        batch,
+        args,
+        clip_eps=float(clip_eps),
+        rule_kl_coef=float(rule_kl_coef),
+    )
+    post_stats = _policy_delta_stats(policy, batch)
+    post_margin_stats = _effective_margin_stats(policy, batch)
+    return tempered_post_loss, untempered_post_loss, post_stats, post_margin_stats
+
+
+def _apply_adaptive_recovery_gate(
+    policy,
+    batch,
+    optimizer,
+    args: argparse.Namespace,
+    *,
+    temperature: float,
+    clip_eps: float,
+    rule_kl_coef: float,
+    delta_l2_coef: float,
+    delta_clip: float,
+    delta_clip_coef: float,
+    tempered_post_loss: PPOLossBreakdown,
+    untempered_post_loss: PPOLossBreakdown,
+    post_stats: dict[str, float],
+    post_margin_stats: dict[str, float],
+    iteration_pre_state: dict[str, Any],
+    iteration_pre_optimizer_state: dict[str, Any],
+    base_update_epochs: int,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "tempered_post_loss": tempered_post_loss,
+        "untempered_post_loss": untempered_post_loss,
+        "post_stats": post_stats,
+        "post_margin_stats": post_margin_stats,
+        "extra_epochs": 0,
+        "attempted_epochs": 0,
+        "rejected_epochs": 0,
+        "stop_reason": "disabled" if not bool(args.adaptive_recovery_gate) else "not_needed",
+        "pre_top1_changed": float(post_stats["top1_action_changed_rate"]),
+        "pre_tempered_kl": _loss_float(tempered_post_loss.approx_kl),
+        "pre_tempered_clip": _loss_float(tempered_post_loss.clip_fraction),
+        "pre_untempered_clip": _loss_float(untempered_post_loss.clip_fraction),
+    }
+    if not bool(args.adaptive_recovery_gate):
+        return result
+    max_extra_epochs = int(args.recovery_max_extra_epochs)
+    if float(post_stats["top1_action_changed_rate"]) > _recovery_max_top1_changed(
+        args
+    ) or not _recovery_state_is_stable(tempered_post_loss, untempered_post_loss, args):
+        policy.load_state_dict(iteration_pre_state)
+        optimizer.load_state_dict(iteration_pre_optimizer_state)
+        rollback_metrics = _post_update_metrics(
+            policy,
+            batch,
+            args,
+            temperature=float(temperature),
+            clip_eps=float(clip_eps),
+            rule_kl_coef=float(rule_kl_coef),
+            delta_l2_coef=float(delta_l2_coef),
+            delta_clip=float(delta_clip),
+            delta_clip_coef=float(delta_clip_coef),
+        )
+        (
+            result["tempered_post_loss"],
+            result["untempered_post_loss"],
+            result["post_stats"],
+            result["post_margin_stats"],
+        ) = rollback_metrics
+        result["rejected_epochs"] = int(result["rejected_epochs"]) + int(base_update_epochs)
+        result["stop_reason"] = "base_rejected_unstable_or_overmove"
+        return result
+    if max_extra_epochs <= 0:
+        result["stop_reason"] = "no_budget"
+        return result
+    if float(post_stats["top1_action_changed_rate"]) >= _recovery_min_top1_changed(args):
+        return result
+
+    for _extra_epoch in range(max_extra_epochs):
+        previous_state = copy.deepcopy(policy.state_dict())
+        previous_optimizer_state = copy.deepcopy(optimizer.state_dict())
+        previous_metrics = (
+            result["tempered_post_loss"],
+            result["untempered_post_loss"],
+            result["post_stats"],
+            result["post_margin_stats"],
+        )
+        result["attempted_epochs"] = int(result["attempted_epochs"]) + 1
+        _tempered_ppo_update(
+            policy,
+            optimizer,
+            batch,
+            temperature=float(temperature),
+            clip_eps=float(clip_eps),
+            value_coef=float(args.value_coef),
+            entropy_coef=float(args.entropy_coef),
+            rank_coef=float(args.rank_coef),
+            rule_kl_coef=float(rule_kl_coef),
+            delta_l2_coef=float(delta_l2_coef),
+            delta_clip=float(delta_clip),
+            delta_clip_coef=float(delta_clip_coef),
+            normalize_advantages=bool(args.normalize_advantages),
+            max_grad_norm=float(args.max_grad_norm) if args.max_grad_norm is not None else None,
+        )
+        candidate_metrics = _post_update_metrics(
+            policy,
+            batch,
+            args,
+            temperature=float(temperature),
+            clip_eps=float(clip_eps),
+            rule_kl_coef=float(rule_kl_coef),
+            delta_l2_coef=float(delta_l2_coef),
+            delta_clip=float(delta_clip),
+            delta_clip_coef=float(delta_clip_coef),
+        )
+        candidate_top1 = float(candidate_metrics[2]["top1_action_changed_rate"])
+        if candidate_top1 > _recovery_max_top1_changed(args) or not _recovery_state_is_stable(
+            candidate_metrics[0],
+            candidate_metrics[1],
+            args,
+        ):
+            policy.load_state_dict(previous_state)
+            optimizer.load_state_dict(previous_optimizer_state)
+            (
+                result["tempered_post_loss"],
+                result["untempered_post_loss"],
+                result["post_stats"],
+                result["post_margin_stats"],
+            ) = previous_metrics
+            result["rejected_epochs"] = int(result["rejected_epochs"]) + 1
+            result["stop_reason"] = "rejected_unstable_or_overmove"
+            break
+
+        (
+            result["tempered_post_loss"],
+            result["untempered_post_loss"],
+            result["post_stats"],
+            result["post_margin_stats"],
+        ) = candidate_metrics
+        result["extra_epochs"] = int(result["extra_epochs"]) + 1
+        if candidate_top1 >= _recovery_min_top1_changed(args):
+            result["stop_reason"] = "target_reached"
+            break
+    else:
+        result["stop_reason"] = "budget_exhausted"
+
+    return result
 
 
 def _tempered_ppo_update(
@@ -363,6 +831,9 @@ def _tempered_ppo_update(
     entropy_coef: float,
     rank_coef: float,
     rule_kl_coef: float,
+    delta_l2_coef: float,
+    delta_clip: float,
+    delta_clip_coef: float,
     normalize_advantages: bool,
     max_grad_norm: float | None,
 ) -> PPOLossBreakdown:
@@ -376,6 +847,9 @@ def _tempered_ppo_update(
         entropy_coef=entropy_coef,
         rank_coef=rank_coef,
         rule_kl_coef=rule_kl_coef,
+        delta_l2_coef=delta_l2_coef,
+        delta_clip=delta_clip,
+        delta_clip_coef=delta_clip_coef,
         normalize_advantages=normalize_advantages,
     )
     losses.total_loss.backward()
@@ -395,10 +869,14 @@ def _compute_tempered_ppo_loss(
     entropy_coef: float,
     rank_coef: float,
     rule_kl_coef: float,
+    delta_l2_coef: float,
+    delta_clip: float,
+    delta_clip_coef: float,
     normalize_advantages: bool,
 ) -> PPOLossBreakdown:
     if float(temperature) <= 0.0:
         raise ValueError(f"temperature must be positive, got {temperature}")
+    validate_ppo_batch_rule_score_scale(policy, batch, strict_metadata=True)
     output = policy(batch.policy_input)
     mask = batch.policy_input.legal_action_mask.bool()
     tempered_logits = (output.action_logits / float(temperature)).masked_fill(
@@ -439,6 +917,16 @@ def _compute_tempered_ppo_loss(
     if rule_kl is not None and rule_kl_coef > 0.0:
         total_loss = total_loss + float(rule_kl_coef) * rule_kl
 
+    delta_l2, delta_clip_penalty = _delta_regularization_terms(
+        output,
+        batch,
+        delta_clip=float(delta_clip),
+    )
+    if delta_l2 is not None and delta_l2_coef > 0.0:
+        total_loss = total_loss + float(delta_l2_coef) * delta_l2
+    if delta_clip_penalty is not None and delta_clip_coef > 0.0:
+        total_loss = total_loss + float(delta_clip_coef) * delta_clip_penalty
+
     avg_abs_neural_delta, delta_norm = _delta_metrics(output, batch)
     rule_agreement = _untempered_rule_agreement(output, batch)
     return PPOLossBreakdown(
@@ -461,7 +949,14 @@ def _compute_tempered_ppo_loss(
     )
 
 
-def _compute_untempered_loss(policy, batch, args: argparse.Namespace, *, clip_eps: float):
+def _compute_untempered_loss(
+    policy,
+    batch,
+    args: argparse.Namespace,
+    *,
+    clip_eps: float,
+    rule_kl_coef: float,
+):
     with torch.no_grad():
         return compute_ppo_loss(
             policy,
@@ -470,7 +965,7 @@ def _compute_untempered_loss(policy, batch, args: argparse.Namespace, *, clip_ep
             value_coef=float(args.value_coef),
             entropy_coef=float(args.entropy_coef),
             rank_coef=float(args.rank_coef),
-            rule_kl_coef=float(args.rule_kl_coef),
+            rule_kl_coef=float(rule_kl_coef),
             normalize_advantages=bool(args.normalize_advantages),
         )
 
@@ -565,6 +1060,27 @@ def _delta_metrics(output, batch) -> tuple[torch.Tensor | None, torch.Tensor | N
     return legal_delta.abs().mean(), legal_delta.pow(2).mean().sqrt()
 
 
+def _delta_regularization_terms(
+    output,
+    batch,
+    *,
+    delta_clip: float,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    neural_delta = output.aux.get("neural_delta")
+    if neural_delta is None:
+        return None, None
+    mask = batch.policy_input.legal_action_mask.bool()
+    legal_delta = neural_delta.masked_select(mask)
+    if legal_delta.numel() == 0:
+        return None, None
+    delta_l2 = legal_delta.pow(2).mean()
+    if float(delta_clip) <= 0.0:
+        delta_clip_penalty = torch.zeros((), device=legal_delta.device, dtype=legal_delta.dtype)
+    else:
+        delta_clip_penalty = (legal_delta.abs() - float(delta_clip)).clamp_min(0.0).pow(2).mean()
+    return delta_l2, delta_clip_penalty
+
+
 def _assert_behavior_temperature(rows: Sequence[dict[str, Any]], expected: float) -> None:
     temperatures = {
         float(row["behavior_temperature"])
@@ -592,6 +1108,120 @@ def _rule_score_scales(args: argparse.Namespace) -> tuple[float, ...]:
     if any(value < 0.0 for value in values):
         raise ValueError(f"rule score scales must be non-negative, got {values}")
     return values
+
+
+def _rule_kl_coef_values(args: argparse.Namespace) -> tuple[float, ...]:
+    raw_values = args.rule_kl_coef_values
+    values = (
+        (float(args.rule_kl_coef),)
+        if raw_values is None
+        else tuple(float(value) for value in raw_values)
+    )
+    if not values:
+        raise ValueError("rule_kl_coef matrix must not be empty")
+    if any(value < 0.0 for value in values):
+        raise ValueError(f"rule_kl_coef values must be non-negative, got {values}")
+    return values
+
+
+def _nonnegative_float_values(values: Sequence[float], *, name: str) -> tuple[float, ...]:
+    clean = tuple(float(value) for value in values)
+    if not clean:
+        raise ValueError(f"{name} matrix must not be empty")
+    if any(value < 0.0 for value in clean):
+        raise ValueError(f"{name} values must be non-negative, got {clean}")
+    return clean
+
+
+def _pass_criteria(args: argparse.Namespace) -> dict[str, float]:
+    return {
+        "min_top1_changed": float(args.pass_min_top1_changed),
+        "max_top1_changed": float(args.pass_max_top1_changed),
+        "max_tempered_kl": float(args.pass_max_tempered_kl),
+        "max_tempered_clip": float(args.pass_max_tempered_clip),
+        "max_untempered_clip": float(args.pass_max_untempered_clip),
+        "max_eval_fourth": float(args.pass_max_eval_fourth),
+        "max_eval_deal_in": float(args.pass_max_eval_deal_in),
+    }
+
+
+def _adaptive_recovery_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "enabled": bool(args.adaptive_recovery_gate),
+        "max_extra_epochs": int(args.recovery_max_extra_epochs),
+        "min_top1_changed": _recovery_min_top1_changed(args),
+        "max_top1_changed": _recovery_max_top1_changed(args),
+        "max_tempered_kl": _recovery_max_tempered_kl(args),
+        "max_tempered_clip": _recovery_max_tempered_clip(args),
+        "max_untempered_clip": _recovery_max_untempered_clip(args),
+        "rollback_on_unstable_or_overmove": True,
+    }
+
+
+def _recovery_min_top1_changed(args: argparse.Namespace) -> float:
+    value = args.recovery_min_top1_changed
+    return float(args.pass_min_top1_changed if value is None else value)
+
+
+def _recovery_max_top1_changed(args: argparse.Namespace) -> float:
+    value = args.recovery_max_top1_changed
+    return float(args.pass_max_top1_changed if value is None else value)
+
+
+def _recovery_max_tempered_kl(args: argparse.Namespace) -> float:
+    value = args.recovery_max_tempered_kl
+    return float(args.pass_max_tempered_kl if value is None else value)
+
+
+def _recovery_max_tempered_clip(args: argparse.Namespace) -> float:
+    value = args.recovery_max_tempered_clip
+    return float(args.pass_max_tempered_clip if value is None else value)
+
+
+def _recovery_max_untempered_clip(args: argparse.Namespace) -> float:
+    value = args.recovery_max_untempered_clip
+    return float(args.pass_max_untempered_clip if value is None else value)
+
+
+def _recovery_state_is_stable(
+    tempered_loss: PPOLossBreakdown,
+    untempered_loss: PPOLossBreakdown,
+    args: argparse.Namespace,
+) -> bool:
+    return (
+        _loss_float(tempered_loss.approx_kl) < _recovery_max_tempered_kl(args)
+        and _loss_float(tempered_loss.clip_fraction) < _recovery_max_tempered_clip(args)
+        and _loss_float(untempered_loss.clip_fraction) < _recovery_max_untempered_clip(args)
+    )
+
+
+def _annotate_step38a_status(row: dict[str, Any], args: argparse.Namespace) -> None:
+    top1_changed = float(row["final_untempered_post_top1_action_changed_rate"])
+    tempered_kl = float(row["final_tempered_post_update_approx_kl"])
+    tempered_clip = float(row["final_tempered_post_update_clip_fraction"])
+    untempered_clip = float(row["final_untempered_post_update_clip_fraction"])
+    eval_fourth = float(row["eval_fourth_rate"])
+    eval_deal_in = float(row["eval_learner_deal_in_rate"])
+
+    movement_pass = (
+        float(args.pass_min_top1_changed)
+        < top1_changed
+        < float(args.pass_max_top1_changed)
+    )
+    stability_pass = (
+        tempered_kl < float(args.pass_max_tempered_kl)
+        and tempered_clip < float(args.pass_max_tempered_clip)
+        and untempered_clip < float(args.pass_max_untempered_clip)
+    )
+    eval_sanity_pass = (
+        eval_fourth <= float(args.pass_max_eval_fourth)
+        and eval_deal_in <= float(args.pass_max_eval_deal_in)
+    )
+
+    row["step38a_movement_pass"] = movement_pass
+    row["step38a_stability_pass"] = stability_pass
+    row["step38a_eval_sanity_pass"] = eval_sanity_pass
+    row["step38a_pass"] = movement_pass and stability_pass and eval_sanity_pass
 
 
 def _summary_metric_key(key: str) -> bool:
@@ -626,6 +1256,13 @@ def _summary_metric_key(key: str) -> bool:
         "tempered_post_update_rule_kl",
         "untempered_post_update_approx_kl",
         "untempered_post_update_clip_fraction",
+        "recovery_extra_epochs",
+        "recovery_attempted_epochs",
+        "recovery_rejected_epochs",
+        "recovery_pre_top1_changed",
+        "recovery_pre_tempered_kl",
+        "recovery_pre_tempered_clip",
+        "recovery_pre_untempered_clip",
     }
 
 
@@ -640,14 +1277,22 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
         f"episodes: `{args.episodes}`",
         f"iterations: `{args.iterations}`",
         f"rule_score_scales: `{','.join(str(float(value)) for value in _rule_score_scales(args))}`",
+        f"rule_score_scale_version: `{RULE_SCORE_SCALE_VERSION}`",
         f"temperatures: `{','.join(str(float(value)) for value in args.temperatures)}`",
         f"lrs: `{','.join(str(float(value)) for value in args.lrs)}`",
         f"update_epochs_values: `{','.join(str(int(value)) for value in _update_epochs_values(args))}`",
         f"clip_eps_values: `{','.join(str(float(value)) for value in args.clip_eps_values)}`",
-        f"rule_kl_coef: `{args.rule_kl_coef}`",
+        f"rule_kl_coef_values: `{','.join(str(float(value)) for value in _rule_kl_coef_values(args))}`",
+        f"delta_l2_coef_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.delta_l2_coef_values, name='delta_l2_coef'))}`",
+        f"delta_clip_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.delta_clip_values, name='delta_clip'))}`",
+        f"delta_clip_coef_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.delta_clip_coef_values, name='delta_clip_coef'))}`",
         f"entropy_coef: `{args.entropy_coef}`",
+        f"pass_criteria: `{_pass_criteria(args)}`",
+        f"adaptive_recovery: `{_adaptive_recovery_config(args)}`",
         f"eval_seed_registry_id: `{_eval_seed_registry_id(args)}`",
         f"eval_seed_hash: `{seed_registry_hash(_eval_seed_registry(args))}`",
+        f"eval_scope: `{_eval_scope(args)}`",
+        "eval_strength_note: `sanity check only; not duplicate strength evidence`",
         "",
         "## Results",
         "",
@@ -661,6 +1306,10 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             float(item["lr"]),
             int(item["update_epochs"]),
             float(item["clip_eps"]),
+            float(item["rule_kl_coef"]),
+            float(item["delta_l2_coef"]),
+            float(item["delta_clip"]),
+            float(item["delta_clip_coef"]),
         ),
     ):
         lines.append(
@@ -672,6 +1321,10 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"lr={row['lr']:g} "
             f"epochs={row['update_epochs']} "
             f"clip={row['clip_eps']:g} "
+            f"rule_kl={row['rule_kl_coef']:g} "
+            f"delta_l2={row['delta_l2_coef']:g} "
+            f"delta_clip={row['delta_clip']:g}/{row['delta_clip_coef']:g} "
+            f"pass={row.get('step38a_pass')} "
             f"non_top1={row['final_non_top1_selected_count']} "
             f"non_top1_pos={row['final_non_top1_positive_advantage_count']} "
             f"top1_changed={row['final_untempered_post_top1_action_changed_rate']:.6g} "
@@ -682,6 +1335,8 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"u_kl={row['final_untempered_post_update_approx_kl']:.6g} "
             f"u_clip={row['final_untempered_post_update_clip_fraction']:.6g} "
             f"delta_max={row['final_untempered_post_neural_delta_abs_max']:.6g} "
+            f"recovery_extra={row.get('final_recovery_extra_epochs', 0)} "
+            f"recovery_stop={row.get('final_recovery_stop_reason', '')} "
             f"eval_fourth={row['eval_fourth_rate']:.6g} "
             f"deal_in={row['eval_learner_deal_in_rate']:.6g}"
         )

@@ -28,6 +28,7 @@ from keqingrl import (
 )
 from keqingrl.contracts import PolicyInput, PolicyOutput
 from keqingrl.distribution import MaskedCategorical
+from keqingrl.metadata import default_checkpoint_metadata, validate_checkpoint_metadata
 from keqingrl.training import (
     _initialize_policy_from_env_observation,
     _loss_float,
@@ -622,6 +623,8 @@ def _run_config(
                 "config_key_label": _config_key_label(opponent_mode, rule_kl_coef, entropy_coef, lr),
                 "iteration": iteration,
                 "seed": iteration_seed,
+                "rule_score_scale": float(getattr(policy, "rule_score_scale", 1.0)),
+                "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
                 "rule_kl_coef": rule_kl_coef,
                 "entropy_coef": entropy_coef,
                 "lr": lr,
@@ -676,6 +679,30 @@ def _run_config(
         greedy=True,
         device=device,
     )
+    contract_metadata = default_checkpoint_metadata(
+        rule_score_scale=float(getattr(policy, "rule_score_scale", 1.0)),
+        gamma=float(args.gamma),
+        gae_lambda=float(args.gae_lambda),
+        ppo_config_hash=_stable_json_hash(
+            {
+                "config_id": config_id,
+                "rerun_config_id": _rerun_config_id(args, config_id),
+                "opponent_mode": opponent_mode,
+                "rule_kl_coef": rule_kl_coef,
+                "entropy_coef": entropy_coef,
+                "lr": lr,
+                "update_epochs": update_epochs,
+                "clip_eps": args.clip_eps,
+                "value_coef": value_coef,
+                "rank_coef": rank_coef,
+                "normalize_advantages": normalize_advantages,
+            }
+        ),
+    )
+    validate_checkpoint_metadata(
+        contract_metadata,
+        expected_rule_score_scale=float(getattr(policy, "rule_score_scale", 1.0)),
+    )
     final = iteration_rows[-1]
     summary = {
         "config_id": config_id,
@@ -693,8 +720,12 @@ def _run_config(
         "eval_seed_hash": _eval_seed_hash(_eval_seed_registry(args)),
         "shared_eval_seeds": True,
         "eval_seed_policy": "forced_shared_across_configs",
+        "eval_scope": "single learner seat 0; use paired checkpoint eval for seat rotation validation",
+        "eval_strength_note": "sanity check only; not duplicate strength evidence",
         "diagnostic_seed_registry_id": _diagnostic_seed_registry_id(args),
         "diagnostic_seed_hash": seed_registry_hash(_diagnostic_seed_registry(args)),
+        "rule_score_scale": contract_metadata["rule_score_scale"],
+        "rule_score_scale_version": contract_metadata["rule_score_scale_version"],
         "rule_kl_coef": rule_kl_coef,
         "entropy_coef": entropy_coef,
         "lr": lr,
@@ -774,6 +805,7 @@ def _run_config(
         iteration_rows=iteration_rows,
         eval_metrics=eval_metrics,
         summary=summary,
+        contract_metadata=contract_metadata,
         update_epochs=update_epochs,
         value_coef=value_coef,
         rank_coef=rank_coef,
@@ -799,6 +831,7 @@ def _save_config_artifacts(
     iteration_rows: list[dict[str, Any]],
     eval_metrics: Any,
     summary: dict[str, Any],
+    contract_metadata: dict[str, Any],
     update_epochs: int,
     value_coef: float,
     rank_coef: float,
@@ -827,6 +860,8 @@ def _save_config_artifacts(
             "hidden_dim": args.hidden_dim,
             "num_res_blocks": args.num_res_blocks,
             "dropout": 0.0,
+            "rule_score_scale": float(getattr(policy, "rule_score_scale", 1.0)),
+            "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
         },
         "optimizer": {
             "class": "torch.optim.Adam",
@@ -863,6 +898,9 @@ def _save_config_artifacts(
         {
             "policy_state_dict": policy.state_dict(),
             "config": config_payload,
+            "contract_metadata": contract_metadata,
+            "rule_score_scale": contract_metadata["rule_score_scale"],
+            "rule_score_scale_version": contract_metadata["rule_score_scale_version"],
             "summary": _to_jsonable(summary),
         },
         policy_path,
@@ -1218,6 +1256,9 @@ def _summary_markdown(args: argparse.Namespace, summaries: list[dict[str, Any]])
         "source_type: `retrained_config`",
         "comparison_note: `config repeat only; use checkpoint eval for candidate comparison`",
         "eval_scope: `single learner seat 0; use paired checkpoint eval for seat rotation validation`",
+        "eval_strength_note: `sanity check only; not duplicate strength evidence`",
+        f"rule_score_scale_values: `{','.join(str(value) for value in sorted({float(row['rule_score_scale']) for row in summaries})) if summaries else ''}`",
+        "rule_score_scale_version: `keqingrl_rule_score_scale_v1`",
         "",
         "## Scope",
         "",
@@ -1249,6 +1290,7 @@ def _summary_markdown(args: argparse.Namespace, summaries: list[dict[str, Any]])
             "- "
             f"id={row['config_id']} "
             f"opponent={row['opponent_mode']} "
+            f"scale={row['rule_score_scale']:g} "
             f"rule_kl={row['rule_kl_coef']:g} "
             f"entropy={row['entropy_coef']:g} "
             f"lr={row['lr']:g} "
@@ -1427,6 +1469,11 @@ def _eval_seed_registry_id(args: argparse.Namespace) -> str:
 def _eval_seed_hash(eval_seeds: list[int]) -> str:
     payload = json.dumps(eval_seeds, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _stable_json_hash(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
 def _fmt_optional(value: object) -> str:

@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from keqingrl.actions import ActionSpec, ActionType
 from keqingrl.buffer import PPOBatch, build_ppo_batch, compute_returns_and_advantages
 from keqingrl.contracts import ObsTensorBatch, PolicyInput, PolicyOutput
+from keqingrl.metadata import RULE_SCORE_SCALE_VERSION
 from keqingrl.policy import InteractivePolicy, NeuralInteractivePolicy, RulePriorDeltaPolicy
 from keqingrl.ppo import (
     _assert_critic_pretrain_optimizer_param_groups,
@@ -106,6 +107,10 @@ def _make_two_action_policy_input() -> PolicyInput:
         rule_context=torch.zeros((1, 6), dtype=torch.float32),
         prior_logits=torch.tensor([[0.0, -1.0]], dtype=torch.float32),
         legal_actions=actions,
+        metadata={
+            "rule_score_scale": 1.0,
+            "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
+        },
     )
 
 
@@ -178,6 +183,20 @@ def test_rule_kl_uses_same_filtered_learner_action_set() -> None:
         ActionType.DISCARD,
         ActionType.DISCARD,
     ]
+
+
+def test_compute_ppo_loss_rejects_rule_score_scale_mismatch() -> None:
+    policy_input = _make_two_action_policy_input()
+    batch = _make_two_action_ppo_batch(policy_input)
+    policy = _make_two_action_rule_prior_delta_policy()
+    policy.rule_score_scale = 0.25
+
+    try:
+        compute_ppo_loss(policy, batch)
+    except ValueError as exc:
+        assert "rule score scale mismatch" in str(exc)
+    else:  # pragma: no cover - defensive
+        raise AssertionError("expected rule_score_scale mismatch")
 
 
 def test_critic_pretrain_freeze_keeps_actor_logits_and_probs_unchanged() -> None:

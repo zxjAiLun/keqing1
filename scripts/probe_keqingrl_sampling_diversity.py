@@ -21,6 +21,7 @@ from keqingrl import DiscardOnlyMahjongEnv, OpponentPool, OpponentPoolEntry, Rul
 from keqingrl.contracts import PolicyInput, PolicyOutput
 from keqingrl.distribution import MaskedCategorical
 from keqingrl.learning_signal import batch_diagnostic_rows, seed_registry_hash
+from keqingrl.metadata import resolve_rule_score_scale_metadata
 from keqingrl.policy import InteractivePolicy
 from keqingrl.selfplay import build_episodes_ppo_batch, collect_selfplay_episodes
 from scripts.run_keqingrl_discard_research_sweep import RulebaseGreedyPolicy
@@ -122,6 +123,8 @@ def main() -> None:
                 "source_type": "checkpoint",
                 "training": False,
                 "temperature": float(temperature),
+                "rule_score_scale": float(getattr(policy, "rule_score_scale", 1.0)),
+                "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
                 "episodes": int(args.episodes),
                 "learner_seats": list(int(seat) for seat in args.learner_seats),
                 "seed_registry_id": _seed_registry_id(args),
@@ -138,6 +141,8 @@ def main() -> None:
                         "source_type": "checkpoint",
                         "training": False,
                         "temperature": float(temperature),
+                        "rule_score_scale": float(getattr(policy, "rule_score_scale", 1.0)),
+                        "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
                         "seed_registry_id": _seed_registry_id(args),
                         "seed_hash": seed_registry_hash(_seed_registry(args)),
                         "torch_sample_seed": torch_seed,
@@ -163,6 +168,10 @@ def main() -> None:
         "source_config_ids": list(args.source_config_ids or ()),
         "rerun_config_ids": args.rerun_config_ids,
         "temperatures": [float(value) for value in args.temperatures],
+        "rule_score_scale_values": sorted(
+            {float(row["rule_score_scale"]) for row in summary_rows}
+        ),
+        "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
         "episodes": int(args.episodes),
         "learner_seats": [int(seat) for seat in args.learner_seats],
         "seed_registry_id": _seed_registry_id(args),
@@ -235,9 +244,26 @@ def _load_policy(candidate: dict[str, Any], device: torch.device) -> RulePriorDe
         dropout=float(config["model"].get("dropout", 0.0)),
     ).to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device)
+    policy.rule_score_scale = _checkpoint_rule_score_scale(checkpoint)
     policy.load_state_dict(checkpoint["policy_state_dict"])
     policy.eval()
     return policy
+
+
+def _checkpoint_rule_score_scale(checkpoint: dict[str, Any]) -> float:
+    metadata = checkpoint.get("contract_metadata")
+    if metadata is None:
+        artifact_metadata = checkpoint.get("artifact_metadata")
+        if isinstance(artifact_metadata, dict):
+            metadata = artifact_metadata.get("contract_metadata")
+    if metadata is None:
+        metadata = {
+            "rule_score_scale": checkpoint.get("rule_score_scale"),
+            "rule_score_scale_version": checkpoint.get("rule_score_scale_version"),
+        }
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return resolve_rule_score_scale_metadata(metadata, strict_metadata=False)
 
 
 def _opponent_pool(opponent_mode: str) -> OpponentPool:

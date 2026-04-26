@@ -26,6 +26,7 @@ from keqingrl import (
     NATIVE_TERMINAL_RESOLVER_VERSION,
     OBSERVATION_CONTRACT_VERSION,
     REWARD_SPEC_VERSION,
+    RULE_SCORE_SCALE_VERSION,
     RULE_SCORE_VERSION,
     STYLE_CONTEXT_VERSION,
     RolloutEpisode,
@@ -78,6 +79,8 @@ def _dummy_step(
             "native_legal_enumeration_version": NATIVE_LEGAL_ENUMERATION_VERSION,
             "native_terminal_resolver_version": NATIVE_TERMINAL_RESOLVER_VERSION,
             "rule_score_version": RULE_SCORE_VERSION,
+            "rule_score_scale": 1.0,
+            "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
             "reward_spec_version": REWARD_SPEC_VERSION,
             "style_context_version": STYLE_CONTEXT_VERSION,
         }
@@ -278,6 +281,8 @@ def test_build_episode_ppo_batch_separates_actor_returns() -> None:
         [True, True, True, True],
         [True, True, False, False],
     ]
+    assert batch.policy_input.metadata["rule_score_scale"] == 1.0
+    assert batch.policy_input.metadata["rule_score_scale_version"] == RULE_SCORE_SCALE_VERSION
     assert batch.final_rank_target.tolist() == [0, 3, 0, 3]
 
 
@@ -368,6 +373,17 @@ def test_build_ppo_batch_strict_metadata_rejects_native_schema_drift() -> None:
         build_ppo_batch([drifted], [1.0], [1.0], strict_metadata=True)
 
 
+def test_build_ppo_batch_strict_metadata_rejects_mixed_rule_score_scales() -> None:
+    step_a = _dummy_step(actor=0, step_id=0, action_count=2, done=True, with_metadata=True)
+    step_b = replace(
+        _dummy_step(actor=0, step_id=1, action_count=2, done=True, with_metadata=True),
+        rule_score_scale=0.25,
+    )
+
+    with pytest.raises(ValueError, match="mixes rule score scales"):
+        build_ppo_batch([step_a, step_b], [1.0, 1.0], [1.0, 1.0], strict_metadata=True)
+
+
 def test_build_ppo_batch_rejects_reordered_legal_actions() -> None:
     legal_actions = (
         ActionSpec(ActionType.DISCARD, tile=0),
@@ -454,6 +470,8 @@ def test_collect_discard_only_episode_emits_terminal_metadata() -> None:
     assert all(step.policy_version == 7 for step in policy_steps)
     assert all(step.game_id == episode.game_id for step in episode.steps)
     assert all(step.action_spec.action_type == ActionType.DISCARD for step in policy_steps)
+    assert all(step.rule_score_scale == 1.0 for step in episode.steps)
+    assert all(step.rule_score_scale_version == RULE_SCORE_SCALE_VERSION for step in episode.steps)
 
 
 def test_collect_discard_only_episode_records_autopilot_trace_rows() -> None:

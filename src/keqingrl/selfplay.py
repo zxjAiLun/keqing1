@@ -12,6 +12,7 @@ from keqingrl.buffer import PPOBatch, build_ppo_batch, compute_returns_and_advan
 from keqingrl.actions import ActionType
 from keqingrl.contracts import ObsTensorBatch, PolicyInput
 from keqingrl.env import DiscardOnlyMahjongEnv
+from keqingrl.metadata import RULE_SCORE_SCALE_VERSION
 from keqingrl.opponent_pool import (
     OpponentPool,
     SeatPolicyAssignment,
@@ -190,6 +191,11 @@ def collect_policy_episode(
                 native_legal_enumeration_version=policy_input_cpu.metadata.get("native_legal_enumeration_version"),
                 native_terminal_resolver_version=policy_input_cpu.metadata.get("native_terminal_resolver_version"),
                 rule_score_version=policy_input_cpu.metadata.get("rule_score_version"),
+                rule_score_scale=_sample_rule_score_scale(sample, policy_input_cpu),
+                rule_score_scale_version=policy_input_cpu.metadata.get(
+                    "rule_score_scale_version",
+                    RULE_SCORE_SCALE_VERSION,
+                ),
                 reward_spec_version=policy_input_cpu.metadata.get("reward_spec_version"),
                 style_context_version=policy_input_cpu.metadata.get("style_context_version"),
                 is_autopilot=False,
@@ -774,6 +780,17 @@ def _sample_behavior_temperature(sample) -> float | None:
     return float(value)
 
 
+def _sample_rule_score_scale(sample, policy_input: PolicyInput) -> float | None:
+    value = sample.aux.get("rule_score_scale")
+    if value is None:
+        value = policy_input.metadata.get("rule_score_scale")
+    if value is None:
+        return None
+    if hasattr(value, "detach"):
+        return float(value.detach().flatten()[0].cpu())
+    return float(value)
+
+
 def _drain_autopilot_events(env) -> tuple[object, ...]:
     drain = getattr(env, "drain_autopilot_events", None)
     if drain is None:
@@ -838,6 +855,8 @@ def _append_autopilot_trace_steps(
                 native_legal_enumeration_version=policy_input.metadata.get("native_legal_enumeration_version"),
                 native_terminal_resolver_version=policy_input.metadata.get("native_terminal_resolver_version"),
                 rule_score_version=policy_input.metadata.get("rule_score_version"),
+                rule_score_scale=policy_input.metadata.get("rule_score_scale"),
+                rule_score_scale_version=policy_input.metadata.get("rule_score_scale_version"),
                 reward_spec_version=policy_input.metadata.get("reward_spec_version"),
                 style_context_version=policy_input.metadata.get("style_context_version"),
                 is_autopilot=True,

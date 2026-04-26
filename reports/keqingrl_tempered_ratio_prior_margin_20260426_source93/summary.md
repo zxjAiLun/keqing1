@@ -7,6 +7,7 @@ source_config_ids: `93`
 episodes: `16`
 iterations: `3`
 rule_score_scales: `1.0,0.5,0.25,0.1`
+rule_score_scale_version: `keqingrl_rule_score_scale_v1`
 temperatures: `1.25`
 lrs: `0.003`
 update_epochs_values: `8`
@@ -15,6 +16,8 @@ rule_kl_coef: `0.001`
 entropy_coef: `0.005`
 eval_seed_registry_id: `base=202604310000:stride=1:count=16`
 eval_seed_hash: `0a023780fd4aa5d1`
+eval_scope: `fixed-seed smoke; learner seat 0 only`
+eval_strength_note: `sanity check only; not duplicate strength evidence`
 
 ## Results
 

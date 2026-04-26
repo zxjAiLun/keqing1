@@ -104,6 +104,7 @@ def main() -> None:
             candidate,
             stage="fixed_batch_overfit",
             overfit_config=overfit_config,
+            rule_score_scale=float(getattr(overfit_policy, "rule_score_scale", 1.0)),
         )
         torch.save(
             {
@@ -148,6 +149,7 @@ def main() -> None:
             overfit_config=overfit_config,
             online_config=online_config,
             parent_checkpoint_sha256=checkpoint_sha256,
+            rule_score_scale=float(getattr(overfit_policy, "rule_score_scale", 1.0)),
         )
         torch.save(
             {
@@ -180,6 +182,8 @@ def main() -> None:
             "checkpoint_git_dirty": fixed_checkpoint_metadata["git_dirty"],
             "native_schema_name": fixed_checkpoint_metadata["native_schema"]["schema_name"],
             "native_schema_version": fixed_checkpoint_metadata["native_schema"]["schema_version"],
+            "rule_score_scale": fixed_checkpoint_metadata["rule_score_scale"],
+            "rule_score_scale_version": fixed_checkpoint_metadata["rule_score_scale_version"],
             **{f"fixed_before_{key}": value for key, value in fixed_before.items()},
             **{f"fixed_after_overfit_{key}": value for key, value in fixed_after_overfit.items()},
             **{f"online_pre_{key}": value for key, value in online_pre.items()},
@@ -228,6 +232,8 @@ def main() -> None:
         "fixed_seed_hash": seed_registry_hash(_seed_registry(args)),
         "online_seed_registry_id": _online_seed_registry_id(args),
         "online_seed_hash": seed_registry_hash(_online_seed_registry(args)),
+        "rule_score_scale_values": sorted({float(row["rule_score_scale"]) for row in summary_rows}),
+        "rule_score_scale_version": "keqingrl_rule_score_scale_v1",
         "summaries": summary_rows,
     }
     _write_json(args.output_dir / "fixed_online_bridge.json", payload)
@@ -367,6 +373,7 @@ def _bridge_checkpoint_metadata(
     overfit_config: dict[str, Any],
     online_config: dict[str, Any] | None = None,
     parent_checkpoint_sha256: str | None = None,
+    rule_score_scale: float = 1.0,
 ) -> dict[str, Any]:
     ppo_config_hash = _stable_json_hash(
         {
@@ -385,8 +392,9 @@ def _bridge_checkpoint_metadata(
         gamma=float(args.gamma),
         gae_lambda=float(args.gae_lambda),
         ppo_config_hash=ppo_config_hash,
+        rule_score_scale=float(rule_score_scale),
     )
-    validate_checkpoint_metadata(contract_metadata)
+    validate_checkpoint_metadata(contract_metadata, expected_rule_score_scale=float(rule_score_scale))
     native_schema = keqing_core.require_native_schema()
     git_info = _git_info()
     metadata = {
@@ -407,6 +415,8 @@ def _bridge_checkpoint_metadata(
         "reward_spec_version": contract_metadata["reward_spec_version"],
         "style_context_version": contract_metadata["style_context_version"],
         "rule_score_version": contract_metadata["rule_score_version"],
+        "rule_score_scale": contract_metadata["rule_score_scale"],
+        "rule_score_scale_version": contract_metadata["rule_score_scale_version"],
         "rule_context_encoding_version": contract_metadata["rule_context_encoding_version"],
         "git_commit": git_info["commit"],
         "git_dirty": git_info["dirty"],
@@ -436,6 +446,8 @@ def _checkpoint_contract_payload_fields(metadata: dict[str, Any]) -> dict[str, A
         "reward_spec_version": metadata["reward_spec_version"],
         "style_context_version": metadata["style_context_version"],
         "rule_score_version": metadata["rule_score_version"],
+        "rule_score_scale": metadata["rule_score_scale"],
+        "rule_score_scale_version": metadata["rule_score_scale_version"],
         "rule_context_encoding_version": metadata["rule_context_encoding_version"],
         "git_commit": metadata["git_commit"],
         "git_dirty": metadata["git_dirty"],
@@ -539,6 +551,8 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
         f"online_episodes: `{args.online_episodes}`",
         f"fixed_seed_registry_id: `{_seed_registry_id(args)}`",
         f"online_seed_registry_id: `{_online_seed_registry_id(args)}`",
+        f"rule_score_scale_values: `{','.join(str(value) for value in sorted({float(row['rule_score_scale']) for row in rows})) if rows else ''}`",
+        "rule_score_scale_version: `keqingrl_rule_score_scale_v1`",
         "",
         "## Results",
         "",
@@ -548,6 +562,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             "- "
             f"source={row['source_config_id']} "
             f"rerun={row['rerun_config_id']} "
+            f"scale={row['rule_score_scale']:g} "
             f"status={row['bridge_status']} "
             f"overfit_pass={row['overfit_passed_target']} "
             f"overfit_epochs={row['overfit_epochs']} "
