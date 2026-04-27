@@ -64,6 +64,7 @@ def main() -> None:
     policies = candidates + baselines
 
     rows: list[dict[str, Any]] = []
+    changed_state_rows: list[dict[str, Any]] = []
     for opponent_name in args.opponents:
         baseline_metrics: dict[str, dict[str, Any]] = {}
         for policy_record in policies:
@@ -71,7 +72,8 @@ def main() -> None:
                 f"eval opponent={opponent_name} kind={policy_record['kind']} candidate={policy_record['candidate_id']}",
                 flush=True,
             )
-            eval_row = _evaluate_record(policy_record, opponent_name, args, device)
+            eval_row, record_changed_rows = _evaluate_record(policy_record, opponent_name, args, device)
+            changed_state_rows.extend(record_changed_rows)
             if policy_record["kind"] == "baseline":
                 baseline_metrics[policy_record["candidate_id"]] = eval_row
             rows.append(eval_row)
@@ -86,6 +88,7 @@ def main() -> None:
 
     _write_json(args.out_dir / "paired_eval.json", _payload(args, rows))
     _write_csv(args.out_dir / "paired_eval.csv", rows)
+    _write_jsonl(args.out_dir / "movement_quality_changed_states.jsonl", changed_state_rows)
     summary = _summary_markdown(args, rows)
     (args.out_dir / "summary.md").write_text(summary, encoding="utf-8")
     print(summary)
@@ -284,7 +287,12 @@ def _build_baselines(candidates: list[dict[str, Any]], args: argparse.Namespace,
     ]
 
 
-def _evaluate_record(record: dict[str, Any], opponent_name: str, args: argparse.Namespace, device: torch.device) -> dict[str, Any]:
+def _evaluate_record(
+    record: dict[str, Any],
+    opponent_name: str,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     opponent_pool = _opponent_pool(opponent_name)
     metrics = run_fixed_seed_evaluation_smoke(
         DiscardOnlyMahjongEnv(max_kyokus=args.max_kyokus),
@@ -300,7 +308,8 @@ def _evaluate_record(record: dict[str, Any], opponent_name: str, args: argparse.
         reuse_training_rollout=False,
         device=device,
     )
-    diagnostics = _policy_diagnostics(record["policy"], opponent_pool, args, device)
+    diagnostics = _policy_diagnostics(record, opponent_name, opponent_pool, args, device)
+    changed_state_rows = list(diagnostics.pop("changed_state_rows"))
     return {
         "kind": record["kind"],
         "candidate_id": record["candidate_id"],
@@ -332,6 +341,31 @@ def _evaluate_record(record: dict[str, Any], opponent_name: str, args: argparse.
         "top1_action_changed_rate": diagnostics["top1_action_changed_rate"],
         "neural_delta_abs_mean": diagnostics["neural_delta_abs_mean"],
         "neural_delta_abs_max": diagnostics["neural_delta_abs_max"],
+        "scaled_prior_delta_abs_mean": diagnostics["scaled_prior_delta_abs_mean"],
+        "scaled_prior_delta_abs_max": diagnostics["scaled_prior_delta_abs_max"],
+        "final_minus_unscaled_prior_abs_mean": diagnostics["final_minus_unscaled_prior_abs_mean"],
+        "final_minus_unscaled_prior_abs_max": diagnostics["final_minus_unscaled_prior_abs_max"],
+        "changed_action_prior_rank_mean": diagnostics["changed_action_prior_rank_mean"],
+        "changed_action_prior_rank_p50": diagnostics["changed_action_prior_rank_p50"],
+        "changed_action_prior_rank_p90": diagnostics["changed_action_prior_rank_p90"],
+        "changed_to_top2_rate": diagnostics["changed_to_top2_rate"],
+        "changed_to_top3_rate": diagnostics["changed_to_top3_rate"],
+        "changed_to_top5_rate": diagnostics["changed_to_top5_rate"],
+        "changed_to_rank_ge5_rate": diagnostics["changed_to_rank_ge5_rate"],
+        "changed_state_prior_margin_mean": diagnostics["changed_state_prior_margin_mean"],
+        "changed_state_prior_margin_p50": diagnostics["changed_state_prior_margin_p50"],
+        "changed_state_prior_margin_p90": diagnostics["changed_state_prior_margin_p90"],
+        "changed_state_prior_margin_top1_to_top2_mean": diagnostics[
+            "changed_state_prior_margin_top1_to_top2_mean"
+        ],
+        "changed_state_prior_margin_top1_to_top2_p50": diagnostics[
+            "changed_state_prior_margin_top1_to_top2_p50"
+        ],
+        "changed_state_prior_margin_top1_to_top2_p90": diagnostics[
+            "changed_state_prior_margin_top1_to_top2_p90"
+        ],
+        "changed_state_selected_prior_prob_mean": diagnostics["changed_state_selected_prior_prob_mean"],
+        "changed_state_prior_top1_prob_mean": diagnostics["changed_state_prior_top1_prob_mean"],
         "diagnostic_episode_count": args.diagnostic_episodes,
         "diagnostic_step_count": diagnostics["diagnostic_step_count"],
         "train_rule_agreement": record.get("train_rule_agreement"),
@@ -351,12 +385,27 @@ def _evaluate_record(record: dict[str, Any], opponent_name: str, args: argparse.
         "paired_rank_pt_delta_vs_zero_delta": None,
         "paired_rank_pt_delta_vs_untrained_rule_prior_delta": None,
         "paired_rank_pt_delta_vs_rule_prior": None,
-    }
+    }, changed_state_rows
 
 
-def _policy_diagnostics(policy, opponent_pool: OpponentPool, args: argparse.Namespace, device: torch.device) -> dict[str, float | int]:
+def _policy_diagnostics(
+    record: dict[str, Any],
+    opponent_name: str,
+    opponent_pool: OpponentPool,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> dict[str, float | int | list[dict[str, Any]]]:
+    policy = record["policy"]
     episode_count = args.eval_episodes if args.diagnostic_episodes is None else args.diagnostic_episodes
-    abs_values: list[float] = []
+    neural_delta_abs_values: list[float] = []
+    scaled_prior_delta_abs_values: list[float] = []
+    final_minus_unscaled_prior_abs_values: list[float] = []
+    changed_prior_ranks: list[float] = []
+    changed_prior_margins_to_selected: list[float] = []
+    changed_prior_margins_to_top2: list[float] = []
+    changed_selected_prior_probs: list[float] = []
+    changed_top1_prior_probs: list[float] = []
+    changed_state_rows: list[dict[str, Any]] = []
     changed = 0
     total = 0
     for seat in tuple(int(seat) for seat in args.eval_seat_rotation):
@@ -372,7 +421,7 @@ def _policy_diagnostics(policy, opponent_pool: OpponentPool, args: argparse.Name
             greedy=True,
             device=device,
         )
-        for episode in episodes:
+        for episode_index, episode in enumerate(episodes):
             for step in episode.steps:
                 if step.actor != seat or step.is_autopilot:
                     continue
@@ -381,27 +430,101 @@ def _policy_diagnostics(policy, opponent_pool: OpponentPool, args: argparse.Name
                     output = policy.forward(policy_input)
                 final_logits = output.aux.get("final_logits", output.action_logits).detach().cpu()
                 prior_logits = policy_input.prior_logits.detach().cpu() if policy_input.prior_logits is not None else final_logits
+                neural_delta = output.aux.get("neural_delta")
+                if neural_delta is None:
+                    neural_delta = torch.zeros_like(final_logits)
+                else:
+                    neural_delta = neural_delta.detach().cpu()
                 mask = policy_input.legal_action_mask.detach().cpu().bool()
                 valid_final = final_logits.masked_fill(~mask, torch.finfo(final_logits.dtype).min)
                 valid_prior = prior_logits.masked_fill(~mask, torch.finfo(prior_logits.dtype).min)
-                changed += int(torch.argmax(valid_final, dim=1).item() != torch.argmax(valid_prior, dim=1).item())
-                delta = (final_logits - prior_logits).abs()[mask]
-                abs_values.extend(float(value) for value in delta.flatten())
+                final_top1 = int(torch.argmax(valid_final, dim=1).item())
+                prior_top1 = int(torch.argmax(valid_prior, dim=1).item())
+                is_changed = final_top1 != prior_top1
+                changed += int(is_changed)
+                scale = float(getattr(policy, "rule_score_scale", 1.0))
+                scaled_prior_delta = (scale - 1.0) * prior_logits
+                final_minus_unscaled_prior = final_logits - prior_logits
+                neural_delta_abs_values.extend(float(value) for value in neural_delta.abs()[mask].flatten())
+                scaled_prior_delta_abs_values.extend(
+                    float(value) for value in scaled_prior_delta.abs()[mask].flatten()
+                )
+                final_minus_unscaled_prior_abs_values.extend(
+                    float(value) for value in final_minus_unscaled_prior.abs()[mask].flatten()
+                )
+                if is_changed:
+                    row_prior = prior_logits[0]
+                    row_mask = mask[0]
+                    legal_prior = row_prior[row_mask]
+                    prior_probs = torch.softmax(valid_prior, dim=1)[0]
+                    final_rank = 1 + int((legal_prior > row_prior[final_top1]).sum().item())
+                    top2_margin = _top2_margin(legal_prior)
+                    selected_margin = float((row_prior[prior_top1] - row_prior[final_top1]).item())
+                    changed_prior_ranks.append(float(final_rank))
+                    changed_prior_margins_to_selected.append(selected_margin)
+                    changed_prior_margins_to_top2.append(top2_margin)
+                    selected_prior_prob = float(prior_probs[final_top1].item())
+                    top1_prior_prob = float(prior_probs[prior_top1].item())
+                    changed_selected_prior_probs.append(selected_prior_prob)
+                    changed_top1_prior_probs.append(top1_prior_prob)
+                    changed_state_rows.append(
+                        {
+                            "kind": record["kind"],
+                            "candidate_id": record["candidate_id"],
+                            "source_config_id": record["source_config_id"],
+                            "rerun_config_id": record["rerun_config_id"],
+                            "opponent_name": opponent_name,
+                            "eval_seed_base": int(args.eval_seed_base),
+                            "eval_seed_stride": int(args.eval_seed_stride),
+                            "diagnostic_episode_index": int(episode_index),
+                            "episode_id": step.episode_id,
+                            "step_id": step.step_id,
+                            "seat": int(seat),
+                            "chosen_action": _action_label(policy_input, final_top1),
+                            "prior_top1_action": _action_label(policy_input, prior_top1),
+                            "changed_action_prior_rank": int(final_rank),
+                            "prior_top1_prob": top1_prior_prob,
+                            "changed_action_prior_prob": selected_prior_prob,
+                            "prior_margin_top1_to_changed": selected_margin,
+                            "prior_margin_top1_to_top2": top2_margin,
+                            "advantage": None,
+                            "return": None,
+                            "terminal_reward": float(episode.terminal_rewards[seat]),
+                        }
+                    )
                 total += 1
-    if not abs_values:
+    if not neural_delta_abs_values:
         return {
             "rule_agreement": 1.0,
             "top1_action_changed_rate": 0.0,
             "neural_delta_abs_mean": 0.0,
             "neural_delta_abs_max": 0.0,
+            "scaled_prior_delta_abs_mean": 0.0,
+            "scaled_prior_delta_abs_max": 0.0,
+            "final_minus_unscaled_prior_abs_mean": 0.0,
+            "final_minus_unscaled_prior_abs_max": 0.0,
+            **_empty_movement_quality_fields(),
             "diagnostic_step_count": 0,
+            "changed_state_rows": changed_state_rows,
         }
     return {
         "rule_agreement": 1.0 - changed / max(1, total),
         "top1_action_changed_rate": changed / max(1, total),
-        "neural_delta_abs_mean": sum(abs_values) / len(abs_values),
-        "neural_delta_abs_max": max(abs_values),
+        "neural_delta_abs_mean": _mean(neural_delta_abs_values),
+        "neural_delta_abs_max": max(neural_delta_abs_values),
+        "scaled_prior_delta_abs_mean": _mean(scaled_prior_delta_abs_values),
+        "scaled_prior_delta_abs_max": max(scaled_prior_delta_abs_values),
+        "final_minus_unscaled_prior_abs_mean": _mean(final_minus_unscaled_prior_abs_values),
+        "final_minus_unscaled_prior_abs_max": max(final_minus_unscaled_prior_abs_values),
+        **_movement_quality_fields(
+            prior_ranks=changed_prior_ranks,
+            prior_margins_to_selected=changed_prior_margins_to_selected,
+            prior_margins_to_top2=changed_prior_margins_to_top2,
+            selected_prior_probs=changed_selected_prior_probs,
+            top1_prior_probs=changed_top1_prior_probs,
+        ),
         "diagnostic_step_count": total,
+        "changed_state_rows": changed_state_rows,
     }
 
 
@@ -413,6 +536,87 @@ def _opponent_pool(name: str) -> OpponentPool:
     else:
         raise ValueError(f"unsupported opponent: {name}")
     return OpponentPool((OpponentPoolEntry(policy=policy, policy_version=-1, greedy=True, name=name),))
+
+
+def _top2_margin(legal_prior: torch.Tensor) -> float:
+    if int(legal_prior.numel()) <= 1:
+        return 0.0
+    top2 = torch.topk(legal_prior, k=2).values
+    return float((top2[0] - top2[1]).item())
+
+
+def _action_label(policy_input, action_index: int) -> str:
+    if policy_input.legal_actions is None:
+        return str(int(action_index))
+    action = policy_input.legal_actions[0][int(action_index)]
+    return getattr(action, "canonical_key", str(action))
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _quantile(values: list[float], q: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    pos = (len(ordered) - 1) * float(q)
+    lo = int(pos)
+    hi = min(lo + 1, len(ordered) - 1)
+    frac = pos - lo
+    return ordered[lo] * (1.0 - frac) + ordered[hi] * frac
+
+
+def _empty_movement_quality_fields() -> dict[str, float]:
+    return _movement_quality_fields(
+        prior_ranks=[],
+        prior_margins_to_selected=[],
+        prior_margins_to_top2=[],
+        selected_prior_probs=[],
+        top1_prior_probs=[],
+    )
+
+
+def _movement_quality_fields(
+    *,
+    prior_ranks: list[float],
+    prior_margins_to_selected: list[float],
+    prior_margins_to_top2: list[float],
+    selected_prior_probs: list[float],
+    top1_prior_probs: list[float],
+) -> dict[str, float]:
+    changed_count = len(prior_ranks)
+    return {
+        "changed_action_prior_rank_mean": _mean(prior_ranks),
+        "changed_action_prior_rank_p50": _quantile(prior_ranks, 0.5),
+        "changed_action_prior_rank_p90": _quantile(prior_ranks, 0.9),
+        "changed_to_top2_rate": _rank_rate(prior_ranks, max_rank=2),
+        "changed_to_top3_rate": _rank_rate(prior_ranks, max_rank=3),
+        "changed_to_top5_rate": _rank_rate(prior_ranks, max_rank=5),
+        "changed_to_rank_ge5_rate": (
+            sum(1 for rank in prior_ranks if rank >= 5.0) / changed_count
+            if changed_count
+            else 0.0
+        ),
+        "changed_state_prior_margin_mean": _mean(prior_margins_to_selected),
+        "changed_state_prior_margin_p50": _quantile(prior_margins_to_selected, 0.5),
+        "changed_state_prior_margin_p90": _quantile(prior_margins_to_selected, 0.9),
+        "changed_state_prior_margin_top1_to_top2_mean": _mean(prior_margins_to_top2),
+        "changed_state_prior_margin_top1_to_top2_p50": _quantile(prior_margins_to_top2, 0.5),
+        "changed_state_prior_margin_top1_to_top2_p90": _quantile(prior_margins_to_top2, 0.9),
+        "changed_state_selected_prior_prob_mean": _mean(selected_prior_probs),
+        "changed_state_prior_top1_prob_mean": _mean(top1_prior_probs),
+    }
+
+
+def _rank_rate(prior_ranks: list[float], *, max_rank: int) -> float:
+    return (
+        sum(1 for rank in prior_ranks if rank <= float(max_rank)) / len(prior_ranks)
+        if prior_ranks
+        else 0.0
+    )
 
 
 def _payload(args: argparse.Namespace, rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -431,6 +635,8 @@ def _payload(args: argparse.Namespace, rows: list[dict[str, Any]]) -> dict[str, 
         "policy_mode": "greedy",
         "training_rollout_reuse": False,
         "opponents": list(args.opponents),
+        "strength_proxy_note": "paired seat-rotation sanity/strength-proxy only; this is not proof of model strength.",
+        "movement_quality_note": "neural_delta metrics are pure output.aux['neural_delta']; final_minus_unscaled_prior is reported only for compatibility diagnostics.",
         "rows": rows,
     }
 
@@ -463,6 +669,8 @@ def _summary_markdown(args: argparse.Namespace, rows: list[dict[str, Any]]) -> s
         f"seat_rotation: `{_seat_rotation_label(args)}`",
         "policy_mode: `greedy`",
         "training_rollout_reuse: `false`",
+        "strength_proxy_note: `paired seat-rotation sanity/strength-proxy only; this is not proof of model strength.`",
+        "movement_quality_note: `neural_delta_abs_* is pure neural_delta; scaled_prior_delta_abs_* isolates scale contribution; final_minus_unscaled_prior_abs_* is compatibility/diagnostic only.`",
         "",
         "## Required Fields",
         "",
@@ -492,8 +700,11 @@ def _summary_markdown(args: argparse.Namespace, rows: list[dict[str, Any]]) -> s
             f"learner_deal_in={row['learner_deal_in_rate']:.6g} "
             f"rule_agree={row['rule_agreement']:.6g} "
             f"top1_changed={row['top1_action_changed_rate']:.6g} "
-            f"delta_mean={row['neural_delta_abs_mean']:.6g} "
-            f"delta_max={row['neural_delta_abs_max']:.6g} "
+            f"neural_delta_mean={row['neural_delta_abs_mean']:.6g} "
+            f"neural_delta_max={row['neural_delta_abs_max']:.6g} "
+            f"changed_rank_mean={row['changed_action_prior_rank_mean']:.6g} "
+            f"rank_ge5={row['changed_to_rank_ge5_rate']:.6g} "
+            f"changed_margin_p50={row['changed_state_prior_margin_p50']:.6g} "
             f"checkpoint={row['checkpoint_path']}"
         )
     lines.extend(["", "## Decision", "", _decision_text(candidates), ""])
@@ -528,6 +739,12 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows({key: _to_csvable(value) for key, value in row.items()} for row in rows)
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(_to_jsonable(row), ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def _to_jsonable(value: Any) -> Any:

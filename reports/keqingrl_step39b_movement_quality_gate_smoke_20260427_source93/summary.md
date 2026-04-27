@@ -1,0 +1,39 @@
+# KeqingRL Tempered-Ratio PPO Diagnostic
+
+source_type: `checkpoint`
+ratio_mode: `tempered_current_logits`
+candidate_summary: `reports/keqingrl_discard_research_20260425_candidates_checkpoint_rerun/summary.csv`
+source_config_ids: `93`
+episodes: `2`
+iterations: `1`
+rule_score_scales: `0.25`
+rule_score_scale_version: `keqingrl_rule_score_scale_v1`
+temperatures: `1.25`
+lrs: `3e-05`
+update_epochs_values: `1`
+clip_eps_values: `0.2`
+rule_kl_coef_values: `0.01`
+delta_l2_coef_values: `0.001`
+delta_clip_values: `0.0`
+delta_clip_coef_values: `0.0`
+entropy_coef: `0.01`
+pass_criteria: `{'min_top1_changed': 0.02, 'max_top1_changed': 0.25, 'max_tempered_kl': 0.03, 'max_tempered_clip': 0.3, 'max_untempered_clip': 0.8, 'max_eval_fourth': 0.5, 'max_eval_deal_in': 0.25}`
+adaptive_recovery: `{'enabled': True, 'max_extra_epochs': 1, 'min_top1_changed': 0.02, 'max_top1_changed': 0.15, 'max_tempered_kl': 0.03, 'max_tempered_clip': 0.3, 'max_untempered_clip': 0.8, 'rollback_on_unstable_overmove_or_quality': True}`
+movement_quality_gate: `{'enabled': True, 'train_min_top1_changed': 0.02, 'train_max_top1_changed': 0.15, 'max_changed_prior_rank_mean': 3.0, 'max_rank_ge5_rate': 0.1, 'max_prior_margin_p50': 1.0}`
+fresh_validation: `{'episodes': 1, 'seed_base': 202604420000, 'seed_stride': 1, 'seat_rotation': (0, 1), 'min_top1_changed': 0.01, 'max_top1_changed': 0.1, 'policy_mode': 'greedy'}`
+eval_seed_registry_id: `base=202604410000:stride=1:count=2`
+eval_seed_hash: `712d56e8ca93b655`
+eval_scope: `fixed-seed smoke; learner seats 0,1 only`
+eval_strength_note: `sanity check only; not duplicate strength evidence`
+
+## Results
+
+- cfg=0 source=93 scale=0.25 temp=1.25 lr=3e-05 epochs=1 clip=0.2 rule_kl=0.01 delta_l2=0.001 delta_clip=0/0 pass=False non_top1=25 non_top1_pos=15 top1_changed=0 train_quality=False changed_rank=0 rank_ge5=0 margin_p50=0 fresh_top1=0 fresh_quality=False qualified_eval=False effective_margin=0.749984 scaled_prior_margin=0.75 t_kl=1.75649e-10 t_clip=0 u_kl=0.00153843 u_clip=0 delta_max=0.000199643 recovery_extra=1 recovery_stop=budget_exhausted eval_fourth=nan deal_in=nan
+
+## Artifacts
+
+- `tempered_ratio_pilot.json`
+- `summary.csv`
+- `iterations.csv`
+- `batch_steps.csv`
+- `advantage_audit.csv`

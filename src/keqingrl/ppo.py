@@ -33,6 +33,8 @@ class PPOLossBreakdown:
     rule_agreement: torch.Tensor | None = None
     avg_abs_neural_delta: torch.Tensor | None = None
     delta_norm: torch.Tensor | None = None
+    low_rank_flip_penalty: torch.Tensor | None = None
+    weak_margin_flip_penalty: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
