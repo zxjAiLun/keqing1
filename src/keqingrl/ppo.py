@@ -39,6 +39,9 @@ class PPOLossBreakdown:
     topk_ranking_teacher_kl: torch.Tensor | None = None
     topk_ranking_teacher_agreement: torch.Tensor | None = None
     topk_ranking_kept_count: torch.Tensor | None = None
+    topk_ranking_teacher_prior_agreement: torch.Tensor | None = None
+    topk_ranking_teacher_rule_top1_rank: torch.Tensor | None = None
+    topk_ranking_teacher_margin: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)

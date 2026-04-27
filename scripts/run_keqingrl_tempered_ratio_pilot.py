@@ -68,7 +68,8 @@ _DELTA_SUPPORT_MODES = _ACTOR_UPDATE_SUPPORT_MODES
 _OUTSIDE_SUPPORT_DELTA_MODES = ("zero", "negative-clip")
 _SUPPORT_POLICY_MODES = ("unrestricted", "delta-topk-zero", "support-only-topk")
 _TOPK_RANKING_AUX_MODES = ("none", "teacher-ce", "teacher-pairwise", "advantage-pairwise")
-_TEACHER_SOURCES = ("rule-components", "model", "search", "oracle-file")
+_TEACHER_SOURCES = ("rule-prior-topk", "rule-components", "rule-component-v1", "model", "search", "oracle-file")
+_TOPK_TEACHER_CONTRACT_VERSION = "keqingrl_topk_teacher_v1"
 
 
 class DeltaSupportProjectionPolicy(InteractivePolicy):
@@ -190,9 +191,23 @@ def _parse_args() -> argparse.Namespace:
         nargs="+",
         default=("none",),
     )
-    parser.add_argument("--topk-ranking-aux-coef", "--topk-ranking-aux-coef-values", dest="topk_ranking_aux_coef_values", type=float, nargs="+", default=(0.0,))
+    parser.add_argument(
+        "--topk-ranking-aux-coef",
+        "--topk-ranking-aux-coef-values",
+        dest="topk_ranking_aux_coef_values",
+        type=float,
+        nargs="+",
+        default=(0.0,),
+    )
     parser.add_argument("--topk-ranking-k", type=int, default=3)
-    parser.add_argument("--teacher-source", choices=_TEACHER_SOURCES, default="rule-components")
+    parser.add_argument(
+        "--teacher-source",
+        "--teacher-sources",
+        dest="teacher_sources",
+        choices=_TEACHER_SOURCES,
+        nargs="+",
+        default=("rule-prior-topk",),
+    )
     parser.add_argument("--teacher-temperature", type=float, default=1.0)
     parser.add_argument("--low-rank-flip-topk-values", type=int, nargs="+", default=(3,))
     parser.add_argument("--low-rank-flip-penalty-coef-values", type=float, nargs="+", default=(0.0,))
@@ -692,6 +707,11 @@ def _run_tempered_ratio_config(
             "topk_ranking_k": int(topk_ranking_k),
             "teacher_source": str(teacher_source),
             "teacher_temperature": float(teacher_temperature),
+            **_teacher_metadata_fields(
+                str(teacher_source),
+                topk=int(topk_ranking_k),
+                temperature=float(teacher_temperature),
+            ),
             "low_rank_flip_topk": int(low_rank_flip_topk),
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
@@ -758,6 +778,15 @@ def _run_tempered_ratio_config(
             "tempered_post_update_topk_ranking_kept_count": _loss_float(
                 tempered_post_loss.topk_ranking_kept_count
             ),
+            "tempered_post_update_topk_ranking_teacher_prior_agreement": _loss_float(
+                tempered_post_loss.topk_ranking_teacher_prior_agreement
+            ),
+            "tempered_post_update_topk_ranking_teacher_rule_top1_rank": _loss_float(
+                tempered_post_loss.topk_ranking_teacher_rule_top1_rank
+            ),
+            "tempered_post_update_topk_ranking_teacher_margin": _loss_float(
+                tempered_post_loss.topk_ranking_teacher_margin
+            ),
             "untempered_post_update_approx_kl": _loss_float(untempered_post_loss.approx_kl),
             "untempered_post_update_clip_fraction": _loss_float(untempered_post_loss.clip_fraction),
         }
@@ -785,6 +814,11 @@ def _run_tempered_ratio_config(
                     "topk_ranking_k": int(topk_ranking_k),
                     "teacher_source": str(teacher_source),
                     "teacher_temperature": float(teacher_temperature),
+                    **_teacher_metadata_fields(
+                        str(teacher_source),
+                        topk=int(topk_ranking_k),
+                        temperature=float(teacher_temperature),
+                    ),
                     "low_rank_flip_topk": int(low_rank_flip_topk),
                     "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
                     "weak_margin_threshold": float(weak_margin_threshold),
@@ -822,6 +856,11 @@ def _run_tempered_ratio_config(
                     "topk_ranking_k": int(topk_ranking_k),
                     "teacher_source": str(teacher_source),
                     "teacher_temperature": float(teacher_temperature),
+                    **_teacher_metadata_fields(
+                        str(teacher_source),
+                        topk=int(topk_ranking_k),
+                        temperature=float(teacher_temperature),
+                    ),
                     "low_rank_flip_topk": int(low_rank_flip_topk),
                     "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
                     "weak_margin_threshold": float(weak_margin_threshold),
@@ -846,7 +885,7 @@ def _run_tempered_ratio_config(
             f"rule_kl={float(rule_kl_coef):g} "
             f"delta_l2={float(delta_l2_coef):g} "
             f"delta_clip={float(delta_clip):g}/{float(delta_clip_coef):g} "
-            f"ranking_aux={topk_ranking_aux_mode}/{float(topk_ranking_aux_coef):g}/k{int(topk_ranking_k)} "
+            f"ranking_aux={topk_ranking_aux_mode}/{teacher_source}/{float(topk_ranking_aux_coef):g}/k{int(topk_ranking_k)} "
             f"low_rank_k={int(low_rank_flip_topk)} "
             f"low_rank_coef={float(low_rank_flip_penalty_coef):g} "
             f"weak_margin={float(weak_margin_threshold):g}/{float(weak_margin_flip_penalty_coef):g} "
@@ -864,6 +903,7 @@ def _run_tempered_ratio_config(
             f"weak_margin_pen={_loss_float(tempered_post_loss.weak_margin_flip_penalty):.6g} "
             f"rank_aux={_loss_float(tempered_post_loss.topk_ranking_aux_loss):.6g} "
             f"teacher_kl={_loss_float(tempered_post_loss.topk_ranking_teacher_kl):.6g} "
+            f"teacher_prior_agree={_loss_float(tempered_post_loss.topk_ranking_teacher_prior_agreement):.6g} "
             f"t_kl={_loss_float(tempered_post_loss.approx_kl):.6g} "
             f"t_clip={_loss_float(tempered_post_loss.clip_fraction):.6g} "
             f"delta_max={post_stats['neural_delta_abs_max']:.6g} "
@@ -919,6 +959,11 @@ def _run_tempered_ratio_config(
             "topk_ranking_k": int(topk_ranking_k),
             "teacher_source": str(teacher_source),
             "teacher_temperature": float(teacher_temperature),
+            **_teacher_metadata_fields(
+                str(teacher_source),
+                topk=int(topk_ranking_k),
+                temperature=float(teacher_temperature),
+            ),
             "low_rank_flip_topk": int(low_rank_flip_topk),
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
@@ -1051,6 +1096,11 @@ def _save_tempered_ratio_checkpoint(
             "topk_ranking_k": int(topk_ranking_k),
             "teacher_source": str(teacher_source),
             "teacher_temperature": float(teacher_temperature),
+            **_teacher_metadata_fields(
+                str(teacher_source),
+                topk=int(topk_ranking_k),
+                temperature=float(teacher_temperature),
+            ),
             "low_rank_flip_topk": int(low_rank_flip_topk),
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
@@ -1091,6 +1141,13 @@ def _save_tempered_ratio_checkpoint(
         gae_lambda=float(args.gae_lambda),
         ppo_config_hash=ppo_config_hash,
     )
+    contract_metadata.update(
+        _teacher_metadata_fields(
+            str(teacher_source),
+            topk=int(topk_ranking_k),
+            temperature=float(teacher_temperature),
+        )
+    )
     validate_checkpoint_metadata(contract_metadata, expected_rule_score_scale=float(rule_score_scale))
     config_payload = {
         **source_config,
@@ -1116,6 +1173,11 @@ def _save_tempered_ratio_checkpoint(
             "topk_ranking_k": int(topk_ranking_k),
             "teacher_source": str(teacher_source),
             "teacher_temperature": float(teacher_temperature),
+            **_teacher_metadata_fields(
+                str(teacher_source),
+                topk=int(topk_ranking_k),
+                temperature=float(teacher_temperature),
+            ),
             "low_rank_flip_topk": int(low_rank_flip_topk),
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
@@ -1214,10 +1276,24 @@ def _save_tempered_ratio_checkpoint(
         "topk_ranking_k": int(topk_ranking_k),
         "teacher_source": str(teacher_source),
         "teacher_temperature": float(teacher_temperature),
+        **_teacher_metadata_fields(
+            str(teacher_source),
+            topk=int(topk_ranking_k),
+            temperature=float(teacher_temperature),
+        ),
         "topk_ranking_aux_loss": float(summary_row["final_tempered_post_update_topk_ranking_aux_loss"]),
         "topk_ranking_teacher_kl": float(summary_row["final_tempered_post_update_topk_ranking_teacher_kl"]),
         "topk_ranking_teacher_agreement": float(
             summary_row["final_tempered_post_update_topk_ranking_teacher_agreement"]
+        ),
+        "topk_ranking_teacher_prior_agreement": float(
+            summary_row["final_tempered_post_update_topk_ranking_teacher_prior_agreement"]
+        ),
+        "topk_ranking_teacher_rule_top1_rank": float(
+            summary_row["final_tempered_post_update_topk_ranking_teacher_rule_top1_rank"]
+        ),
+        "topk_ranking_teacher_margin": float(
+            summary_row["final_tempered_post_update_topk_ranking_teacher_margin"]
         ),
         "support_policy_mode": str(support_policy_mode),
         "delta_support_mode": str(delta_support_mode),
@@ -1676,6 +1752,9 @@ def _compute_tempered_ppo_loss(
         topk_ranking_teacher_kl,
         topk_ranking_teacher_agreement,
         topk_ranking_kept_count,
+        topk_ranking_teacher_prior_agreement,
+        topk_ranking_teacher_rule_top1_rank,
+        topk_ranking_teacher_margin,
     ) = _topk_ranking_aux_terms(
         output,
         batch,
@@ -1712,6 +1791,9 @@ def _compute_tempered_ppo_loss(
         topk_ranking_teacher_kl=topk_ranking_teacher_kl,
         topk_ranking_teacher_agreement=topk_ranking_teacher_agreement,
         topk_ranking_kept_count=topk_ranking_kept_count,
+        topk_ranking_teacher_prior_agreement=topk_ranking_teacher_prior_agreement,
+        topk_ranking_teacher_rule_top1_rank=topk_ranking_teacher_rule_top1_rank,
+        topk_ranking_teacher_margin=topk_ranking_teacher_margin,
     )
 
 
@@ -2004,14 +2086,23 @@ def _topk_ranking_aux_terms(
     topk: int,
     teacher_source: str,
     teacher_temperature: float,
-) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+) -> tuple[
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
+]:
     aux_mode = str(mode)
     if aux_mode == "none":
         zero = output.action_logits.new_zeros(())
-        return zero, zero, zero, zero
+        return zero, zero, zero, zero, zero, zero, zero
     if aux_mode != "teacher-ce":
         raise ValueError(f"topK ranking aux mode is not implemented yet: {aux_mode}")
-    if str(teacher_source) != "rule-components":
+    canonical_teacher = _canonical_teacher_source(str(teacher_source))
+    if canonical_teacher not in {"rule-prior-topk", "rule-component-v1"}:
         raise ValueError(f"teacher source is not implemented yet: {teacher_source}")
     if float(teacher_temperature) <= 0.0:
         raise ValueError(f"teacher_temperature must be positive, got {teacher_temperature}")
@@ -2028,14 +2119,73 @@ def _topk_ranking_aux_terms(
     k = max(1, min(int(topk), int(masked_prior.shape[-1])))
     topk_values, topk_indices = torch.topk(masked_prior, k=k, dim=-1)
     policy_topk_logits = output.action_logits.gather(1, topk_indices).float()
-    teacher_probs = torch.softmax(topk_values / float(teacher_temperature), dim=-1)
+    if canonical_teacher == "rule-prior-topk":
+        teacher_topk_scores = topk_values
+    elif canonical_teacher == "rule-component-v1":
+        component_scores = _rule_component_v1_teacher_scores(batch).to(
+            device=output.action_logits.device,
+            dtype=output.action_logits.dtype,
+        )
+        teacher_topk_scores = component_scores.gather(1, topk_indices)
+    else:
+        raise ValueError(f"teacher source is not implemented yet: {teacher_source}")
+    teacher_probs = torch.softmax(teacher_topk_scores / float(teacher_temperature), dim=-1)
     teacher_log_probs = torch.log(teacher_probs.clamp_min(1e-12))
     policy_log_probs = torch.log_softmax(policy_topk_logits, dim=-1)
     ce_loss = -(teacher_probs * policy_log_probs).sum(dim=-1).mean()
     teacher_kl = (teacher_probs * (teacher_log_probs - policy_log_probs)).sum(dim=-1).mean()
     teacher_agreement = (policy_topk_logits.argmax(dim=-1) == teacher_probs.argmax(dim=-1)).float().mean()
+    teacher_argmax = teacher_topk_scores.argmax(dim=-1)
+    teacher_prior_agreement = (teacher_argmax == 0).float().mean()
+    teacher_rule_top1_rank = 1.0 + (teacher_topk_scores > teacher_topk_scores[:, :1]).sum(dim=-1).float()
+    if teacher_topk_scores.shape[-1] > 1:
+        teacher_top2 = torch.topk(teacher_topk_scores, k=2, dim=-1).values
+        teacher_margin = (teacher_top2[:, 0] - teacher_top2[:, 1]).mean()
+    else:
+        teacher_margin = output.action_logits.new_zeros(())
     kept_count = torch.tensor(float(masked_prior.shape[0]), device=output.action_logits.device, dtype=output.action_logits.dtype)
-    return ce_loss, teacher_kl, teacher_agreement, kept_count
+    return (
+        ce_loss,
+        teacher_kl,
+        teacher_agreement,
+        kept_count,
+        teacher_prior_agreement,
+        teacher_rule_top1_rank.mean(),
+        teacher_margin,
+    )
+
+
+def _rule_component_v1_teacher_scores(batch) -> torch.Tensor:
+    """Lightweight diagnostic reranker built from the current action feature contract.
+
+    This is intentionally not a strength teacher: it uses only the existing
+    KeqingRL action features and provides a topK ordering different from the
+    rule-prior negative control.
+    """
+
+    features = batch.policy_input.legal_action_features.float()
+    mask = batch.policy_input.legal_action_mask.bool()
+    if features.ndim != 3 or features.shape[-1] < 8:
+        raise ValueError("rule-component-v1 teacher requires KeqingRL action feature dim >= 8")
+    action_type_norm = features[..., 0]
+    tsumogiri = features[..., 2].clamp(0.0, 1.0)
+    hand_count = features[..., 3].clamp(0.0, 1.0)
+    visible = features[..., 4].clamp(0.0, 1.0)
+    is_honor = features[..., 5].clamp(0.0, 1.0)
+    is_terminal = features[..., 6].clamp(0.0, 1.0)
+    wall = features[..., 7].clamp(0.0, 1.0)
+    middle_tile = (1.0 - torch.maximum(is_honor, is_terminal)).clamp(0.0, 1.0)
+    discard_like = action_type_norm <= 1e-6
+
+    safety_proxy = visible
+    shape_release_proxy = (0.55 + 0.25 * wall) * (is_honor + is_terminal).clamp(0.0, 1.0)
+    keep_value_penalty = 0.30 * hand_count + 0.10 * middle_tile * (1.0 - visible)
+    scores = safety_proxy + shape_release_proxy + 0.15 * tsumogiri - keep_value_penalty
+    prior_logits = batch.policy_input.prior_logits
+    if prior_logits is not None:
+        scores = torch.where(discard_like, scores, prior_logits.float())
+    scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
+    return scores
 
 
 def _delta_support_mask(
@@ -2424,32 +2574,58 @@ def _topk_ranking_aux_configs(args: argparse.Namespace) -> tuple[dict[str, Any],
     teacher_temperature = float(args.teacher_temperature)
     if teacher_temperature <= 0.0:
         raise ValueError(f"teacher_temperature must be positive, got {teacher_temperature}")
-    if str(args.teacher_source) != "rule-components" and any(mode != "none" for mode in modes):
-        raise ValueError(f"teacher source is not implemented yet: {args.teacher_source}")
+    teacher_sources = tuple(str(value) for value in args.teacher_sources)
+    if not teacher_sources:
+        raise ValueError("teacher source matrix must not be empty")
+    invalid_sources = [source for source in teacher_sources if source not in _TEACHER_SOURCES]
+    if invalid_sources:
+        raise ValueError(f"unsupported teacher sources: {invalid_sources}")
+    unsupported_sources = [
+        source
+        for source in teacher_sources
+        if _canonical_teacher_source(source) not in {"rule-prior-topk", "rule-component-v1"}
+    ]
+    if unsupported_sources and any(mode != "none" for mode in modes):
+        raise ValueError(f"teacher source is not implemented yet: {unsupported_sources}")
     configs: list[dict[str, Any]] = []
     seen: set[tuple[str, float, int, str, float]] = set()
     for mode in modes:
         raw_coefs = (0.0,) if mode == "none" else coef_values
         if mode not in {"none", "teacher-ce"}:
             raise ValueError(f"topK ranking auxiliary mode is not implemented yet: {mode}")
-        for coef in raw_coefs:
-            key = (str(mode), round(float(coef), 12), topk, str(args.teacher_source), round(teacher_temperature, 12))
-            if key in seen:
-                continue
-            seen.add(key)
-            configs.append(
-                {
-                    "mode": str(mode),
-                    "coef": float(coef),
-                    "topk": int(topk),
-                    "teacher_source": str(args.teacher_source),
-                    "teacher_temperature": float(teacher_temperature),
-                }
-            )
+        sources = ("none",) if mode == "none" else teacher_sources
+        for source in sources:
+            canonical_source = _canonical_teacher_source(str(source))
+            for coef in raw_coefs:
+                key = (
+                    str(mode),
+                    round(float(coef), 12),
+                    topk,
+                    str(canonical_source),
+                    round(teacher_temperature, 12),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                configs.append(
+                    {
+                        "mode": str(mode),
+                        "coef": float(coef),
+                        "topk": int(topk),
+                        "teacher_source": str(canonical_source),
+                        "teacher_temperature": float(teacher_temperature),
+                        **_teacher_metadata_fields(
+                            str(canonical_source),
+                            topk=int(topk),
+                            temperature=float(teacher_temperature),
+                        ),
+                    }
+                )
     return tuple(configs)
 
 
 def _topk_ranking_aux_config(args: argparse.Namespace) -> dict[str, Any]:
+    teacher_sources = tuple(str(value) for value in args.teacher_sources)
     return {
         "modes": tuple(str(value) for value in args.topk_ranking_aux_modes),
         "coef_values": _nonnegative_float_values(
@@ -2457,11 +2633,44 @@ def _topk_ranking_aux_config(args: argparse.Namespace) -> dict[str, Any]:
             name="topk_ranking_aux_coef",
         ),
         "topk": int(args.topk_ranking_k),
-        "teacher_source": str(args.teacher_source),
+        "teacher_sources": teacher_sources,
         "teacher_temperature": float(args.teacher_temperature),
         "expanded_configs": _topk_ranking_aux_configs(args),
         "implemented_modes": ("none", "teacher-ce"),
-        "teacher_source_note": "rule-components currently maps to the existing rule-prior topK distribution",
+        "teacher_contract_version": _TOPK_TEACHER_CONTRACT_VERSION,
+        "teacher_source_note": (
+            "rule-prior-topk is the negative control; rule-components is a legacy alias; "
+            "rule-component-v1 is an action-feature diagnostic reranker"
+        ),
+    }
+
+
+def _canonical_teacher_source(source: str) -> str:
+    if str(source) == "rule-components":
+        return "rule-prior-topk"
+    return str(source)
+
+
+def _teacher_version(source: str) -> str:
+    canonical = _canonical_teacher_source(source)
+    if canonical == "none":
+        return "none"
+    if canonical == "rule-prior-topk":
+        return "rule_prior_topk_v1"
+    if canonical == "rule-component-v1":
+        return "action_feature_component_reranker_v1"
+    return f"{canonical}_unimplemented"
+
+
+def _teacher_metadata_fields(source: str, *, topk: int, temperature: float) -> dict[str, Any]:
+    canonical = _canonical_teacher_source(source)
+    return {
+        "teacher_source": str(canonical),
+        "teacher_version": _teacher_version(canonical),
+        "teacher_topk": int(topk),
+        "teacher_target_type": "none" if canonical == "none" else "topk_distribution",
+        "teacher_temperature": float(temperature),
+        "teacher_contract_version": _TOPK_TEACHER_CONTRACT_VERSION,
     }
 
 
@@ -3061,6 +3270,9 @@ def _summary_metric_key(key: str) -> bool:
         "tempered_post_update_topk_ranking_teacher_kl",
         "tempered_post_update_topk_ranking_teacher_agreement",
         "tempered_post_update_topk_ranking_kept_count",
+        "tempered_post_update_topk_ranking_teacher_prior_agreement",
+        "tempered_post_update_topk_ranking_teacher_rule_top1_rank",
+        "tempered_post_update_topk_ranking_teacher_margin",
         "untempered_post_update_approx_kl",
         "untempered_post_update_clip_fraction",
         "recovery_extra_epochs",
@@ -3130,6 +3342,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             float(item["delta_clip"]),
             float(item["delta_clip_coef"]),
             str(item["topk_ranking_aux_mode"]),
+            str(item["teacher_source"]),
             float(item["topk_ranking_aux_coef"]),
             int(item["topk_ranking_k"]),
             int(item["low_rank_flip_topk"]),
@@ -3158,7 +3371,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"rule_kl={row['rule_kl_coef']:g} "
             f"delta_l2={row['delta_l2_coef']:g} "
             f"delta_clip={row['delta_clip']:g}/{row['delta_clip_coef']:g} "
-            f"ranking_aux={row['topk_ranking_aux_mode']}/{row['topk_ranking_aux_coef']:g}/k{row['topk_ranking_k']} "
+            f"ranking_aux={row['topk_ranking_aux_mode']}/{row['teacher_source']}/{row['topk_ranking_aux_coef']:g}/k{row['topk_ranking_k']} "
             f"low_rank={row['low_rank_flip_topk']}/{row['low_rank_flip_penalty_coef']:g} "
             f"weak_margin={row['weak_margin_threshold']:g}/{row['weak_margin_flip_penalty_coef']:g} "
             f"support_policy={row['support_policy_mode']} "
@@ -3180,6 +3393,9 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"rank_aux={row['final_tempered_post_update_topk_ranking_aux_loss']:.6g} "
             f"teacher_kl={row['final_tempered_post_update_topk_ranking_teacher_kl']:.6g} "
             f"teacher_agree={row['final_tempered_post_update_topk_ranking_teacher_agreement']:.6g} "
+            f"teacher_prior_agree={row['final_tempered_post_update_topk_ranking_teacher_prior_agreement']:.6g} "
+            f"teacher_rule_top1_rank={row['final_tempered_post_update_topk_ranking_teacher_rule_top1_rank']:.6g} "
+            f"teacher_margin={row['final_tempered_post_update_topk_ranking_teacher_margin']:.6g} "
             f"fresh_top1={row.get('fresh_validation_top1_action_changed_rate', 0.0):.6g} "
             f"fresh_quality={row.get('fresh_validation_gate_pass')} "
             f"qualified_eval={row.get('qualified_for_eval')} "
