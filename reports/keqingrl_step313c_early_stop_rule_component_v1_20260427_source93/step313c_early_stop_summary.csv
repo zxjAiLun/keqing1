@@ -1,0 +1,5 @@
+seed,qualified_for_eval,early_stop_selected_iteration,train_movement_quality_gate_pass,fresh_validation_gate_pass,final_untempered_post_top1_action_changed_rate,fresh_validation_top1_action_changed_rate,final_untempered_post_changed_action_prior_rank_mean,final_untempered_post_changed_to_rank_ge5_rate,final_tempered_post_update_topk_ranking_teacher_confidence_kept_rate,eval_fourth_rate,eval_learner_deal_in_rate
+202604340000,True,1,True,True,0.06730769574642181,0.07623318582773209,2.142857142857143,0.0,0.3076923191547394,0.5,0.25
+202604350000,False,0,True,False,0.02678571455180645,0.004807692486792803,2.5,0.0,0.2767857015132904,nan,nan
+202604360000,True,0,True,True,0.09389671683311462,0.032710280269384384,2.55,0.0,0.2582159638404846,0.375,0.0625
+202604370000,True,1,True,True,0.05000000074505806,0.015228426083922386,2.4166666666666665,0.0,0.25,0.25,0.0625

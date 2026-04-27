@@ -318,6 +318,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fresh-validation-seed-base", type=int, default=None)
     parser.add_argument("--fresh-validation-min-top1-changed", type=float, default=0.01)
     parser.add_argument("--fresh-validation-max-top1-changed", type=float, default=0.10)
+    parser.add_argument("--per-iteration-fresh-early-stop", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--save-final-checkpoint", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--device", default=None)
     return parser.parse_args()
@@ -569,6 +570,7 @@ def _run_tempered_ratio_config(
     ).to(device)
     optimizer = torch.optim.Adam(base_policy.parameters(), lr=float(lr))
     config_rows: list[dict[str, Any]] = []
+    early_stop_best: dict[str, Any] | None = None
     for iteration in range(int(args.iterations)):
         rollout_seed = _iteration_seed(args, config_id, iteration)
         torch_seed = _iteration_torch_seed(args, config_id, iteration)
@@ -848,6 +850,48 @@ def _run_tempered_ratio_config(
             "untempered_post_update_approx_kl": _loss_float(untempered_post_loss.approx_kl),
             "untempered_post_update_clip_fraction": _loss_float(untempered_post_loss.clip_fraction),
         }
+        if bool(args.per_iteration_fresh_early_stop):
+            iteration_fresh_validation = _fresh_validation_metrics(
+                args,
+                policy,
+                opponent_pool,
+                device,
+                config_id=int(config_id),
+            )
+            iteration_qualified_for_eval = _qualified_for_eval(iter_row, iteration_fresh_validation, args)
+            iter_row.update(
+                {
+                    "per_iteration_fresh_early_stop_enabled": True,
+                    "iteration_fresh_validation_gate_pass": bool(
+                        iteration_fresh_validation.get("fresh_validation_gate_pass", True)
+                    ),
+                    "iteration_qualified_for_eval": bool(iteration_qualified_for_eval),
+                    "iteration_early_stop_score": _early_stop_score(iter_row, iteration_fresh_validation, args),
+                    **{
+                        f"iteration_{key}": value
+                        for key, value in iteration_fresh_validation.items()
+                    },
+                }
+            )
+            candidate_selection = {
+                "score": _early_stop_selection_key(iter_row, iteration_fresh_validation, args),
+                "iteration": int(iteration),
+                "policy_state": copy.deepcopy(policy.state_dict()),
+                "optimizer_state": copy.deepcopy(optimizer.state_dict()),
+                "row": copy.deepcopy(iter_row),
+                "fresh_validation": copy.deepcopy(iteration_fresh_validation),
+            }
+            if early_stop_best is None or candidate_selection["score"] < early_stop_best["score"]:
+                early_stop_best = candidate_selection
+        else:
+            iter_row.update(
+                {
+                    "per_iteration_fresh_early_stop_enabled": False,
+                    "iteration_fresh_validation_gate_pass": "",
+                    "iteration_qualified_for_eval": "",
+                    "iteration_early_stop_score": "",
+                }
+            )
         iteration_rows.append(iter_row)
         config_rows.append(iter_row)
         for row in diagnostic_rows:
@@ -971,6 +1015,8 @@ def _run_tempered_ratio_config(
             f"teacher_kl={_loss_float(tempered_post_loss.topk_ranking_teacher_kl):.6g} "
             f"teacher_prior_agree={_loss_float(tempered_post_loss.topk_ranking_teacher_prior_agreement):.6g} "
             f"teacher_conf_keep={_loss_float(tempered_post_loss.topk_ranking_teacher_confidence_kept_rate):.6g} "
+            f"iter_fresh={iter_row.get('iteration_fresh_validation_top1_action_changed_rate', '')} "
+            f"iter_fresh_gate={iter_row.get('iteration_fresh_validation_gate_pass', '')} "
             f"t_kl={_loss_float(tempered_post_loss.approx_kl):.6g} "
             f"t_clip={_loss_float(tempered_post_loss.clip_fraction):.6g} "
             f"delta_max={post_stats['neural_delta_abs_max']:.6g} "
@@ -979,14 +1025,24 @@ def _run_tempered_ratio_config(
             flush=True,
         )
 
-    final_row = config_rows[-1]
-    fresh_validation = _fresh_validation_metrics(
-        args,
-        policy,
-        opponent_pool,
-        device,
-        config_id=int(config_id),
-    )
+    if bool(args.per_iteration_fresh_early_stop) and early_stop_best is not None:
+        policy.load_state_dict(early_stop_best["policy_state"])
+        optimizer.load_state_dict(early_stop_best["optimizer_state"])
+        final_row = copy.deepcopy(early_stop_best["row"])
+        fresh_validation = copy.deepcopy(early_stop_best["fresh_validation"])
+        early_stop_selected_iteration = int(early_stop_best["iteration"])
+        early_stop_selected_score = float(_early_stop_score(final_row, fresh_validation, args))
+    else:
+        final_row = config_rows[-1]
+        fresh_validation = _fresh_validation_metrics(
+            args,
+            policy,
+            opponent_pool,
+            device,
+            config_id=int(config_id),
+        )
+        early_stop_selected_iteration = int(final_row.get("iteration", int(args.iterations) - 1))
+        early_stop_selected_score = float(_early_stop_score(final_row, fresh_validation, args))
     qualified_for_eval = _qualified_for_eval(final_row, fresh_validation, args)
     eval_skipped_reason = "" if qualified_for_eval else _eval_skip_reason(final_row, fresh_validation, args)
     if qualified_for_eval:
@@ -1057,6 +1113,11 @@ def _run_tempered_ratio_config(
             "eval_strength_note": "sanity check only; not duplicate strength evidence",
             "fresh_validation_episodes": int(args.fresh_validation_episodes),
             "fresh_validation_seed_registry_id": _fresh_validation_seed_registry_id(args, config_id),
+            "per_iteration_fresh_early_stop_enabled": bool(args.per_iteration_fresh_early_stop),
+            "early_stop_selected_iteration": int(early_stop_selected_iteration),
+            "early_stop_selected_score": float(early_stop_selected_score),
+            "early_stop_selected_train_gate_pass": bool(final_row.get("train_movement_quality_pass", True)),
+            "early_stop_selected_fresh_gate_pass": bool(fresh_validation.get("fresh_validation_gate_pass", True)),
             "train_movement_quality_gate_pass": bool(final_row.get("train_movement_quality_pass", True)),
             "qualified_for_eval": bool(qualified_for_eval),
             "eval_skipped_reason": eval_skipped_reason,
@@ -3412,6 +3473,10 @@ def _fresh_validation_config(args: argparse.Namespace) -> dict[str, Any]:
         "min_top1_changed": float(args.fresh_validation_min_top1_changed),
         "max_top1_changed": float(args.fresh_validation_max_top1_changed),
         "policy_mode": "greedy",
+        "per_iteration_early_stop_enabled": bool(args.per_iteration_fresh_early_stop),
+        "selection": (
+            "best train+fresh gate pass; otherwise lowest fresh violation, then train/stability violation"
+        ),
     }
 
 
@@ -3546,6 +3611,113 @@ def _fresh_validation_metrics(
         "fresh_validation_neural_delta_abs_max": float(delta_stats["neural_delta_abs_max"]),
         **{f"fresh_validation_{key}": value for key, value in quality_stats.items()},
     }
+
+
+def _early_stop_selection_key(
+    final_row: dict[str, Any],
+    fresh_validation: dict[str, Any],
+    args: argparse.Namespace,
+) -> tuple[float, float, float, float, float, int]:
+    train_pass = bool(final_row.get("train_movement_quality_pass", True))
+    fresh_pass = bool(fresh_validation.get("fresh_validation_gate_pass", True))
+    train_violation = _train_gate_violation(final_row, args)
+    fresh_violation = _fresh_gate_violation(fresh_validation, args)
+    stability_violation = _stability_violation(final_row, args)
+    fresh_top1 = float(fresh_validation.get("fresh_validation_top1_action_changed_rate", 0.0))
+    iteration = int(final_row.get("iteration", 0))
+    return (
+        0.0 if train_pass and fresh_pass else 1.0,
+        float(fresh_violation),
+        float(train_violation),
+        float(stability_violation),
+        float(fresh_top1),
+        int(iteration),
+    )
+
+
+def _early_stop_score(
+    final_row: dict[str, Any],
+    fresh_validation: dict[str, Any],
+    args: argparse.Namespace,
+) -> float:
+    key = _early_stop_selection_key(final_row, fresh_validation, args)
+    return (
+        key[0] * 1000.0
+        + key[1] * 100.0
+        + key[2] * 10.0
+        + key[3]
+        + key[4] * 0.01
+        + key[5] * 1e-6
+    )
+
+
+def _train_gate_violation(final_row: dict[str, Any], args: argparse.Namespace) -> float:
+    if not bool(args.movement_quality_gate):
+        return 0.0
+    top1 = float(final_row.get("untempered_post_top1_action_changed_rate", 0.0))
+    violation = _range_violation(
+        top1,
+        min_value=_quality_train_min_top1_changed(args),
+        max_value=float(args.quality_train_max_top1_changed),
+    )
+    violation += max(
+        0.0,
+        float(final_row.get("untempered_post_changed_action_prior_rank_mean", 0.0))
+        - float(args.quality_max_changed_prior_rank_mean),
+    )
+    violation += max(
+        0.0,
+        float(final_row.get("untempered_post_changed_to_rank_ge5_rate", 0.0))
+        - float(args.quality_max_rank_ge5_rate),
+    )
+    violation += max(
+        0.0,
+        float(final_row.get("untempered_post_changed_state_prior_margin_p50", 0.0))
+        - float(args.quality_max_prior_margin_p50),
+    )
+    return float(violation)
+
+
+def _fresh_gate_violation(fresh_validation: dict[str, Any], args: argparse.Namespace) -> float:
+    if not bool(args.movement_quality_gate) or int(args.fresh_validation_episodes) <= 0:
+        return 0.0
+    violation = _range_violation(
+        float(fresh_validation.get("fresh_validation_top1_action_changed_rate", 0.0)),
+        min_value=float(args.fresh_validation_min_top1_changed),
+        max_value=float(args.fresh_validation_max_top1_changed),
+    )
+    violation += max(
+        0.0,
+        float(fresh_validation.get("fresh_validation_changed_action_prior_rank_mean", 0.0))
+        - float(args.quality_max_changed_prior_rank_mean),
+    )
+    violation += max(
+        0.0,
+        float(fresh_validation.get("fresh_validation_changed_to_rank_ge5_rate", 0.0))
+        - float(args.quality_max_rank_ge5_rate),
+    )
+    violation += max(
+        0.0,
+        float(fresh_validation.get("fresh_validation_changed_state_prior_margin_p50", 0.0))
+        - float(args.quality_max_prior_margin_p50),
+    )
+    return float(violation)
+
+
+def _stability_violation(final_row: dict[str, Any], args: argparse.Namespace) -> float:
+    return (
+        max(0.0, float(final_row.get("tempered_post_update_approx_kl", 0.0)) - _recovery_max_tempered_kl(args))
+        + max(0.0, float(final_row.get("tempered_post_update_clip_fraction", 0.0)) - _recovery_max_tempered_clip(args))
+        + max(0.0, float(final_row.get("untempered_post_update_clip_fraction", 0.0)) - _recovery_max_untempered_clip(args))
+    )
+
+
+def _range_violation(value: float, *, min_value: float, max_value: float) -> float:
+    if float(value) < float(min_value):
+        return float(min_value) - float(value)
+    if float(value) > float(max_value):
+        return float(value) - float(max_value)
+    return 0.0
 
 
 def _fresh_validation_gate_pass(
@@ -3857,6 +4029,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"support_policy={row['support_policy_mode']} "
             f"delta_support={row['delta_support_mode']}/{row['delta_support_topk']}/{row['delta_support_margin_threshold']:g}/{row['outside_support_delta_mode']} "
             f"actor_support={row['actor_update_support_mode']}/{row['actor_update_topk']}/{row['actor_update_margin_threshold']:g} "
+            f"early_stop={row.get('per_iteration_fresh_early_stop_enabled', False)}/iter{row.get('early_stop_selected_iteration', '')} "
             f"pass={row.get('step38a_pass')} "
             f"non_top1={row['final_non_top1_selected_count']} "
             f"non_top1_pos={row['final_non_top1_positive_advantage_count']} "
