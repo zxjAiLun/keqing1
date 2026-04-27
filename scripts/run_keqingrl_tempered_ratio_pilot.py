@@ -18,6 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from keqingrl import DiscardOnlyMahjongEnv, run_fixed_seed_evaluation_smoke
+from keqingrl.contracts import PolicyInput, PolicyOutput
 from keqingrl.distribution import MaskedCategorical
 from keqingrl.learning_signal import batch_diagnostic_rows, seed_registry_hash
 from keqingrl.metadata import (
@@ -25,6 +26,7 @@ from keqingrl.metadata import (
     default_checkpoint_metadata,
     validate_checkpoint_metadata,
 )
+from keqingrl.policy import InteractivePolicy
 from keqingrl.ppo import PPOLossBreakdown, compute_ppo_loss, validate_ppo_batch_rule_score_scale
 from keqingrl.rule_score import smoothed_prior_probs
 from keqingrl.selfplay import build_episodes_ppo_batch, collect_selfplay_episodes
@@ -54,6 +56,100 @@ from scripts.run_keqingrl_temperature_pilot import (
 )
 
 
+_ACTOR_UPDATE_SUPPORT_MODES = (
+    "all",
+    "topk",
+    "weak-margin",
+    "topk-or-weak-margin",
+    "topk-and-weak-margin",
+)
+
+_DELTA_SUPPORT_MODES = _ACTOR_UPDATE_SUPPORT_MODES
+_OUTSIDE_SUPPORT_DELTA_MODES = ("zero", "negative-clip")
+
+
+class DeltaSupportProjectionPolicy(InteractivePolicy):
+    """Diagnostic wrapper that constrains neural_delta support before action selection."""
+
+    def __init__(
+        self,
+        base_policy: InteractivePolicy,
+        *,
+        support_mode: str,
+        topk: int,
+        margin_threshold: float,
+        outside_support_delta_mode: str,
+    ) -> None:
+        super().__init__()
+        if support_mode not in _DELTA_SUPPORT_MODES:
+            raise ValueError(f"unsupported delta support mode: {support_mode}")
+        if outside_support_delta_mode not in _OUTSIDE_SUPPORT_DELTA_MODES:
+            raise ValueError(f"unsupported outside-support delta mode: {outside_support_delta_mode}")
+        if int(topk) <= 0:
+            raise ValueError(f"delta_support_topk must be positive, got {topk}")
+        if float(margin_threshold) < 0.0:
+            raise ValueError(f"delta_support_margin_threshold must be non-negative, got {margin_threshold}")
+        self.base_policy = base_policy
+        self.support_mode = str(support_mode)
+        self.topk = int(topk)
+        self.margin_threshold = float(margin_threshold)
+        self.outside_support_delta_mode = str(outside_support_delta_mode)
+        self.rule_score_scale = float(getattr(base_policy, "rule_score_scale", 1.0))
+
+    def forward(self, policy_input: PolicyInput) -> PolicyOutput:
+        output = self.base_policy(policy_input)
+        prior_logits = output.aux.get("prior_logits")
+        if prior_logits is None:
+            prior_logits = policy_input.prior_logits
+        if prior_logits is None:
+            if self.support_mode != "all":
+                raise ValueError("delta support projection requires prior_logits")
+            prior_logits = torch.zeros_like(output.action_logits)
+        prior_logits = prior_logits.float()
+        mask = policy_input.legal_action_mask.bool()
+        unprojected_delta = output.aux.get("neural_delta")
+        if unprojected_delta is None:
+            unprojected_delta = output.action_logits.float() - self.rule_score_scale * prior_logits
+        else:
+            unprojected_delta = unprojected_delta.float()
+
+        support_mask = _delta_support_mask(
+            policy_input,
+            prior_logits=prior_logits,
+            support_mode=self.support_mode,
+            topk=self.topk,
+            margin_threshold=self.margin_threshold,
+        )
+        if self.outside_support_delta_mode == "zero":
+            projected_delta = torch.where(support_mask, unprojected_delta, torch.zeros_like(unprojected_delta))
+        elif self.outside_support_delta_mode == "negative-clip":
+            projected_delta = torch.where(support_mask, unprojected_delta, unprojected_delta.clamp_max(0.0))
+        else:
+            raise ValueError(f"unsupported outside-support delta mode: {self.outside_support_delta_mode}")
+
+        final_logits = self.rule_score_scale * prior_logits + projected_delta
+        final_logits = final_logits.masked_fill(~mask, torch.finfo(final_logits.dtype).min)
+        entropy = MaskedCategorical(final_logits, mask).entropy()
+        aux = dict(output.aux)
+        aux["prior_logits"] = prior_logits
+        aux["unprojected_neural_delta"] = unprojected_delta
+        aux["unprojected_final_logits"] = output.aux.get("final_logits", output.action_logits)
+        aux["neural_delta"] = projected_delta
+        aux["final_logits"] = final_logits
+        aux["delta_support_mask"] = support_mask
+        aux["delta_support_mode"] = torch.tensor(0, device=final_logits.device, dtype=torch.int64)
+        aux["delta_support_action_rate"] = support_mask.masked_select(mask).float().mean()
+        aux["outside_support_delta_mode"] = torch.tensor(0, device=final_logits.device, dtype=torch.int64)
+        return PolicyOutput(
+            action_logits=final_logits,
+            value=output.value,
+            rank_logits=output.rank_logits,
+            entropy=entropy,
+            aux=aux,
+            next_recurrent_state=output.next_recurrent_state,
+        )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run tempered-ratio PPO diagnostic")
     parser.add_argument("--candidate-summary", type=Path, required=True)
@@ -80,6 +176,62 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--low-rank-flip-penalty-coef-values", type=float, nargs="+", default=(0.0,))
     parser.add_argument("--weak-margin-threshold-values", type=float, nargs="+", default=(0.75,))
     parser.add_argument("--weak-margin-flip-penalty-coef-values", type=float, nargs="+", default=(0.0,))
+    parser.add_argument(
+        "--delta-support-mode",
+        "--delta-support-modes",
+        dest="delta_support_modes",
+        choices=_DELTA_SUPPORT_MODES,
+        nargs="+",
+        default=("all",),
+    )
+    parser.add_argument(
+        "--delta-support-topk",
+        "--delta-support-topk-values",
+        dest="delta_support_topk_values",
+        type=int,
+        nargs="+",
+        default=(3,),
+    )
+    parser.add_argument(
+        "--delta-support-margin-threshold",
+        "--delta-support-margin-threshold-values",
+        dest="delta_support_margin_threshold_values",
+        type=float,
+        nargs="+",
+        default=(0.75,),
+    )
+    parser.add_argument(
+        "--outside-support-delta-mode",
+        "--outside-support-delta-modes",
+        dest="outside_support_delta_modes",
+        choices=_OUTSIDE_SUPPORT_DELTA_MODES,
+        nargs="+",
+        default=("zero",),
+    )
+    parser.add_argument(
+        "--actor-update-support-mode",
+        "--actor-update-support-modes",
+        dest="actor_update_support_modes",
+        choices=_ACTOR_UPDATE_SUPPORT_MODES,
+        nargs="+",
+        default=("all",),
+    )
+    parser.add_argument(
+        "--actor-update-topk",
+        "--actor-update-topk-values",
+        dest="actor_update_topk_values",
+        type=int,
+        nargs="+",
+        default=(3,),
+    )
+    parser.add_argument(
+        "--actor-update-margin-threshold",
+        "--actor-update-margin-threshold-values",
+        dest="actor_update_margin_threshold_values",
+        type=float,
+        nargs="+",
+        default=(0.75,),
+    )
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--normalize-advantages", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--seed-base", type=int, default=202604300000)
@@ -164,6 +316,8 @@ def main() -> None:
         args.weak_margin_flip_penalty_coef_values,
         name="weak_margin_flip_penalty_coef",
     )
+    delta_support_configs = _delta_support_projection_configs(args)
+    actor_update_support_configs = _actor_update_support_configs(args)
 
     for candidate in candidates:
         source_policy = _load_policy(candidate, device)
@@ -181,36 +335,55 @@ def main() -> None:
                                                 for low_rank_flip_penalty_coef in low_rank_flip_penalty_coef_values:
                                                     for weak_margin_threshold in weak_margin_threshold_values:
                                                         for weak_margin_flip_penalty_coef in weak_margin_flip_penalty_coef_values:
-                                                            config_id = _run_tempered_ratio_config(
-                                                                args,
-                                                                candidate,
-                                                                source_policy,
-                                                                opponent_pool,
-                                                                device,
-                                                                config_id,
-                                                                rule_score_scale=float(rule_score_scale),
-                                                                temperature=float(temperature),
-                                                                lr=float(lr),
-                                                                update_epochs=int(update_epochs),
-                                                                clip_eps=float(clip_eps),
-                                                                rule_kl_coef=float(rule_kl_coef),
-                                                                delta_l2_coef=float(delta_l2_coef),
-                                                                delta_clip=float(delta_clip),
-                                                                delta_clip_coef=float(delta_clip_coef),
-                                                                low_rank_flip_topk=int(low_rank_flip_topk),
-                                                                low_rank_flip_penalty_coef=float(
-                                                                    low_rank_flip_penalty_coef
-                                                                ),
-                                                                weak_margin_threshold=float(weak_margin_threshold),
-                                                                weak_margin_flip_penalty_coef=float(
-                                                                    weak_margin_flip_penalty_coef
-                                                                ),
-                                                                summary_rows=summary_rows,
-                                                                iteration_rows=iteration_rows,
-                                                                step_rows=step_rows,
-                                                                advantage_rows=advantage_rows,
-                                                                checkpoint_rows=checkpoint_rows,
-                                                            )
+                                                            for delta_support in delta_support_configs:
+                                                                for actor_support in actor_update_support_configs:
+                                                                    config_id = _run_tempered_ratio_config(
+                                                                        args,
+                                                                        candidate,
+                                                                        source_policy,
+                                                                        opponent_pool,
+                                                                        device,
+                                                                        config_id,
+                                                                        rule_score_scale=float(rule_score_scale),
+                                                                        temperature=float(temperature),
+                                                                        lr=float(lr),
+                                                                        update_epochs=int(update_epochs),
+                                                                        clip_eps=float(clip_eps),
+                                                                        rule_kl_coef=float(rule_kl_coef),
+                                                                        delta_l2_coef=float(delta_l2_coef),
+                                                                        delta_clip=float(delta_clip),
+                                                                        delta_clip_coef=float(delta_clip_coef),
+                                                                        low_rank_flip_topk=int(low_rank_flip_topk),
+                                                                        low_rank_flip_penalty_coef=float(
+                                                                            low_rank_flip_penalty_coef
+                                                                        ),
+                                                                        weak_margin_threshold=float(weak_margin_threshold),
+                                                                        weak_margin_flip_penalty_coef=float(
+                                                                            weak_margin_flip_penalty_coef
+                                                                        ),
+                                                                        delta_support_mode=str(
+                                                                            delta_support["mode"]
+                                                                        ),
+                                                                        delta_support_topk=int(delta_support["topk"]),
+                                                                        delta_support_margin_threshold=float(
+                                                                            delta_support["margin_threshold"]
+                                                                        ),
+                                                                        outside_support_delta_mode=str(
+                                                                            delta_support["outside_support_delta_mode"]
+                                                                        ),
+                                                                        actor_update_support_mode=str(
+                                                                            actor_support["mode"]
+                                                                        ),
+                                                                        actor_update_topk=int(actor_support["topk"]),
+                                                                        actor_update_margin_threshold=float(
+                                                                            actor_support["margin_threshold"]
+                                                                        ),
+                                                                        summary_rows=summary_rows,
+                                                                        iteration_rows=iteration_rows,
+                                                                        step_rows=step_rows,
+                                                                        advantage_rows=advantage_rows,
+                                                                        checkpoint_rows=checkpoint_rows,
+                                                                    )
 
     payload = {
         "mode": _run_mode_label(args),
@@ -232,6 +405,8 @@ def main() -> None:
         "weak_margin_threshold_values": [float(value) for value in weak_margin_threshold_values],
         "weak_margin_flip_penalty_coef_values": [float(value) for value in weak_margin_flip_penalty_coef_values],
         "pass_criteria": _pass_criteria(args),
+        "delta_support_projection": _delta_support_projection_config(args),
+        "actor_update_support": _actor_update_support_config(args),
         "adaptive_recovery": _adaptive_recovery_config(args),
         "movement_regularization": _movement_regularization_config(args),
         "movement_quality_gate": _movement_quality_gate_config(args),
@@ -276,15 +451,29 @@ def _run_tempered_ratio_config(
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
     weak_margin_flip_penalty_coef: float,
+    delta_support_mode: str,
+    delta_support_topk: int,
+    delta_support_margin_threshold: float,
+    outside_support_delta_mode: str,
+    actor_update_support_mode: str,
+    actor_update_topk: int,
+    actor_update_margin_threshold: float,
     summary_rows: list[dict[str, Any]],
     iteration_rows: list[dict[str, Any]],
     step_rows: list[dict[str, Any]],
     advantage_rows: list[dict[str, Any]],
     checkpoint_rows: list[dict[str, Any]],
 ) -> int:
-    policy = copy.deepcopy(source_policy).to(device)
-    policy.rule_score_scale = float(rule_score_scale)
-    optimizer = torch.optim.Adam(policy.parameters(), lr=float(lr))
+    base_policy = copy.deepcopy(source_policy).to(device)
+    base_policy.rule_score_scale = float(rule_score_scale)
+    policy = DeltaSupportProjectionPolicy(
+        base_policy,
+        support_mode=str(delta_support_mode),
+        topk=int(delta_support_topk),
+        margin_threshold=float(delta_support_margin_threshold),
+        outside_support_delta_mode=str(outside_support_delta_mode),
+    ).to(device)
+    optimizer = torch.optim.Adam(base_policy.parameters(), lr=float(lr))
     config_rows: list[dict[str, Any]] = []
     for iteration in range(int(args.iterations)):
         rollout_seed = _iteration_seed(args, config_id, iteration)
@@ -312,7 +501,19 @@ def _run_tempered_ratio_config(
         )
         batch = batch.to(device)
         diagnostic_rows, diagnostic_summary = batch_diagnostic_rows(policy, batch, prepared_steps, episodes)
+        diagnostic_rows = _annotate_actor_update_support_rows(
+            diagnostic_rows,
+            support_mode=str(actor_update_support_mode),
+            topk=int(actor_update_topk),
+            margin_threshold=float(actor_update_margin_threshold),
+        )
         sampling_summary = _sampling_summary(diagnostic_rows)
+        actor_update_stats = _actor_update_support_stats(
+            batch,
+            support_mode=str(actor_update_support_mode),
+            topk=int(actor_update_topk),
+            margin_threshold=float(actor_update_margin_threshold),
+        )
         _assert_behavior_temperature(diagnostic_rows, float(temperature))
         pre_stats = _policy_delta_stats(policy, batch)
         pre_margin_stats = _effective_margin_stats(policy, batch)
@@ -337,6 +538,9 @@ def _run_tempered_ratio_config(
                 low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
                 weak_margin_threshold=float(weak_margin_threshold),
                 weak_margin_flip_penalty_coef=float(weak_margin_flip_penalty_coef),
+                actor_update_support_mode=str(actor_update_support_mode),
+                actor_update_topk=int(actor_update_topk),
+                actor_update_margin_threshold=float(actor_update_margin_threshold),
                 normalize_advantages=bool(args.normalize_advantages),
                 max_grad_norm=float(args.max_grad_norm) if args.max_grad_norm is not None else None,
             )
@@ -354,6 +558,9 @@ def _run_tempered_ratio_config(
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
             weak_margin_flip_penalty_coef=float(weak_margin_flip_penalty_coef),
+            actor_update_support_mode=str(actor_update_support_mode),
+            actor_update_topk=int(actor_update_topk),
+            actor_update_margin_threshold=float(actor_update_margin_threshold),
         )
         recovery_result = _apply_adaptive_recovery_gate(
             policy,
@@ -370,6 +577,9 @@ def _run_tempered_ratio_config(
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
             weak_margin_flip_penalty_coef=float(weak_margin_flip_penalty_coef),
+            actor_update_support_mode=str(actor_update_support_mode),
+            actor_update_topk=int(actor_update_topk),
+            actor_update_margin_threshold=float(actor_update_margin_threshold),
             tempered_post_loss=tempered_post_loss,
             untempered_post_loss=untempered_post_loss,
             post_stats=post_stats,
@@ -407,6 +617,13 @@ def _run_tempered_ratio_config(
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
             "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
+            "delta_support_mode": str(delta_support_mode),
+            "delta_support_topk": int(delta_support_topk),
+            "delta_support_margin_threshold": float(delta_support_margin_threshold),
+            "outside_support_delta_mode": str(outside_support_delta_mode),
+            "actor_update_support_mode": str(actor_update_support_mode),
+            "actor_update_topk": int(actor_update_topk),
+            "actor_update_margin_threshold": float(actor_update_margin_threshold),
             "entropy_coef": float(args.entropy_coef),
             "value_coef": float(args.value_coef),
             "rank_coef": float(args.rank_coef),
@@ -432,6 +649,7 @@ def _run_tempered_ratio_config(
             "train_movement_quality_pass": _train_movement_quality_gate_pass(post_stats, post_quality_stats, args),
             **diagnostic_summary,
             **sampling_summary,
+            **actor_update_stats,
             **{f"untempered_pre_{key}": value for key, value in pre_stats.items()},
             **{f"untempered_pre_{key}": value for key, value in pre_margin_stats.items()},
             **{f"untempered_pre_{key}": value for key, value in pre_quality_stats.items()},
@@ -474,6 +692,13 @@ def _run_tempered_ratio_config(
                     "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
                     "weak_margin_threshold": float(weak_margin_threshold),
                     "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
+                    "delta_support_mode": str(delta_support_mode),
+                    "delta_support_topk": int(delta_support_topk),
+                    "delta_support_margin_threshold": float(delta_support_margin_threshold),
+                    "outside_support_delta_mode": str(outside_support_delta_mode),
+                    "actor_update_support_mode": str(actor_update_support_mode),
+                    "actor_update_topk": int(actor_update_topk),
+                    "actor_update_margin_threshold": float(actor_update_margin_threshold),
                     **row,
                 }
             )
@@ -498,6 +723,13 @@ def _run_tempered_ratio_config(
                     "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
                     "weak_margin_threshold": float(weak_margin_threshold),
                     "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
+                    "delta_support_mode": str(delta_support_mode),
+                    "delta_support_topk": int(delta_support_topk),
+                    "delta_support_margin_threshold": float(delta_support_margin_threshold),
+                    "outside_support_delta_mode": str(outside_support_delta_mode),
+                    "actor_update_support_mode": str(actor_update_support_mode),
+                    "actor_update_topk": int(actor_update_topk),
+                    "actor_update_margin_threshold": float(actor_update_margin_threshold),
                     **row,
                 }
             )
@@ -513,6 +745,9 @@ def _run_tempered_ratio_config(
             f"low_rank_k={int(low_rank_flip_topk)} "
             f"low_rank_coef={float(low_rank_flip_penalty_coef):g} "
             f"weak_margin={float(weak_margin_threshold):g}/{float(weak_margin_flip_penalty_coef):g} "
+            f"delta_support={delta_support_mode}/{int(delta_support_topk)}/{float(delta_support_margin_threshold):g}/{outside_support_delta_mode} "
+            f"actor_support={actor_update_support_mode}/{int(actor_update_topk)}/{float(actor_update_margin_threshold):g} "
+            f"actor_kept={actor_update_stats['actor_update_kept_rate']:.6g} "
             f"iter={iteration + 1}/{args.iterations} "
             f"non_top1={sampling_summary['non_top1_selected_count']} "
             f"non_top1_pos={sampling_summary['non_top1_positive_advantage_count']} "
@@ -575,6 +810,13 @@ def _run_tempered_ratio_config(
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
             "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
+            "delta_support_mode": str(delta_support_mode),
+            "delta_support_topk": int(delta_support_topk),
+            "delta_support_margin_threshold": float(delta_support_margin_threshold),
+            "outside_support_delta_mode": str(outside_support_delta_mode),
+            "actor_update_support_mode": str(actor_update_support_mode),
+            "actor_update_topk": int(actor_update_topk),
+            "actor_update_margin_threshold": float(actor_update_margin_threshold),
             "update_epochs": int(update_epochs),
             "iterations": int(args.iterations),
             "episodes": int(args.episodes),
@@ -603,7 +845,7 @@ def _run_tempered_ratio_config(
             _save_tempered_ratio_checkpoint(
                 args,
                 candidate,
-                policy,
+                base_policy,
                 optimizer,
                 config_id=int(config_id),
                 rule_score_scale=float(rule_score_scale),
@@ -619,6 +861,13 @@ def _run_tempered_ratio_config(
                 low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
                 weak_margin_threshold=float(weak_margin_threshold),
                 weak_margin_flip_penalty_coef=float(weak_margin_flip_penalty_coef),
+                delta_support_mode=str(delta_support_mode),
+                delta_support_topk=int(delta_support_topk),
+                delta_support_margin_threshold=float(delta_support_margin_threshold),
+                outside_support_delta_mode=str(outside_support_delta_mode),
+                actor_update_support_mode=str(actor_update_support_mode),
+                actor_update_topk=int(actor_update_topk),
+                actor_update_margin_threshold=float(actor_update_margin_threshold),
                 summary_row=summary_rows[-1],
             )
         )
@@ -645,6 +894,13 @@ def _save_tempered_ratio_checkpoint(
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
     weak_margin_flip_penalty_coef: float,
+    delta_support_mode: str,
+    delta_support_topk: int,
+    delta_support_margin_threshold: float,
+    outside_support_delta_mode: str,
+    actor_update_support_mode: str,
+    actor_update_topk: int,
+    actor_update_margin_threshold: float,
     summary_row: dict[str, Any],
 ) -> dict[str, Any]:
     checkpoint_dir = args.output_dir / f"checkpoint_config_{config_id:03d}"
@@ -668,6 +924,24 @@ def _save_tempered_ratio_checkpoint(
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
             "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
+            "delta_support_mode": str(delta_support_mode),
+            "delta_support_topk": int(delta_support_topk),
+            "delta_support_margin_threshold": float(delta_support_margin_threshold),
+            "outside_support_delta_mode": str(outside_support_delta_mode),
+            "delta_support_projection": _single_delta_support_projection_config(
+                str(delta_support_mode),
+                int(delta_support_topk),
+                float(delta_support_margin_threshold),
+                str(outside_support_delta_mode),
+            ),
+            "actor_update_support_mode": str(actor_update_support_mode),
+            "actor_update_topk": int(actor_update_topk),
+            "actor_update_margin_threshold": float(actor_update_margin_threshold),
+            "actor_update_support": _single_actor_update_support_config(
+                str(actor_update_support_mode),
+                int(actor_update_topk),
+                float(actor_update_margin_threshold),
+            ),
             "adaptive_recovery": _adaptive_recovery_config(args),
             "movement_regularization": _movement_regularization_config(args),
             "movement_quality_gate": _movement_quality_gate_config(args),
@@ -708,6 +982,24 @@ def _save_tempered_ratio_checkpoint(
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
             "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
+            "delta_support_mode": str(delta_support_mode),
+            "delta_support_topk": int(delta_support_topk),
+            "delta_support_margin_threshold": float(delta_support_margin_threshold),
+            "outside_support_delta_mode": str(outside_support_delta_mode),
+            "delta_support_projection": _single_delta_support_projection_config(
+                str(delta_support_mode),
+                int(delta_support_topk),
+                float(delta_support_margin_threshold),
+                str(outside_support_delta_mode),
+            ),
+            "actor_update_support_mode": str(actor_update_support_mode),
+            "actor_update_topk": int(actor_update_topk),
+            "actor_update_margin_threshold": float(actor_update_margin_threshold),
+            "actor_update_support": _single_actor_update_support_config(
+                str(actor_update_support_mode),
+                int(actor_update_topk),
+                float(actor_update_margin_threshold),
+            ),
             "entropy_coef": float(args.entropy_coef),
             "value_coef": float(args.value_coef),
             "rank_coef": float(args.rank_coef),
@@ -777,6 +1069,17 @@ def _save_tempered_ratio_checkpoint(
         "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
         "low_rank_flip_penalty": float(summary_row["final_tempered_post_update_low_rank_flip_penalty"]),
         "weak_margin_flip_penalty": float(summary_row["final_tempered_post_update_weak_margin_flip_penalty"]),
+        "delta_support_mode": str(delta_support_mode),
+        "delta_support_topk": int(delta_support_topk),
+        "delta_support_margin_threshold": float(delta_support_margin_threshold),
+        "outside_support_delta_mode": str(outside_support_delta_mode),
+        "actor_update_support_mode": str(actor_update_support_mode),
+        "actor_update_topk": int(actor_update_topk),
+        "actor_update_margin_threshold": float(actor_update_margin_threshold),
+        "actor_update_kept_rate": float(summary_row["final_actor_update_kept_rate"]),
+        "actor_update_dropped_positive_advantage_count": int(
+            summary_row["final_actor_update_dropped_positive_advantage_count"]
+        ),
         "changed_action_prior_rank_mean": float(summary_row["final_untempered_post_changed_action_prior_rank_mean"]),
         "changed_to_rank_ge5_rate": float(summary_row["final_untempered_post_changed_to_rank_ge5_rate"]),
         "changed_state_prior_margin_p50": float(summary_row["final_untempered_post_changed_state_prior_margin_p50"]),
@@ -806,6 +1109,9 @@ def _post_update_metrics(
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
     weak_margin_flip_penalty_coef: float,
+    actor_update_support_mode: str,
+    actor_update_topk: int,
+    actor_update_margin_threshold: float,
 ) -> tuple[PPOLossBreakdown, PPOLossBreakdown, dict[str, float], dict[str, float]]:
     tempered_post_loss = _compute_tempered_ppo_loss(
         policy,
@@ -823,6 +1129,9 @@ def _post_update_metrics(
         low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
         weak_margin_threshold=float(weak_margin_threshold),
         weak_margin_flip_penalty_coef=float(weak_margin_flip_penalty_coef),
+        actor_update_support_mode=str(actor_update_support_mode),
+        actor_update_topk=int(actor_update_topk),
+        actor_update_margin_threshold=float(actor_update_margin_threshold),
         normalize_advantages=bool(args.normalize_advantages),
     )
     untempered_post_loss = _compute_untempered_loss(
@@ -853,6 +1162,9 @@ def _apply_adaptive_recovery_gate(
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
     weak_margin_flip_penalty_coef: float,
+    actor_update_support_mode: str,
+    actor_update_topk: int,
+    actor_update_margin_threshold: float,
     tempered_post_loss: PPOLossBreakdown,
     untempered_post_loss: PPOLossBreakdown,
     post_stats: dict[str, float],
@@ -903,6 +1215,9 @@ def _apply_adaptive_recovery_gate(
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
             weak_margin_flip_penalty_coef=float(weak_margin_flip_penalty_coef),
+            actor_update_support_mode=str(actor_update_support_mode),
+            actor_update_topk=int(actor_update_topk),
+            actor_update_margin_threshold=float(actor_update_margin_threshold),
         )
         (
             result["tempered_post_loss"],
@@ -947,6 +1262,9 @@ def _apply_adaptive_recovery_gate(
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
             weak_margin_flip_penalty_coef=float(weak_margin_flip_penalty_coef),
+            actor_update_support_mode=str(actor_update_support_mode),
+            actor_update_topk=int(actor_update_topk),
+            actor_update_margin_threshold=float(actor_update_margin_threshold),
             normalize_advantages=bool(args.normalize_advantages),
             max_grad_norm=float(args.max_grad_norm) if args.max_grad_norm is not None else None,
         )
@@ -964,6 +1282,9 @@ def _apply_adaptive_recovery_gate(
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
             weak_margin_flip_penalty_coef=float(weak_margin_flip_penalty_coef),
+            actor_update_support_mode=str(actor_update_support_mode),
+            actor_update_topk=int(actor_update_topk),
+            actor_update_margin_threshold=float(actor_update_margin_threshold),
         )
         candidate_top1 = float(candidate_metrics[2]["top1_action_changed_rate"])
         candidate_quality_stats = _movement_quality_stats(policy, batch)
@@ -1020,6 +1341,9 @@ def _tempered_ppo_update(
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
     weak_margin_flip_penalty_coef: float,
+    actor_update_support_mode: str,
+    actor_update_topk: int,
+    actor_update_margin_threshold: float,
     normalize_advantages: bool,
     max_grad_norm: float | None,
 ) -> PPOLossBreakdown:
@@ -1040,6 +1364,9 @@ def _tempered_ppo_update(
         low_rank_flip_penalty_coef=low_rank_flip_penalty_coef,
         weak_margin_threshold=weak_margin_threshold,
         weak_margin_flip_penalty_coef=weak_margin_flip_penalty_coef,
+        actor_update_support_mode=actor_update_support_mode,
+        actor_update_topk=actor_update_topk,
+        actor_update_margin_threshold=actor_update_margin_threshold,
         normalize_advantages=normalize_advantages,
     )
     losses.total_loss.backward()
@@ -1066,6 +1393,9 @@ def _compute_tempered_ppo_loss(
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
     weak_margin_flip_penalty_coef: float,
+    actor_update_support_mode: str,
+    actor_update_topk: int,
+    actor_update_margin_threshold: float,
     normalize_advantages: bool,
 ) -> PPOLossBreakdown:
     if float(temperature) <= 0.0:
@@ -1095,7 +1425,19 @@ def _compute_tempered_ppo_loss(
     ratio_std = ratio.std(unbiased=False)
     unclipped = ratio * advantages
     clipped = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * advantages
-    policy_loss = -torch.min(unclipped, clipped).mean()
+    per_sample_policy_loss = -torch.min(unclipped, clipped)
+    actor_weights = _actor_update_support_weights(
+        batch,
+        support_mode=str(actor_update_support_mode),
+        topk=int(actor_update_topk),
+        margin_threshold=float(actor_update_margin_threshold),
+    ).to(device=per_sample_policy_loss.device, dtype=per_sample_policy_loss.dtype)
+    if int(actor_weights.numel()) != int(per_sample_policy_loss.numel()):
+        raise ValueError(
+            "actor update support weights must match policy loss samples: "
+            f"{actor_weights.numel()} != {per_sample_policy_loss.numel()}"
+        )
+    policy_loss = (per_sample_policy_loss * actor_weights).sum() / actor_weights.sum().clamp_min(1.0)
     value_loss = F.smooth_l1_loss(output.value, batch.returns)
     entropy_bonus = entropy.mean()
     approx_kl = 0.5 * (new_log_prob - batch.old_log_prob).pow(2).mean()
@@ -1438,6 +1780,240 @@ def _movement_regularization_terms(
     return low_rank_flip_penalty, weak_margin_flip_penalty
 
 
+def _delta_support_mask(
+    policy_input: PolicyInput,
+    *,
+    prior_logits: torch.Tensor,
+    support_mode: str,
+    topk: int,
+    margin_threshold: float,
+) -> torch.Tensor:
+    mode = str(support_mode)
+    if mode not in _DELTA_SUPPORT_MODES:
+        raise ValueError(f"unsupported delta support mode: {mode}")
+    mask = policy_input.legal_action_mask.bool()
+    if mode == "all":
+        return mask
+
+    prior_logits = prior_logits.float()
+    masked_prior = prior_logits.masked_fill(~mask, torch.finfo(prior_logits.dtype).min)
+    ranks = 1.0 + (masked_prior.unsqueeze(2) > masked_prior.unsqueeze(1)).sum(dim=1).float()
+    topk_keep = ranks <= float(topk)
+
+    legal_count = mask.sum(dim=-1)
+    top_values = torch.topk(masked_prior, k=min(2, masked_prior.shape[-1]), dim=-1).values
+    top1 = top_values[:, 0]
+    if top_values.shape[-1] > 1:
+        second = torch.where(legal_count > 1, top_values[:, 1], top1)
+    else:
+        second = top1
+    prior_margin = torch.where(legal_count > 1, top1 - second, torch.zeros_like(top1))
+    weak_margin_keep = (prior_margin <= float(margin_threshold)).unsqueeze(1).expand_as(mask)
+
+    if mode == "topk":
+        support = topk_keep
+    elif mode == "weak-margin":
+        support = weak_margin_keep
+    elif mode == "topk-or-weak-margin":
+        support = topk_keep | weak_margin_keep
+    elif mode == "topk-and-weak-margin":
+        support = topk_keep & weak_margin_keep
+    else:
+        raise ValueError(f"unsupported delta support mode: {mode}")
+    return support & mask
+
+
+def _annotate_actor_update_support_rows(
+    rows: Sequence[dict[str, Any]],
+    *,
+    support_mode: str,
+    topk: int,
+    margin_threshold: float,
+) -> list[dict[str, Any]]:
+    annotated: list[dict[str, Any]] = []
+    for row in rows:
+        selected_rank = float(row.get("selected_prior_rank", 0.0))
+        prior_margin = float(row.get("prior_top1_margin_to_second", 0.0))
+        keep = _actor_update_support_keep(
+            selected_prior_rank=selected_rank,
+            prior_top1_margin_to_second=prior_margin,
+            support_mode=str(support_mode),
+            topk=int(topk),
+            margin_threshold=float(margin_threshold),
+        )
+        annotated.append(
+            {
+                **row,
+                "actor_update_support_mode": str(support_mode),
+                "actor_update_topk": int(topk),
+                "actor_update_margin_threshold": float(margin_threshold),
+                "actor_update_keep": bool(keep),
+                "actor_update_dropped": not bool(keep),
+            }
+        )
+    return annotated
+
+
+def _actor_update_support_stats(
+    batch,
+    *,
+    support_mode: str,
+    topk: int,
+    margin_threshold: float,
+) -> dict[str, float | int]:
+    selected_rank, prior_margin = _actor_update_prior_rank_and_margin(
+        batch,
+        require_prior=str(support_mode) != "all",
+    )
+    weights = _actor_update_support_weights(
+        batch,
+        support_mode=str(support_mode),
+        topk=int(topk),
+        margin_threshold=float(margin_threshold),
+        selected_rank=selected_rank,
+        prior_margin=prior_margin,
+    )
+    keep = weights > 0.0
+    dropped = ~keep
+    advantages = batch.advantages.detach().float().to(device=weights.device)
+    positive = advantages > 0.0
+    non_top1 = selected_rank.to(device=weights.device) > 1.0
+    batch_size = int(weights.numel())
+    kept_count = int(keep.sum().detach().cpu())
+    dropped_count = int(dropped.sum().detach().cpu())
+    kept_rank = selected_rank[keep.to(device=selected_rank.device)]
+    dropped_rank = selected_rank[dropped.to(device=selected_rank.device)]
+    kept_margin = prior_margin[keep.to(device=prior_margin.device)]
+    dropped_margin = prior_margin[dropped.to(device=prior_margin.device)]
+    return {
+        "actor_update_kept_count": kept_count,
+        "actor_update_dropped_count": dropped_count,
+        "actor_update_kept_rate": kept_count / batch_size if batch_size else 0.0,
+        "actor_update_dropped_rate": dropped_count / batch_size if batch_size else 0.0,
+        "actor_update_kept_positive_advantage_count": int((keep & positive).sum().detach().cpu()),
+        "actor_update_dropped_positive_advantage_count": int((dropped & positive).sum().detach().cpu()),
+        "actor_update_kept_non_top1_positive_advantage_count": int(
+            (keep & non_top1 & positive).sum().detach().cpu()
+        ),
+        "actor_update_dropped_non_top1_positive_advantage_count": int(
+            (dropped & non_top1 & positive).sum().detach().cpu()
+        ),
+        "actor_update_kept_selected_prior_rank_mean": _tensor_mean_float(kept_rank),
+        "actor_update_dropped_selected_prior_rank_mean": _tensor_mean_float(dropped_rank),
+        "actor_update_kept_prior_margin_mean": _tensor_mean_float(kept_margin),
+        "actor_update_dropped_prior_margin_mean": _tensor_mean_float(dropped_margin),
+    }
+
+
+def _actor_update_support_weights(
+    batch,
+    *,
+    support_mode: str,
+    topk: int,
+    margin_threshold: float,
+    selected_rank: torch.Tensor | None = None,
+    prior_margin: torch.Tensor | None = None,
+) -> torch.Tensor:
+    mode = str(support_mode)
+    if mode not in _ACTOR_UPDATE_SUPPORT_MODES:
+        raise ValueError(f"unsupported actor update support mode: {mode}")
+    if selected_rank is None or prior_margin is None:
+        selected_rank, prior_margin = _actor_update_prior_rank_and_margin(
+            batch,
+            require_prior=mode != "all",
+        )
+    if mode == "all":
+        return torch.ones_like(batch.advantages.detach().float())
+    keep = _actor_update_support_tensor(
+        selected_rank=selected_rank,
+        prior_top1_margin_to_second=prior_margin,
+        support_mode=mode,
+        topk=int(topk),
+        margin_threshold=float(margin_threshold),
+    )
+    return keep.to(device=batch.advantages.device, dtype=batch.advantages.dtype)
+
+
+def _actor_update_prior_rank_and_margin(
+    batch,
+    *,
+    require_prior: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    prior_logits = batch.policy_input.prior_logits
+    if prior_logits is None:
+        if require_prior:
+            raise ValueError("actor-update support mask requires prior_logits")
+        defaults = torch.ones_like(batch.advantages.detach().float())
+        return defaults, torch.zeros_like(defaults)
+
+    mask = batch.policy_input.legal_action_mask.bool()
+    prior_logits = prior_logits.float()
+    masked_prior = prior_logits.masked_fill(~mask, torch.finfo(prior_logits.dtype).min)
+    ranks = 1.0 + (masked_prior.unsqueeze(2) > masked_prior.unsqueeze(1)).sum(dim=1).float()
+    action_index = batch.action_index.long().view(-1, 1)
+    selected_rank = ranks.gather(1, action_index).squeeze(1)
+
+    legal_count = mask.sum(dim=-1)
+    top_values = torch.topk(masked_prior, k=min(2, masked_prior.shape[-1]), dim=-1).values
+    top1 = top_values[:, 0]
+    if top_values.shape[-1] > 1:
+        second = torch.where(legal_count > 1, top_values[:, 1], top1)
+    else:
+        second = top1
+    prior_margin = torch.where(legal_count > 1, top1 - second, torch.zeros_like(top1))
+    return selected_rank.detach(), prior_margin.detach()
+
+
+def _actor_update_support_tensor(
+    *,
+    selected_rank: torch.Tensor,
+    prior_top1_margin_to_second: torch.Tensor,
+    support_mode: str,
+    topk: int,
+    margin_threshold: float,
+) -> torch.Tensor:
+    topk_keep = selected_rank <= float(topk)
+    weak_margin_keep = prior_top1_margin_to_second <= float(margin_threshold)
+    if support_mode == "topk":
+        return topk_keep
+    if support_mode == "weak-margin":
+        return weak_margin_keep
+    if support_mode == "topk-or-weak-margin":
+        return topk_keep | weak_margin_keep
+    if support_mode == "topk-and-weak-margin":
+        return topk_keep & weak_margin_keep
+    if support_mode == "all":
+        return torch.ones_like(topk_keep, dtype=torch.bool)
+    raise ValueError(f"unsupported actor update support mode: {support_mode}")
+
+
+def _actor_update_support_keep(
+    *,
+    selected_prior_rank: float,
+    prior_top1_margin_to_second: float,
+    support_mode: str,
+    topk: int,
+    margin_threshold: float,
+) -> bool:
+    topk_keep = float(selected_prior_rank) <= float(topk)
+    weak_margin_keep = float(prior_top1_margin_to_second) <= float(margin_threshold)
+    if support_mode == "all":
+        return True
+    if support_mode == "topk":
+        return topk_keep
+    if support_mode == "weak-margin":
+        return weak_margin_keep
+    if support_mode == "topk-or-weak-margin":
+        return topk_keep or weak_margin_keep
+    if support_mode == "topk-and-weak-margin":
+        return topk_keep and weak_margin_keep
+    raise ValueError(f"unsupported actor update support mode: {support_mode}")
+
+
+def _tensor_mean_float(values: torch.Tensor) -> float:
+    return 0.0 if int(values.numel()) == 0 else float(values.float().mean().detach().cpu())
+
+
 def _assert_behavior_temperature(rows: Sequence[dict[str, Any]], expected: float) -> None:
     temperatures = {
         float(row["behavior_temperature"])
@@ -1497,6 +2073,185 @@ def _positive_int_values(values: Sequence[int], *, name: str) -> tuple[int, ...]
     if any(value <= 0 for value in clean):
         raise ValueError(f"{name} values must be positive, got {clean}")
     return clean
+
+
+def _delta_support_modes(args: argparse.Namespace) -> tuple[str, ...]:
+    modes = tuple(str(value) for value in args.delta_support_modes)
+    if not modes:
+        raise ValueError("delta support mode matrix must not be empty")
+    invalid = [mode for mode in modes if mode not in _DELTA_SUPPORT_MODES]
+    if invalid:
+        raise ValueError(f"unsupported delta support modes: {invalid}")
+    return modes
+
+
+def _outside_support_delta_modes(args: argparse.Namespace) -> tuple[str, ...]:
+    modes = tuple(str(value) for value in args.outside_support_delta_modes)
+    if not modes:
+        raise ValueError("outside-support delta mode matrix must not be empty")
+    invalid = [mode for mode in modes if mode not in _OUTSIDE_SUPPORT_DELTA_MODES]
+    if invalid:
+        raise ValueError(f"unsupported outside-support delta modes: {invalid}")
+    return modes
+
+
+def _delta_support_projection_configs(args: argparse.Namespace) -> tuple[dict[str, Any], ...]:
+    modes = _delta_support_modes(args)
+    topk_values = _positive_int_values(args.delta_support_topk_values, name="delta_support_topk")
+    margin_thresholds = _nonnegative_float_values(
+        args.delta_support_margin_threshold_values,
+        name="delta_support_margin_threshold",
+    )
+    outside_modes = _outside_support_delta_modes(args)
+    configs: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, float, str]] = set()
+    for mode in modes:
+        if mode == "all":
+            pairs = ((topk_values[0], margin_thresholds[0]),)
+        elif mode == "topk":
+            pairs = tuple((topk, margin_thresholds[0]) for topk in topk_values)
+        elif mode == "weak-margin":
+            pairs = tuple((topk_values[0], threshold) for threshold in margin_thresholds)
+        else:
+            pairs = tuple(
+                (topk, threshold)
+                for topk in topk_values
+                for threshold in margin_thresholds
+            )
+        for outside_mode in outside_modes:
+            for topk, threshold in pairs:
+                key = (str(mode), int(topk), round(float(threshold), 12), str(outside_mode))
+                if key in seen:
+                    continue
+                seen.add(key)
+                configs.append(
+                    _single_delta_support_projection_config(
+                        str(mode),
+                        int(topk),
+                        float(threshold),
+                        str(outside_mode),
+                    )
+                )
+    return tuple(configs)
+
+
+def _delta_support_projection_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "modes": _delta_support_modes(args),
+        "topk_values": _positive_int_values(args.delta_support_topk_values, name="delta_support_topk"),
+        "margin_threshold_values": _nonnegative_float_values(
+            args.delta_support_margin_threshold_values,
+            name="delta_support_margin_threshold",
+        ),
+        "outside_support_delta_modes": _outside_support_delta_modes(args),
+        "expanded_configs": _delta_support_projection_configs(args),
+        "scope": "projected_policy_forward_and_loss",
+        "margin_threshold_units": "unscaled_prior_logits",
+    }
+
+
+def _single_delta_support_projection_config(
+    mode: str,
+    topk: int,
+    margin_threshold: float,
+    outside_support_delta_mode: str,
+) -> dict[str, Any]:
+    if mode not in _DELTA_SUPPORT_MODES:
+        raise ValueError(f"unsupported delta support mode: {mode}")
+    if outside_support_delta_mode not in _OUTSIDE_SUPPORT_DELTA_MODES:
+        raise ValueError(f"unsupported outside-support delta mode: {outside_support_delta_mode}")
+    if int(topk) <= 0:
+        raise ValueError(f"delta_support_topk must be positive, got {topk}")
+    if float(margin_threshold) < 0.0:
+        raise ValueError(f"delta_support_margin_threshold must be non-negative, got {margin_threshold}")
+    return {
+        "mode": str(mode),
+        "topk": int(topk),
+        "margin_threshold": float(margin_threshold),
+        "outside_support_delta_mode": str(outside_support_delta_mode),
+        "margin_threshold_units": "unscaled_prior_logits",
+    }
+
+
+def _actor_update_support_modes(args: argparse.Namespace) -> tuple[str, ...]:
+    modes = tuple(str(value) for value in args.actor_update_support_modes)
+    if not modes:
+        raise ValueError("actor update support mode matrix must not be empty")
+    invalid = [mode for mode in modes if mode not in _ACTOR_UPDATE_SUPPORT_MODES]
+    if invalid:
+        raise ValueError(f"unsupported actor update support modes: {invalid}")
+    return modes
+
+
+def _actor_update_support_configs(args: argparse.Namespace) -> tuple[dict[str, Any], ...]:
+    modes = _actor_update_support_modes(args)
+    topk_values = _positive_int_values(args.actor_update_topk_values, name="actor_update_topk")
+    margin_thresholds = _nonnegative_float_values(
+        args.actor_update_margin_threshold_values,
+        name="actor_update_margin_threshold",
+    )
+    configs: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, float]] = set()
+    for mode in modes:
+        if mode == "all":
+            pairs = ((topk_values[0], margin_thresholds[0]),)
+        elif mode == "topk":
+            pairs = tuple((topk, margin_thresholds[0]) for topk in topk_values)
+        elif mode == "weak-margin":
+            pairs = tuple((topk_values[0], threshold) for threshold in margin_thresholds)
+        else:
+            pairs = tuple(
+                (topk, threshold)
+                for topk in topk_values
+                for threshold in margin_thresholds
+            )
+        for topk, threshold in pairs:
+            key = (str(mode), int(topk), round(float(threshold), 12))
+            if key in seen:
+                continue
+            seen.add(key)
+            configs.append(
+                _single_actor_update_support_config(
+                    str(mode),
+                    int(topk),
+                    float(threshold),
+                )
+            )
+    return tuple(configs)
+
+
+def _actor_update_support_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "modes": _actor_update_support_modes(args),
+        "topk_values": _positive_int_values(args.actor_update_topk_values, name="actor_update_topk"),
+        "margin_threshold_values": _nonnegative_float_values(
+            args.actor_update_margin_threshold_values,
+            name="actor_update_margin_threshold",
+        ),
+        "expanded_configs": _actor_update_support_configs(args),
+        "scope": "actor_policy_loss_only",
+        "value_rank_losses_weighted": False,
+        "margin_threshold_units": "unscaled_prior_logits",
+    }
+
+
+def _single_actor_update_support_config(
+    mode: str,
+    topk: int,
+    margin_threshold: float,
+) -> dict[str, Any]:
+    if mode not in _ACTOR_UPDATE_SUPPORT_MODES:
+        raise ValueError(f"unsupported actor update support mode: {mode}")
+    if int(topk) <= 0:
+        raise ValueError(f"actor_update_topk must be positive, got {topk}")
+    if float(margin_threshold) < 0.0:
+        raise ValueError(f"actor_update_margin_threshold must be non-negative, got {margin_threshold}")
+    return {
+        "mode": str(mode),
+        "topk": int(topk),
+        "margin_threshold": float(margin_threshold),
+        "margin_threshold_units": "unscaled_prior_logits",
+    }
 
 
 def _run_mode_label(args: argparse.Namespace) -> str:
@@ -1848,6 +2603,18 @@ def _summary_metric_key(key: str) -> bool:
         "positive_advantage_top1_count",
         "positive_advantage_non_top1_count",
         "selected_prior_top1_rate",
+        "actor_update_kept_count",
+        "actor_update_dropped_count",
+        "actor_update_kept_rate",
+        "actor_update_dropped_rate",
+        "actor_update_kept_positive_advantage_count",
+        "actor_update_dropped_positive_advantage_count",
+        "actor_update_kept_non_top1_positive_advantage_count",
+        "actor_update_dropped_non_top1_positive_advantage_count",
+        "actor_update_kept_selected_prior_rank_mean",
+        "actor_update_dropped_selected_prior_rank_mean",
+        "actor_update_kept_prior_margin_mean",
+        "actor_update_dropped_prior_margin_mean",
         "untempered_post_top1_action_changed_rate",
         "untempered_post_rule_agreement",
         "untempered_post_neural_delta_abs_mean",
@@ -1912,6 +2679,8 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
         f"low_rank_flip_penalty_coef_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.low_rank_flip_penalty_coef_values, name='low_rank_flip_penalty_coef'))}`",
         f"weak_margin_threshold_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.weak_margin_threshold_values, name='weak_margin_threshold'))}`",
         f"weak_margin_flip_penalty_coef_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.weak_margin_flip_penalty_coef_values, name='weak_margin_flip_penalty_coef'))}`",
+        f"delta_support_projection: `{_delta_support_projection_config(args)}`",
+        f"actor_update_support: `{_actor_update_support_config(args)}`",
         f"entropy_coef: `{args.entropy_coef}`",
         f"pass_criteria: `{_pass_criteria(args)}`",
         f"adaptive_recovery: `{_adaptive_recovery_config(args)}`",
@@ -1943,6 +2712,13 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             float(item["low_rank_flip_penalty_coef"]),
             float(item["weak_margin_threshold"]),
             float(item["weak_margin_flip_penalty_coef"]),
+            str(item["delta_support_mode"]),
+            int(item["delta_support_topk"]),
+            float(item["delta_support_margin_threshold"]),
+            str(item["outside_support_delta_mode"]),
+            str(item["actor_update_support_mode"]),
+            int(item["actor_update_topk"]),
+            float(item["actor_update_margin_threshold"]),
         ),
     ):
         lines.append(
@@ -1959,9 +2735,14 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"delta_clip={row['delta_clip']:g}/{row['delta_clip_coef']:g} "
             f"low_rank={row['low_rank_flip_topk']}/{row['low_rank_flip_penalty_coef']:g} "
             f"weak_margin={row['weak_margin_threshold']:g}/{row['weak_margin_flip_penalty_coef']:g} "
+            f"delta_support={row['delta_support_mode']}/{row['delta_support_topk']}/{row['delta_support_margin_threshold']:g}/{row['outside_support_delta_mode']} "
+            f"actor_support={row['actor_update_support_mode']}/{row['actor_update_topk']}/{row['actor_update_margin_threshold']:g} "
             f"pass={row.get('step38a_pass')} "
             f"non_top1={row['final_non_top1_selected_count']} "
             f"non_top1_pos={row['final_non_top1_positive_advantage_count']} "
+            f"actor_kept={row['final_actor_update_kept_rate']:.6g} "
+            f"dropped_pos={row['final_actor_update_dropped_positive_advantage_count']} "
+            f"kept_non_top1_pos={row['final_actor_update_kept_non_top1_positive_advantage_count']} "
             f"top1_changed={row['final_untempered_post_top1_action_changed_rate']:.6g} "
             f"train_quality={row.get('train_movement_quality_gate_pass')} "
             f"changed_rank={row['final_untempered_post_changed_action_prior_rank_mean']:.6g} "
