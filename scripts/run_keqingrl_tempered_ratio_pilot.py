@@ -209,6 +209,10 @@ def _parse_args() -> argparse.Namespace:
         default=("rule-prior-topk",),
     )
     parser.add_argument("--teacher-temperature", type=float, default=1.0)
+    parser.add_argument("--teacher-confidence-gate", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--teacher-entropy-max-values", type=float, nargs="+", default=(1_000_000_000.0,))
+    parser.add_argument("--teacher-margin-min-values", type=float, nargs="+", default=(0.0,))
+    parser.add_argument("--teacher-prior-agree-min-values", type=float, nargs="+", default=(0.0,))
     parser.add_argument("--low-rank-flip-topk-values", type=int, nargs="+", default=(3,))
     parser.add_argument("--low-rank-flip-penalty-coef-values", type=float, nargs="+", default=(0.0,))
     parser.add_argument("--weak-margin-threshold-values", type=float, nargs="+", default=(0.75,))
@@ -415,6 +419,18 @@ def main() -> None:
                                                                             teacher_temperature=float(
                                                                                 topk_ranking_aux["teacher_temperature"]
                                                                             ),
+                                                                            teacher_confidence_gate=bool(
+                                                                                topk_ranking_aux["teacher_confidence_gate"]
+                                                                            ),
+                                                                            teacher_entropy_max=float(
+                                                                                topk_ranking_aux["teacher_entropy_max"]
+                                                                            ),
+                                                                            teacher_margin_min=float(
+                                                                                topk_ranking_aux["teacher_margin_min"]
+                                                                            ),
+                                                                            teacher_prior_agree_min=float(
+                                                                                topk_ranking_aux["teacher_prior_agree_min"]
+                                                                            ),
                                                                             low_rank_flip_topk=int(low_rank_flip_topk),
                                                                             low_rank_flip_penalty_coef=float(
                                                                                 low_rank_flip_penalty_coef
@@ -519,6 +535,10 @@ def _run_tempered_ratio_config(
     topk_ranking_k: int,
     teacher_source: str,
     teacher_temperature: float,
+    teacher_confidence_gate: bool,
+    teacher_entropy_max: float,
+    teacher_margin_min: float,
+    teacher_prior_agree_min: float,
     low_rank_flip_topk: int,
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
@@ -581,6 +601,18 @@ def _run_tempered_ratio_config(
             topk=int(actor_update_topk),
             margin_threshold=float(actor_update_margin_threshold),
         )
+        diagnostic_rows = _annotate_teacher_quality_rows(
+            diagnostic_rows,
+            batch,
+            topk=int(topk_ranking_k),
+            teacher_source=str(teacher_source),
+            teacher_temperature=float(teacher_temperature),
+            confidence_gate=bool(teacher_confidence_gate),
+            entropy_max=float(teacher_entropy_max),
+            margin_min=float(teacher_margin_min),
+            prior_agree_min=float(teacher_prior_agree_min),
+        )
+        teacher_quality_summary = _teacher_quality_summary(diagnostic_rows)
         sampling_summary = _sampling_summary(diagnostic_rows)
         actor_update_stats = _actor_update_support_stats(
             batch,
@@ -613,6 +645,10 @@ def _run_tempered_ratio_config(
                 topk_ranking_k=int(topk_ranking_k),
                 teacher_source=str(teacher_source),
                 teacher_temperature=float(teacher_temperature),
+                teacher_confidence_gate=bool(teacher_confidence_gate),
+                teacher_entropy_max=float(teacher_entropy_max),
+                teacher_margin_min=float(teacher_margin_min),
+                teacher_prior_agree_min=float(teacher_prior_agree_min),
                 low_rank_flip_topk=int(low_rank_flip_topk),
                 low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
                 weak_margin_threshold=float(weak_margin_threshold),
@@ -638,6 +674,10 @@ def _run_tempered_ratio_config(
             topk_ranking_k=int(topk_ranking_k),
             teacher_source=str(teacher_source),
             teacher_temperature=float(teacher_temperature),
+            teacher_confidence_gate=bool(teacher_confidence_gate),
+            teacher_entropy_max=float(teacher_entropy_max),
+            teacher_margin_min=float(teacher_margin_min),
+            teacher_prior_agree_min=float(teacher_prior_agree_min),
             low_rank_flip_topk=int(low_rank_flip_topk),
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
@@ -662,6 +702,10 @@ def _run_tempered_ratio_config(
             topk_ranking_k=int(topk_ranking_k),
             teacher_source=str(teacher_source),
             teacher_temperature=float(teacher_temperature),
+            teacher_confidence_gate=bool(teacher_confidence_gate),
+            teacher_entropy_max=float(teacher_entropy_max),
+            teacher_margin_min=float(teacher_margin_min),
+            teacher_prior_agree_min=float(teacher_prior_agree_min),
             low_rank_flip_topk=int(low_rank_flip_topk),
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
@@ -707,6 +751,10 @@ def _run_tempered_ratio_config(
             "topk_ranking_k": int(topk_ranking_k),
             "teacher_source": str(teacher_source),
             "teacher_temperature": float(teacher_temperature),
+            "teacher_confidence_gate": bool(teacher_confidence_gate),
+            "teacher_entropy_max": float(teacher_entropy_max),
+            "teacher_margin_min": float(teacher_margin_min),
+            "teacher_prior_agree_min": float(teacher_prior_agree_min),
             **_teacher_metadata_fields(
                 str(teacher_source),
                 topk=int(topk_ranking_k),
@@ -756,6 +804,7 @@ def _run_tempered_ratio_config(
             **{f"untempered_post_{key}": value for key, value in post_stats.items()},
             **{f"untempered_post_{key}": value for key, value in post_margin_stats.items()},
             **{f"untempered_post_{key}": value for key, value in post_quality_stats.items()},
+            **teacher_quality_summary,
             "tempered_post_update_approx_kl": _loss_float(tempered_post_loss.approx_kl),
             "tempered_post_update_clip_fraction": _loss_float(tempered_post_loss.clip_fraction),
             "tempered_post_update_policy_loss": _loss_float(tempered_post_loss.policy_loss),
@@ -787,6 +836,15 @@ def _run_tempered_ratio_config(
             "tempered_post_update_topk_ranking_teacher_margin": _loss_float(
                 tempered_post_loss.topk_ranking_teacher_margin
             ),
+            "tempered_post_update_topk_ranking_teacher_entropy": _loss_float(
+                tempered_post_loss.topk_ranking_teacher_entropy
+            ),
+            "tempered_post_update_topk_ranking_teacher_confidence_kept_count": _loss_float(
+                tempered_post_loss.topk_ranking_teacher_confidence_kept_count
+            ),
+            "tempered_post_update_topk_ranking_teacher_confidence_kept_rate": _loss_float(
+                tempered_post_loss.topk_ranking_teacher_confidence_kept_rate
+            ),
             "untempered_post_update_approx_kl": _loss_float(untempered_post_loss.approx_kl),
             "untempered_post_update_clip_fraction": _loss_float(untempered_post_loss.clip_fraction),
         }
@@ -814,6 +872,10 @@ def _run_tempered_ratio_config(
                     "topk_ranking_k": int(topk_ranking_k),
                     "teacher_source": str(teacher_source),
                     "teacher_temperature": float(teacher_temperature),
+                    "teacher_confidence_gate": bool(teacher_confidence_gate),
+                    "teacher_entropy_max": float(teacher_entropy_max),
+                    "teacher_margin_min": float(teacher_margin_min),
+                    "teacher_prior_agree_min": float(teacher_prior_agree_min),
                     **_teacher_metadata_fields(
                         str(teacher_source),
                         topk=int(topk_ranking_k),
@@ -856,6 +918,10 @@ def _run_tempered_ratio_config(
                     "topk_ranking_k": int(topk_ranking_k),
                     "teacher_source": str(teacher_source),
                     "teacher_temperature": float(teacher_temperature),
+                    "teacher_confidence_gate": bool(teacher_confidence_gate),
+                    "teacher_entropy_max": float(teacher_entropy_max),
+                    "teacher_margin_min": float(teacher_margin_min),
+                    "teacher_prior_agree_min": float(teacher_prior_agree_min),
                     **_teacher_metadata_fields(
                         str(teacher_source),
                         topk=int(topk_ranking_k),
@@ -904,6 +970,7 @@ def _run_tempered_ratio_config(
             f"rank_aux={_loss_float(tempered_post_loss.topk_ranking_aux_loss):.6g} "
             f"teacher_kl={_loss_float(tempered_post_loss.topk_ranking_teacher_kl):.6g} "
             f"teacher_prior_agree={_loss_float(tempered_post_loss.topk_ranking_teacher_prior_agreement):.6g} "
+            f"teacher_conf_keep={_loss_float(tempered_post_loss.topk_ranking_teacher_confidence_kept_rate):.6g} "
             f"t_kl={_loss_float(tempered_post_loss.approx_kl):.6g} "
             f"t_clip={_loss_float(tempered_post_loss.clip_fraction):.6g} "
             f"delta_max={post_stats['neural_delta_abs_max']:.6g} "
@@ -959,6 +1026,10 @@ def _run_tempered_ratio_config(
             "topk_ranking_k": int(topk_ranking_k),
             "teacher_source": str(teacher_source),
             "teacher_temperature": float(teacher_temperature),
+            "teacher_confidence_gate": bool(teacher_confidence_gate),
+            "teacher_entropy_max": float(teacher_entropy_max),
+            "teacher_margin_min": float(teacher_margin_min),
+            "teacher_prior_agree_min": float(teacher_prior_agree_min),
             **_teacher_metadata_fields(
                 str(teacher_source),
                 topk=int(topk_ranking_k),
@@ -1021,6 +1092,10 @@ def _run_tempered_ratio_config(
                 topk_ranking_k=int(topk_ranking_k),
                 teacher_source=str(teacher_source),
                 teacher_temperature=float(teacher_temperature),
+                teacher_confidence_gate=bool(teacher_confidence_gate),
+                teacher_entropy_max=float(teacher_entropy_max),
+                teacher_margin_min=float(teacher_margin_min),
+                teacher_prior_agree_min=float(teacher_prior_agree_min),
                 low_rank_flip_topk=int(low_rank_flip_topk),
                 low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
                 weak_margin_threshold=float(weak_margin_threshold),
@@ -1060,6 +1135,10 @@ def _save_tempered_ratio_checkpoint(
     topk_ranking_k: int,
     teacher_source: str,
     teacher_temperature: float,
+    teacher_confidence_gate: bool,
+    teacher_entropy_max: float,
+    teacher_margin_min: float,
+    teacher_prior_agree_min: float,
     low_rank_flip_topk: int,
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
@@ -1096,6 +1175,10 @@ def _save_tempered_ratio_checkpoint(
             "topk_ranking_k": int(topk_ranking_k),
             "teacher_source": str(teacher_source),
             "teacher_temperature": float(teacher_temperature),
+            "teacher_confidence_gate": bool(teacher_confidence_gate),
+            "teacher_entropy_max": float(teacher_entropy_max),
+            "teacher_margin_min": float(teacher_margin_min),
+            "teacher_prior_agree_min": float(teacher_prior_agree_min),
             **_teacher_metadata_fields(
                 str(teacher_source),
                 topk=int(topk_ranking_k),
@@ -1173,6 +1256,10 @@ def _save_tempered_ratio_checkpoint(
             "topk_ranking_k": int(topk_ranking_k),
             "teacher_source": str(teacher_source),
             "teacher_temperature": float(teacher_temperature),
+            "teacher_confidence_gate": bool(teacher_confidence_gate),
+            "teacher_entropy_max": float(teacher_entropy_max),
+            "teacher_margin_min": float(teacher_margin_min),
+            "teacher_prior_agree_min": float(teacher_prior_agree_min),
             **_teacher_metadata_fields(
                 str(teacher_source),
                 topk=int(topk_ranking_k),
@@ -1276,6 +1363,10 @@ def _save_tempered_ratio_checkpoint(
         "topk_ranking_k": int(topk_ranking_k),
         "teacher_source": str(teacher_source),
         "teacher_temperature": float(teacher_temperature),
+        "teacher_confidence_gate": bool(teacher_confidence_gate),
+        "teacher_entropy_max": float(teacher_entropy_max),
+        "teacher_margin_min": float(teacher_margin_min),
+        "teacher_prior_agree_min": float(teacher_prior_agree_min),
         **_teacher_metadata_fields(
             str(teacher_source),
             topk=int(topk_ranking_k),
@@ -1337,6 +1428,10 @@ def _post_update_metrics(
     topk_ranking_k: int,
     teacher_source: str,
     teacher_temperature: float,
+    teacher_confidence_gate: bool,
+    teacher_entropy_max: float,
+    teacher_margin_min: float,
+    teacher_prior_agree_min: float,
     low_rank_flip_topk: int,
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
@@ -1362,6 +1457,10 @@ def _post_update_metrics(
         topk_ranking_k=int(topk_ranking_k),
         teacher_source=str(teacher_source),
         teacher_temperature=float(teacher_temperature),
+        teacher_confidence_gate=bool(teacher_confidence_gate),
+        teacher_entropy_max=float(teacher_entropy_max),
+        teacher_margin_min=float(teacher_margin_min),
+        teacher_prior_agree_min=float(teacher_prior_agree_min),
         low_rank_flip_topk=int(low_rank_flip_topk),
         low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
         weak_margin_threshold=float(weak_margin_threshold),
@@ -1400,6 +1499,10 @@ def _apply_adaptive_recovery_gate(
     topk_ranking_k: int,
     teacher_source: str,
     teacher_temperature: float,
+    teacher_confidence_gate: bool,
+    teacher_entropy_max: float,
+    teacher_margin_min: float,
+    teacher_prior_agree_min: float,
     low_rank_flip_topk: int,
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
@@ -1458,6 +1561,10 @@ def _apply_adaptive_recovery_gate(
             topk_ranking_k=int(topk_ranking_k),
             teacher_source=str(teacher_source),
             teacher_temperature=float(teacher_temperature),
+            teacher_confidence_gate=bool(teacher_confidence_gate),
+            teacher_entropy_max=float(teacher_entropy_max),
+            teacher_margin_min=float(teacher_margin_min),
+            teacher_prior_agree_min=float(teacher_prior_agree_min),
             low_rank_flip_topk=int(low_rank_flip_topk),
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
@@ -1510,6 +1617,10 @@ def _apply_adaptive_recovery_gate(
             topk_ranking_k=int(topk_ranking_k),
             teacher_source=str(teacher_source),
             teacher_temperature=float(teacher_temperature),
+            teacher_confidence_gate=bool(teacher_confidence_gate),
+            teacher_entropy_max=float(teacher_entropy_max),
+            teacher_margin_min=float(teacher_margin_min),
+            teacher_prior_agree_min=float(teacher_prior_agree_min),
             low_rank_flip_topk=int(low_rank_flip_topk),
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
@@ -1535,6 +1646,10 @@ def _apply_adaptive_recovery_gate(
             topk_ranking_k=int(topk_ranking_k),
             teacher_source=str(teacher_source),
             teacher_temperature=float(teacher_temperature),
+            teacher_confidence_gate=bool(teacher_confidence_gate),
+            teacher_entropy_max=float(teacher_entropy_max),
+            teacher_margin_min=float(teacher_margin_min),
+            teacher_prior_agree_min=float(teacher_prior_agree_min),
             low_rank_flip_topk=int(low_rank_flip_topk),
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
@@ -1599,6 +1714,10 @@ def _tempered_ppo_update(
     topk_ranking_k: int,
     teacher_source: str,
     teacher_temperature: float,
+    teacher_confidence_gate: bool,
+    teacher_entropy_max: float,
+    teacher_margin_min: float,
+    teacher_prior_agree_min: float,
     low_rank_flip_topk: int,
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
@@ -1627,6 +1746,10 @@ def _tempered_ppo_update(
         topk_ranking_k=topk_ranking_k,
         teacher_source=teacher_source,
         teacher_temperature=teacher_temperature,
+        teacher_confidence_gate=teacher_confidence_gate,
+        teacher_entropy_max=teacher_entropy_max,
+        teacher_margin_min=teacher_margin_min,
+        teacher_prior_agree_min=teacher_prior_agree_min,
         low_rank_flip_topk=low_rank_flip_topk,
         low_rank_flip_penalty_coef=low_rank_flip_penalty_coef,
         weak_margin_threshold=weak_margin_threshold,
@@ -1661,6 +1784,10 @@ def _compute_tempered_ppo_loss(
     topk_ranking_k: int,
     teacher_source: str,
     teacher_temperature: float,
+    teacher_confidence_gate: bool,
+    teacher_entropy_max: float,
+    teacher_margin_min: float,
+    teacher_prior_agree_min: float,
     low_rank_flip_topk: int,
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
@@ -1755,6 +1882,9 @@ def _compute_tempered_ppo_loss(
         topk_ranking_teacher_prior_agreement,
         topk_ranking_teacher_rule_top1_rank,
         topk_ranking_teacher_margin,
+        topk_ranking_teacher_entropy,
+        topk_ranking_teacher_confidence_kept_count,
+        topk_ranking_teacher_confidence_kept_rate,
     ) = _topk_ranking_aux_terms(
         output,
         batch,
@@ -1762,6 +1892,10 @@ def _compute_tempered_ppo_loss(
         topk=int(topk_ranking_k),
         teacher_source=str(teacher_source),
         teacher_temperature=float(teacher_temperature),
+        confidence_gate=bool(teacher_confidence_gate),
+        entropy_max=float(teacher_entropy_max),
+        margin_min=float(teacher_margin_min),
+        prior_agree_min=float(teacher_prior_agree_min),
     )
     if topk_ranking_aux_loss is not None and topk_ranking_aux_coef > 0.0:
         total_loss = total_loss + float(topk_ranking_aux_coef) * topk_ranking_aux_loss
@@ -1794,6 +1928,9 @@ def _compute_tempered_ppo_loss(
         topk_ranking_teacher_prior_agreement=topk_ranking_teacher_prior_agreement,
         topk_ranking_teacher_rule_top1_rank=topk_ranking_teacher_rule_top1_rank,
         topk_ranking_teacher_margin=topk_ranking_teacher_margin,
+        topk_ranking_teacher_entropy=topk_ranking_teacher_entropy,
+        topk_ranking_teacher_confidence_kept_count=topk_ranking_teacher_confidence_kept_count,
+        topk_ranking_teacher_confidence_kept_rate=topk_ranking_teacher_confidence_kept_rate,
     )
 
 
@@ -2086,7 +2223,14 @@ def _topk_ranking_aux_terms(
     topk: int,
     teacher_source: str,
     teacher_temperature: float,
+    confidence_gate: bool,
+    entropy_max: float,
+    margin_min: float,
+    prior_agree_min: float,
 ) -> tuple[
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
     torch.Tensor | None,
     torch.Tensor | None,
     torch.Tensor | None,
@@ -2098,14 +2242,9 @@ def _topk_ranking_aux_terms(
     aux_mode = str(mode)
     if aux_mode == "none":
         zero = output.action_logits.new_zeros(())
-        return zero, zero, zero, zero, zero, zero, zero
+        return zero, zero, zero, zero, zero, zero, zero, zero, zero, zero
     if aux_mode != "teacher-ce":
         raise ValueError(f"topK ranking aux mode is not implemented yet: {aux_mode}")
-    canonical_teacher = _canonical_teacher_source(str(teacher_source))
-    if canonical_teacher not in {"rule-prior-topk", "rule-component-v1"}:
-        raise ValueError(f"teacher source is not implemented yet: {teacher_source}")
-    if float(teacher_temperature) <= 0.0:
-        raise ValueError(f"teacher_temperature must be positive, got {teacher_temperature}")
 
     prior_logits = output.aux.get("prior_logits")
     if prior_logits is None:
@@ -2113,37 +2252,66 @@ def _topk_ranking_aux_terms(
     if prior_logits is None:
         raise ValueError("teacher-ce topK ranking auxiliary requires prior_logits")
 
-    mask = batch.policy_input.legal_action_mask.bool()
-    prior_logits = prior_logits.float()
-    masked_prior = prior_logits.masked_fill(~mask, torch.finfo(prior_logits.dtype).min)
-    k = max(1, min(int(topk), int(masked_prior.shape[-1])))
-    topk_values, topk_indices = torch.topk(masked_prior, k=k, dim=-1)
+    teacher = _topk_teacher_context(
+        batch,
+        prior_logits=prior_logits,
+        topk=int(topk),
+        teacher_source=str(teacher_source),
+        teacher_temperature=float(teacher_temperature),
+    )
+    topk_indices = teacher["topk_indices"].to(device=output.action_logits.device)
+    teacher_topk_scores = teacher["teacher_topk_scores"].to(
+        device=output.action_logits.device,
+        dtype=output.action_logits.dtype,
+    )
+    teacher_probs = teacher["teacher_probs"].to(device=output.action_logits.device, dtype=output.action_logits.dtype)
+    teacher_log_probs = teacher["teacher_log_probs"].to(
+        device=output.action_logits.device,
+        dtype=output.action_logits.dtype,
+    )
+    teacher_prior_agreement_by_row = teacher["teacher_prior_agreement"].to(
+        device=output.action_logits.device,
+        dtype=output.action_logits.dtype,
+    )
+    teacher_rule_top1_rank_by_row = teacher["teacher_rule_top1_rank"].to(
+        device=output.action_logits.device,
+        dtype=output.action_logits.dtype,
+    )
+    teacher_margin_by_row = teacher["teacher_margin"].to(
+        device=output.action_logits.device,
+        dtype=output.action_logits.dtype,
+    )
+    teacher_entropy_by_row = teacher["teacher_entropy"].to(
+        device=output.action_logits.device,
+        dtype=output.action_logits.dtype,
+    )
     policy_topk_logits = output.action_logits.gather(1, topk_indices).float()
-    if canonical_teacher == "rule-prior-topk":
-        teacher_topk_scores = topk_values
-    elif canonical_teacher == "rule-component-v1":
-        component_scores = _rule_component_v1_teacher_scores(batch).to(
-            device=output.action_logits.device,
-            dtype=output.action_logits.dtype,
-        )
-        teacher_topk_scores = component_scores.gather(1, topk_indices)
-    else:
-        raise ValueError(f"teacher source is not implemented yet: {teacher_source}")
-    teacher_probs = torch.softmax(teacher_topk_scores / float(teacher_temperature), dim=-1)
-    teacher_log_probs = torch.log(teacher_probs.clamp_min(1e-12))
     policy_log_probs = torch.log_softmax(policy_topk_logits, dim=-1)
-    ce_loss = -(teacher_probs * policy_log_probs).sum(dim=-1).mean()
-    teacher_kl = (teacher_probs * (teacher_log_probs - policy_log_probs)).sum(dim=-1).mean()
+    per_row_ce = -(teacher_probs * policy_log_probs).sum(dim=-1)
+    per_row_kl = (teacher_probs * (teacher_log_probs - policy_log_probs)).sum(dim=-1)
+    confidence_mask = _teacher_confidence_mask(
+        teacher_entropy_by_row,
+        teacher_margin_by_row,
+        teacher_prior_agreement_by_row,
+        enabled=bool(confidence_gate),
+        entropy_max=float(entropy_max),
+        margin_min=float(margin_min),
+        prior_agree_min=float(prior_agree_min),
+    ).to(device=output.action_logits.device, dtype=output.action_logits.dtype)
+    ce_loss = _weighted_mean(per_row_ce, confidence_mask)
+    teacher_kl = _weighted_mean(per_row_kl, confidence_mask)
     teacher_agreement = (policy_topk_logits.argmax(dim=-1) == teacher_probs.argmax(dim=-1)).float().mean()
-    teacher_argmax = teacher_topk_scores.argmax(dim=-1)
-    teacher_prior_agreement = (teacher_argmax == 0).float().mean()
-    teacher_rule_top1_rank = 1.0 + (teacher_topk_scores > teacher_topk_scores[:, :1]).sum(dim=-1).float()
-    if teacher_topk_scores.shape[-1] > 1:
-        teacher_top2 = torch.topk(teacher_topk_scores, k=2, dim=-1).values
-        teacher_margin = (teacher_top2[:, 0] - teacher_top2[:, 1]).mean()
-    else:
-        teacher_margin = output.action_logits.new_zeros(())
-    kept_count = torch.tensor(float(masked_prior.shape[0]), device=output.action_logits.device, dtype=output.action_logits.dtype)
+    teacher_prior_agreement = teacher_prior_agreement_by_row.mean()
+    teacher_rule_top1_rank = teacher_rule_top1_rank_by_row.mean()
+    teacher_margin = teacher_margin_by_row.mean()
+    teacher_entropy = teacher_entropy_by_row.mean()
+    kept_count = torch.tensor(
+        float(output.action_logits.shape[0]),
+        device=output.action_logits.device,
+        dtype=output.action_logits.dtype,
+    )
+    confidence_kept_count = confidence_mask.sum()
+    confidence_kept_rate = confidence_mask.mean()
     return (
         ce_loss,
         teacher_kl,
@@ -2152,7 +2320,254 @@ def _topk_ranking_aux_terms(
         teacher_prior_agreement,
         teacher_rule_top1_rank.mean(),
         teacher_margin,
+        teacher_entropy,
+        confidence_kept_count,
+        confidence_kept_rate,
     )
+
+
+def _weighted_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    return (values * weights).sum() / weights.sum().clamp_min(1.0)
+
+
+def _teacher_confidence_mask(
+    entropy: torch.Tensor,
+    margin: torch.Tensor,
+    prior_agreement: torch.Tensor,
+    *,
+    enabled: bool,
+    entropy_max: float,
+    margin_min: float,
+    prior_agree_min: float,
+) -> torch.Tensor:
+    if not bool(enabled):
+        return torch.ones_like(entropy, dtype=torch.bool)
+    return (
+        (entropy <= float(entropy_max))
+        & (margin >= float(margin_min))
+        & (prior_agreement >= float(prior_agree_min))
+    )
+
+
+def _topk_teacher_context(
+    batch,
+    *,
+    prior_logits: torch.Tensor,
+    topk: int,
+    teacher_source: str,
+    teacher_temperature: float,
+) -> dict[str, torch.Tensor]:
+    canonical_teacher = _canonical_teacher_source(str(teacher_source))
+    if canonical_teacher not in {"rule-prior-topk", "rule-component-v1"}:
+        raise ValueError(f"teacher source is not implemented yet: {teacher_source}")
+    if float(teacher_temperature) <= 0.0:
+        raise ValueError(f"teacher_temperature must be positive, got {teacher_temperature}")
+
+    mask = batch.policy_input.legal_action_mask.bool().to(device=prior_logits.device)
+    prior_logits = prior_logits.float()
+    masked_prior = prior_logits.masked_fill(~mask, torch.finfo(prior_logits.dtype).min)
+    k = max(1, min(int(topk), int(masked_prior.shape[-1])))
+    topk_values, topk_indices = torch.topk(masked_prior, k=k, dim=-1)
+    if canonical_teacher == "rule-prior-topk":
+        teacher_topk_scores = topk_values
+    elif canonical_teacher == "rule-component-v1":
+        component_scores = _rule_component_v1_teacher_scores(batch).to(
+            device=prior_logits.device,
+            dtype=prior_logits.dtype,
+        )
+        teacher_topk_scores = component_scores.gather(1, topk_indices)
+    else:
+        raise ValueError(f"teacher source is not implemented yet: {teacher_source}")
+
+    teacher_probs = torch.softmax(teacher_topk_scores / float(teacher_temperature), dim=-1)
+    teacher_log_probs = torch.log(teacher_probs.clamp_min(1e-12))
+    teacher_argmax = teacher_topk_scores.argmax(dim=-1)
+    teacher_prior_agreement = (teacher_argmax == 0).float()
+    teacher_rule_top1_rank = 1.0 + (teacher_topk_scores > teacher_topk_scores[:, :1]).sum(dim=-1).float()
+    if teacher_topk_scores.shape[-1] > 1:
+        teacher_top2 = torch.topk(teacher_topk_scores, k=2, dim=-1).values
+        teacher_margin = teacher_top2[:, 0] - teacher_top2[:, 1]
+    else:
+        teacher_margin = torch.zeros(
+            (int(teacher_topk_scores.shape[0]),),
+            device=teacher_topk_scores.device,
+            dtype=teacher_topk_scores.dtype,
+        )
+    teacher_entropy = -(teacher_probs * teacher_log_probs).sum(dim=-1)
+    return {
+        "topk_indices": topk_indices,
+        "topk_prior_values": topk_values,
+        "teacher_topk_scores": teacher_topk_scores,
+        "teacher_probs": teacher_probs,
+        "teacher_log_probs": teacher_log_probs,
+        "teacher_argmax": teacher_argmax,
+        "teacher_prior_agreement": teacher_prior_agreement,
+        "teacher_rule_top1_rank": teacher_rule_top1_rank,
+        "teacher_margin": teacher_margin,
+        "teacher_entropy": teacher_entropy,
+    }
+
+
+def _annotate_teacher_quality_rows(
+    rows: Sequence[dict[str, Any]],
+    batch,
+    *,
+    topk: int,
+    teacher_source: str,
+    teacher_temperature: float,
+    confidence_gate: bool,
+    entropy_max: float,
+    margin_min: float,
+    prior_agree_min: float,
+) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    if batch.policy_input.prior_logits is None:
+        raise ValueError("teacher quality audit requires prior_logits")
+    if len(rows) != int(batch.policy_input.prior_logits.shape[0]):
+        raise ValueError(
+            "teacher quality rows must align with PPO batch rows: "
+            f"{len(rows)} != {int(batch.policy_input.prior_logits.shape[0])}"
+        )
+    teacher = _topk_teacher_context(
+        batch,
+        prior_logits=batch.policy_input.prior_logits,
+        topk=int(topk),
+        teacher_source=str(teacher_source),
+        teacher_temperature=float(teacher_temperature),
+    )
+    confidence_mask = _teacher_confidence_mask(
+        teacher["teacher_entropy"],
+        teacher["teacher_margin"],
+        teacher["teacher_prior_agreement"],
+        enabled=bool(confidence_gate),
+        entropy_max=float(entropy_max),
+        margin_min=float(margin_min),
+        prior_agree_min=float(prior_agree_min),
+    )
+    entropy_pass = teacher["teacher_entropy"] <= float(entropy_max)
+    margin_pass = teacher["teacher_margin"] >= float(margin_min)
+    prior_agree_pass = teacher["teacher_prior_agreement"] >= float(prior_agree_min)
+
+    topk_indices = teacher["topk_indices"].detach().cpu()
+    topk_prior_values = teacher["topk_prior_values"].detach().cpu()
+    teacher_scores = teacher["teacher_topk_scores"].detach().cpu()
+    teacher_probs = teacher["teacher_probs"].detach().cpu()
+    teacher_argmax = teacher["teacher_argmax"].detach().cpu()
+    teacher_entropy = teacher["teacher_entropy"].detach().cpu()
+    teacher_margin = teacher["teacher_margin"].detach().cpu()
+    teacher_prior_agreement = teacher["teacher_prior_agreement"].detach().cpu()
+    teacher_rule_top1_rank = teacher["teacher_rule_top1_rank"].detach().cpu()
+    confidence_mask_cpu = confidence_mask.detach().cpu()
+    entropy_pass_cpu = entropy_pass.detach().cpu()
+    margin_pass_cpu = margin_pass.detach().cpu()
+    prior_agree_pass_cpu = prior_agree_pass.detach().cpu()
+
+    annotated: list[dict[str, Any]] = []
+    for row_idx, row in enumerate(rows):
+        indices = [int(value) for value in topk_indices[row_idx].tolist()]
+        labels = [_batch_action_label(batch.policy_input, row_idx, action_index) for action_index in indices]
+        best_position = int(teacher_argmax[row_idx].item())
+        annotated.append(
+            {
+                **row,
+                "teacher_confidence_gate": bool(confidence_gate),
+                "teacher_entropy_max": float(entropy_max),
+                "teacher_margin_min": float(margin_min),
+                "teacher_prior_agree_min": float(prior_agree_min),
+                "teacher_prior_topk_action_indices_json": json.dumps(indices, separators=(",", ":")),
+                "teacher_prior_topk_actions_json": json.dumps(labels, ensure_ascii=True, separators=(",", ":")),
+                "teacher_prior_topk_logits_json": _json_float_list(topk_prior_values[row_idx].tolist()),
+                "teacher_topk_scores_json": _json_float_list(teacher_scores[row_idx].tolist()),
+                "teacher_topk_probs_json": _json_float_list(teacher_probs[row_idx].tolist()),
+                "teacher_best_action_index": indices[best_position],
+                "teacher_best_action_canonical_key": labels[best_position],
+                "teacher_best_prior_rank": best_position + 1,
+                "teacher_prior_agree": bool(teacher_prior_agreement[row_idx].item() >= 1.0),
+                "teacher_entropy": float(teacher_entropy[row_idx].item()),
+                "teacher_confidence": _teacher_entropy_confidence(
+                    float(teacher_entropy[row_idx].item()),
+                    k=len(indices),
+                ),
+                "teacher_margin_top1_to_second": float(teacher_margin[row_idx].item()),
+                "teacher_rule_top1_rank": float(teacher_rule_top1_rank[row_idx].item()),
+                "teacher_confidence_entropy_pass": bool(entropy_pass_cpu[row_idx].item()),
+                "teacher_confidence_margin_pass": bool(margin_pass_cpu[row_idx].item()),
+                "teacher_confidence_prior_agree_pass": bool(prior_agree_pass_cpu[row_idx].item()),
+                "teacher_confidence_gate_keep": bool(confidence_mask_cpu[row_idx].item()),
+            }
+        )
+    return annotated
+
+
+def _batch_action_label(policy_input: PolicyInput, row_idx: int, action_index: int) -> str:
+    if policy_input.legal_actions is None:
+        return str(int(action_index))
+    if row_idx >= len(policy_input.legal_actions):
+        return str(int(action_index))
+    actions = policy_input.legal_actions[row_idx]
+    if action_index >= len(actions):
+        return str(int(action_index))
+    action = actions[int(action_index)]
+    return str(getattr(action, "canonical_key", action))
+
+
+def _json_float_list(values: Sequence[float]) -> str:
+    return json.dumps([round(float(value), 8) for value in values], separators=(",", ":"))
+
+
+def _teacher_entropy_confidence(entropy: float, *, k: int) -> float:
+    if int(k) <= 1:
+        return 1.0
+    max_entropy = torch.log(torch.tensor(float(k), dtype=torch.float32)).item()
+    if max_entropy <= 0.0:
+        return 1.0
+    return max(0.0, min(1.0, 1.0 - float(entropy) / float(max_entropy)))
+
+
+def _teacher_quality_summary(rows: Sequence[dict[str, Any]]) -> dict[str, float]:
+    if not rows or "teacher_entropy" not in rows[0]:
+        return {
+            "teacher_audit_entropy_mean": 0.0,
+            "teacher_audit_entropy_p50": 0.0,
+            "teacher_audit_margin_mean": 0.0,
+            "teacher_audit_margin_p50": 0.0,
+            "teacher_audit_prior_agree_rate": 0.0,
+            "teacher_audit_confidence_keep_rate": 0.0,
+            "teacher_audit_disagree_positive_advantage_count": 0.0,
+            "teacher_audit_disagree_return_mean": 0.0,
+            "teacher_audit_agree_return_mean": 0.0,
+        }
+    entropies = [float(row["teacher_entropy"]) for row in rows]
+    margins = [float(row["teacher_margin_top1_to_second"]) for row in rows]
+    prior_agree = [1.0 if bool(row["teacher_prior_agree"]) else 0.0 for row in rows]
+    keep = [1.0 if bool(row["teacher_confidence_gate_keep"]) else 0.0 for row in rows]
+    disagree_positive_advantages = [
+        row
+        for row in rows
+        if not bool(row["teacher_prior_agree"]) and float(row.get("advantage_raw", 0.0)) > 0.0
+    ]
+    disagree_returns = [
+        float(row.get("return", 0.0))
+        for row in rows
+        if not bool(row["teacher_prior_agree"])
+    ]
+    agree_returns = [
+        float(row.get("return", 0.0))
+        for row in rows
+        if bool(row["teacher_prior_agree"])
+    ]
+    return {
+        "teacher_audit_entropy_mean": _mean_float(entropies),
+        "teacher_audit_entropy_p50": _quantile_float(entropies, 0.50),
+        "teacher_audit_margin_mean": _mean_float(margins),
+        "teacher_audit_margin_p50": _quantile_float(margins, 0.50),
+        "teacher_audit_prior_agree_rate": _mean_float(prior_agree),
+        "teacher_audit_confidence_keep_rate": _mean_float(keep),
+        "teacher_audit_disagree_positive_advantage_count": float(len(disagree_positive_advantages)),
+        "teacher_audit_disagree_return_mean": _mean_float(disagree_returns),
+        "teacher_audit_agree_return_mean": _mean_float(agree_returns),
+    }
 
 
 def _rule_component_v1_teacher_scores(batch) -> torch.Tensor:
@@ -2574,6 +2989,19 @@ def _topk_ranking_aux_configs(args: argparse.Namespace) -> tuple[dict[str, Any],
     teacher_temperature = float(args.teacher_temperature)
     if teacher_temperature <= 0.0:
         raise ValueError(f"teacher_temperature must be positive, got {teacher_temperature}")
+    teacher_confidence_gate = bool(args.teacher_confidence_gate)
+    entropy_values = _nonnegative_float_values(
+        args.teacher_entropy_max_values,
+        name="teacher_entropy_max",
+    )
+    margin_values = _nonnegative_float_values(
+        args.teacher_margin_min_values,
+        name="teacher_margin_min",
+    )
+    prior_agree_values = _nonnegative_float_values(
+        args.teacher_prior_agree_min_values,
+        name="teacher_prior_agree_min",
+    )
     teacher_sources = tuple(str(value) for value in args.teacher_sources)
     if not teacher_sources:
         raise ValueError("teacher source matrix must not be empty")
@@ -2588,7 +3016,7 @@ def _topk_ranking_aux_configs(args: argparse.Namespace) -> tuple[dict[str, Any],
     if unsupported_sources and any(mode != "none" for mode in modes):
         raise ValueError(f"teacher source is not implemented yet: {unsupported_sources}")
     configs: list[dict[str, Any]] = []
-    seen: set[tuple[str, float, int, str, float]] = set()
+    seen: set[tuple[str, float, int, str, float, bool, float, float, float]] = set()
     for mode in modes:
         raw_coefs = (0.0,) if mode == "none" else coef_values
         if mode not in {"none", "teacher-ce"}:
@@ -2597,30 +3025,52 @@ def _topk_ranking_aux_configs(args: argparse.Namespace) -> tuple[dict[str, Any],
         for source in sources:
             canonical_source = _canonical_teacher_source(str(source))
             for coef in raw_coefs:
-                key = (
-                    str(mode),
-                    round(float(coef), 12),
-                    topk,
-                    str(canonical_source),
-                    round(teacher_temperature, 12),
+                confidence_settings = (
+                    (
+                        bool(teacher_confidence_gate),
+                        float(entropy_max),
+                        float(margin_min),
+                        float(prior_agree_min),
+                    )
+                    for entropy_max in (entropy_values if teacher_confidence_gate and mode != "none" else entropy_values[:1])
+                    for margin_min in (margin_values if teacher_confidence_gate and mode != "none" else margin_values[:1])
+                    for prior_agree_min in (
+                        prior_agree_values if teacher_confidence_gate and mode != "none" else prior_agree_values[:1]
+                    )
                 )
-                if key in seen:
-                    continue
-                seen.add(key)
-                configs.append(
-                    {
-                        "mode": str(mode),
-                        "coef": float(coef),
-                        "topk": int(topk),
-                        "teacher_source": str(canonical_source),
-                        "teacher_temperature": float(teacher_temperature),
-                        **_teacher_metadata_fields(
-                            str(canonical_source),
-                            topk=int(topk),
-                            temperature=float(teacher_temperature),
-                        ),
-                    }
-                )
+                for confidence_gate, entropy_max, margin_min, prior_agree_min in confidence_settings:
+                    key = (
+                        str(mode),
+                        round(float(coef), 12),
+                        topk,
+                        str(canonical_source),
+                        round(teacher_temperature, 12),
+                        bool(confidence_gate),
+                        round(float(entropy_max), 12),
+                        round(float(margin_min), 12),
+                        round(float(prior_agree_min), 12),
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    configs.append(
+                        {
+                            "mode": str(mode),
+                            "coef": float(coef),
+                            "topk": int(topk),
+                            "teacher_source": str(canonical_source),
+                            "teacher_temperature": float(teacher_temperature),
+                            "teacher_confidence_gate": bool(confidence_gate and mode != "none"),
+                            "teacher_entropy_max": float(entropy_max),
+                            "teacher_margin_min": float(margin_min),
+                            "teacher_prior_agree_min": float(prior_agree_min),
+                            **_teacher_metadata_fields(
+                                str(canonical_source),
+                                topk=int(topk),
+                                temperature=float(teacher_temperature),
+                            ),
+                        }
+                    )
     return tuple(configs)
 
 
@@ -2635,6 +3085,19 @@ def _topk_ranking_aux_config(args: argparse.Namespace) -> dict[str, Any]:
         "topk": int(args.topk_ranking_k),
         "teacher_sources": teacher_sources,
         "teacher_temperature": float(args.teacher_temperature),
+        "teacher_confidence_gate": bool(args.teacher_confidence_gate),
+        "teacher_entropy_max_values": _nonnegative_float_values(
+            args.teacher_entropy_max_values,
+            name="teacher_entropy_max",
+        ),
+        "teacher_margin_min_values": _nonnegative_float_values(
+            args.teacher_margin_min_values,
+            name="teacher_margin_min",
+        ),
+        "teacher_prior_agree_min_values": _nonnegative_float_values(
+            args.teacher_prior_agree_min_values,
+            name="teacher_prior_agree_min",
+        ),
         "expanded_configs": _topk_ranking_aux_configs(args),
         "implemented_modes": ("none", "teacher-ce"),
         "teacher_contract_version": _TOPK_TEACHER_CONTRACT_VERSION,
@@ -3273,6 +3736,18 @@ def _summary_metric_key(key: str) -> bool:
         "tempered_post_update_topk_ranking_teacher_prior_agreement",
         "tempered_post_update_topk_ranking_teacher_rule_top1_rank",
         "tempered_post_update_topk_ranking_teacher_margin",
+        "tempered_post_update_topk_ranking_teacher_entropy",
+        "tempered_post_update_topk_ranking_teacher_confidence_kept_count",
+        "tempered_post_update_topk_ranking_teacher_confidence_kept_rate",
+        "teacher_audit_entropy_mean",
+        "teacher_audit_entropy_p50",
+        "teacher_audit_margin_mean",
+        "teacher_audit_margin_p50",
+        "teacher_audit_prior_agree_rate",
+        "teacher_audit_confidence_keep_rate",
+        "teacher_audit_disagree_positive_advantage_count",
+        "teacher_audit_disagree_return_mean",
+        "teacher_audit_agree_return_mean",
         "untempered_post_update_approx_kl",
         "untempered_post_update_clip_fraction",
         "recovery_extra_epochs",
@@ -3345,6 +3820,10 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             str(item["teacher_source"]),
             float(item["topk_ranking_aux_coef"]),
             int(item["topk_ranking_k"]),
+            bool(item.get("teacher_confidence_gate", False)),
+            float(item.get("teacher_entropy_max", 0.0)),
+            float(item.get("teacher_margin_min", 0.0)),
+            float(item.get("teacher_prior_agree_min", 0.0)),
             int(item["low_rank_flip_topk"]),
             float(item["low_rank_flip_penalty_coef"]),
             float(item["weak_margin_threshold"]),
@@ -3372,6 +3851,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"delta_l2={row['delta_l2_coef']:g} "
             f"delta_clip={row['delta_clip']:g}/{row['delta_clip_coef']:g} "
             f"ranking_aux={row['topk_ranking_aux_mode']}/{row['teacher_source']}/{row['topk_ranking_aux_coef']:g}/k{row['topk_ranking_k']} "
+            f"teacher_conf={row.get('teacher_confidence_gate', False)}/{row.get('teacher_entropy_max', 0.0):g}/{row.get('teacher_margin_min', 0.0):g} "
             f"low_rank={row['low_rank_flip_topk']}/{row['low_rank_flip_penalty_coef']:g} "
             f"weak_margin={row['weak_margin_threshold']:g}/{row['weak_margin_flip_penalty_coef']:g} "
             f"support_policy={row['support_policy_mode']} "
@@ -3396,6 +3876,8 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"teacher_prior_agree={row['final_tempered_post_update_topk_ranking_teacher_prior_agreement']:.6g} "
             f"teacher_rule_top1_rank={row['final_tempered_post_update_topk_ranking_teacher_rule_top1_rank']:.6g} "
             f"teacher_margin={row['final_tempered_post_update_topk_ranking_teacher_margin']:.6g} "
+            f"teacher_entropy={row.get('final_tempered_post_update_topk_ranking_teacher_entropy', 0.0):.6g} "
+            f"teacher_conf_keep={row.get('final_tempered_post_update_topk_ranking_teacher_confidence_kept_rate', 0.0):.6g} "
             f"fresh_top1={row.get('fresh_validation_top1_action_changed_rate', 0.0):.6g} "
             f"fresh_quality={row.get('fresh_validation_gate_pass')} "
             f"qualified_eval={row.get('qualified_for_eval')} "
