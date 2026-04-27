@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 import keqing_core
 import torch
@@ -31,6 +31,7 @@ from keqingrl.metadata import (
     RULE_SCORE_VERSION,
     STYLE_CONTEXT_VERSION,
 )
+from keqingrl.mortal_teacher import assert_mortal_discard_mask_parity
 from keqingrl.rewards import (
     DEFAULT_PT_MAP,
     build_rule_context,
@@ -144,6 +145,8 @@ class DiscardOnlyMahjongEnv:
         ),
         style_context: StyleContext = DEFAULT_STYLE_CONTEXT,
         rule_score_config: RuleScoreConfig = DEFAULT_RULE_SCORE_CONFIG,
+        mortal_teacher_runtime: Any | None = None,
+        mortal_observation_bridge: Any | None = None,
     ) -> None:
         keqing_core.enable_rust(True)
         self.native_schema_info = keqing_core.require_native_schema(**_KEQINGRL_NATIVE_SCHEMA_KWARGS)
@@ -180,6 +183,8 @@ class DiscardOnlyMahjongEnv:
         self.style_context = style_context
         self.style_context_tensor = style_context.to_tensor()
         self.rule_score_config = rule_score_config
+        self.mortal_teacher_runtime = mortal_teacher_runtime
+        self.mortal_observation_bridge = mortal_observation_bridge
         self.rule_context = build_rule_context(
             self.pt_map,
             rank_score_scale=self.rank_score_scale,
@@ -263,8 +268,9 @@ class DiscardOnlyMahjongEnv:
             turn.legal_actions,
             config=self.rule_score_config,
         )
+        extras = self._mortal_teacher_extras_for_turn(turn)
         return PolicyInput(
-            obs=ObsTensorBatch(tile_obs=tile_obs, scalar_obs=scalar_obs),
+            obs=ObsTensorBatch(tile_obs=tile_obs, scalar_obs=scalar_obs, extras=extras),
             legal_action_ids=legal_action_ids,
             legal_action_features=legal_action_features,
             legal_action_mask=legal_action_mask,
@@ -293,6 +299,26 @@ class DiscardOnlyMahjongEnv:
                 "style_context_version": STYLE_CONTEXT_VERSION,
             },
         )
+
+    def _mortal_teacher_extras_for_turn(self, turn: _TurnContext) -> dict[str, torch.Tensor]:
+        if self.mortal_teacher_runtime is None:
+            return {}
+        if any(action.action_type != ActionType.DISCARD for action in turn.legal_actions):
+            return {}
+        bridge = self.mortal_observation_bridge
+        if bridge is None:
+            from keqingrl.mortal_observation import MortalObservationBridge  # noqa: PLC0415
+
+            bridge = MortalObservationBridge()
+            self.mortal_observation_bridge = bridge
+        room = self._require_room()
+        encoded = bridge.encode_from_events(room.events, turn.actor)
+        assert_mortal_discard_mask_parity(encoded.action_mask, turn.legal_actions)
+        output = self.mortal_teacher_runtime.evaluate(
+            encoded.obs.unsqueeze(0),
+            encoded.action_mask.unsqueeze(0),
+        )
+        return output.extras()
 
     def step(self, actor: int, action_spec: ActionSpec) -> StepResult:
         room = self._require_room()

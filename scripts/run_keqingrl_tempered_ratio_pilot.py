@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Tempered-ratio PPO diagnostic for KeqingRL discard-only research."""
+# ruff: noqa: E402
 
 from __future__ import annotations
 
@@ -26,6 +27,13 @@ from keqingrl.metadata import (
     default_checkpoint_metadata,
     validate_checkpoint_metadata,
 )
+from keqingrl.mortal_teacher import (
+    MORTAL_DISCARD_TEACHER_CONTRACT_VERSION,
+    mortal_discard_teacher_tensors_from_extras,
+    mortal_discard_topk_teacher_context,
+)
+from keqingrl.mortal_observation import MortalObservationBridge
+from keqingrl.mortal_runtime import load_mortal_teacher_runtime
 from keqingrl.policy import InteractivePolicy
 from keqingrl.ppo import PPOLossBreakdown, compute_ppo_loss, validate_ppo_batch_rule_score_scale
 from keqingrl.rule_score import smoothed_prior_probs
@@ -51,7 +59,6 @@ from scripts.run_keqingrl_temperature_pilot import (
     _iteration_seed_registry,
     _iteration_seed_registry_id,
     _iteration_torch_seed,
-    _mean,
     _seed_torch_sampling,
 )
 
@@ -68,7 +75,15 @@ _DELTA_SUPPORT_MODES = _ACTOR_UPDATE_SUPPORT_MODES
 _OUTSIDE_SUPPORT_DELTA_MODES = ("zero", "negative-clip")
 _SUPPORT_POLICY_MODES = ("unrestricted", "delta-topk-zero", "support-only-topk")
 _TOPK_RANKING_AUX_MODES = ("none", "teacher-ce", "teacher-pairwise", "advantage-pairwise")
-_TEACHER_SOURCES = ("rule-prior-topk", "rule-components", "rule-component-v1", "model", "search", "oracle-file")
+_TEACHER_SOURCES = (
+    "rule-prior-topk",
+    "rule-components",
+    "rule-component-v1",
+    "mortal-discard-q",
+    "model",
+    "search",
+    "oracle-file",
+)
 _TOPK_TEACHER_CONTRACT_VERSION = "keqingrl_topk_teacher_v1"
 
 
@@ -209,6 +224,9 @@ def _parse_args() -> argparse.Namespace:
         default=("rule-prior-topk",),
     )
     parser.add_argument("--teacher-temperature", type=float, default=1.0)
+    parser.add_argument("--mortal-teacher-checkpoint", type=Path, default=None)
+    parser.add_argument("--mortal-root", type=Path, default=Path("third_party/Mortal"))
+    parser.add_argument("--mortal-teacher-device", default=None)
     parser.add_argument("--teacher-confidence-gate", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--teacher-entropy-max-values", type=float, nargs="+", default=(1_000_000_000.0,))
     parser.add_argument("--teacher-margin-min-values", type=float, nargs="+", default=(0.0,))
@@ -351,6 +369,11 @@ def main() -> None:
         name="delta_clip_coef",
     )
     topk_ranking_aux_configs = _topk_ranking_aux_configs(args)
+    mortal_teacher_runtime = _load_mortal_teacher_runtime_for_args(
+        args,
+        topk_ranking_aux_configs,
+        device=device,
+    )
     low_rank_flip_topk_values = _positive_int_values(
         args.low_rank_flip_topk_values,
         name="low_rank_flip_topk",
@@ -432,6 +455,7 @@ def main() -> None:
                                                                             teacher_prior_agree_min=float(
                                                                                 topk_ranking_aux["teacher_prior_agree_min"]
                                                                             ),
+                                                                            mortal_teacher_runtime=mortal_teacher_runtime,
                                                                             low_rank_flip_topk=int(low_rank_flip_topk),
                                                                             low_rank_flip_penalty_coef=float(
                                                                                 low_rank_flip_penalty_coef
@@ -483,6 +507,14 @@ def main() -> None:
         "delta_clip_values": [float(value) for value in delta_clip_values],
         "delta_clip_coef_values": [float(value) for value in delta_clip_coef_values],
         "topk_ranking_aux": _topk_ranking_aux_config(args),
+        "mortal_teacher": {
+            "enabled": mortal_teacher_runtime is not None,
+            "checkpoint": None
+            if args.mortal_teacher_checkpoint is None
+            else str(args.mortal_teacher_checkpoint),
+            "mortal_root": str(args.mortal_root),
+            "device": args.mortal_teacher_device if args.mortal_teacher_device is not None else str(device),
+        },
         "low_rank_flip_topk_values": [int(value) for value in low_rank_flip_topk_values],
         "low_rank_flip_penalty_coef_values": [float(value) for value in low_rank_flip_penalty_coef_values],
         "weak_margin_threshold_values": [float(value) for value in weak_margin_threshold_values],
@@ -514,6 +546,52 @@ def main() -> None:
     print((args.output_dir / "summary.md").read_text(encoding="utf-8"))
 
 
+def _load_mortal_teacher_runtime_for_args(
+    args: argparse.Namespace,
+    topk_ranking_aux_configs: Sequence[dict[str, Any]],
+    *,
+    device: torch.device,
+):
+    if not _requires_mortal_teacher_runtime(topk_ranking_aux_configs):
+        return None
+    checkpoint = args.mortal_teacher_checkpoint
+    if checkpoint is None:
+        raise ValueError("teacher_source=mortal-discard-q requires --mortal-teacher-checkpoint")
+    teacher_device = args.mortal_teacher_device if args.mortal_teacher_device is not None else str(device)
+    return load_mortal_teacher_runtime(
+        Path(checkpoint),
+        mortal_root=Path(args.mortal_root),
+        device=teacher_device,
+    )
+
+
+def _requires_mortal_teacher_runtime(topk_ranking_aux_configs: Sequence[dict[str, Any]]) -> bool:
+    return any(
+        str(config.get("mode")) != "none"
+        and _canonical_teacher_source(str(config.get("teacher_source"))) == "mortal-discard-q"
+        for config in topk_ranking_aux_configs
+    )
+
+
+def _mortal_runtime_for_teacher(mortal_teacher_runtime, *, teacher_source: str):
+    if _canonical_teacher_source(str(teacher_source)) == "mortal-discard-q":
+        if mortal_teacher_runtime is None:
+            raise ValueError("teacher_source=mortal-discard-q requires a loaded Mortal teacher runtime")
+        return mortal_teacher_runtime
+    return None
+
+
+def _rollout_env(args: argparse.Namespace, *, mortal_teacher_runtime=None) -> DiscardOnlyMahjongEnv:
+    mortal_observation_bridge = None
+    if mortal_teacher_runtime is not None:
+        mortal_observation_bridge = MortalObservationBridge(mortal_root=Path(args.mortal_root))
+    return DiscardOnlyMahjongEnv(
+        max_kyokus=args.max_kyokus,
+        mortal_teacher_runtime=mortal_teacher_runtime,
+        mortal_observation_bridge=mortal_observation_bridge,
+    )
+
+
 def _run_tempered_ratio_config(
     args: argparse.Namespace,
     candidate: dict[str, Any],
@@ -540,6 +618,7 @@ def _run_tempered_ratio_config(
     teacher_entropy_max: float,
     teacher_margin_min: float,
     teacher_prior_agree_min: float,
+    mortal_teacher_runtime: Any | None,
     low_rank_flip_topk: int,
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
@@ -577,7 +656,13 @@ def _run_tempered_ratio_config(
         _seed_torch_sampling(torch_seed)
         behavior_policy = TemperaturePolicy(policy, temperature=float(temperature)).to(device)
         episodes = collect_selfplay_episodes(
-            DiscardOnlyMahjongEnv(max_kyokus=args.max_kyokus),
+            _rollout_env(
+                args,
+                mortal_teacher_runtime=_mortal_runtime_for_teacher(
+                    mortal_teacher_runtime,
+                    teacher_source=str(teacher_source),
+                ),
+            ),
             behavior_policy,
             num_episodes=int(args.episodes),
             opponent_pool=opponent_pool,
@@ -2341,10 +2426,6 @@ def _topk_ranking_aux_terms(
         teacher_temperature=float(teacher_temperature),
     )
     topk_indices = teacher["topk_indices"].to(device=output.action_logits.device)
-    teacher_topk_scores = teacher["teacher_topk_scores"].to(
-        device=output.action_logits.device,
-        dtype=output.action_logits.dtype,
-    )
     teacher_probs = teacher["teacher_probs"].to(device=output.action_logits.device, dtype=output.action_logits.dtype)
     teacher_log_probs = teacher["teacher_log_probs"].to(
         device=output.action_logits.device,
@@ -2439,10 +2520,25 @@ def _topk_teacher_context(
     teacher_temperature: float,
 ) -> dict[str, torch.Tensor]:
     canonical_teacher = _canonical_teacher_source(str(teacher_source))
-    if canonical_teacher not in {"rule-prior-topk", "rule-component-v1"}:
+    if canonical_teacher not in {"rule-prior-topk", "rule-component-v1", "mortal-discard-q"}:
         raise ValueError(f"teacher source is not implemented yet: {teacher_source}")
     if float(teacher_temperature) <= 0.0:
         raise ValueError(f"teacher_temperature must be positive, got {teacher_temperature}")
+
+    if canonical_teacher == "mortal-discard-q":
+        if batch.policy_input.legal_actions is None:
+            raise ValueError("mortal-discard-q teacher requires policy_input.legal_actions")
+        q_values, mortal_masks = mortal_discard_teacher_tensors_from_extras(batch.policy_input.obs.extras)
+        return mortal_discard_topk_teacher_context(
+            prior_logits=prior_logits,
+            legal_action_mask=batch.policy_input.legal_action_mask,
+            legal_actions=batch.policy_input.legal_actions,
+            q_values=q_values,
+            mortal_masks=mortal_masks,
+            topk=int(topk),
+            teacher_temperature=float(teacher_temperature),
+            strict_mask=True,
+        )
 
     mask = batch.policy_input.legal_action_mask.bool().to(device=prior_logits.device)
     prior_logits = prior_logits.float()
@@ -3092,7 +3188,7 @@ def _topk_ranking_aux_configs(args: argparse.Namespace) -> tuple[dict[str, Any],
     unsupported_sources = [
         source
         for source in teacher_sources
-        if _canonical_teacher_source(source) not in {"rule-prior-topk", "rule-component-v1"}
+        if _canonical_teacher_source(source) not in {"rule-prior-topk", "rule-component-v1", "mortal-discard-q"}
     ]
     if unsupported_sources and any(mode != "none" for mode in modes):
         raise ValueError(f"teacher source is not implemented yet: {unsupported_sources}")
@@ -3183,8 +3279,10 @@ def _topk_ranking_aux_config(args: argparse.Namespace) -> dict[str, Any]:
         "implemented_modes": ("none", "teacher-ce"),
         "teacher_contract_version": _TOPK_TEACHER_CONTRACT_VERSION,
         "teacher_source_note": (
-            "rule-prior-topk is the negative control; rule-components is a legacy alias; "
-            "rule-component-v1 is an action-feature diagnostic reranker"
+            "mortal-discard-q is the only allowed strength teacher source; "
+            "rule-prior-topk is a diagnostic negative control; rule-components is a legacy alias; "
+            "rule-component-v1 is an action-feature diagnostic reranker; "
+            "mortal-discard-q requires Mortal q/mask tensors in policy_input.obs.extras"
         ),
     }
 
@@ -3203,6 +3301,8 @@ def _teacher_version(source: str) -> str:
         return "rule_prior_topk_v1"
     if canonical == "rule-component-v1":
         return "action_feature_component_reranker_v1"
+    if canonical == "mortal-discard-q":
+        return MORTAL_DISCARD_TEACHER_CONTRACT_VERSION
     return f"{canonical}_unimplemented"
 
 
