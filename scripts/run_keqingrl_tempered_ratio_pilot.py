@@ -1292,6 +1292,26 @@ def _save_tempered_ratio_checkpoint(
             temperature=float(teacher_temperature),
         )
     )
+    contract_metadata.update(
+        {
+            "source_config_id": int(candidate["source_config_id"]),
+            "rerun_config_id": int(candidate["rerun_config_id"]),
+            "selected_iteration": int(summary_row.get("early_stop_selected_iteration", int(args.iterations) - 1)),
+            "per_iteration_fresh_early_stop_enabled": bool(args.per_iteration_fresh_early_stop),
+            "seed_registry_id": str(summary_row.get("seed_registry_id", "")),
+            "fresh_validation_seed_registry_id": str(summary_row.get("fresh_validation_seed_registry_id", "")),
+            "teacher_confidence_gate": bool(teacher_confidence_gate),
+            "teacher_entropy_max": float(teacher_entropy_max),
+            "teacher_margin_min": float(teacher_margin_min),
+            "teacher_prior_agree_min": float(teacher_prior_agree_min),
+            "support_policy_mode": str(support_policy_mode),
+            "support_topk": int(delta_support_topk),
+            "delta_support_mode": str(delta_support_mode),
+            "delta_support_topk": int(delta_support_topk),
+            "movement_quality_gate": _movement_quality_gate_config(args),
+            "fresh_validation": _fresh_validation_config(args),
+        }
+    )
     validate_checkpoint_metadata(contract_metadata, expected_rule_score_scale=float(rule_score_scale))
     config_payload = {
         **source_config,

@@ -31,6 +31,7 @@ from keqingrl.rollout import rollout_step_policy_input
 from keqingrl.metadata import resolve_rule_score_scale_metadata
 from keqingrl.training import _initialize_policy_from_env_observation
 from scripts.run_keqingrl_discard_research_sweep import RulebaseGreedyPolicy
+from scripts.run_keqingrl_tempered_ratio_pilot import DeltaSupportProjectionPolicy
 
 
 def _parse_args() -> argparse.Namespace:
@@ -82,8 +83,12 @@ def main() -> None:
                 continue
             zero = baseline_metrics["zero_delta_rule_prior"]
             untrained = baseline_metrics["untrained_rule_prior_delta"]
+            source_checkpoint = baseline_metrics.get("source_checkpoint_original")
             row["paired_rank_pt_delta_vs_zero_delta"] = row["rank_pt"] - zero["rank_pt"]
             row["paired_rank_pt_delta_vs_untrained_rule_prior_delta"] = row["rank_pt"] - untrained["rank_pt"]
+            row["paired_rank_pt_delta_vs_source_checkpoint"] = (
+                None if source_checkpoint is None else row["rank_pt"] - source_checkpoint["rank_pt"]
+            )
             row["paired_rank_pt_delta_vs_rule_prior"] = row["paired_rank_pt_delta_vs_zero_delta"]
 
     _write_json(args.out_dir / "paired_eval.json", _payload(args, rows))
@@ -116,9 +121,17 @@ def _has_duplicate_source_ids(rows: list[dict[str, str]]) -> bool:
 
 def _candidate_id_from_row(row: dict[str, str], duplicate_source_ids: bool) -> str:
     source_id = int(row["source_config_id"])
+    seed = row.get("seed")
+    if seed not in (None, ""):
+        return f"source_{source_id}_seed_{int(seed)}"
     if not duplicate_source_ids:
         return str(source_id)
-    return f"source_{source_id}_rerun_{int(row['rerun_config_id'])}"
+    rerun_id = int(row["rerun_config_id"])
+    checkpoint_path = row.get("checkpoint_path", "")
+    if checkpoint_path:
+        digest = hashlib.sha1(checkpoint_path.encode("utf-8")).hexdigest()[:8]
+        return f"source_{source_id}_rerun_{rerun_id}_{digest}"
+    return f"source_{source_id}_rerun_{rerun_id}"
 
 
 def _load_candidate_records(args: argparse.Namespace, device: torch.device) -> list[dict[str, Any]]:
@@ -139,15 +152,8 @@ def _load_single_checkpoint_candidate(args: argparse.Namespace, device: torch.de
     if not config_path.exists():
         raise FileNotFoundError(config_path)
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    policy = RulePriorDeltaPolicy(
-        hidden_dim=int(config["model"]["hidden_dim"]),
-        num_res_blocks=int(config["model"]["num_res_blocks"]),
-        dropout=float(config["model"].get("dropout", 0.0)),
-    ).to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    policy.rule_score_scale = _checkpoint_rule_score_scale(checkpoint)
-    policy.load_state_dict(checkpoint["policy_state_dict"])
-    policy.eval()
+    policy = _load_candidate_policy(config, checkpoint, device)
     source_config_id = args.source_config_id
     if source_config_id is None:
         raw_source = config.get("source_config_id")
@@ -171,6 +177,7 @@ def _load_single_checkpoint_candidate(args: argparse.Namespace, device: torch.de
         "train_neural_delta_abs_max": None,
         "train_approx_kl": None,
         "train_clip_fraction": None,
+        "support_policy_mode": _checkpoint_support_policy_mode(config, checkpoint),
     }
 
 
@@ -192,15 +199,8 @@ def _load_candidates(
         if not checkpoint_path.exists():
             raise FileNotFoundError(checkpoint_path)
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        policy = RulePriorDeltaPolicy(
-            hidden_dim=int(config["model"]["hidden_dim"]),
-            num_res_blocks=int(config["model"]["num_res_blocks"]),
-            dropout=float(config["model"].get("dropout", 0.0)),
-        ).to(device)
         checkpoint = torch.load(checkpoint_path, map_location=device)
-        policy.rule_score_scale = _checkpoint_rule_score_scale(checkpoint)
-        policy.load_state_dict(checkpoint["policy_state_dict"])
-        policy.eval()
+        policy = _load_candidate_policy(config, checkpoint, device)
         selected.append(
             {
                 "kind": "candidate",
@@ -220,9 +220,103 @@ def _load_candidates(
                 "train_neural_delta_abs_max": _optional_float(row.get("neural_delta_abs_max")),
                 "train_approx_kl": _optional_float(row.get("approx_kl")),
                 "train_clip_fraction": _optional_float(row.get("clip_fraction")),
+                "support_policy_mode": _checkpoint_support_policy_mode(config, checkpoint),
             }
         )
     return selected
+
+
+def _load_candidate_policy(config: dict[str, Any], checkpoint: dict[str, Any], device: torch.device):
+    base_policy = RulePriorDeltaPolicy(
+        hidden_dim=int(config["model"]["hidden_dim"]),
+        num_res_blocks=int(config["model"]["num_res_blocks"]),
+        dropout=float(config["model"].get("dropout", 0.0)),
+    ).to(device)
+    base_policy.rule_score_scale = _checkpoint_rule_score_scale(checkpoint)
+    state_dict = checkpoint["policy_state_dict"]
+    if any(str(key).startswith("base_policy.") for key in state_dict):
+        state_dict = {
+            str(key).removeprefix("base_policy."): value
+            for key, value in state_dict.items()
+            if str(key).startswith("base_policy.")
+        }
+    base_policy.load_state_dict(state_dict)
+    policy = _apply_support_policy_contract(base_policy, config, checkpoint, device)
+    policy.eval()
+    return policy
+
+
+def _apply_support_policy_contract(
+    base_policy: RulePriorDeltaPolicy,
+    config: dict[str, Any],
+    checkpoint: dict[str, Any],
+    device: torch.device,
+):
+    support_config = _checkpoint_support_config(config, checkpoint)
+    support_policy_mode = str(support_config["support_policy_mode"])
+    support_mode = str(support_config["support_mode"])
+    if support_policy_mode == "unrestricted" and support_mode == "all":
+        return base_policy
+    return DeltaSupportProjectionPolicy(
+        base_policy,
+        support_mode=support_mode,
+        topk=int(support_config["topk"]),
+        margin_threshold=float(support_config["margin_threshold"]),
+        outside_support_delta_mode=str(support_config["outside_support_delta_mode"]),
+        support_policy_mode=support_policy_mode,
+    ).to(device)
+
+
+def _checkpoint_support_policy_mode(config: dict[str, Any], checkpoint: dict[str, Any]) -> str:
+    return str(_checkpoint_support_config(config, checkpoint)["support_policy_mode"])
+
+
+def _checkpoint_support_config(config: dict[str, Any], checkpoint: dict[str, Any]) -> dict[str, Any]:
+    tempered = config.get("tempered_ratio_config")
+    if not isinstance(tempered, dict):
+        tempered = {}
+    projection = tempered.get("delta_support_projection")
+    if not isinstance(projection, dict):
+        projection = {}
+    metadata = checkpoint.get("contract_metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    support_policy_mode = (
+        metadata.get("support_policy_mode")
+        or tempered.get("support_policy_mode")
+        or projection.get("support_policy_mode")
+        or "unrestricted"
+    )
+    support_mode = (
+        metadata.get("delta_support_mode")
+        or tempered.get("delta_support_mode")
+        or projection.get("mode")
+        or "all"
+    )
+    topk = (
+        metadata.get("delta_support_topk")
+        or metadata.get("support_topk")
+        or tempered.get("delta_support_topk")
+        or projection.get("topk")
+        or 3
+    )
+    margin_threshold = (
+        tempered.get("delta_support_margin_threshold")
+        or projection.get("margin_threshold")
+        or 0.75
+    )
+    outside_support_delta_mode = (
+        tempered.get("outside_support_delta_mode")
+        or projection.get("outside_support_delta_mode")
+        or "zero"
+    )
+    return {
+        "support_policy_mode": str(support_policy_mode),
+        "support_mode": str(support_mode),
+        "topk": int(topk),
+        "margin_threshold": float(margin_threshold),
+        "outside_support_delta_mode": str(outside_support_delta_mode),
+    }
 
 
 def _checkpoint_rule_score_scale(checkpoint: dict[str, Any]) -> float:
@@ -257,7 +351,7 @@ def _build_baselines(candidates: list[dict[str, Any]], args: argparse.Namespace,
         device=device,
     )
     untrained.eval()
-    return [
+    baselines = [
         {
             "kind": "baseline",
             "candidate_id": "zero_delta_rule_prior",
@@ -285,6 +379,38 @@ def _build_baselines(candidates: list[dict[str, Any]], args: argparse.Namespace,
             "policy": untrained,
         },
     ]
+    parent_checkpoint_path = first_checkpoint_config.get("parent_checkpoint_path")
+    if parent_checkpoint_path:
+        parent_path = Path(parent_checkpoint_path)
+        if parent_path.exists():
+            source_policy = RulePriorDeltaPolicy(
+                hidden_dim=int(first_checkpoint_config["model"]["hidden_dim"]),
+                num_res_blocks=int(first_checkpoint_config["model"]["num_res_blocks"]),
+                dropout=float(first_checkpoint_config["model"].get("dropout", 0.0)),
+            ).to(device)
+            parent_checkpoint = torch.load(parent_path, map_location=device)
+            source_policy.rule_score_scale = _checkpoint_rule_score_scale(parent_checkpoint)
+            source_policy.load_state_dict(parent_checkpoint["policy_state_dict"])
+            source_policy.eval()
+            baselines.append(
+                {
+                    "kind": "baseline",
+                    "candidate_id": "source_checkpoint_original",
+                    "source_type": "baseline",
+                    "source_config_id": candidates[0].get("source_config_id"),
+                    "rerun_config_id": candidates[0].get("rerun_config_id"),
+                    "config_key": {
+                        "baseline": "source_checkpoint_original",
+                        "reference_config_key": first_config,
+                    },
+                    "config_key_label": "baseline/source_checkpoint_original",
+                    "checkpoint_path": str(parent_path),
+                    "checkpoint_sha256": _file_sha256(parent_path),
+                    "config_path": "",
+                    "policy": source_policy,
+                }
+            )
+    return baselines
 
 
 def _evaluate_record(
@@ -321,6 +447,7 @@ def _evaluate_record(
         "checkpoint_path": record["checkpoint_path"],
         "checkpoint_sha256": record["checkpoint_sha256"],
         "config_path": record.get("config_path", ""),
+        "support_policy_mode": record.get("support_policy_mode", "baseline"),
         "opponent_name": opponent_name,
         "eval_seed_registry_id": _eval_seed_registry_id(args),
         "eval_seed_hash": _eval_seed_hash(_eval_seed_registry(args)),
@@ -384,6 +511,7 @@ def _evaluate_record(
         "forced_terminal_missed_fail_closed": metrics.forced_terminal_missed_fail_closed,
         "paired_rank_pt_delta_vs_zero_delta": None,
         "paired_rank_pt_delta_vs_untrained_rule_prior_delta": None,
+        "paired_rank_pt_delta_vs_source_checkpoint": None,
         "paired_rank_pt_delta_vs_rule_prior": None,
     }, changed_state_rows
 
@@ -692,8 +820,10 @@ def _summary_markdown(args: argparse.Namespace, rows: list[dict[str, Any]]) -> s
             f"candidate_id={row['candidate_id']} "
             f"source_type={row['source_type']} "
             f"source_id={row['source_config_id']} "
+            f"support_policy={row.get('support_policy_mode', 'baseline')} "
             f"delta_vs_zero={row['paired_rank_pt_delta_vs_zero_delta']:.6g} "
             f"delta_vs_untrained={row['paired_rank_pt_delta_vs_untrained_rule_prior_delta']:.6g} "
+            f"delta_vs_source={_format_optional_float(row.get('paired_rank_pt_delta_vs_source_checkpoint'))} "
             f"rank_pt={row['rank_pt']:.6g} "
             f"mean_rank={row['mean_rank']:.6g} "
             f"fourth={row['fourth_rate']:.6g} "
@@ -711,6 +841,12 @@ def _summary_markdown(args: argparse.Namespace, rows: list[dict[str, Any]]) -> s
     return "\n".join(lines)
 
 
+def _format_optional_float(value: Any) -> str:
+    if value is None:
+        return "nan"
+    return f"{float(value):.6g}"
+
+
 def _decision_text(rows: list[dict[str, Any]]) -> str:
     if rows and all(
         float(row["top1_action_changed_rate"]) == 0.0
@@ -719,6 +855,9 @@ def _decision_text(rows: list[dict[str, Any]]) -> str:
         for row in rows
     ):
         return "Current checkpoints remain rule-prior equivalent on top-1 decisions; prioritize learning-signal research before more eval scaling."
+    if rows and all(float(row["changed_to_rank_ge5_rate"]) == 0.0 for row in rows):
+        if not any(float(row["paired_rank_pt_delta_vs_zero_delta"]) > 0.0 for row in rows):
+            return "Support-only topK contract holds in paired diagnostics, but rank proxy does not show positive strength signal; keep this as sanity/proxy evidence only."
     return "At least one checkpoint changes top-1 or has non-trivial delta; continue paired strength/stability evaluation before changing learning signal."
 
 
