@@ -67,6 +67,8 @@ _ACTOR_UPDATE_SUPPORT_MODES = (
 _DELTA_SUPPORT_MODES = _ACTOR_UPDATE_SUPPORT_MODES
 _OUTSIDE_SUPPORT_DELTA_MODES = ("zero", "negative-clip")
 _SUPPORT_POLICY_MODES = ("unrestricted", "delta-topk-zero", "support-only-topk")
+_TOPK_RANKING_AUX_MODES = ("none", "teacher-ce", "teacher-pairwise", "advantage-pairwise")
+_TEACHER_SOURCES = ("rule-components", "model", "search", "oracle-file")
 
 
 class DeltaSupportProjectionPolicy(InteractivePolicy):
@@ -180,6 +182,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--delta-l2-coef-values", type=float, nargs="+", default=(0.0,))
     parser.add_argument("--delta-clip-values", type=float, nargs="+", default=(0.0,))
     parser.add_argument("--delta-clip-coef-values", type=float, nargs="+", default=(0.0,))
+    parser.add_argument(
+        "--topk-ranking-aux-mode",
+        "--topk-ranking-aux-modes",
+        dest="topk_ranking_aux_modes",
+        choices=_TOPK_RANKING_AUX_MODES,
+        nargs="+",
+        default=("none",),
+    )
+    parser.add_argument("--topk-ranking-aux-coef", "--topk-ranking-aux-coef-values", dest="topk_ranking_aux_coef_values", type=float, nargs="+", default=(0.0,))
+    parser.add_argument("--topk-ranking-k", type=int, default=3)
+    parser.add_argument("--teacher-source", choices=_TEACHER_SOURCES, default="rule-components")
+    parser.add_argument("--teacher-temperature", type=float, default=1.0)
     parser.add_argument("--low-rank-flip-topk-values", type=int, nargs="+", default=(3,))
     parser.add_argument("--low-rank-flip-penalty-coef-values", type=float, nargs="+", default=(0.0,))
     parser.add_argument("--weak-margin-threshold-values", type=float, nargs="+", default=(0.75,))
@@ -316,6 +330,7 @@ def main() -> None:
         args.delta_clip_coef_values,
         name="delta_clip_coef",
     )
+    topk_ranking_aux_configs = _topk_ranking_aux_configs(args)
     low_rank_flip_topk_values = _positive_int_values(
         args.low_rank_flip_topk_values,
         name="low_rank_flip_topk",
@@ -347,62 +362,78 @@ def main() -> None:
                                 for delta_l2_coef in delta_l2_coef_values:
                                     for delta_clip in delta_clip_values:
                                         for delta_clip_coef in delta_clip_coef_values:
-                                            for low_rank_flip_topk in low_rank_flip_topk_values:
-                                                for low_rank_flip_penalty_coef in low_rank_flip_penalty_coef_values:
-                                                    for weak_margin_threshold in weak_margin_threshold_values:
-                                                        for weak_margin_flip_penalty_coef in weak_margin_flip_penalty_coef_values:
-                                                            for delta_support in delta_support_configs:
-                                                                for actor_support in actor_update_support_configs:
-                                                                    config_id = _run_tempered_ratio_config(
-                                                                        args,
-                                                                        candidate,
-                                                                        source_policy,
-                                                                        opponent_pool,
-                                                                        device,
-                                                                        config_id,
-                                                                        rule_score_scale=float(rule_score_scale),
-                                                                        temperature=float(temperature),
-                                                                        lr=float(lr),
-                                                                        update_epochs=int(update_epochs),
-                                                                        clip_eps=float(clip_eps),
-                                                                        rule_kl_coef=float(rule_kl_coef),
-                                                                        delta_l2_coef=float(delta_l2_coef),
-                                                                        delta_clip=float(delta_clip),
-                                                                        delta_clip_coef=float(delta_clip_coef),
-                                                                        low_rank_flip_topk=int(low_rank_flip_topk),
-                                                                        low_rank_flip_penalty_coef=float(
-                                                                            low_rank_flip_penalty_coef
-                                                                        ),
-                                                                        weak_margin_threshold=float(weak_margin_threshold),
-                                                                        weak_margin_flip_penalty_coef=float(
-                                                                            weak_margin_flip_penalty_coef
-                                                                        ),
-                                                                        support_policy_mode=str(
-                                                                            delta_support["support_policy_mode"]
-                                                                        ),
-                                                                        delta_support_mode=str(
-                                                                            delta_support["mode"]
-                                                                        ),
-                                                                        delta_support_topk=int(delta_support["topk"]),
-                                                                        delta_support_margin_threshold=float(
-                                                                            delta_support["margin_threshold"]
-                                                                        ),
-                                                                        outside_support_delta_mode=str(
-                                                                            delta_support["outside_support_delta_mode"]
-                                                                        ),
-                                                                        actor_update_support_mode=str(
-                                                                            actor_support["mode"]
-                                                                        ),
-                                                                        actor_update_topk=int(actor_support["topk"]),
-                                                                        actor_update_margin_threshold=float(
-                                                                            actor_support["margin_threshold"]
-                                                                        ),
-                                                                        summary_rows=summary_rows,
-                                                                        iteration_rows=iteration_rows,
-                                                                        step_rows=step_rows,
-                                                                        advantage_rows=advantage_rows,
-                                                                        checkpoint_rows=checkpoint_rows,
-                                                                    )
+                                            for topk_ranking_aux in topk_ranking_aux_configs:
+                                                for low_rank_flip_topk in low_rank_flip_topk_values:
+                                                    for low_rank_flip_penalty_coef in low_rank_flip_penalty_coef_values:
+                                                        for weak_margin_threshold in weak_margin_threshold_values:
+                                                            for weak_margin_flip_penalty_coef in weak_margin_flip_penalty_coef_values:
+                                                                for delta_support in delta_support_configs:
+                                                                    for actor_support in actor_update_support_configs:
+                                                                        config_id = _run_tempered_ratio_config(
+                                                                            args,
+                                                                            candidate,
+                                                                            source_policy,
+                                                                            opponent_pool,
+                                                                            device,
+                                                                            config_id,
+                                                                            rule_score_scale=float(rule_score_scale),
+                                                                            temperature=float(temperature),
+                                                                            lr=float(lr),
+                                                                            update_epochs=int(update_epochs),
+                                                                            clip_eps=float(clip_eps),
+                                                                            rule_kl_coef=float(rule_kl_coef),
+                                                                            delta_l2_coef=float(delta_l2_coef),
+                                                                            delta_clip=float(delta_clip),
+                                                                            delta_clip_coef=float(delta_clip_coef),
+                                                                            topk_ranking_aux_mode=str(
+                                                                                topk_ranking_aux["mode"]
+                                                                            ),
+                                                                            topk_ranking_aux_coef=float(
+                                                                                topk_ranking_aux["coef"]
+                                                                            ),
+                                                                            topk_ranking_k=int(
+                                                                                topk_ranking_aux["topk"]
+                                                                            ),
+                                                                            teacher_source=str(
+                                                                                topk_ranking_aux["teacher_source"]
+                                                                            ),
+                                                                            teacher_temperature=float(
+                                                                                topk_ranking_aux["teacher_temperature"]
+                                                                            ),
+                                                                            low_rank_flip_topk=int(low_rank_flip_topk),
+                                                                            low_rank_flip_penalty_coef=float(
+                                                                                low_rank_flip_penalty_coef
+                                                                            ),
+                                                                            weak_margin_threshold=float(weak_margin_threshold),
+                                                                            weak_margin_flip_penalty_coef=float(
+                                                                                weak_margin_flip_penalty_coef
+                                                                            ),
+                                                                            support_policy_mode=str(
+                                                                                delta_support["support_policy_mode"]
+                                                                            ),
+                                                                            delta_support_mode=str(
+                                                                                delta_support["mode"]
+                                                                            ),
+                                                                            delta_support_topk=int(delta_support["topk"]),
+                                                                            delta_support_margin_threshold=float(
+                                                                                delta_support["margin_threshold"]
+                                                                            ),
+                                                                            outside_support_delta_mode=str(
+                                                                                delta_support["outside_support_delta_mode"]
+                                                                            ),
+                                                                            actor_update_support_mode=str(
+                                                                                actor_support["mode"]
+                                                                            ),
+                                                                            actor_update_topk=int(actor_support["topk"]),
+                                                                            actor_update_margin_threshold=float(
+                                                                                actor_support["margin_threshold"]
+                                                                            ),
+                                                                            summary_rows=summary_rows,
+                                                                            iteration_rows=iteration_rows,
+                                                                            step_rows=step_rows,
+                                                                            advantage_rows=advantage_rows,
+                                                                            checkpoint_rows=checkpoint_rows,
+                                                                        )
 
     payload = {
         "mode": _run_mode_label(args),
@@ -419,6 +450,7 @@ def main() -> None:
         "delta_l2_coef_values": [float(value) for value in delta_l2_coef_values],
         "delta_clip_values": [float(value) for value in delta_clip_values],
         "delta_clip_coef_values": [float(value) for value in delta_clip_coef_values],
+        "topk_ranking_aux": _topk_ranking_aux_config(args),
         "low_rank_flip_topk_values": [int(value) for value in low_rank_flip_topk_values],
         "low_rank_flip_penalty_coef_values": [float(value) for value in low_rank_flip_penalty_coef_values],
         "weak_margin_threshold_values": [float(value) for value in weak_margin_threshold_values],
@@ -467,6 +499,11 @@ def _run_tempered_ratio_config(
     delta_l2_coef: float,
     delta_clip: float,
     delta_clip_coef: float,
+    topk_ranking_aux_mode: str,
+    topk_ranking_aux_coef: float,
+    topk_ranking_k: int,
+    teacher_source: str,
+    teacher_temperature: float,
     low_rank_flip_topk: int,
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
@@ -556,6 +593,11 @@ def _run_tempered_ratio_config(
                 delta_l2_coef=float(delta_l2_coef),
                 delta_clip=float(delta_clip),
                 delta_clip_coef=float(delta_clip_coef),
+                topk_ranking_aux_mode=str(topk_ranking_aux_mode),
+                topk_ranking_aux_coef=float(topk_ranking_aux_coef),
+                topk_ranking_k=int(topk_ranking_k),
+                teacher_source=str(teacher_source),
+                teacher_temperature=float(teacher_temperature),
                 low_rank_flip_topk=int(low_rank_flip_topk),
                 low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
                 weak_margin_threshold=float(weak_margin_threshold),
@@ -576,6 +618,11 @@ def _run_tempered_ratio_config(
             delta_l2_coef=float(delta_l2_coef),
             delta_clip=float(delta_clip),
             delta_clip_coef=float(delta_clip_coef),
+            topk_ranking_aux_mode=str(topk_ranking_aux_mode),
+            topk_ranking_aux_coef=float(topk_ranking_aux_coef),
+            topk_ranking_k=int(topk_ranking_k),
+            teacher_source=str(teacher_source),
+            teacher_temperature=float(teacher_temperature),
             low_rank_flip_topk=int(low_rank_flip_topk),
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
@@ -595,6 +642,11 @@ def _run_tempered_ratio_config(
             delta_l2_coef=float(delta_l2_coef),
             delta_clip=float(delta_clip),
             delta_clip_coef=float(delta_clip_coef),
+            topk_ranking_aux_mode=str(topk_ranking_aux_mode),
+            topk_ranking_aux_coef=float(topk_ranking_aux_coef),
+            topk_ranking_k=int(topk_ranking_k),
+            teacher_source=str(teacher_source),
+            teacher_temperature=float(teacher_temperature),
             low_rank_flip_topk=int(low_rank_flip_topk),
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
@@ -635,6 +687,11 @@ def _run_tempered_ratio_config(
             "delta_l2_coef": float(delta_l2_coef),
             "delta_clip": float(delta_clip),
             "delta_clip_coef": float(delta_clip_coef),
+            "topk_ranking_aux_mode": str(topk_ranking_aux_mode),
+            "topk_ranking_aux_coef": float(topk_ranking_aux_coef),
+            "topk_ranking_k": int(topk_ranking_k),
+            "teacher_source": str(teacher_source),
+            "teacher_temperature": float(teacher_temperature),
             "low_rank_flip_topk": int(low_rank_flip_topk),
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
@@ -689,6 +746,18 @@ def _run_tempered_ratio_config(
             "tempered_post_update_weak_margin_flip_penalty": _loss_float(
                 tempered_post_loss.weak_margin_flip_penalty
             ),
+            "tempered_post_update_topk_ranking_aux_loss": _loss_float(
+                tempered_post_loss.topk_ranking_aux_loss
+            ),
+            "tempered_post_update_topk_ranking_teacher_kl": _loss_float(
+                tempered_post_loss.topk_ranking_teacher_kl
+            ),
+            "tempered_post_update_topk_ranking_teacher_agreement": _loss_float(
+                tempered_post_loss.topk_ranking_teacher_agreement
+            ),
+            "tempered_post_update_topk_ranking_kept_count": _loss_float(
+                tempered_post_loss.topk_ranking_kept_count
+            ),
             "untempered_post_update_approx_kl": _loss_float(untempered_post_loss.approx_kl),
             "untempered_post_update_clip_fraction": _loss_float(untempered_post_loss.clip_fraction),
         }
@@ -711,6 +780,11 @@ def _run_tempered_ratio_config(
                     "delta_l2_coef": float(delta_l2_coef),
                     "delta_clip": float(delta_clip),
                     "delta_clip_coef": float(delta_clip_coef),
+                    "topk_ranking_aux_mode": str(topk_ranking_aux_mode),
+                    "topk_ranking_aux_coef": float(topk_ranking_aux_coef),
+                    "topk_ranking_k": int(topk_ranking_k),
+                    "teacher_source": str(teacher_source),
+                    "teacher_temperature": float(teacher_temperature),
                     "low_rank_flip_topk": int(low_rank_flip_topk),
                     "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
                     "weak_margin_threshold": float(weak_margin_threshold),
@@ -743,6 +817,11 @@ def _run_tempered_ratio_config(
                     "delta_l2_coef": float(delta_l2_coef),
                     "delta_clip": float(delta_clip),
                     "delta_clip_coef": float(delta_clip_coef),
+                    "topk_ranking_aux_mode": str(topk_ranking_aux_mode),
+                    "topk_ranking_aux_coef": float(topk_ranking_aux_coef),
+                    "topk_ranking_k": int(topk_ranking_k),
+                    "teacher_source": str(teacher_source),
+                    "teacher_temperature": float(teacher_temperature),
                     "low_rank_flip_topk": int(low_rank_flip_topk),
                     "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
                     "weak_margin_threshold": float(weak_margin_threshold),
@@ -767,6 +846,7 @@ def _run_tempered_ratio_config(
             f"rule_kl={float(rule_kl_coef):g} "
             f"delta_l2={float(delta_l2_coef):g} "
             f"delta_clip={float(delta_clip):g}/{float(delta_clip_coef):g} "
+            f"ranking_aux={topk_ranking_aux_mode}/{float(topk_ranking_aux_coef):g}/k{int(topk_ranking_k)} "
             f"low_rank_k={int(low_rank_flip_topk)} "
             f"low_rank_coef={float(low_rank_flip_penalty_coef):g} "
             f"weak_margin={float(weak_margin_threshold):g}/{float(weak_margin_flip_penalty_coef):g} "
@@ -782,6 +862,8 @@ def _run_tempered_ratio_config(
             f"rank_ge5={post_quality_stats['changed_to_rank_ge5_rate']:.6g} "
             f"low_rank_pen={_loss_float(tempered_post_loss.low_rank_flip_penalty):.6g} "
             f"weak_margin_pen={_loss_float(tempered_post_loss.weak_margin_flip_penalty):.6g} "
+            f"rank_aux={_loss_float(tempered_post_loss.topk_ranking_aux_loss):.6g} "
+            f"teacher_kl={_loss_float(tempered_post_loss.topk_ranking_teacher_kl):.6g} "
             f"t_kl={_loss_float(tempered_post_loss.approx_kl):.6g} "
             f"t_clip={_loss_float(tempered_post_loss.clip_fraction):.6g} "
             f"delta_max={post_stats['neural_delta_abs_max']:.6g} "
@@ -832,6 +914,11 @@ def _run_tempered_ratio_config(
             "delta_l2_coef": float(delta_l2_coef),
             "delta_clip": float(delta_clip),
             "delta_clip_coef": float(delta_clip_coef),
+            "topk_ranking_aux_mode": str(topk_ranking_aux_mode),
+            "topk_ranking_aux_coef": float(topk_ranking_aux_coef),
+            "topk_ranking_k": int(topk_ranking_k),
+            "teacher_source": str(teacher_source),
+            "teacher_temperature": float(teacher_temperature),
             "low_rank_flip_topk": int(low_rank_flip_topk),
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
@@ -884,6 +971,11 @@ def _run_tempered_ratio_config(
                 delta_l2_coef=float(delta_l2_coef),
                 delta_clip=float(delta_clip),
                 delta_clip_coef=float(delta_clip_coef),
+                topk_ranking_aux_mode=str(topk_ranking_aux_mode),
+                topk_ranking_aux_coef=float(topk_ranking_aux_coef),
+                topk_ranking_k=int(topk_ranking_k),
+                teacher_source=str(teacher_source),
+                teacher_temperature=float(teacher_temperature),
                 low_rank_flip_topk=int(low_rank_flip_topk),
                 low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
                 weak_margin_threshold=float(weak_margin_threshold),
@@ -918,6 +1010,11 @@ def _save_tempered_ratio_checkpoint(
     delta_l2_coef: float,
     delta_clip: float,
     delta_clip_coef: float,
+    topk_ranking_aux_mode: str,
+    topk_ranking_aux_coef: float,
+    topk_ranking_k: int,
+    teacher_source: str,
+    teacher_temperature: float,
     low_rank_flip_topk: int,
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
@@ -949,6 +1046,11 @@ def _save_tempered_ratio_checkpoint(
             "delta_l2_coef": float(delta_l2_coef),
             "delta_clip": float(delta_clip),
             "delta_clip_coef": float(delta_clip_coef),
+            "topk_ranking_aux_mode": str(topk_ranking_aux_mode),
+            "topk_ranking_aux_coef": float(topk_ranking_aux_coef),
+            "topk_ranking_k": int(topk_ranking_k),
+            "teacher_source": str(teacher_source),
+            "teacher_temperature": float(teacher_temperature),
             "low_rank_flip_topk": int(low_rank_flip_topk),
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
@@ -1009,6 +1111,11 @@ def _save_tempered_ratio_checkpoint(
             "delta_l2_coef": float(delta_l2_coef),
             "delta_clip": float(delta_clip),
             "delta_clip_coef": float(delta_clip_coef),
+            "topk_ranking_aux_mode": str(topk_ranking_aux_mode),
+            "topk_ranking_aux_coef": float(topk_ranking_aux_coef),
+            "topk_ranking_k": int(topk_ranking_k),
+            "teacher_source": str(teacher_source),
+            "teacher_temperature": float(teacher_temperature),
             "low_rank_flip_topk": int(low_rank_flip_topk),
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
@@ -1102,6 +1209,16 @@ def _save_tempered_ratio_checkpoint(
         "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
         "low_rank_flip_penalty": float(summary_row["final_tempered_post_update_low_rank_flip_penalty"]),
         "weak_margin_flip_penalty": float(summary_row["final_tempered_post_update_weak_margin_flip_penalty"]),
+        "topk_ranking_aux_mode": str(topk_ranking_aux_mode),
+        "topk_ranking_aux_coef": float(topk_ranking_aux_coef),
+        "topk_ranking_k": int(topk_ranking_k),
+        "teacher_source": str(teacher_source),
+        "teacher_temperature": float(teacher_temperature),
+        "topk_ranking_aux_loss": float(summary_row["final_tempered_post_update_topk_ranking_aux_loss"]),
+        "topk_ranking_teacher_kl": float(summary_row["final_tempered_post_update_topk_ranking_teacher_kl"]),
+        "topk_ranking_teacher_agreement": float(
+            summary_row["final_tempered_post_update_topk_ranking_teacher_agreement"]
+        ),
         "support_policy_mode": str(support_policy_mode),
         "delta_support_mode": str(delta_support_mode),
         "delta_support_topk": int(delta_support_topk),
@@ -1139,6 +1256,11 @@ def _post_update_metrics(
     delta_l2_coef: float,
     delta_clip: float,
     delta_clip_coef: float,
+    topk_ranking_aux_mode: str,
+    topk_ranking_aux_coef: float,
+    topk_ranking_k: int,
+    teacher_source: str,
+    teacher_temperature: float,
     low_rank_flip_topk: int,
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
@@ -1159,6 +1281,11 @@ def _post_update_metrics(
         delta_l2_coef=float(delta_l2_coef),
         delta_clip=float(delta_clip),
         delta_clip_coef=float(delta_clip_coef),
+        topk_ranking_aux_mode=str(topk_ranking_aux_mode),
+        topk_ranking_aux_coef=float(topk_ranking_aux_coef),
+        topk_ranking_k=int(topk_ranking_k),
+        teacher_source=str(teacher_source),
+        teacher_temperature=float(teacher_temperature),
         low_rank_flip_topk=int(low_rank_flip_topk),
         low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
         weak_margin_threshold=float(weak_margin_threshold),
@@ -1192,6 +1319,11 @@ def _apply_adaptive_recovery_gate(
     delta_l2_coef: float,
     delta_clip: float,
     delta_clip_coef: float,
+    topk_ranking_aux_mode: str,
+    topk_ranking_aux_coef: float,
+    topk_ranking_k: int,
+    teacher_source: str,
+    teacher_temperature: float,
     low_rank_flip_topk: int,
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
@@ -1245,6 +1377,11 @@ def _apply_adaptive_recovery_gate(
             delta_l2_coef=float(delta_l2_coef),
             delta_clip=float(delta_clip),
             delta_clip_coef=float(delta_clip_coef),
+            topk_ranking_aux_mode=str(topk_ranking_aux_mode),
+            topk_ranking_aux_coef=float(topk_ranking_aux_coef),
+            topk_ranking_k=int(topk_ranking_k),
+            teacher_source=str(teacher_source),
+            teacher_temperature=float(teacher_temperature),
             low_rank_flip_topk=int(low_rank_flip_topk),
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
@@ -1292,6 +1429,11 @@ def _apply_adaptive_recovery_gate(
             delta_l2_coef=float(delta_l2_coef),
             delta_clip=float(delta_clip),
             delta_clip_coef=float(delta_clip_coef),
+            topk_ranking_aux_mode=str(topk_ranking_aux_mode),
+            topk_ranking_aux_coef=float(topk_ranking_aux_coef),
+            topk_ranking_k=int(topk_ranking_k),
+            teacher_source=str(teacher_source),
+            teacher_temperature=float(teacher_temperature),
             low_rank_flip_topk=int(low_rank_flip_topk),
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
@@ -1312,6 +1454,11 @@ def _apply_adaptive_recovery_gate(
             delta_l2_coef=float(delta_l2_coef),
             delta_clip=float(delta_clip),
             delta_clip_coef=float(delta_clip_coef),
+            topk_ranking_aux_mode=str(topk_ranking_aux_mode),
+            topk_ranking_aux_coef=float(topk_ranking_aux_coef),
+            topk_ranking_k=int(topk_ranking_k),
+            teacher_source=str(teacher_source),
+            teacher_temperature=float(teacher_temperature),
             low_rank_flip_topk=int(low_rank_flip_topk),
             low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
             weak_margin_threshold=float(weak_margin_threshold),
@@ -1371,6 +1518,11 @@ def _tempered_ppo_update(
     delta_l2_coef: float,
     delta_clip: float,
     delta_clip_coef: float,
+    topk_ranking_aux_mode: str,
+    topk_ranking_aux_coef: float,
+    topk_ranking_k: int,
+    teacher_source: str,
+    teacher_temperature: float,
     low_rank_flip_topk: int,
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
@@ -1394,6 +1546,11 @@ def _tempered_ppo_update(
         delta_l2_coef=delta_l2_coef,
         delta_clip=delta_clip,
         delta_clip_coef=delta_clip_coef,
+        topk_ranking_aux_mode=topk_ranking_aux_mode,
+        topk_ranking_aux_coef=topk_ranking_aux_coef,
+        topk_ranking_k=topk_ranking_k,
+        teacher_source=teacher_source,
+        teacher_temperature=teacher_temperature,
         low_rank_flip_topk=low_rank_flip_topk,
         low_rank_flip_penalty_coef=low_rank_flip_penalty_coef,
         weak_margin_threshold=weak_margin_threshold,
@@ -1423,6 +1580,11 @@ def _compute_tempered_ppo_loss(
     delta_l2_coef: float,
     delta_clip: float,
     delta_clip_coef: float,
+    topk_ranking_aux_mode: str,
+    topk_ranking_aux_coef: float,
+    topk_ranking_k: int,
+    teacher_source: str,
+    teacher_temperature: float,
     low_rank_flip_topk: int,
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
@@ -1509,6 +1671,22 @@ def _compute_tempered_ppo_loss(
     if weak_margin_flip_penalty is not None and weak_margin_flip_penalty_coef > 0.0:
         total_loss = total_loss + float(weak_margin_flip_penalty_coef) * weak_margin_flip_penalty
 
+    (
+        topk_ranking_aux_loss,
+        topk_ranking_teacher_kl,
+        topk_ranking_teacher_agreement,
+        topk_ranking_kept_count,
+    ) = _topk_ranking_aux_terms(
+        output,
+        batch,
+        mode=str(topk_ranking_aux_mode),
+        topk=int(topk_ranking_k),
+        teacher_source=str(teacher_source),
+        teacher_temperature=float(teacher_temperature),
+    )
+    if topk_ranking_aux_loss is not None and topk_ranking_aux_coef > 0.0:
+        total_loss = total_loss + float(topk_ranking_aux_coef) * topk_ranking_aux_loss
+
     avg_abs_neural_delta, delta_norm = _delta_metrics(output, batch)
     rule_agreement = _untempered_rule_agreement(output, batch)
     return PPOLossBreakdown(
@@ -1530,6 +1708,10 @@ def _compute_tempered_ppo_loss(
         delta_norm=delta_norm,
         low_rank_flip_penalty=low_rank_flip_penalty,
         weak_margin_flip_penalty=weak_margin_flip_penalty,
+        topk_ranking_aux_loss=topk_ranking_aux_loss,
+        topk_ranking_teacher_kl=topk_ranking_teacher_kl,
+        topk_ranking_teacher_agreement=topk_ranking_teacher_agreement,
+        topk_ranking_kept_count=topk_ranking_kept_count,
     )
 
 
@@ -1812,6 +1994,48 @@ def _movement_regularization_terms(
     strong_margin = (legal_count > 1) & (prior_top1_margin > float(weak_margin_threshold))
     weak_margin_flip_penalty = ((1.0 - prior_top1_prob) * strong_margin.float()).mean()
     return low_rank_flip_penalty, weak_margin_flip_penalty
+
+
+def _topk_ranking_aux_terms(
+    output,
+    batch,
+    *,
+    mode: str,
+    topk: int,
+    teacher_source: str,
+    teacher_temperature: float,
+) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    aux_mode = str(mode)
+    if aux_mode == "none":
+        zero = output.action_logits.new_zeros(())
+        return zero, zero, zero, zero
+    if aux_mode != "teacher-ce":
+        raise ValueError(f"topK ranking aux mode is not implemented yet: {aux_mode}")
+    if str(teacher_source) != "rule-components":
+        raise ValueError(f"teacher source is not implemented yet: {teacher_source}")
+    if float(teacher_temperature) <= 0.0:
+        raise ValueError(f"teacher_temperature must be positive, got {teacher_temperature}")
+
+    prior_logits = output.aux.get("prior_logits")
+    if prior_logits is None:
+        prior_logits = batch.policy_input.prior_logits
+    if prior_logits is None:
+        raise ValueError("teacher-ce topK ranking auxiliary requires prior_logits")
+
+    mask = batch.policy_input.legal_action_mask.bool()
+    prior_logits = prior_logits.float()
+    masked_prior = prior_logits.masked_fill(~mask, torch.finfo(prior_logits.dtype).min)
+    k = max(1, min(int(topk), int(masked_prior.shape[-1])))
+    topk_values, topk_indices = torch.topk(masked_prior, k=k, dim=-1)
+    policy_topk_logits = output.action_logits.gather(1, topk_indices).float()
+    teacher_probs = torch.softmax(topk_values / float(teacher_temperature), dim=-1)
+    teacher_log_probs = torch.log(teacher_probs.clamp_min(1e-12))
+    policy_log_probs = torch.log_softmax(policy_topk_logits, dim=-1)
+    ce_loss = -(teacher_probs * policy_log_probs).sum(dim=-1).mean()
+    teacher_kl = (teacher_probs * (teacher_log_probs - policy_log_probs)).sum(dim=-1).mean()
+    teacher_agreement = (policy_topk_logits.argmax(dim=-1) == teacher_probs.argmax(dim=-1)).float().mean()
+    kept_count = torch.tensor(float(masked_prior.shape[0]), device=output.action_logits.device, dtype=output.action_logits.dtype)
+    return ce_loss, teacher_kl, teacher_agreement, kept_count
 
 
 def _delta_support_mask(
@@ -2180,6 +2404,64 @@ def _support_policy_config(args: argparse.Namespace) -> dict[str, Any]:
         "expanded_configs": _support_policy_configs(args),
         "legacy_delta_support_args_used": args.support_policy_modes is None,
         "scope": "policy_forward_rollout_loss_fresh_eval",
+    }
+
+
+def _topk_ranking_aux_configs(args: argparse.Namespace) -> tuple[dict[str, Any], ...]:
+    modes = tuple(str(value) for value in args.topk_ranking_aux_modes)
+    if not modes:
+        raise ValueError("topK ranking auxiliary mode matrix must not be empty")
+    invalid = [mode for mode in modes if mode not in _TOPK_RANKING_AUX_MODES]
+    if invalid:
+        raise ValueError(f"unsupported topK ranking auxiliary modes: {invalid}")
+    coef_values = _nonnegative_float_values(
+        args.topk_ranking_aux_coef_values,
+        name="topk_ranking_aux_coef",
+    )
+    topk = int(args.topk_ranking_k)
+    if topk <= 0:
+        raise ValueError(f"topk_ranking_k must be positive, got {topk}")
+    teacher_temperature = float(args.teacher_temperature)
+    if teacher_temperature <= 0.0:
+        raise ValueError(f"teacher_temperature must be positive, got {teacher_temperature}")
+    if str(args.teacher_source) != "rule-components" and any(mode != "none" for mode in modes):
+        raise ValueError(f"teacher source is not implemented yet: {args.teacher_source}")
+    configs: list[dict[str, Any]] = []
+    seen: set[tuple[str, float, int, str, float]] = set()
+    for mode in modes:
+        raw_coefs = (0.0,) if mode == "none" else coef_values
+        if mode not in {"none", "teacher-ce"}:
+            raise ValueError(f"topK ranking auxiliary mode is not implemented yet: {mode}")
+        for coef in raw_coefs:
+            key = (str(mode), round(float(coef), 12), topk, str(args.teacher_source), round(teacher_temperature, 12))
+            if key in seen:
+                continue
+            seen.add(key)
+            configs.append(
+                {
+                    "mode": str(mode),
+                    "coef": float(coef),
+                    "topk": int(topk),
+                    "teacher_source": str(args.teacher_source),
+                    "teacher_temperature": float(teacher_temperature),
+                }
+            )
+    return tuple(configs)
+
+
+def _topk_ranking_aux_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "modes": tuple(str(value) for value in args.topk_ranking_aux_modes),
+        "coef_values": _nonnegative_float_values(
+            args.topk_ranking_aux_coef_values,
+            name="topk_ranking_aux_coef",
+        ),
+        "topk": int(args.topk_ranking_k),
+        "teacher_source": str(args.teacher_source),
+        "teacher_temperature": float(args.teacher_temperature),
+        "expanded_configs": _topk_ranking_aux_configs(args),
+        "implemented_modes": ("none", "teacher-ce"),
+        "teacher_source_note": "rule-components currently maps to the existing rule-prior topK distribution",
     }
 
 
@@ -2775,6 +3057,10 @@ def _summary_metric_key(key: str) -> bool:
         "tempered_post_update_rule_kl",
         "tempered_post_update_low_rank_flip_penalty",
         "tempered_post_update_weak_margin_flip_penalty",
+        "tempered_post_update_topk_ranking_aux_loss",
+        "tempered_post_update_topk_ranking_teacher_kl",
+        "tempered_post_update_topk_ranking_teacher_agreement",
+        "tempered_post_update_topk_ranking_kept_count",
         "untempered_post_update_approx_kl",
         "untempered_post_update_clip_fraction",
         "recovery_extra_epochs",
@@ -2808,6 +3094,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
         f"delta_l2_coef_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.delta_l2_coef_values, name='delta_l2_coef'))}`",
         f"delta_clip_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.delta_clip_values, name='delta_clip'))}`",
         f"delta_clip_coef_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.delta_clip_coef_values, name='delta_clip_coef'))}`",
+        f"topk_ranking_aux: `{_topk_ranking_aux_config(args)}`",
         f"low_rank_flip_topk_values: `{','.join(str(int(value)) for value in _positive_int_values(args.low_rank_flip_topk_values, name='low_rank_flip_topk'))}`",
         f"low_rank_flip_penalty_coef_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.low_rank_flip_penalty_coef_values, name='low_rank_flip_penalty_coef'))}`",
         f"weak_margin_threshold_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.weak_margin_threshold_values, name='weak_margin_threshold'))}`",
@@ -2842,6 +3129,9 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             float(item["delta_l2_coef"]),
             float(item["delta_clip"]),
             float(item["delta_clip_coef"]),
+            str(item["topk_ranking_aux_mode"]),
+            float(item["topk_ranking_aux_coef"]),
+            int(item["topk_ranking_k"]),
             int(item["low_rank_flip_topk"]),
             float(item["low_rank_flip_penalty_coef"]),
             float(item["weak_margin_threshold"]),
@@ -2868,6 +3158,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"rule_kl={row['rule_kl_coef']:g} "
             f"delta_l2={row['delta_l2_coef']:g} "
             f"delta_clip={row['delta_clip']:g}/{row['delta_clip_coef']:g} "
+            f"ranking_aux={row['topk_ranking_aux_mode']}/{row['topk_ranking_aux_coef']:g}/k{row['topk_ranking_k']} "
             f"low_rank={row['low_rank_flip_topk']}/{row['low_rank_flip_penalty_coef']:g} "
             f"weak_margin={row['weak_margin_threshold']:g}/{row['weak_margin_flip_penalty_coef']:g} "
             f"support_policy={row['support_policy_mode']} "
@@ -2886,6 +3177,9 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"margin_p50={row['final_untempered_post_changed_state_prior_margin_p50']:.6g} "
             f"low_rank_pen={row['final_tempered_post_update_low_rank_flip_penalty']:.6g} "
             f"weak_margin_pen={row['final_tempered_post_update_weak_margin_flip_penalty']:.6g} "
+            f"rank_aux={row['final_tempered_post_update_topk_ranking_aux_loss']:.6g} "
+            f"teacher_kl={row['final_tempered_post_update_topk_ranking_teacher_kl']:.6g} "
+            f"teacher_agree={row['final_tempered_post_update_topk_ranking_teacher_agreement']:.6g} "
             f"fresh_top1={row.get('fresh_validation_top1_action_changed_rate', 0.0):.6g} "
             f"fresh_quality={row.get('fresh_validation_gate_pass')} "
             f"qualified_eval={row.get('qualified_for_eval')} "

@@ -35,6 +35,10 @@ class PPOLossBreakdown:
     delta_norm: torch.Tensor | None = None
     low_rank_flip_penalty: torch.Tensor | None = None
     weak_margin_flip_penalty: torch.Tensor | None = None
+    topk_ranking_aux_loss: torch.Tensor | None = None
+    topk_ranking_teacher_kl: torch.Tensor | None = None
+    topk_ranking_teacher_agreement: torch.Tensor | None = None
+    topk_ranking_kept_count: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
