@@ -66,6 +66,7 @@ _ACTOR_UPDATE_SUPPORT_MODES = (
 
 _DELTA_SUPPORT_MODES = _ACTOR_UPDATE_SUPPORT_MODES
 _OUTSIDE_SUPPORT_DELTA_MODES = ("zero", "negative-clip")
+_SUPPORT_POLICY_MODES = ("unrestricted", "delta-topk-zero", "support-only-topk")
 
 
 class DeltaSupportProjectionPolicy(InteractivePolicy):
@@ -79,6 +80,7 @@ class DeltaSupportProjectionPolicy(InteractivePolicy):
         topk: int,
         margin_threshold: float,
         outside_support_delta_mode: str,
+        support_policy_mode: str = "delta-projection",
     ) -> None:
         super().__init__()
         if support_mode not in _DELTA_SUPPORT_MODES:
@@ -94,6 +96,7 @@ class DeltaSupportProjectionPolicy(InteractivePolicy):
         self.topk = int(topk)
         self.margin_threshold = float(margin_threshold)
         self.outside_support_delta_mode = str(outside_support_delta_mode)
+        self.support_policy_mode = str(support_policy_mode)
         self.rule_score_scale = float(getattr(base_policy, "rule_score_scale", 1.0))
 
     def forward(self, policy_input: PolicyInput) -> PolicyOutput:
@@ -128,7 +131,10 @@ class DeltaSupportProjectionPolicy(InteractivePolicy):
             raise ValueError(f"unsupported outside-support delta mode: {self.outside_support_delta_mode}")
 
         final_logits = self.rule_score_scale * prior_logits + projected_delta
-        final_logits = final_logits.masked_fill(~mask, torch.finfo(final_logits.dtype).min)
+        action_support_mask = mask
+        if self.support_policy_mode == "support-only-topk":
+            action_support_mask = support_mask
+        final_logits = final_logits.masked_fill(~action_support_mask, torch.finfo(final_logits.dtype).min)
         entropy = MaskedCategorical(final_logits, mask).entropy()
         aux = dict(output.aux)
         aux["prior_logits"] = prior_logits
@@ -137,8 +143,10 @@ class DeltaSupportProjectionPolicy(InteractivePolicy):
         aux["neural_delta"] = projected_delta
         aux["final_logits"] = final_logits
         aux["delta_support_mask"] = support_mask
+        aux["action_support_mask"] = action_support_mask
         aux["delta_support_mode"] = torch.tensor(0, device=final_logits.device, dtype=torch.int64)
         aux["delta_support_action_rate"] = support_mask.masked_select(mask).float().mean()
+        aux["action_support_rate"] = action_support_mask.masked_select(mask).float().mean()
         aux["outside_support_delta_mode"] = torch.tensor(0, device=final_logits.device, dtype=torch.int64)
         return PolicyOutput(
             action_logits=final_logits,
@@ -176,6 +184,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--low-rank-flip-penalty-coef-values", type=float, nargs="+", default=(0.0,))
     parser.add_argument("--weak-margin-threshold-values", type=float, nargs="+", default=(0.75,))
     parser.add_argument("--weak-margin-flip-penalty-coef-values", type=float, nargs="+", default=(0.0,))
+    parser.add_argument(
+        "--support-policy-mode",
+        "--support-policy-modes",
+        dest="support_policy_modes",
+        choices=_SUPPORT_POLICY_MODES,
+        nargs="+",
+        default=None,
+    )
     parser.add_argument(
         "--delta-support-mode",
         "--delta-support-modes",
@@ -316,7 +332,7 @@ def main() -> None:
         args.weak_margin_flip_penalty_coef_values,
         name="weak_margin_flip_penalty_coef",
     )
-    delta_support_configs = _delta_support_projection_configs(args)
+    delta_support_configs = _support_policy_configs(args)
     actor_update_support_configs = _actor_update_support_configs(args)
 
     for candidate in candidates:
@@ -360,6 +376,9 @@ def main() -> None:
                                                                         weak_margin_threshold=float(weak_margin_threshold),
                                                                         weak_margin_flip_penalty_coef=float(
                                                                             weak_margin_flip_penalty_coef
+                                                                        ),
+                                                                        support_policy_mode=str(
+                                                                            delta_support["support_policy_mode"]
                                                                         ),
                                                                         delta_support_mode=str(
                                                                             delta_support["mode"]
@@ -405,6 +424,7 @@ def main() -> None:
         "weak_margin_threshold_values": [float(value) for value in weak_margin_threshold_values],
         "weak_margin_flip_penalty_coef_values": [float(value) for value in weak_margin_flip_penalty_coef_values],
         "pass_criteria": _pass_criteria(args),
+        "support_policy": _support_policy_config(args),
         "delta_support_projection": _delta_support_projection_config(args),
         "actor_update_support": _actor_update_support_config(args),
         "adaptive_recovery": _adaptive_recovery_config(args),
@@ -451,6 +471,7 @@ def _run_tempered_ratio_config(
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
     weak_margin_flip_penalty_coef: float,
+    support_policy_mode: str,
     delta_support_mode: str,
     delta_support_topk: int,
     delta_support_margin_threshold: float,
@@ -472,6 +493,7 @@ def _run_tempered_ratio_config(
         topk=int(delta_support_topk),
         margin_threshold=float(delta_support_margin_threshold),
         outside_support_delta_mode=str(outside_support_delta_mode),
+        support_policy_mode=str(support_policy_mode),
     ).to(device)
     optimizer = torch.optim.Adam(base_policy.parameters(), lr=float(lr))
     config_rows: list[dict[str, Any]] = []
@@ -617,6 +639,7 @@ def _run_tempered_ratio_config(
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
             "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
+            "support_policy_mode": str(support_policy_mode),
             "delta_support_mode": str(delta_support_mode),
             "delta_support_topk": int(delta_support_topk),
             "delta_support_margin_threshold": float(delta_support_margin_threshold),
@@ -692,6 +715,7 @@ def _run_tempered_ratio_config(
                     "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
                     "weak_margin_threshold": float(weak_margin_threshold),
                     "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
+                    "support_policy_mode": str(support_policy_mode),
                     "delta_support_mode": str(delta_support_mode),
                     "delta_support_topk": int(delta_support_topk),
                     "delta_support_margin_threshold": float(delta_support_margin_threshold),
@@ -723,6 +747,7 @@ def _run_tempered_ratio_config(
                     "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
                     "weak_margin_threshold": float(weak_margin_threshold),
                     "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
+                    "support_policy_mode": str(support_policy_mode),
                     "delta_support_mode": str(delta_support_mode),
                     "delta_support_topk": int(delta_support_topk),
                     "delta_support_margin_threshold": float(delta_support_margin_threshold),
@@ -745,6 +770,7 @@ def _run_tempered_ratio_config(
             f"low_rank_k={int(low_rank_flip_topk)} "
             f"low_rank_coef={float(low_rank_flip_penalty_coef):g} "
             f"weak_margin={float(weak_margin_threshold):g}/{float(weak_margin_flip_penalty_coef):g} "
+            f"support_policy={support_policy_mode} "
             f"delta_support={delta_support_mode}/{int(delta_support_topk)}/{float(delta_support_margin_threshold):g}/{outside_support_delta_mode} "
             f"actor_support={actor_update_support_mode}/{int(actor_update_topk)}/{float(actor_update_margin_threshold):g} "
             f"actor_kept={actor_update_stats['actor_update_kept_rate']:.6g} "
@@ -810,6 +836,7 @@ def _run_tempered_ratio_config(
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
             "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
+            "support_policy_mode": str(support_policy_mode),
             "delta_support_mode": str(delta_support_mode),
             "delta_support_topk": int(delta_support_topk),
             "delta_support_margin_threshold": float(delta_support_margin_threshold),
@@ -861,6 +888,7 @@ def _run_tempered_ratio_config(
                 low_rank_flip_penalty_coef=float(low_rank_flip_penalty_coef),
                 weak_margin_threshold=float(weak_margin_threshold),
                 weak_margin_flip_penalty_coef=float(weak_margin_flip_penalty_coef),
+                support_policy_mode=str(support_policy_mode),
                 delta_support_mode=str(delta_support_mode),
                 delta_support_topk=int(delta_support_topk),
                 delta_support_margin_threshold=float(delta_support_margin_threshold),
@@ -894,6 +922,7 @@ def _save_tempered_ratio_checkpoint(
     low_rank_flip_penalty_coef: float,
     weak_margin_threshold: float,
     weak_margin_flip_penalty_coef: float,
+    support_policy_mode: str,
     delta_support_mode: str,
     delta_support_topk: int,
     delta_support_margin_threshold: float,
@@ -924,6 +953,7 @@ def _save_tempered_ratio_checkpoint(
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
             "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
+            "support_policy_mode": str(support_policy_mode),
             "delta_support_mode": str(delta_support_mode),
             "delta_support_topk": int(delta_support_topk),
             "delta_support_margin_threshold": float(delta_support_margin_threshold),
@@ -933,6 +963,7 @@ def _save_tempered_ratio_checkpoint(
                 int(delta_support_topk),
                 float(delta_support_margin_threshold),
                 str(outside_support_delta_mode),
+                support_policy_mode=str(support_policy_mode),
             ),
             "actor_update_support_mode": str(actor_update_support_mode),
             "actor_update_topk": int(actor_update_topk),
@@ -982,6 +1013,7 @@ def _save_tempered_ratio_checkpoint(
             "low_rank_flip_penalty_coef": float(low_rank_flip_penalty_coef),
             "weak_margin_threshold": float(weak_margin_threshold),
             "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
+            "support_policy_mode": str(support_policy_mode),
             "delta_support_mode": str(delta_support_mode),
             "delta_support_topk": int(delta_support_topk),
             "delta_support_margin_threshold": float(delta_support_margin_threshold),
@@ -991,6 +1023,7 @@ def _save_tempered_ratio_checkpoint(
                 int(delta_support_topk),
                 float(delta_support_margin_threshold),
                 str(outside_support_delta_mode),
+                support_policy_mode=str(support_policy_mode),
             ),
             "actor_update_support_mode": str(actor_update_support_mode),
             "actor_update_topk": int(actor_update_topk),
@@ -1069,6 +1102,7 @@ def _save_tempered_ratio_checkpoint(
         "weak_margin_flip_penalty_coef": float(weak_margin_flip_penalty_coef),
         "low_rank_flip_penalty": float(summary_row["final_tempered_post_update_low_rank_flip_penalty"]),
         "weak_margin_flip_penalty": float(summary_row["final_tempered_post_update_weak_margin_flip_penalty"]),
+        "support_policy_mode": str(support_policy_mode),
         "delta_support_mode": str(delta_support_mode),
         "delta_support_topk": int(delta_support_topk),
         "delta_support_margin_threshold": float(delta_support_margin_threshold),
@@ -2075,6 +2109,80 @@ def _positive_int_values(values: Sequence[int], *, name: str) -> tuple[int, ...]
     return clean
 
 
+def _support_policy_configs(args: argparse.Namespace) -> tuple[dict[str, Any], ...]:
+    if args.support_policy_modes is None:
+        return _delta_support_projection_configs(args)
+    modes = tuple(str(value) for value in args.support_policy_modes)
+    if not modes:
+        raise ValueError("support policy mode matrix must not be empty")
+    invalid = [mode for mode in modes if mode not in _SUPPORT_POLICY_MODES]
+    if invalid:
+        raise ValueError(f"unsupported support policy modes: {invalid}")
+    topk_values = _positive_int_values(args.delta_support_topk_values, name="delta_support_topk")
+    margin_thresholds = _nonnegative_float_values(
+        args.delta_support_margin_threshold_values,
+        name="delta_support_margin_threshold",
+    )
+    configs: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, float, str]] = set()
+    for mode in modes:
+        if mode == "unrestricted":
+            raw_configs = (
+                _single_delta_support_projection_config(
+                    "all",
+                    int(topk_values[0]),
+                    float(margin_thresholds[0]),
+                    "zero",
+                    support_policy_mode=mode,
+                ),
+            )
+        elif mode == "delta-topk-zero":
+            raw_configs = tuple(
+                _single_delta_support_projection_config(
+                    "topk",
+                    int(topk),
+                    float(margin_thresholds[0]),
+                    "zero",
+                    support_policy_mode=mode,
+                )
+                for topk in topk_values
+            )
+        elif mode == "support-only-topk":
+            raw_configs = tuple(
+                _single_delta_support_projection_config(
+                    "topk",
+                    int(topk),
+                    float(margin_thresholds[0]),
+                    "zero",
+                    support_policy_mode=mode,
+                )
+                for topk in topk_values
+            )
+        else:
+            raise ValueError(f"unsupported support policy mode: {mode}")
+        for config in raw_configs:
+            key = (
+                str(config["support_policy_mode"]),
+                int(config["topk"]),
+                round(float(config["margin_threshold"]), 12),
+                str(config["outside_support_delta_mode"]),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            configs.append(config)
+    return tuple(configs)
+
+
+def _support_policy_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "modes": None if args.support_policy_modes is None else tuple(str(value) for value in args.support_policy_modes),
+        "expanded_configs": _support_policy_configs(args),
+        "legacy_delta_support_args_used": args.support_policy_modes is None,
+        "scope": "policy_forward_rollout_loss_fresh_eval",
+    }
+
+
 def _delta_support_modes(args: argparse.Namespace) -> tuple[str, ...]:
     modes = tuple(str(value) for value in args.delta_support_modes)
     if not modes:
@@ -2155,6 +2263,8 @@ def _single_delta_support_projection_config(
     topk: int,
     margin_threshold: float,
     outside_support_delta_mode: str,
+    *,
+    support_policy_mode: str | None = None,
 ) -> dict[str, Any]:
     if mode not in _DELTA_SUPPORT_MODES:
         raise ValueError(f"unsupported delta support mode: {mode}")
@@ -2164,13 +2274,36 @@ def _single_delta_support_projection_config(
         raise ValueError(f"delta_support_topk must be positive, got {topk}")
     if float(margin_threshold) < 0.0:
         raise ValueError(f"delta_support_margin_threshold must be non-negative, got {margin_threshold}")
+    policy_mode = _support_policy_mode_from_delta_config(
+        mode=str(mode),
+        outside_support_delta_mode=str(outside_support_delta_mode),
+        explicit=support_policy_mode,
+    )
     return {
+        "support_policy_mode": policy_mode,
         "mode": str(mode),
         "topk": int(topk),
         "margin_threshold": float(margin_threshold),
         "outside_support_delta_mode": str(outside_support_delta_mode),
         "margin_threshold_units": "unscaled_prior_logits",
     }
+
+
+def _support_policy_mode_from_delta_config(
+    *,
+    mode: str,
+    outside_support_delta_mode: str,
+    explicit: str | None,
+) -> str:
+    if explicit is not None:
+        if explicit not in _SUPPORT_POLICY_MODES and explicit != "delta-projection":
+            raise ValueError(f"unsupported support policy mode: {explicit}")
+        return str(explicit)
+    if mode == "all":
+        return "unrestricted"
+    if mode == "topk" and outside_support_delta_mode == "zero":
+        return "delta-topk-zero"
+    return "delta-projection"
 
 
 def _actor_update_support_modes(args: argparse.Namespace) -> tuple[str, ...]:
@@ -2679,6 +2812,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
         f"low_rank_flip_penalty_coef_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.low_rank_flip_penalty_coef_values, name='low_rank_flip_penalty_coef'))}`",
         f"weak_margin_threshold_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.weak_margin_threshold_values, name='weak_margin_threshold'))}`",
         f"weak_margin_flip_penalty_coef_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.weak_margin_flip_penalty_coef_values, name='weak_margin_flip_penalty_coef'))}`",
+        f"support_policy: `{_support_policy_config(args)}`",
         f"delta_support_projection: `{_delta_support_projection_config(args)}`",
         f"actor_update_support: `{_actor_update_support_config(args)}`",
         f"entropy_coef: `{args.entropy_coef}`",
@@ -2712,6 +2846,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             float(item["low_rank_flip_penalty_coef"]),
             float(item["weak_margin_threshold"]),
             float(item["weak_margin_flip_penalty_coef"]),
+            str(item["support_policy_mode"]),
             str(item["delta_support_mode"]),
             int(item["delta_support_topk"]),
             float(item["delta_support_margin_threshold"]),
@@ -2735,6 +2870,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"delta_clip={row['delta_clip']:g}/{row['delta_clip_coef']:g} "
             f"low_rank={row['low_rank_flip_topk']}/{row['low_rank_flip_penalty_coef']:g} "
             f"weak_margin={row['weak_margin_threshold']:g}/{row['weak_margin_flip_penalty_coef']:g} "
+            f"support_policy={row['support_policy_mode']} "
             f"delta_support={row['delta_support_mode']}/{row['delta_support_topk']}/{row['delta_support_margin_threshold']:g}/{row['outside_support_delta_mode']} "
             f"actor_support={row['actor_update_support_mode']}/{row['actor_update_topk']}/{row['actor_update_margin_threshold']:g} "
             f"pass={row.get('step38a_pass')} "
