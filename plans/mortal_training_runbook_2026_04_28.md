@@ -26,16 +26,17 @@ The rebuilt local module imports as `libriichi`; `third_party/Mortal` is clean.
 
 ## Local Environment Status
 
-Current project venv has Torch, but is missing Mortal's Python-side utilities:
+Current project venv has the Python-side utilities needed by the local finite
+Mortal runners:
 
 ```text
 torch: ok
-toml: missing
-tqdm: missing
-tensorboard: missing
+toml: ok
+tqdm: ok
+tensorboard: ok
 ```
 
-Before running Mortal training in this venv, install at least:
+If setting up a fresh venv, install at least:
 
 ```bash
 uv pip install toml tqdm tensorboard
@@ -198,7 +199,7 @@ state['aux_net']
 state['config']
 ```
 
-## Current Blocking Point
+## Offline Wrapper Note
 
 Upstream `train.py` constructs `TestPlayer()` immediately, before the first
 offline batch. `TestPlayer` loads:
@@ -208,15 +209,14 @@ offline batch. `TestPlayer` loads:
 state_file = '/path/to/baseline.pth'
 ```
 
-So first-from-scratch offline training currently needs either:
+So first-from-scratch offline training needs either:
 
 - an existing trained Mortal-format baseline checkpoint for `baseline.test`, or
 - a small local patch that instantiates `TestPlayer` lazily only when evaluation
   actually runs.
 
 For this project, the baseline checkpoint must also be Mortal-format. Do not use
-`xmodel`, `xmodel1`, or `keqingv4` as baseline or teacher artifacts. A lazy-eval
-patch is the clean next step if no Mortal baseline checkpoint is available.
+`xmodel`, `xmodel1`, or `keqingv4` as baseline or teacher artifacts.
 
 The project-side wrapper avoids editing `third_party/Mortal` by monkeypatching
 `player.TestPlayer` into a lazy proxy before importing `mortal/train.py`:
@@ -309,15 +309,17 @@ As of 2026-04-28, the local workspace has completed the first bootstrap pass:
 ```text
 artifacts/mortal_mjai_gz/**/*.json.gz      105765 files, 745M
 artifacts/mortal_training/grp.pth          steps=2000
-artifacts/mortal_training/mortal_step400.pth steps=400
-artifacts/mortal_training/mortal.pth       steps=2000
+artifacts/mortal_training/mortal_step400.pth  steps=400
+artifacts/mortal_training/mortal_step2000.pth steps=2000
+artifacts/mortal_training/mortal_step5000.pth steps=5000
+artifacts/mortal_training/mortal.pth          steps=10000
 ```
 
 The current `mortal.pth` is a trained Mortal-format teacher artifact and is
 useful for integration probes. It is not yet validated as a strength teacher;
 only report it as a candidate after the KeqingRL train/fresh/movement/paired
-gates pass. The previous step-400 checkpoint is preserved as
-`mortal_step400.pth` for reproducibility.
+gates pass. Previous step-400, step-2000, and step-5000 checkpoints are
+preserved for reproducibility.
 
 Runtime smoke already passed:
 
@@ -326,6 +328,14 @@ load_mortal_teacher_runtime(artifacts/mortal_training/mortal.pth)
 env.observe(actor).obs.extras['mortal_q_values']     -> shape [1, 46]
 env.observe(actor).obs.extras['mortal_action_mask']  -> shape [1, 46]
 mortal-discard-q topK teacher context                -> OK
+```
+
+The step-10000 runtime smoke on `seed=1` produced a valid discard topK
+distribution:
+
+```text
+teacher_topk_scores = [-3.5802, -5.9136, -5.9463]
+teacher_probs       = [0.8398, 0.0814, 0.0788]
 ```
 
 Mortal-only KeqingRL probes have been run under:
@@ -338,6 +348,8 @@ reports/keqingrl_mortal_discard_q_moderate_grid_20260428_source93_step400
 reports/keqingrl_mortal_discard_q_narrow_grid_20260428_source93_step400
 reports/keqingrl_mortal_discard_q_narrow_grid_20260428_source93_step2000
 reports/keqingrl_mortal_discard_q_penalty_grid_20260428_source93_step2000
+reports/keqingrl_mortal_discard_q_narrow_gate_20260428_source93_step10000
+reports/keqingrl_mortal_discard_q_penalty_gate_20260428_source93_step10000
 ```
 
 Observed status:
@@ -362,6 +374,14 @@ The useful diagnostic facts are:
 - Step-2000 did not remove this gate issue.
 - Weak-margin flip penalty suppresses movement when strong enough and does not
   yet produce a clean pass.
+- Step-10000 preserves the same failure shape. The narrow gate found no pass:
+  `lr=0.0023` did not move top1, `lr=0.0025` moved top1 by `0.0952` but failed
+  movement quality and fresh validation (`fresh_top1=0.4194`,
+  `changed_prior_margin_p50=3.0`, `t_clip=0.3571`), and `lr=0.0027` was below
+  the train movement threshold while still failing fresh quality.
+- Step-10000 weak-margin penalties also found no pass. `coef=0.01` and
+  `coef=0.1` suppressed top1 movement to zero; `coef=0.05` reproduced the
+  overmoving/high-margin failure.
 
 Do not treat the current Mortal checkpoint as validated strength. The next
 productive branch is either longer/better Mortal training or a teacher-consumer
