@@ -2,19 +2,56 @@
 
 Updated: 2026-04-28
 
+## Status: Deprecated Diagnostic Scope
+
+This document is historical context for the first `mortal-discard-q` adapter.
+It is no longer the active Mortal teacher plan.
+
+Active documents:
+
+```text
+docs/mortal_action_contract.md
+docs/keqingrl/mortal_training_workflow.md
+plans/mortal_training_runbook_2026_04_28.md
+```
+
+The corrected 2026-04-28 understanding is:
+
+```text
+WRONG: discard-only / terminal-poor no-move probes prove Mortal teacher weakness.
+RIGHT: those probes are unqualified unless the batch covers the terminal/action
+       opportunities being tested.
+
+WRONG: score_changed is agari coverage.
+RIGHT: riichi sticks and ryukyoku tenpai payments can change scores without hora.
+
+WRONG: actual hora / selected agari should be a default gate.
+RIGHT: actual hora is outcome luck; default gates must use legal opportunity rows.
+
+WRONG: Mortal should only be used as discard-Q topK teacher.
+RIGHT: discard-Q is only a contract diagnostic. Strength-relevant teacher use
+       must move to Mortal action-Q over KeqingRL legal ActionSpec rows, with
+       KeqingCore/Rust still owning legal actions.
+```
+
+Do not use this file to justify a teacher-strength conclusion. Use it only to
+understand the first discard-only bridge and its fail-closed parity checks.
+
 ## Scope
 
-Mortal is the only allowed strength teacher source for KeqingRL's topK
-reranking problem. `xmodel`, `xmodel1`, and `keqingv4` checkpoints or outputs
-must not be used as teacher artifacts. The first Mortal integration must be
-discard-only:
+Mortal is the only allowed teacher source for KeqingRL's teacher experiments.
+`xmodel`, `xmodel1`, and `keqingv4` checkpoints or outputs must not be used as
+teacher artifacts. The first Mortal integration was intentionally discard-only:
 
 - use Mortal `q_values` and mask only for discard tile ids
 - map to KeqingRL `ActionSpec(ActionType.DISCARD, tile=...)`
 - consume the mapped scores only inside rule-prior topK, initially `topK=3`
 - keep Rust legal enumeration and KeqingRL rollout contracts authoritative
 
-Do not connect Mortal call, riichi, kan, agari, ryukyoku, or pass actions in this phase.
+This "do not connect" rule is now superseded for the active plan. The current
+route is to connect Mortal action-Q progressively over KeqingRL legal actions,
+while failing closed on mask/key mismatches. Full response-window
+PASS/RON/PON/CHI training remains blocked until mask parity gaps are understood.
 
 ## Mortal Runtime Contract
 
@@ -121,9 +158,9 @@ Failure modes must fail closed:
 The implementation lives in `src/keqingrl/mortal_teacher.py`; tests live in `tests/test_mortal_teacher_mapping.py`.
 Bridge and selfplay collation tests live in `tests/test_mortal_observation_bridge.py`.
 
-## TopK Teacher Use
+## Historical TopK Teacher Use
 
-The intended training signal is:
+The historical discard-only diagnostic signal was:
 
 ```text
 topK_indices = topK(rule_prior_logits, K=3)
@@ -132,7 +169,7 @@ teacher_probs_topK = softmax(mortal_scores_topK / teacher_temperature)
 loss = CE(policy_logits_topK, teacher_probs_topK)
 ```
 
-This should be combined with the existing support-only topK policy constraint:
+This was combined with the existing support-only topK policy constraint:
 
 ```text
 support-onlyTopK=3

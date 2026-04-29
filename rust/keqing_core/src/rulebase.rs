@@ -69,7 +69,11 @@ pub fn score_rulebase_actions(
     let chosen = choose_rulebase_action_impl(snapshot, actor, legal_actions)?;
     let chosen_index = chosen
         .as_ref()
-        .and_then(|chosen_action| legal_actions.iter().position(|action| action == chosen_action))
+        .and_then(|chosen_action| {
+            legal_actions
+                .iter()
+                .position(|action| action == chosen_action)
+        })
         .unwrap_or(0);
 
     Ok(legal_actions
@@ -838,7 +842,8 @@ mod tests {
         let chosen = choose_rulebase_action(&snapshot, 0, &legal_actions)
             .expect("choose should succeed")
             .expect("chosen action");
-        let scored = score_rulebase_actions(&snapshot, 0, &legal_actions).expect("score should succeed");
+        let scored =
+            score_rulebase_actions(&snapshot, 0, &legal_actions).expect("score should succeed");
         let best = scored
             .iter()
             .max_by(|lhs, rhs| {

@@ -155,6 +155,59 @@ def test_reach_acceptance_sets_ippatsu_eligible_until_interruption():
     assert room.events[-1]["type"] == "reach_accepted"
 
 
+def test_prepare_turn_after_late_open_meld_does_not_draw():
+    manager, room = _make_room()
+    manager.start_kyoku(room, seed=7)
+
+    actor = 2
+    room.state.players[actor].hand = Counter({
+        "3s": 1,
+        "5m": 1,
+        "5s": 1,
+        "6m": 1,
+        "6s": 1,
+        "S": 3,
+    })
+    room.state.players[actor].melds = [
+        {"type": "daiminkan", "pai": "C", "consumed": ["C", "C", "C"], "target": 0},
+        {"type": "chi", "pai": "4m", "consumed": ["3m", "5mr"], "target": 1},
+    ]
+    room.state.actor_to_move = actor
+    room.state.last_discard = None
+    room.state.last_tsumo[actor] = None
+    room.state.last_tsumo_raw[actor] = None
+    room.events.append(
+        {"type": "chi", "actor": actor, "pai": "4m", "consumed": ["3m", "5mr"], "target": 1}
+    )
+    before_hand = room.state.players[actor].hand.copy()
+    before_wall_index = room.wall_index
+
+    drawn = manager.prepare_turn(room, actor)
+
+    assert drawn is None
+    assert room.wall_index == before_wall_index
+    assert room.state.players[actor].hand == before_hand
+    assert room.state.actor_to_move == actor
+
+
+def test_prepare_turn_uses_logical_remaining_wall_after_kan():
+    manager, room = _make_room()
+    manager.start_kyoku(room, seed=7)
+    room.state.actor_to_move = 1
+    room.state.players[1].hand = Counter({"1m": 1, "2m": 1, "3m": 1, "4m": 1})
+    room.state.last_tsumo[1] = None
+    room.state.last_tsumo_raw[1] = None
+    room.state.remaining_wall = 0
+    before_wall_index = room.wall_index
+
+    drawn = manager.prepare_turn(room, 1)
+
+    assert drawn is None
+    assert room.phase == "ended"
+    assert room.events[-2]["type"] == "ryukyoku"
+    assert room.wall_index == before_wall_index
+
+
 # =============================================================================
 # 3. 连杠：多个大明杠连续揭示 dora
 # =============================================================================

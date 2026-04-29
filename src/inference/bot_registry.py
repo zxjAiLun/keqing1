@@ -5,8 +5,9 @@ from typing import Any
 
 from inference.rulebase_bot import RulebaseBot
 from inference.runtime_bot import RuntimeBot
+from inference.mortal_bot import MortalReviewBot
 
-SUPPORTED_BOT_NAMES = {"keqingv4", "xmodel1", "rulebase"}
+SUPPORTED_BOT_NAMES = {"keqingv4", "xmodel1", "rulebase", "mortal"}
 
 
 def create_runtime_bot(
@@ -23,6 +24,19 @@ def create_runtime_bot(
 ) -> Any:
     if bot_name == "rulebase":
         return RulebaseBot(player_id=player_id, verbose=verbose)
+    if bot_name == "mortal":
+        resolved_model_path = (
+            Path(model_path)
+            if model_path is not None
+            else Path(project_root) / "artifacts" / "mortal_serving" / "mortal.pth"
+        )
+        return MortalReviewBot(
+            player_id=player_id,
+            model_path=resolved_model_path,
+            mortal_root=Path(project_root) / "third_party" / "Mortal",
+            device=device,
+            verbose=verbose,
+        )
     if bot_name not in SUPPORTED_BOT_NAMES:
         raise ValueError(f"Unsupported bot name: {bot_name}")
     resolved_model_path = (

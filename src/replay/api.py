@@ -23,6 +23,7 @@ def run_replay_single_raw(
         checkpoint=checkpoint,
         input_type=input_type,
         bot_type=bot_type,
+        render_html_report=False,
     )
     return bot
 

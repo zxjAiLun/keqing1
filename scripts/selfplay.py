@@ -472,6 +472,8 @@ def _timed_react(bot: object, event: dict) -> Tuple[Optional[dict], float]:
 
 def _default_model_label(model_path: str) -> str:
     lower = model_path.lower()
+    if "mortal" in lower:
+        return "mortal"
     if "xmodel1" in lower or "v1a" in lower or "baseline" in lower:
         return "xmodel1"
     if "keqingv4" in lower or "v4" in lower:
@@ -483,6 +485,9 @@ def _resolve_model_path(model_spec: str) -> str:
     path = Path(model_spec)
     if path.exists():
         return str(path)
+
+    if model_spec == "mortal" and MORTAL_DEFAULT_MODEL.exists():
+        return str(MORTAL_DEFAULT_MODEL)
 
     candidate = MODEL_ROOT / model_spec / "best.pth"
     if candidate.exists():
@@ -540,9 +545,9 @@ def _resolve_seat_bots(
         labels: List[str] = []
         kinds: List[str] = []
         for bot_spec in seat_bots:
-            if bot_spec not in {"xmodel1", "keqingv4", "rulebase"}:
+            if bot_spec not in {"xmodel1", "keqingv4", "mortal", "rulebase"}:
                 raise ValueError(
-                    "--seat-bots 仅支持 xmodel1/keqingv4/rulebase"
+                    "--seat-bots 仅支持 xmodel1/keqingv4/mortal/rulebase"
                 )
             source, default_label = _resolve_bot_source(bot_spec)
             sources.append(source)
@@ -618,6 +623,7 @@ def _abnormal_action_score(
 
 MAX_TURNS = 300  # 防死循环
 MODEL_ROOT = Path("artifacts/models")
+MORTAL_DEFAULT_MODEL = Path("artifacts/mortal_serving/mortal.pth")
 
 
 def run_one_kyoku(
@@ -637,8 +643,11 @@ def run_one_kyoku(
 
     # 重置所有 bot 状态，replay start_kyoku 事件
     for bot in bots:
-        bot.game_state = GameState()
-        bot.decision_log = []
+        if hasattr(bot, "reset"):
+            bot.reset()
+        else:
+            bot.game_state = GameState()
+            bot.decision_log = []
 
     # 广播 start_game / start_kyoku 给所有 bot
     for ev in room.events:
@@ -1694,7 +1703,7 @@ def parse_args():
     p.add_argument(
         "--model",
         required=True,
-        help="模型名或模型权重路径；如 xmodel1 将自动解析到 artifacts/models/xmodel1/best.pth",
+        help="模型名或模型权重路径；如 xmodel1 将自动解析到 artifacts/models/xmodel1/best.pth；mortal 默认使用 artifacts/mortal_serving/mortal.pth",
     )
     p.add_argument(
         "--seat-models",
@@ -1708,7 +1717,7 @@ def parse_args():
         nargs=4,
         default=None,
         metavar=("B0", "B1", "B2", "B3"),
-        help="按座位指定 4 个 bot；可混用 xmodel1/keqingv4/rulebase。提供后优先于 --seat-models",
+        help="按座位指定 4 个 bot；可混用 xmodel1/keqingv4/mortal/rulebase。提供后优先于 --seat-models",
     )
     p.add_argument(
         "--seat-labels",

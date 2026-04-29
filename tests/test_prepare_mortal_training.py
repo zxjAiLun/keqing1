@@ -5,6 +5,7 @@ from pathlib import Path
 
 from scripts.prepare_mortal_training import (
     MORTAL_TRAINING_DATASET_CONTRACT_VERSION,
+    discover_mjson_files,
     prepare_mortal_training,
     split_relative_paths,
 )
@@ -68,6 +69,39 @@ def test_prepare_mortal_training_dry_run_does_not_write_files(tmp_path: Path) ->
     assert "config_text" in manifest
     assert not (tmp_path / "mortal_gz").exists()
     assert not Path(manifest["config_path"]).exists()
+
+
+def test_prepare_mortal_training_excludes_relative_source_dir(tmp_path: Path) -> None:
+    source_dir = tmp_path / "converted"
+    _write_mjson(source_dir / "keep" / "one.mjson", '{"type":"start_game"}\n')
+    _write_mjson(source_dir / "ds3" / "two.mjson", '{"type":"start_game","id":2}\n')
+
+    manifest = prepare_mortal_training(
+        source_dir=source_dir,
+        output_dir=tmp_path / "mortal_gz",
+        training_dir=tmp_path / "mortal_training",
+        val_ratio=0.0,
+        exclude_dirs=("ds3",),
+    )
+
+    assert manifest["exclude_dirs"] == ["ds3"]
+    assert manifest["source_count"] == 1
+    assert manifest["train_count"] == 1
+    assert manifest["files"][0]["source"] == "keep/one.mjson"
+    assert not (tmp_path / "mortal_gz" / "train" / "ds3").exists()
+    assert (source_dir / "ds3" / "two.mjson").exists()
+
+
+def test_discover_mjson_files_rejects_absolute_exclude_dir(tmp_path: Path) -> None:
+    source_dir = tmp_path / "converted"
+    _write_mjson(source_dir / "one.mjson", "{}\n")
+
+    try:
+        discover_mjson_files(source_dir, exclude_dirs=(source_dir / "ds3",))
+    except ValueError as exc:
+        assert "exclude-dir must be relative" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for absolute exclude-dir")
 
 
 def test_split_relative_paths_keeps_at_least_one_train_file(tmp_path: Path) -> None:

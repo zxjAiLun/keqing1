@@ -151,6 +151,8 @@ def _infer_player_bot_type(player_name: str | None, fallback: str | None = None)
         return "xmodel1"
     if "keqingv4" in raw:
         return "keqingv4"
+    if "mortal" in raw:
+        return "mortal"
     if "rulebase" in raw:
         return "rulebase"
     return fallback or "xmodel1"
@@ -159,6 +161,7 @@ def _infer_player_bot_type(player_name: str | None, fallback: str | None = None)
 def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
     mapping = {
         "keqingv4": BASE_DIR.parent.parent / "artifacts" / "models" / "keqingv4" / "best.pth",
+        "mortal": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "mortal.pth",
         "xmodel1": BASE_DIR.parent.parent / "artifacts" / "models" / "xmodel1" / "best.pth",
     }
     return mapping[bot_type]
@@ -252,6 +255,7 @@ async def replay(
         normalized_events = _normalize_replay_events(events)
         result = normalize_replay_decisions(render_replay_json(bot))
         result = _merge_terminal_event_details(result, normalized_events)
+        result["bot_type"] = bot_type
         if events:
             replay_id = storage.save(
                 events=normalized_events,

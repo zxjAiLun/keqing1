@@ -1,5 +1,9 @@
 use serde_json::{json, Value};
 
+use crate::legal_actions::{
+    calc_shanten_waits_like_python, can_hora_from_snapshot_candidate, counts34_from_hand,
+    tile_to_34,
+};
 use crate::state_core::{GameStateCore, PlayerStateCore};
 use crate::types::{DiscardEntry, LastDiscard};
 
@@ -65,6 +69,158 @@ fn tile_family_key(tile: &str) -> String {
         _ if tile.ends_with('r') => tile.trim_end_matches('r').to_string(),
         _ => tile.to_string(),
     }
+}
+
+fn refresh_furiten(player: &mut PlayerStateCore) {
+    player.furiten = player.sutehai_furiten || player.riichi_furiten || player.doujun_furiten;
+}
+
+fn actor_waits_on_tile(state: &GameStateCore, actor: usize, pai: &str) -> bool {
+    let Some(tile34) = tile_to_34(pai) else {
+        return false;
+    };
+    let player = &state.players[actor];
+    let counts34 = counts34_from_hand(&player.hand);
+    let (_, _, waits) = calc_shanten_waits_like_python(&counts34, !player.melds.is_empty());
+    waits[tile34]
+}
+
+fn recompute_sutehai_furiten_after_discard(state: &mut GameStateCore, actor: usize) {
+    let player = &state.players[actor];
+    let counts34 = counts34_from_hand(&player.hand);
+    let (_, _, waits) = calc_shanten_waits_like_python(&counts34, !player.melds.is_empty());
+    let discarded_wait = player.discards.iter().any(|discard| {
+        tile_to_34(&discard.pai)
+            .map(|tile34| waits[tile34])
+            .unwrap_or(false)
+    });
+
+    let player = &mut state.players[actor];
+    player.sutehai_furiten = discarded_wait;
+    if player.reached && discarded_wait {
+        player.riichi_furiten = true;
+    }
+    player.doujun_furiten = false;
+    refresh_furiten(player);
+}
+
+fn mark_same_cycle_furiten(state: &mut GameStateCore, actor: usize) {
+    let player = &mut state.players[actor];
+    if player.reached {
+        player.riichi_furiten = true;
+    } else {
+        player.doujun_furiten = true;
+    }
+    refresh_furiten(player);
+}
+
+fn can_current_ron_from_state(
+    state: &GameStateCore,
+    actor: usize,
+    target: usize,
+    pai: &str,
+    is_chankan: bool,
+) -> bool {
+    let Ok(state_snapshot) =
+        serde_json::to_value(crate::snapshot::snapshot_for_actor(state, actor))
+    else {
+        return false;
+    };
+    let mut candidate = json!({
+        "target": target,
+        "pai": pai,
+        "is_tsumo": false,
+    });
+    if is_chankan {
+        candidate["is_chankan"] = Value::Bool(true);
+    }
+    can_hora_from_snapshot_candidate(&state_snapshot, actor, target, pai, false, &candidate)
+        .unwrap_or(false)
+}
+
+fn mark_no_yaku_furiten_for_discard_waiters(
+    state: &mut GameStateCore,
+    discarder: usize,
+    pai: &str,
+) {
+    let mut actors_to_mark = Vec::new();
+    for actor in 0..state.players.len() {
+        if actor == discarder || state.players[actor].furiten {
+            continue;
+        }
+        if !actor_waits_on_tile(state, actor, pai) {
+            continue;
+        }
+        if !can_current_ron_from_state(state, actor, discarder, pai, false) {
+            actors_to_mark.push(actor);
+        }
+    }
+    for actor in actors_to_mark {
+        mark_same_cycle_furiten(state, actor);
+    }
+}
+
+fn mark_missed_discard_hora_if_waiting(
+    state: &mut GameStateCore,
+    actor: usize,
+) -> Result<(), String> {
+    let Some(last_discard) = state.last_discard.clone() else {
+        return Ok(());
+    };
+    if last_discard.actor == actor || state.players[actor].furiten {
+        return Ok(());
+    }
+    let pai = last_discard.pai_raw.as_str();
+    if actor_waits_on_tile(state, actor, pai) {
+        mark_same_cycle_furiten(state, actor);
+    }
+    Ok(())
+}
+
+fn mark_missed_chankan_if_waiting(state: &mut GameStateCore, actor: usize) -> Result<(), String> {
+    let Some(last_kakan) = state.last_kakan.clone() else {
+        return Ok(());
+    };
+    let target = last_kakan
+        .get("actor")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .ok_or_else(|| "invalid last_kakan.actor".to_string())?;
+    if target == actor || state.players[actor].furiten {
+        return Ok(());
+    }
+    let pai = last_kakan
+        .get("pai_raw")
+        .or_else(|| last_kakan.get("pai"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "invalid last_kakan.pai".to_string())?;
+    if actor_waits_on_tile(state, actor, pai)
+        && can_current_ron_from_state(state, actor, target, pai, true)
+    {
+        mark_same_cycle_furiten(state, actor);
+    }
+    Ok(())
+}
+
+fn mark_all_missed_responses(state: &mut GameStateCore) -> Result<(), String> {
+    if let Some(last_discard) = state.last_discard.clone() {
+        let discarder = last_discard.actor;
+        for offset in 1..4 {
+            mark_missed_discard_hora_if_waiting(state, (discarder + offset) % 4)?;
+        }
+        return Ok(());
+    }
+    if let Some(last_kakan) = state.last_kakan.clone() {
+        let actor = last_kakan
+            .get("actor")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .ok_or_else(|| "invalid last_kakan.actor".to_string())?;
+        for offset in 1..4 {
+            mark_missed_chankan_if_waiting(state, (actor + offset) % 4)?;
+        }
+    }
+    Ok(())
 }
 
 fn upgrade_pon_meld_to_kakan(player: &mut PlayerStateCore, pai: &str, added_tile: &str) {
@@ -195,6 +351,7 @@ pub fn apply_event(state: &mut GameStateCore, event: &Value) -> Result<(), Strin
             state.last_kakan = None;
             state.pending_rinshan_actor = None;
             state.players[actor].doujun_furiten = false;
+            refresh_furiten(&mut state.players[actor]);
             state.players[actor].rinshan_tsumo = is_rinshan;
             Ok(())
         }
@@ -237,10 +394,13 @@ pub fn apply_event(state: &mut GameStateCore, event: &Value) -> Result<(), Strin
                 state.players[actor].reached = true;
                 state.players[actor].pending_reach = false;
             }
+            recompute_sutehai_furiten_after_discard(state, actor);
+            mark_no_yaku_furiten_for_discard_waiters(state, actor, pai_raw);
             Ok(())
         }
         "pon" | "chi" | "daiminkan" => {
             let actor = get_usize(event, "actor")?;
+            mark_missed_discard_hora_if_waiting(state, actor)?;
             for player in state.players.iter_mut() {
                 player.ippatsu_eligible = false;
             }
@@ -368,6 +528,20 @@ pub fn apply_event(state: &mut GameStateCore, event: &Value) -> Result<(), Strin
             state.last_discard = None;
             state.last_tsumo[actor] = None;
             state.last_tsumo_raw[actor] = None;
+            let mut actors_to_mark = Vec::new();
+            for opponent in 0..state.players.len() {
+                if opponent == actor || state.players[opponent].furiten {
+                    continue;
+                }
+                if actor_waits_on_tile(state, opponent, &pai)
+                    && !can_current_ron_from_state(state, opponent, actor, &pai, true)
+                {
+                    actors_to_mark.push(opponent);
+                }
+            }
+            for opponent in actors_to_mark {
+                mark_same_cycle_furiten(state, opponent);
+            }
             Ok(())
         }
         "kakan_accepted" => {
@@ -432,6 +606,56 @@ pub fn apply_event(state: &mut GameStateCore, event: &Value) -> Result<(), Strin
             }
             if let Some(kyotaku) = event.get("kyotaku").and_then(Value::as_i64) {
                 state.kyotaku = kyotaku as i32;
+            }
+            Ok(())
+        }
+        "none" => {
+            if let Some(actor) = event
+                .get("actor")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+            {
+                if state
+                    .last_discard
+                    .as_ref()
+                    .is_some_and(|last_discard| last_discard.actor != actor)
+                {
+                    mark_missed_discard_hora_if_waiting(state, actor)?;
+                    let discarder = state.last_discard.as_ref().map(|last| last.actor);
+                    if let Some(discarder) = discarder {
+                        let next_actor = (actor + 1) % 4;
+                        if next_actor == discarder {
+                            state.last_discard = None;
+                            state.actor_to_move = Some((discarder + 1) % 4);
+                        } else {
+                            state.actor_to_move = Some(next_actor);
+                        }
+                    }
+                } else if state
+                    .last_kakan
+                    .as_ref()
+                    .and_then(|last_kakan| last_kakan.get("actor").and_then(Value::as_u64))
+                    .is_some_and(|kan_actor| kan_actor as usize != actor)
+                {
+                    mark_missed_chankan_if_waiting(state, actor)?;
+                    if let Some(kan_actor) = state
+                        .last_kakan
+                        .as_ref()
+                        .and_then(|last_kakan| last_kakan.get("actor").and_then(Value::as_u64))
+                    {
+                        state.actor_to_move = Some(kan_actor as usize);
+                    }
+                }
+                return Ok(());
+            }
+
+            mark_all_missed_responses(state)?;
+            if let Some(last_discard) = state.last_discard.take() {
+                state.actor_to_move = Some((last_discard.actor + 1) % 4);
+            } else if let Some(last_kakan) = state.last_kakan.take() {
+                if let Some(actor) = last_kakan.get("actor").and_then(Value::as_u64) {
+                    state.actor_to_move = Some(actor as usize);
+                }
             }
             Ok(())
         }
@@ -537,7 +761,9 @@ pub fn validate_replay_state_snapshot(
 mod tests {
     use serde_json::json;
 
-    use super::replay_state_snapshot;
+    use crate::legal_actions::enumerate_public_legal_action_specs;
+
+    use super::{replay_state_snapshot, replay_state_snapshot_value};
 
     #[test]
     fn basic_start_tsumo_dahai_snapshot_works() {
@@ -566,5 +792,64 @@ mod tests {
         assert!(snapshot.contains("\"actor\":0"));
         assert!(snapshot.contains("\"last_discard\""));
         assert!(snapshot.contains("\"pai\":\"5p\""));
+    }
+
+    fn ron_pass_fixture_events() -> Vec<serde_json::Value> {
+        vec![
+            json!({"type":"start_game","names":["p0","p1","p2","p3"]}),
+            json!({
+                "type":"start_kyoku",
+                "bakaze":"E",
+                "kyoku":1,
+                "honba":0,
+                "kyotaku":0,
+                "oya":1,
+                "scores":[25000,25000,25000,25000],
+                "dora_marker":"1s",
+                "tehais":[
+                    ["1p","2p","3p","4p","5p","6p","7p","8p","9p","1s","2s","3s","4s"],
+                    ["1m","2m","3m","4m","5m","6m","7m","8m","9m","P","1p","2p","3p"],
+                    ["1m","2m","3m","4p","5p","6p","7s","8s","9s","P","P","5m","5m"],
+                    ["1m","2m","3m","4m","5m","6m","7m","8m","9m","1p","2p","3p","4p"]
+                ]
+            }),
+            json!({"type":"tsumo","actor":1,"pai":"9s"}),
+            json!({"type":"dahai","actor":1,"pai":"P","tsumogiri":false}),
+        ]
+    }
+
+    #[test]
+    fn actor_scoped_none_marks_only_that_actor_doujun_furiten() {
+        let mut events = ron_pass_fixture_events();
+        let before_pass = replay_state_snapshot_value(&events, 2).unwrap();
+        let before_legal = enumerate_public_legal_action_specs(&before_pass, 2).unwrap();
+        assert!(before_legal
+            .iter()
+            .any(|action| action.get("type").and_then(serde_json::Value::as_str) == Some("hora")));
+
+        events.push(json!({"type":"none","actor":2}));
+        let after_pass = replay_state_snapshot_value(&events, 2).unwrap();
+        assert_eq!(after_pass["doujun_furiten"][2], true);
+        assert_eq!(after_pass["furiten"][2], true);
+        assert_eq!(after_pass["furiten"][3], false);
+
+        let after_legal = enumerate_public_legal_action_specs(&after_pass, 2).unwrap();
+        assert!(!after_legal
+            .iter()
+            .any(|action| action.get("type").and_then(serde_json::Value::as_str) == Some("hora")));
+    }
+
+    #[test]
+    fn own_tsumo_clears_actor_scoped_doujun_furiten() {
+        let mut events = ron_pass_fixture_events();
+        events.push(json!({"type":"none","actor":2}));
+        events.push(json!({"type":"none","actor":3}));
+        events.push(json!({"type":"none","actor":0}));
+        events.push(json!({"type":"none"}));
+        events.push(json!({"type":"tsumo","actor":2,"pai":"1s"}));
+
+        let snapshot = replay_state_snapshot_value(&events, 2).unwrap();
+        assert_eq!(snapshot["doujun_furiten"][2], false);
+        assert_eq!(snapshot["furiten"][2], false);
     }
 }

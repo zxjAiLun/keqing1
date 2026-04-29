@@ -54,7 +54,7 @@ export function DashboardPage() {
       <PageHeader
         eyebrow="Workspace"
         title="麻将工作台"
-        description="统一管理牌谱分析、实时对战、4 Bot 对战和 selfplay 对局回放。当前 GUI 以 xmodel1 主线、keqingv4 备线和 rulebase 基线为默认组织方式。"
+        description="统一管理牌谱分析、实时对战、4 Bot 对战和 selfplay 对局回放。当前 GUI 支持 xmodel1、keqingv4、mortal 和 rulebase。"
       />
 
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 28 }}>
@@ -70,7 +70,7 @@ export function DashboardPage() {
               onClick={() => navigate('/review')}
               icon={<BarChart2 size={20} />}
               title="牌谱分析"
-              description={<>上传天凤链接或 mjai JSON。<br />默认按 xmodel1 主线跑谱，也可切到 keqingv4 / rulebase。</>}
+              description={<>上传天凤链接或 mjai JSON。<br />默认按 xmodel1 主线跑谱，也可切到 keqingv4 / mortal / rulebase。</>}
               gradient="linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%)"
               glow="0 4px 12px var(--accent-shadow)"
             />
@@ -78,7 +78,7 @@ export function DashboardPage() {
               onClick={() => navigate('/battle')}
               icon={<Users size={20} />}
               title="人机对战"
-              description={<>与 AI Bot 进行实战练习。<br />默认对手为 xmodel1，兼容支持 keqingv4 / rulebase。</>}
+              description={<>与 AI Bot 进行实战练习。<br />默认对手为 xmodel1，兼容支持 keqingv4 / mortal / rulebase。</>}
               gradient="linear-gradient(135deg, var(--success) 0%, #219a52 100%)"
               glow="0 4px 12px rgba(39,174,96,0.3)"
             />

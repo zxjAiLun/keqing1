@@ -19,6 +19,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from keqingrl import DiscardOnlyMahjongEnv, run_fixed_seed_evaluation_smoke
+from keqingrl.actions import ActionType
 from keqingrl.contracts import PolicyInput, PolicyOutput
 from keqingrl.distribution import MaskedCategorical
 from keqingrl.learning_signal import batch_diagnostic_rows, seed_registry_hash
@@ -28,9 +29,12 @@ from keqingrl.metadata import (
     validate_checkpoint_metadata,
 )
 from keqingrl.mortal_teacher import (
+    MORTAL_ACTION_TEACHER_CONTRACT_VERSION,
     MORTAL_DISCARD_TEACHER_CONTRACT_VERSION,
+    mortal_action_topk_teacher_context,
     mortal_discard_teacher_tensors_from_extras,
     mortal_discard_topk_teacher_context,
+    mortal_scores_for_legal_actions,
 )
 from keqingrl.mortal_observation import MortalObservationBridge
 from keqingrl.mortal_runtime import load_mortal_teacher_runtime
@@ -80,11 +84,13 @@ _TEACHER_SOURCES = (
     "rule-components",
     "rule-component-v1",
     "mortal-discard-q",
+    "mortal-action-q",
     "model",
     "search",
     "oracle-file",
 )
 _TOPK_TEACHER_CONTRACT_VERSION = "keqingrl_topk_teacher_v1"
+_ACTION_TYPE_CHOICES = tuple(action_type.name for action_type in ActionType)
 
 
 class DeltaSupportProjectionPolicy(InteractivePolicy):
@@ -227,6 +233,25 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--mortal-teacher-checkpoint", type=Path, default=None)
     parser.add_argument("--mortal-root", type=Path, default=Path("third_party/Mortal"))
     parser.add_argument("--mortal-teacher-device", default=None)
+    parser.add_argument("--mortal-teacher-strict-extra-mask", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--forced-autopilot-action-types",
+        choices=_ACTION_TYPE_CHOICES,
+        nargs="*",
+        default=("TSUMO", "RON", "RYUKYOKU"),
+    )
+    parser.add_argument(
+        "--self-turn-action-types",
+        choices=_ACTION_TYPE_CHOICES,
+        nargs="+",
+        default=("DISCARD",),
+    )
+    parser.add_argument(
+        "--response-action-types",
+        choices=_ACTION_TYPE_CHOICES,
+        nargs="*",
+        default=(),
+    )
     parser.add_argument("--teacher-confidence-gate", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--teacher-entropy-max-values", type=float, nargs="+", default=(1_000_000_000.0,))
     parser.add_argument("--teacher-margin-min-values", type=float, nargs="+", default=(0.0,))
@@ -337,6 +362,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fresh-validation-min-top1-changed", type=float, default=0.01)
     parser.add_argument("--fresh-validation-max-top1-changed", type=float, default=0.10)
     parser.add_argument("--per-iteration-fresh-early-stop", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--terminal-coverage-gate", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--terminal-coverage-outcome-gate", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--terminal-coverage-min-score-changed-episode-rate", type=float, default=0.0)
+    parser.add_argument("--terminal-coverage-min-legal-terminal-rows", type=int, default=0)
+    parser.add_argument("--terminal-coverage-min-legal-agari-rows", type=int, default=0)
+    parser.add_argument("--terminal-coverage-min-prepared-legal-terminal-rows", type=int, default=0)
+    parser.add_argument("--terminal-coverage-min-prepared-legal-agari-rows", type=int, default=0)
+    parser.add_argument("--terminal-coverage-min-selected-agari-count", type=int, default=0)
+    parser.add_argument("--terminal-coverage-min-selected-agari-episode-rate", type=float, default=0.0)
     parser.add_argument("--save-final-checkpoint", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--device", default=None)
     return parser.parse_args()
@@ -507,6 +541,7 @@ def main() -> None:
         "delta_clip_values": [float(value) for value in delta_clip_values],
         "delta_clip_coef_values": [float(value) for value in delta_clip_coef_values],
         "topk_ranking_aux": _topk_ranking_aux_config(args),
+        "action_scope": _action_scope_config(args),
         "mortal_teacher": {
             "enabled": mortal_teacher_runtime is not None,
             "checkpoint": None
@@ -514,6 +549,7 @@ def main() -> None:
             else str(args.mortal_teacher_checkpoint),
             "mortal_root": str(args.mortal_root),
             "device": args.mortal_teacher_device if args.mortal_teacher_device is not None else str(device),
+            "strict_extra_mask": bool(args.mortal_teacher_strict_extra_mask),
         },
         "low_rank_flip_topk_values": [int(value) for value in low_rank_flip_topk_values],
         "low_rank_flip_penalty_coef_values": [float(value) for value in low_rank_flip_penalty_coef_values],
@@ -526,6 +562,7 @@ def main() -> None:
         "adaptive_recovery": _adaptive_recovery_config(args),
         "movement_regularization": _movement_regularization_config(args),
         "movement_quality_gate": _movement_quality_gate_config(args),
+        "terminal_coverage_gate": _terminal_coverage_config(args),
         "fresh_validation": _fresh_validation_config(args),
         "iteration_count": int(args.iterations),
         "episodes": int(args.episodes),
@@ -556,7 +593,7 @@ def _load_mortal_teacher_runtime_for_args(
         return None
     checkpoint = args.mortal_teacher_checkpoint
     if checkpoint is None:
-        raise ValueError("teacher_source=mortal-discard-q requires --mortal-teacher-checkpoint")
+        raise ValueError("teacher_source=mortal-discard-q/mortal-action-q requires --mortal-teacher-checkpoint")
     teacher_device = args.mortal_teacher_device if args.mortal_teacher_device is not None else str(device)
     return load_mortal_teacher_runtime(
         Path(checkpoint),
@@ -568,15 +605,15 @@ def _load_mortal_teacher_runtime_for_args(
 def _requires_mortal_teacher_runtime(topk_ranking_aux_configs: Sequence[dict[str, Any]]) -> bool:
     return any(
         str(config.get("mode")) != "none"
-        and _canonical_teacher_source(str(config.get("teacher_source"))) == "mortal-discard-q"
+        and _canonical_teacher_source(str(config.get("teacher_source"))) in {"mortal-discard-q", "mortal-action-q"}
         for config in topk_ranking_aux_configs
     )
 
 
 def _mortal_runtime_for_teacher(mortal_teacher_runtime, *, teacher_source: str):
-    if _canonical_teacher_source(str(teacher_source)) == "mortal-discard-q":
+    if _canonical_teacher_source(str(teacher_source)) in {"mortal-discard-q", "mortal-action-q"}:
         if mortal_teacher_runtime is None:
-            raise ValueError("teacher_source=mortal-discard-q requires a loaded Mortal teacher runtime")
+            raise ValueError("teacher_source=mortal-discard-q/mortal-action-q requires a loaded Mortal teacher runtime")
         return mortal_teacher_runtime
     return None
 
@@ -587,9 +624,47 @@ def _rollout_env(args: argparse.Namespace, *, mortal_teacher_runtime=None) -> Di
         mortal_observation_bridge = MortalObservationBridge(mortal_root=Path(args.mortal_root))
     return DiscardOnlyMahjongEnv(
         max_kyokus=args.max_kyokus,
+        self_turn_action_types=_action_type_tuple(getattr(args, "self_turn_action_types", ("DISCARD",))),
+        response_action_types=_action_type_tuple(getattr(args, "response_action_types", ())),
+        forced_autopilot_action_types=_action_type_tuple(
+            getattr(args, "forced_autopilot_action_types", ("TSUMO", "RON", "RYUKYOKU"))
+        ),
         mortal_teacher_runtime=mortal_teacher_runtime,
         mortal_observation_bridge=mortal_observation_bridge,
+        mortal_teacher_strict_extra_mask=bool(getattr(args, "mortal_teacher_strict_extra_mask", True)),
     )
+
+
+def _action_type_tuple(values: Sequence[str | ActionType]) -> tuple[ActionType, ...]:
+    return tuple(value if isinstance(value, ActionType) else ActionType[str(value)] for value in values)
+
+
+def _action_scope_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "self_turn_action_types": tuple(
+            action_type.name
+            for action_type in _action_type_tuple(getattr(args, "self_turn_action_types", ("DISCARD",)))
+        ),
+        "response_action_types": tuple(
+            action_type.name for action_type in _action_type_tuple(getattr(args, "response_action_types", ()))
+        ),
+        "forced_autopilot_action_types": tuple(
+            action_type.name
+            for action_type in _action_type_tuple(
+                getattr(args, "forced_autopilot_action_types", ("TSUMO", "RON", "RYUKYOKU"))
+            )
+        ),
+    }
+
+
+def _action_scope_fields(args: argparse.Namespace) -> dict[str, Any]:
+    scope = _action_scope_config(args)
+    return {
+        "self_turn_action_types": ",".join(scope["self_turn_action_types"]),
+        "response_action_types": ",".join(scope["response_action_types"]),
+        "forced_autopilot_action_types": ",".join(scope["forced_autopilot_action_types"]),
+        "mortal_teacher_strict_extra_mask": bool(getattr(args, "mortal_teacher_strict_extra_mask", True)),
+    }
 
 
 def _run_tempered_ratio_config(
@@ -682,6 +757,10 @@ def _run_tempered_ratio_config(
         )
         batch = batch.to(device)
         diagnostic_rows, diagnostic_summary = batch_diagnostic_rows(policy, batch, prepared_steps, episodes)
+        terminal_coverage = _terminal_coverage_gate_fields(
+            _terminal_coverage_stats(episodes, batch=batch, prepared_steps=prepared_steps),
+            args,
+        )
         diagnostic_rows = _annotate_actor_update_support_rows(
             diagnostic_rows,
             support_mode=str(actor_update_support_mode),
@@ -711,6 +790,17 @@ def _run_tempered_ratio_config(
         pre_stats = _policy_delta_stats(policy, batch)
         pre_margin_stats = _effective_margin_stats(policy, batch)
         pre_quality_stats = _movement_quality_stats(policy, batch)
+        pre_reach_stats = _reach_probe_stats(
+            policy,
+            batch,
+            teacher_source=str(teacher_source),
+            teacher_temperature=float(teacher_temperature),
+        )
+        pre_full_action_stats = _full_action_probe_stats(
+            policy,
+            batch,
+            teacher_source=str(teacher_source),
+        )
         iteration_pre_state = copy.deepcopy(policy.state_dict())
         iteration_pre_optimizer_state = copy.deepcopy(optimizer.state_dict())
         for _epoch in range(int(update_epochs)):
@@ -813,6 +903,17 @@ def _run_tempered_ratio_config(
         post_stats = recovery_result["post_stats"]
         post_margin_stats = recovery_result["post_margin_stats"]
         post_quality_stats = recovery_result["post_quality_stats"]
+        post_reach_stats = _reach_probe_stats(
+            policy,
+            batch,
+            teacher_source=str(teacher_source),
+            teacher_temperature=float(teacher_temperature),
+        )
+        post_full_action_stats = _full_action_probe_stats(
+            policy,
+            batch,
+            teacher_source=str(teacher_source),
+        )
         iter_row = {
             **_candidate_summary(candidate),
             "pilot_config_id": int(config_id),
@@ -842,6 +943,7 @@ def _run_tempered_ratio_config(
             "teacher_entropy_max": float(teacher_entropy_max),
             "teacher_margin_min": float(teacher_margin_min),
             "teacher_prior_agree_min": float(teacher_prior_agree_min),
+            **_action_scope_fields(args),
             **_teacher_metadata_fields(
                 str(teacher_source),
                 topk=int(topk_ranking_k),
@@ -882,15 +984,20 @@ def _run_tempered_ratio_config(
             "quality_max_rank_ge5_rate": float(args.quality_max_rank_ge5_rate),
             "quality_max_prior_margin_p50": float(args.quality_max_prior_margin_p50),
             "train_movement_quality_pass": _train_movement_quality_gate_pass(post_stats, post_quality_stats, args),
+            **terminal_coverage,
             **diagnostic_summary,
             **sampling_summary,
             **actor_update_stats,
             **{f"untempered_pre_{key}": value for key, value in pre_stats.items()},
             **{f"untempered_pre_{key}": value for key, value in pre_margin_stats.items()},
             **{f"untempered_pre_{key}": value for key, value in pre_quality_stats.items()},
+            **{f"reach_pre_{key}": value for key, value in pre_reach_stats.items()},
+            **{f"full_action_pre_{key}": value for key, value in pre_full_action_stats.items()},
             **{f"untempered_post_{key}": value for key, value in post_stats.items()},
             **{f"untempered_post_{key}": value for key, value in post_margin_stats.items()},
             **{f"untempered_post_{key}": value for key, value in post_quality_stats.items()},
+            **{f"reach_post_{key}": value for key, value in post_reach_stats.items()},
+            **{f"full_action_post_{key}": value for key, value in post_full_action_stats.items()},
             **teacher_quality_summary,
             "tempered_post_update_approx_kl": _loss_float(tempered_post_loss.approx_kl),
             "tempered_post_update_clip_fraction": _loss_float(tempered_post_loss.clip_fraction),
@@ -1100,6 +1207,16 @@ def _run_tempered_ratio_config(
             f"teacher_kl={_loss_float(tempered_post_loss.topk_ranking_teacher_kl):.6g} "
             f"teacher_prior_agree={_loss_float(tempered_post_loss.topk_ranking_teacher_prior_agreement):.6g} "
             f"teacher_conf_keep={_loss_float(tempered_post_loss.topk_ranking_teacher_confidence_kept_rate):.6g} "
+            f"reach_n={post_reach_stats['reach_opportunity_count']} "
+            f"reach_policy={post_reach_stats['policy_reach_rate']:.6g} "
+            f"reach_teacher={post_reach_stats['teacher_reach_rate']:.6g} "
+            f"non_discard_n={post_full_action_stats['non_discard_opportunity_count']} "
+            f"call_n={post_full_action_stats['call_opportunity_count']} "
+            f"agari_n={post_full_action_stats['agari_opportunity_count']} "
+            f"score_changed_ep={terminal_coverage['terminal_coverage_score_changed_episode_count']}/{terminal_coverage['terminal_coverage_episode_count']} "
+            f"legal_agari_rows={terminal_coverage['terminal_coverage_legal_agari_row_count']} "
+            f"selected_agari={terminal_coverage['terminal_coverage_selected_agari_count']} "
+            f"terminal_gate={terminal_coverage['terminal_coverage_gate_pass']} "
             f"iter_fresh={iter_row.get('iteration_fresh_validation_top1_action_changed_rate', '')} "
             f"iter_fresh_gate={iter_row.get('iteration_fresh_validation_gate_pass', '')} "
             f"t_kl={_loss_float(tempered_post_loss.approx_kl):.6g} "
@@ -1132,7 +1249,7 @@ def _run_tempered_ratio_config(
     eval_skipped_reason = "" if qualified_for_eval else _eval_skip_reason(final_row, fresh_validation, args)
     if qualified_for_eval:
         eval_metrics = run_fixed_seed_evaluation_smoke(
-            DiscardOnlyMahjongEnv(max_kyokus=args.max_kyokus),
+            _rollout_env(args),
             policy,
             num_games=int(args.eval_episodes),
             seed=int(args.eval_seed_base),
@@ -1171,6 +1288,7 @@ def _run_tempered_ratio_config(
             "teacher_entropy_max": float(teacher_entropy_max),
             "teacher_margin_min": float(teacher_margin_min),
             "teacher_prior_agree_min": float(teacher_prior_agree_min),
+            **_action_scope_fields(args),
             **_teacher_metadata_fields(
                 str(teacher_source),
                 topk=int(topk_ranking_k),
@@ -1204,6 +1322,18 @@ def _run_tempered_ratio_config(
             "early_stop_selected_train_gate_pass": bool(final_row.get("train_movement_quality_pass", True)),
             "early_stop_selected_fresh_gate_pass": bool(fresh_validation.get("fresh_validation_gate_pass", True)),
             "train_movement_quality_gate_pass": bool(final_row.get("train_movement_quality_pass", True)),
+            "terminal_coverage_gate_enabled": bool(args.terminal_coverage_gate),
+            "terminal_coverage_gate_pass": _terminal_coverage_gate_pass(final_row, args),
+            "terminal_coverage_skip_reason": final_row.get("terminal_coverage_skip_reason", ""),
+            "fresh_validation_terminal_coverage_gate_pass": _terminal_coverage_gate_pass(
+                fresh_validation,
+                args,
+                prefix="fresh_validation_",
+            ),
+            "fresh_validation_terminal_coverage_skip_reason": fresh_validation.get(
+                "fresh_validation_terminal_coverage_skip_reason",
+                "",
+            ),
             "qualified_for_eval": bool(qualified_for_eval),
             "eval_skipped_reason": eval_skipped_reason,
             **fresh_validation,
@@ -1357,6 +1487,7 @@ def _save_tempered_ratio_checkpoint(
             "adaptive_recovery": _adaptive_recovery_config(args),
             "movement_regularization": _movement_regularization_config(args),
             "movement_quality_gate": _movement_quality_gate_config(args),
+            "terminal_coverage_gate": _terminal_coverage_config(args),
             "fresh_validation": _fresh_validation_config(args),
             "iterations": int(args.iterations),
             "episodes": int(args.episodes),
@@ -1394,6 +1525,7 @@ def _save_tempered_ratio_checkpoint(
             "delta_support_mode": str(delta_support_mode),
             "delta_support_topk": int(delta_support_topk),
             "movement_quality_gate": _movement_quality_gate_config(args),
+            "terminal_coverage_gate": _terminal_coverage_config(args),
             "fresh_validation": _fresh_validation_config(args),
         }
     )
@@ -1461,6 +1593,7 @@ def _save_tempered_ratio_checkpoint(
             "adaptive_recovery": _adaptive_recovery_config(args),
             "movement_regularization": _movement_regularization_config(args),
             "movement_quality_gate": _movement_quality_gate_config(args),
+            "terminal_coverage_gate": _terminal_coverage_config(args),
             "fresh_validation": _fresh_validation_config(args),
         },
         "run": {
@@ -2265,6 +2398,456 @@ def _movement_quality_fields(
     }
 
 
+def _reach_probe_stats(
+    policy,
+    batch,
+    *,
+    teacher_source: str,
+    teacher_temperature: float,
+) -> dict[str, float]:
+    del teacher_temperature
+    legal_actions = batch.policy_input.legal_actions
+    if legal_actions is None:
+        return _empty_reach_probe_stats()
+    with torch.no_grad():
+        output = policy(batch.policy_input)
+    mask = batch.policy_input.legal_action_mask.bool()
+    final_logits = output.aux.get("final_logits", output.action_logits).float()
+    prior_logits = output.aux.get("prior_logits")
+    if prior_logits is None:
+        prior_logits = batch.policy_input.prior_logits
+    valid_final = final_logits.masked_fill(~mask, torch.finfo(final_logits.dtype).min)
+    final_top1 = valid_final.argmax(dim=-1).detach().cpu()
+    if prior_logits is None:
+        prior_top1 = None
+    else:
+        prior_logits = prior_logits.float()
+        valid_prior = prior_logits.masked_fill(~mask, torch.finfo(prior_logits.dtype).min)
+        prior_top1 = valid_prior.argmax(dim=-1).detach().cpu()
+
+    q_values: torch.Tensor | None = None
+    mortal_masks: torch.Tensor | None = None
+    if _canonical_teacher_source(str(teacher_source)) == "mortal-action-q":
+        q_values, mortal_masks = mortal_discard_teacher_tensors_from_extras(batch.policy_input.obs.extras)
+
+    selected_indices = batch.action_index.long().detach().cpu()
+    row_count = int(mask.shape[0])
+    reach_opportunity_count = 0
+    prior_reach_count = 0
+    policy_reach_count = 0
+    selected_reach_count = 0
+    reach_changed_count = 0
+    reach_added_count = 0
+    reach_removed_count = 0
+    teacher_available_count = 0
+    teacher_reach_count = 0
+    teacher_prior_agree_count = 0
+    teacher_policy_agree_count = 0
+    teacher_policy_reach_agree_count = 0
+
+    for row_idx, row_actions in enumerate(legal_actions):
+        row_mask = mask[row_idx, : len(row_actions)].detach().cpu()
+        legal_positions = [index for index in range(len(row_actions)) if bool(row_mask[index].item())]
+        if not legal_positions:
+            continue
+        reach_positions = {
+            index for index in legal_positions if row_actions[index].action_type == ActionType.REACH_DISCARD
+        }
+        if not reach_positions:
+            continue
+
+        reach_opportunity_count += 1
+        policy_top1 = int(final_top1[row_idx].item())
+        selected_index = int(selected_indices[row_idx].item())
+        policy_is_reach = policy_top1 in reach_positions
+        selected_is_reach = selected_index in reach_positions
+        policy_reach_count += int(policy_is_reach)
+        selected_reach_count += int(selected_is_reach)
+
+        prior_is_reach = False
+        if prior_top1 is not None:
+            prior_is_reach = int(prior_top1[row_idx].item()) in reach_positions
+            prior_reach_count += int(prior_is_reach)
+            reach_changed_count += int(policy_is_reach != prior_is_reach)
+            reach_added_count += int(policy_is_reach and not prior_is_reach)
+            reach_removed_count += int(prior_is_reach and not policy_is_reach)
+
+        if q_values is None or mortal_masks is None:
+            continue
+        mapped = mortal_scores_for_legal_actions(
+            q_values[row_idx],
+            mortal_masks[row_idx],
+            row_actions,
+            strict_mask=False,
+        )
+        mapped_mask = mapped.score_mask.detach().cpu()
+        if not all(bool(mapped_mask[index].item()) for index in legal_positions):
+            continue
+        teacher_scores = torch.full((len(row_actions),), float("-inf"), dtype=torch.float32)
+        mapped_scores = mapped.scores.detach().cpu().float()
+        for index in legal_positions:
+            teacher_scores[index] = mapped_scores[index]
+        teacher_top1 = int(teacher_scores.argmax().item())
+        teacher_is_reach = teacher_top1 in reach_positions
+        teacher_available_count += 1
+        teacher_reach_count += int(teacher_is_reach)
+        teacher_policy_agree_count += int(teacher_top1 == policy_top1)
+        teacher_policy_reach_agree_count += int(teacher_is_reach == policy_is_reach)
+        if prior_top1 is not None:
+            teacher_prior_agree_count += int(teacher_top1 == int(prior_top1[row_idx].item()))
+
+    reach_denominator = max(1, reach_opportunity_count)
+    teacher_denominator = max(1, teacher_available_count)
+    return {
+        "reach_opportunity_count": int(reach_opportunity_count),
+        "reach_opportunity_rate": float(reach_opportunity_count / max(1, row_count)),
+        "prior_reach_rate": float(prior_reach_count / reach_denominator),
+        "policy_reach_rate": float(policy_reach_count / reach_denominator),
+        "selected_reach_rate": float(selected_reach_count / reach_denominator),
+        "reach_changed_rate": float(reach_changed_count / reach_denominator),
+        "reach_added_rate": float(reach_added_count / reach_denominator),
+        "reach_removed_rate": float(reach_removed_count / reach_denominator),
+        "teacher_reach_available_count": int(teacher_available_count),
+        "teacher_reach_rate": float(teacher_reach_count / teacher_denominator),
+        "teacher_prior_agree_rate": float(teacher_prior_agree_count / teacher_denominator),
+        "teacher_policy_agree_rate": float(teacher_policy_agree_count / teacher_denominator),
+        "teacher_policy_reach_agree_rate": float(teacher_policy_reach_agree_count / teacher_denominator),
+    }
+
+
+def _empty_reach_probe_stats() -> dict[str, float]:
+    return {
+        "reach_opportunity_count": 0,
+        "reach_opportunity_rate": 0.0,
+        "prior_reach_rate": 0.0,
+        "policy_reach_rate": 0.0,
+        "selected_reach_rate": 0.0,
+        "reach_changed_rate": 0.0,
+        "reach_added_rate": 0.0,
+        "reach_removed_rate": 0.0,
+        "teacher_reach_available_count": 0,
+        "teacher_reach_rate": 0.0,
+        "teacher_prior_agree_rate": 0.0,
+        "teacher_policy_agree_rate": 0.0,
+        "teacher_policy_reach_agree_rate": 0.0,
+    }
+
+
+_FULL_ACTION_PROBE_GROUPS: tuple[tuple[str, frozenset[ActionType]], ...] = (
+    ("non_discard", frozenset(action_type for action_type in ActionType if action_type != ActionType.DISCARD)),
+    ("response", frozenset((ActionType.PASS, ActionType.RON, ActionType.CHI, ActionType.PON, ActionType.DAIMINKAN))),
+    ("response_nonpass", frozenset((ActionType.RON, ActionType.CHI, ActionType.PON, ActionType.DAIMINKAN))),
+    ("call", frozenset((ActionType.CHI, ActionType.PON, ActionType.DAIMINKAN))),
+    ("agari", frozenset((ActionType.TSUMO, ActionType.RON))),
+    ("terminal", frozenset((ActionType.TSUMO, ActionType.RON, ActionType.RYUKYOKU))),
+    ("pass", frozenset((ActionType.PASS,))),
+)
+
+
+def _full_action_probe_stats(
+    policy,
+    batch,
+    *,
+    teacher_source: str,
+) -> dict[str, float]:
+    legal_actions = batch.policy_input.legal_actions
+    if legal_actions is None:
+        return _empty_full_action_probe_stats()
+    with torch.no_grad():
+        output = policy(batch.policy_input)
+    mask = batch.policy_input.legal_action_mask.bool()
+    final_logits = output.aux.get("final_logits", output.action_logits).float()
+    prior_logits = output.aux.get("prior_logits")
+    if prior_logits is None:
+        prior_logits = batch.policy_input.prior_logits
+    valid_final = final_logits.masked_fill(~mask, torch.finfo(final_logits.dtype).min)
+    final_top1 = valid_final.argmax(dim=-1).detach().cpu()
+    if prior_logits is None:
+        prior_top1 = None
+    else:
+        prior_logits = prior_logits.float()
+        valid_prior = prior_logits.masked_fill(~mask, torch.finfo(prior_logits.dtype).min)
+        prior_top1 = valid_prior.argmax(dim=-1).detach().cpu()
+
+    q_values: torch.Tensor | None = None
+    mortal_masks: torch.Tensor | None = None
+    if _canonical_teacher_source(str(teacher_source)) == "mortal-action-q":
+        q_values, mortal_masks = mortal_discard_teacher_tensors_from_extras(batch.policy_input.obs.extras)
+
+    selected_indices = batch.action_index.long().detach().cpu()
+    group_totals = {name: 0 for name, _types in _FULL_ACTION_PROBE_GROUPS}
+    group_policy = {name: 0 for name, _types in _FULL_ACTION_PROBE_GROUPS}
+    group_prior = {name: 0 for name, _types in _FULL_ACTION_PROBE_GROUPS}
+    group_selected = {name: 0 for name, _types in _FULL_ACTION_PROBE_GROUPS}
+    group_teacher_available = {name: 0 for name, _types in _FULL_ACTION_PROBE_GROUPS}
+    group_teacher = {name: 0 for name, _types in _FULL_ACTION_PROBE_GROUPS}
+    group_teacher_policy_agree = {name: 0 for name, _types in _FULL_ACTION_PROBE_GROUPS}
+    group_teacher_policy_group_agree = {name: 0 for name, _types in _FULL_ACTION_PROBE_GROUPS}
+    teacher_available_count = 0
+    teacher_policy_agree_count = 0
+    teacher_prior_agree_count = 0
+
+    for row_idx, row_actions in enumerate(legal_actions):
+        row_mask = mask[row_idx, : len(row_actions)].detach().cpu()
+        legal_positions = [index for index in range(len(row_actions)) if bool(row_mask[index].item())]
+        if not legal_positions:
+            continue
+        policy_top1 = int(final_top1[row_idx].item())
+        selected_index = int(selected_indices[row_idx].item())
+        prior_top1_index = None if prior_top1 is None else int(prior_top1[row_idx].item())
+        teacher_top1: int | None = None
+        if q_values is not None and mortal_masks is not None:
+            mapped = mortal_scores_for_legal_actions(
+                q_values[row_idx],
+                mortal_masks[row_idx],
+                row_actions,
+                strict_mask=False,
+            )
+            mapped_mask = mapped.score_mask.detach().cpu()
+            if all(bool(mapped_mask[index].item()) for index in legal_positions):
+                teacher_scores = torch.full((len(row_actions),), float("-inf"), dtype=torch.float32)
+                mapped_scores = mapped.scores.detach().cpu().float()
+                for index in legal_positions:
+                    teacher_scores[index] = mapped_scores[index]
+                teacher_top1 = int(teacher_scores.argmax().item())
+                teacher_available_count += 1
+                teacher_policy_agree_count += int(teacher_top1 == policy_top1)
+                if prior_top1_index is not None:
+                    teacher_prior_agree_count += int(teacher_top1 == prior_top1_index)
+
+        for group_name, group_types in _FULL_ACTION_PROBE_GROUPS:
+            group_positions = {
+                index for index in legal_positions if row_actions[index].action_type in group_types
+            }
+            if not group_positions:
+                continue
+            group_totals[group_name] += 1
+            policy_in_group = policy_top1 in group_positions
+            selected_in_group = selected_index in group_positions
+            group_policy[group_name] += int(policy_in_group)
+            group_selected[group_name] += int(selected_in_group)
+            if prior_top1_index is not None:
+                group_prior[group_name] += int(prior_top1_index in group_positions)
+            if teacher_top1 is not None:
+                teacher_in_group = teacher_top1 in group_positions
+                group_teacher_available[group_name] += 1
+                group_teacher[group_name] += int(teacher_in_group)
+                group_teacher_policy_agree[group_name] += int(teacher_top1 == policy_top1)
+                group_teacher_policy_group_agree[group_name] += int(teacher_in_group == policy_in_group)
+
+    stats: dict[str, float] = {
+        "teacher_available_count": int(teacher_available_count),
+        "teacher_policy_agree_rate": teacher_policy_agree_count / max(1, teacher_available_count),
+        "teacher_prior_agree_rate": teacher_prior_agree_count / max(1, teacher_available_count),
+    }
+    for group_name, _group_types in _FULL_ACTION_PROBE_GROUPS:
+        total = max(1, group_totals[group_name])
+        teacher_total = max(1, group_teacher_available[group_name])
+        stats.update(
+            {
+                f"{group_name}_opportunity_count": int(group_totals[group_name]),
+                f"{group_name}_policy_rate": group_policy[group_name] / total,
+                f"{group_name}_prior_rate": group_prior[group_name] / total,
+                f"{group_name}_selected_rate": group_selected[group_name] / total,
+                f"{group_name}_teacher_available_count": int(group_teacher_available[group_name]),
+                f"{group_name}_teacher_rate": group_teacher[group_name] / teacher_total,
+                f"{group_name}_teacher_policy_agree_rate": group_teacher_policy_agree[group_name] / teacher_total,
+                f"{group_name}_teacher_policy_group_agree_rate": (
+                    group_teacher_policy_group_agree[group_name] / teacher_total
+                ),
+            }
+        )
+    return stats
+
+
+def _empty_full_action_probe_stats() -> dict[str, float]:
+    stats: dict[str, float] = {
+        "teacher_available_count": 0,
+        "teacher_policy_agree_rate": 0.0,
+        "teacher_prior_agree_rate": 0.0,
+    }
+    for group_name, _group_types in _FULL_ACTION_PROBE_GROUPS:
+        stats.update(
+            {
+                f"{group_name}_opportunity_count": 0,
+                f"{group_name}_policy_rate": 0.0,
+                f"{group_name}_prior_rate": 0.0,
+                f"{group_name}_selected_rate": 0.0,
+                f"{group_name}_teacher_available_count": 0,
+                f"{group_name}_teacher_rate": 0.0,
+                f"{group_name}_teacher_policy_agree_rate": 0.0,
+                f"{group_name}_teacher_policy_group_agree_rate": 0.0,
+            }
+        )
+    return stats
+
+
+_TERMINAL_AGARI_ACTION_TYPES = frozenset((ActionType.TSUMO, ActionType.RON))
+_TERMINAL_ACTION_TYPES = frozenset((ActionType.TSUMO, ActionType.RON, ActionType.RYUKYOKU))
+_DEFAULT_INITIAL_SCORES = (25000, 25000, 25000, 25000)
+
+
+def _terminal_coverage_stats(
+    episodes: Sequence[Any],
+    *,
+    batch: Any | None = None,
+    prepared_steps: Sequence[Any] = (),
+) -> dict[str, float]:
+    episode_count = len(episodes)
+    score_changed_episode_count = 0
+    score_changed_without_selected_agari_episode_count = 0
+    selected_agari_episode_count = 0
+    legal_agari_episode_count = 0
+    selected_counts = {action_type: 0 for action_type in _TERMINAL_ACTION_TYPES}
+    legal_row_counts = {action_type: 0 for action_type in _TERMINAL_ACTION_TYPES}
+    legal_agari_row_count = 0
+    legal_terminal_row_count = 0
+    total_step_count = 0
+    legal_action_row_count = 0
+
+    for episode in episodes:
+        initial_scores = tuple(int(value) for value in getattr(episode, "initial_scores", _DEFAULT_INITIAL_SCORES))
+        final_scores = tuple(int(value) for value in getattr(episode, "scores", _DEFAULT_INITIAL_SCORES))
+        episode_score_changed = final_scores != initial_scores
+        score_changed_episode_count += int(episode_score_changed)
+        episode_selected_agari = False
+        episode_legal_agari = False
+        for step in getattr(episode, "steps", ()):
+            total_step_count += 1
+            action_type = step.action_spec.action_type
+            if action_type in selected_counts:
+                selected_counts[action_type] += 1
+            if action_type in _TERMINAL_AGARI_ACTION_TYPES:
+                episode_selected_agari = True
+            legal_actions = getattr(step, "legal_actions", None)
+            if legal_actions is None:
+                continue
+            legal_action_row_count += 1
+            row_types = {action.action_type for action in legal_actions}
+            for terminal_type in _TERMINAL_ACTION_TYPES:
+                legal_row_counts[terminal_type] += int(terminal_type in row_types)
+            legal_agari_row_count += int(bool(row_types & _TERMINAL_AGARI_ACTION_TYPES))
+            legal_terminal_row_count += int(bool(row_types & _TERMINAL_ACTION_TYPES))
+            episode_legal_agari = episode_legal_agari or bool(row_types & _TERMINAL_AGARI_ACTION_TYPES)
+        selected_agari_episode_count += int(episode_selected_agari)
+        score_changed_without_selected_agari_episode_count += int(
+            episode_score_changed and not episode_selected_agari
+        )
+        legal_agari_episode_count += int(episode_legal_agari)
+
+    prepared_selected_agari_count = int(
+        sum(1 for step in prepared_steps if step.action_spec.action_type in _TERMINAL_AGARI_ACTION_TYPES)
+    )
+    prepared_legal_agari_row_count = 0
+    prepared_legal_terminal_row_count = 0
+    legal_actions = None if batch is None else getattr(getattr(batch, "policy_input", None), "legal_actions", None)
+    if legal_actions is not None:
+        for row_actions in legal_actions:
+            row_types = {action.action_type for action in row_actions}
+            prepared_legal_agari_row_count += int(bool(row_types & _TERMINAL_AGARI_ACTION_TYPES))
+            prepared_legal_terminal_row_count += int(bool(row_types & _TERMINAL_ACTION_TYPES))
+
+    selected_agari_count = selected_counts[ActionType.TSUMO] + selected_counts[ActionType.RON]
+    return {
+        "terminal_coverage_episode_count": int(episode_count),
+        "terminal_coverage_total_step_count": int(total_step_count),
+        "terminal_coverage_legal_action_row_count": int(legal_action_row_count),
+        "terminal_coverage_score_changed_episode_count": int(score_changed_episode_count),
+        "terminal_coverage_score_changed_episode_rate": score_changed_episode_count / max(1, episode_count),
+        "terminal_coverage_score_changed_without_selected_agari_episode_count": int(
+            score_changed_without_selected_agari_episode_count
+        ),
+        "terminal_coverage_selected_agari_count": int(selected_agari_count),
+        "terminal_coverage_selected_tsumo_count": int(selected_counts[ActionType.TSUMO]),
+        "terminal_coverage_selected_ron_count": int(selected_counts[ActionType.RON]),
+        "terminal_coverage_selected_ryukyoku_count": int(selected_counts[ActionType.RYUKYOKU]),
+        "terminal_coverage_selected_agari_episode_count": int(selected_agari_episode_count),
+        "terminal_coverage_selected_agari_episode_rate": selected_agari_episode_count / max(1, episode_count),
+        "terminal_coverage_legal_agari_row_count": int(legal_agari_row_count),
+        "terminal_coverage_legal_tsumo_row_count": int(legal_row_counts[ActionType.TSUMO]),
+        "terminal_coverage_legal_ron_row_count": int(legal_row_counts[ActionType.RON]),
+        "terminal_coverage_legal_ryukyoku_row_count": int(legal_row_counts[ActionType.RYUKYOKU]),
+        "terminal_coverage_legal_terminal_row_count": int(legal_terminal_row_count),
+        "terminal_coverage_legal_agari_episode_count": int(legal_agari_episode_count),
+        "terminal_coverage_legal_agari_episode_rate": legal_agari_episode_count / max(1, episode_count),
+        "terminal_coverage_prepared_selected_agari_count": int(prepared_selected_agari_count),
+        "terminal_coverage_prepared_legal_agari_row_count": int(prepared_legal_agari_row_count),
+        "terminal_coverage_prepared_legal_terminal_row_count": int(prepared_legal_terminal_row_count),
+    }
+
+
+def _terminal_coverage_threshold_violations(
+    stats: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    prefix: str = "",
+) -> list[str]:
+    if not bool(args.terminal_coverage_gate):
+        return []
+    if prefix == "fresh_validation_" and not bool(stats.get("fresh_validation_enabled", True)):
+        return []
+    violations: list[str] = []
+    opportunity_checks = (
+        ("legal_terminal_row_count", int(args.terminal_coverage_min_legal_terminal_rows), "count"),
+        ("legal_agari_row_count", int(args.terminal_coverage_min_legal_agari_rows), "count"),
+        (
+            "prepared_legal_terminal_row_count",
+            int(args.terminal_coverage_min_prepared_legal_terminal_rows),
+            "count",
+        ),
+        (
+            "prepared_legal_agari_row_count",
+            int(args.terminal_coverage_min_prepared_legal_agari_rows),
+            "count",
+        ),
+    )
+    outcome_checks = (
+        (
+            "score_changed_episode_rate",
+            float(args.terminal_coverage_min_score_changed_episode_rate),
+            "rate",
+        ),
+        ("selected_agari_count", int(args.terminal_coverage_min_selected_agari_count), "count"),
+        (
+            "selected_agari_episode_rate",
+            float(args.terminal_coverage_min_selected_agari_episode_rate),
+            "rate",
+        ),
+    )
+    checks = opportunity_checks + (outcome_checks if bool(args.terminal_coverage_outcome_gate) else ())
+    for metric_suffix, threshold, unit in checks:
+        if float(threshold) <= 0.0:
+            continue
+        metric_key = f"{prefix}terminal_coverage_{metric_suffix}"
+        value = float(stats.get(metric_key, 0.0))
+        if value < float(threshold):
+            violations.append(f"{metric_key}={value:g}<min_{unit}={float(threshold):g}")
+    return violations
+
+
+def _terminal_coverage_gate_pass(
+    stats: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    prefix: str = "",
+) -> bool:
+    return not _terminal_coverage_threshold_violations(stats, args, prefix=prefix)
+
+
+def _terminal_coverage_gate_fields(stats: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    violations = _terminal_coverage_threshold_violations(stats, args)
+    return {
+        **stats,
+        "terminal_coverage_gate_enabled": bool(args.terminal_coverage_gate),
+        "terminal_coverage_gate_pass": not violations,
+        "terminal_coverage_skip_reason": ",".join(violations),
+    }
+
+
+def _empty_terminal_coverage_stats() -> dict[str, float]:
+    return _terminal_coverage_stats(())
+
+
 def _mean_float(values: Sequence[float]) -> float:
     return sum(float(value) for value in values) / len(values) if values else 0.0
 
@@ -2447,11 +3030,15 @@ def _topk_ranking_aux_terms(
         device=output.action_logits.device,
         dtype=output.action_logits.dtype,
     )
+    teacher_row_valid_mask = teacher.get(
+        "teacher_row_valid_mask",
+        torch.ones_like(teacher_entropy_by_row, dtype=torch.bool),
+    ).to(device=output.action_logits.device, dtype=torch.bool)
     policy_topk_logits = output.action_logits.gather(1, topk_indices).float()
     policy_log_probs = torch.log_softmax(policy_topk_logits, dim=-1)
     per_row_ce = -(teacher_probs * policy_log_probs).sum(dim=-1)
     per_row_kl = (teacher_probs * (teacher_log_probs - policy_log_probs)).sum(dim=-1)
-    confidence_mask = _teacher_confidence_mask(
+    confidence_mask_bool = _teacher_confidence_mask(
         teacher_entropy_by_row,
         teacher_margin_by_row,
         teacher_prior_agreement_by_row,
@@ -2459,14 +3046,18 @@ def _topk_ranking_aux_terms(
         entropy_max=float(entropy_max),
         margin_min=float(margin_min),
         prior_agree_min=float(prior_agree_min),
-    ).to(device=output.action_logits.device, dtype=output.action_logits.dtype)
+    ) & teacher_row_valid_mask
+    confidence_mask = confidence_mask_bool.to(device=output.action_logits.device, dtype=output.action_logits.dtype)
     ce_loss = _weighted_mean(per_row_ce, confidence_mask)
     teacher_kl = _weighted_mean(per_row_kl, confidence_mask)
-    teacher_agreement = (policy_topk_logits.argmax(dim=-1) == teacher_probs.argmax(dim=-1)).float().mean()
-    teacher_prior_agreement = teacher_prior_agreement_by_row.mean()
-    teacher_rule_top1_rank = teacher_rule_top1_rank_by_row.mean()
-    teacher_margin = teacher_margin_by_row.mean()
-    teacher_entropy = teacher_entropy_by_row.mean()
+    teacher_agreement = _weighted_mean(
+        (policy_topk_logits.argmax(dim=-1) == teacher_probs.argmax(dim=-1)).float(),
+        confidence_mask,
+    )
+    teacher_prior_agreement = _weighted_mean(teacher_prior_agreement_by_row, confidence_mask)
+    teacher_rule_top1_rank = _weighted_mean(teacher_rule_top1_rank_by_row, confidence_mask)
+    teacher_margin = _weighted_mean(teacher_margin_by_row, confidence_mask)
+    teacher_entropy = _weighted_mean(teacher_entropy_by_row, confidence_mask)
     kept_count = torch.tensor(
         float(output.action_logits.shape[0]),
         device=output.action_logits.device,
@@ -2480,7 +3071,7 @@ def _topk_ranking_aux_terms(
         teacher_agreement,
         kept_count,
         teacher_prior_agreement,
-        teacher_rule_top1_rank.mean(),
+        teacher_rule_top1_rank,
         teacher_margin,
         teacher_entropy,
         confidence_kept_count,
@@ -2520,16 +3111,21 @@ def _topk_teacher_context(
     teacher_temperature: float,
 ) -> dict[str, torch.Tensor]:
     canonical_teacher = _canonical_teacher_source(str(teacher_source))
-    if canonical_teacher not in {"rule-prior-topk", "rule-component-v1", "mortal-discard-q"}:
+    if canonical_teacher not in {"rule-prior-topk", "rule-component-v1", "mortal-discard-q", "mortal-action-q"}:
         raise ValueError(f"teacher source is not implemented yet: {teacher_source}")
     if float(teacher_temperature) <= 0.0:
         raise ValueError(f"teacher_temperature must be positive, got {teacher_temperature}")
 
-    if canonical_teacher == "mortal-discard-q":
+    if canonical_teacher in {"mortal-discard-q", "mortal-action-q"}:
         if batch.policy_input.legal_actions is None:
-            raise ValueError("mortal-discard-q teacher requires policy_input.legal_actions")
+            raise ValueError(f"{canonical_teacher} teacher requires policy_input.legal_actions")
         q_values, mortal_masks = mortal_discard_teacher_tensors_from_extras(batch.policy_input.obs.extras)
-        return mortal_discard_topk_teacher_context(
+        context_fn = (
+            mortal_discard_topk_teacher_context
+            if canonical_teacher == "mortal-discard-q"
+            else mortal_action_topk_teacher_context
+        )
+        return context_fn(
             prior_logits=prior_logits,
             legal_action_mask=batch.policy_input.legal_action_mask,
             legal_actions=batch.policy_input.legal_actions,
@@ -2537,14 +3133,16 @@ def _topk_teacher_context(
             mortal_masks=mortal_masks,
             topk=int(topk),
             teacher_temperature=float(teacher_temperature),
-            strict_mask=True,
+            strict_mask=canonical_teacher == "mortal-discard-q",
         )
 
     mask = batch.policy_input.legal_action_mask.bool().to(device=prior_logits.device)
     prior_logits = prior_logits.float()
     masked_prior = prior_logits.masked_fill(~mask, torch.finfo(prior_logits.dtype).min)
+    legal_counts = mask.sum(dim=-1)
     k = max(1, min(int(topk), int(masked_prior.shape[-1])))
     topk_values, topk_indices = torch.topk(masked_prior, k=k, dim=-1)
+    teacher_row_valid_mask = legal_counts >= k
     if canonical_teacher == "rule-prior-topk":
         teacher_topk_scores = topk_values
     elif canonical_teacher == "rule-component-v1":
@@ -2555,6 +3153,7 @@ def _topk_teacher_context(
         teacher_topk_scores = component_scores.gather(1, topk_indices)
     else:
         raise ValueError(f"teacher source is not implemented yet: {teacher_source}")
+    teacher_topk_scores = teacher_topk_scores.masked_fill(~teacher_row_valid_mask.unsqueeze(-1), 0.0)
 
     teacher_probs = torch.softmax(teacher_topk_scores / float(teacher_temperature), dim=-1)
     teacher_log_probs = torch.log(teacher_probs.clamp_min(1e-12))
@@ -2582,6 +3181,7 @@ def _topk_teacher_context(
         "teacher_rule_top1_rank": teacher_rule_top1_rank,
         "teacher_margin": teacher_margin,
         "teacher_entropy": teacher_entropy,
+        "teacher_row_valid_mask": teacher_row_valid_mask,
     }
 
 
@@ -2622,6 +3222,11 @@ def _annotate_teacher_quality_rows(
         margin_min=float(margin_min),
         prior_agree_min=float(prior_agree_min),
     )
+    teacher_row_valid_mask = teacher.get(
+        "teacher_row_valid_mask",
+        torch.ones_like(teacher["teacher_entropy"], dtype=torch.bool),
+    ).bool()
+    confidence_mask = confidence_mask & teacher_row_valid_mask
     entropy_pass = teacher["teacher_entropy"] <= float(entropy_max)
     margin_pass = teacher["teacher_margin"] >= float(margin_min)
     prior_agree_pass = teacher["teacher_prior_agreement"] >= float(prior_agree_min)
@@ -2636,6 +3241,7 @@ def _annotate_teacher_quality_rows(
     teacher_prior_agreement = teacher["teacher_prior_agreement"].detach().cpu()
     teacher_rule_top1_rank = teacher["teacher_rule_top1_rank"].detach().cpu()
     confidence_mask_cpu = confidence_mask.detach().cpu()
+    row_valid_cpu = teacher_row_valid_mask.detach().cpu()
     entropy_pass_cpu = entropy_pass.detach().cpu()
     margin_pass_cpu = margin_pass.detach().cpu()
     prior_agree_pass_cpu = prior_agree_pass.detach().cpu()
@@ -2671,6 +3277,7 @@ def _annotate_teacher_quality_rows(
                 "teacher_confidence_entropy_pass": bool(entropy_pass_cpu[row_idx].item()),
                 "teacher_confidence_margin_pass": bool(margin_pass_cpu[row_idx].item()),
                 "teacher_confidence_prior_agree_pass": bool(prior_agree_pass_cpu[row_idx].item()),
+                "teacher_topk_row_valid": bool(row_valid_cpu[row_idx].item()),
                 "teacher_confidence_gate_keep": bool(confidence_mask_cpu[row_idx].item()),
             }
         )
@@ -2798,7 +3405,9 @@ def _delta_support_mask(
     prior_logits = prior_logits.float()
     masked_prior = prior_logits.masked_fill(~mask, torch.finfo(prior_logits.dtype).min)
     ranks = 1.0 + (masked_prior.unsqueeze(2) > masked_prior.unsqueeze(1)).sum(dim=1).float()
-    topk_keep = ranks <= float(topk)
+    topk_keep = _source_deduped_topk_keep(policy_input, masked_prior, mask, topk=int(topk))
+    if topk_keep is None:
+        topk_keep = ranks <= float(topk)
 
     legal_count = mask.sum(dim=-1)
     top_values = torch.topk(masked_prior, k=min(2, masked_prior.shape[-1]), dim=-1).values
@@ -2821,6 +3430,49 @@ def _delta_support_mask(
     else:
         raise ValueError(f"unsupported delta support mode: {mode}")
     return support & mask
+
+
+def _source_deduped_topk_keep(
+    policy_input: PolicyInput,
+    masked_prior: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    topk: int,
+) -> torch.BoolTensor | None:
+    legal_actions = policy_input.legal_actions
+    if legal_actions is None:
+        return None
+    keep = torch.zeros_like(mask, dtype=torch.bool)
+    for row_idx, row_actions in enumerate(legal_actions):
+        legal_indices = [
+            index
+            for index in range(len(row_actions))
+            if index < int(mask.shape[1]) and bool(mask[row_idx, index].item())
+        ]
+        sorted_indices = sorted(
+            legal_indices,
+            key=lambda index: float(masked_prior[row_idx, index].detach().cpu()),
+            reverse=True,
+        )
+        seen_sources: set[tuple[object, ...]] = set()
+        for index in sorted_indices:
+            source_key = _support_source_key(row_actions[index])
+            if source_key in seen_sources:
+                continue
+            keep[row_idx, index] = True
+            seen_sources.add(source_key)
+            if len(seen_sources) >= int(topk):
+                break
+    return keep
+
+
+def _support_source_key(action) -> tuple[object, ...]:
+    action_type = getattr(action, "action_type", None)
+    if action_type == ActionType.REACH_DISCARD:
+        return ("reach",)
+    if action_type == ActionType.DISCARD and getattr(action, "tile", None) is not None:
+        return ("discard", int(action.tile))
+    return ("action", getattr(action, "canonical_key", repr(action)))
 
 
 def _annotate_actor_update_support_rows(
@@ -3188,7 +3840,8 @@ def _topk_ranking_aux_configs(args: argparse.Namespace) -> tuple[dict[str, Any],
     unsupported_sources = [
         source
         for source in teacher_sources
-        if _canonical_teacher_source(source) not in {"rule-prior-topk", "rule-component-v1", "mortal-discard-q"}
+        if _canonical_teacher_source(source)
+        not in {"rule-prior-topk", "rule-component-v1", "mortal-discard-q", "mortal-action-q"}
     ]
     if unsupported_sources and any(mode != "none" for mode in modes):
         raise ValueError(f"teacher source is not implemented yet: {unsupported_sources}")
@@ -3279,10 +3932,10 @@ def _topk_ranking_aux_config(args: argparse.Namespace) -> dict[str, Any]:
         "implemented_modes": ("none", "teacher-ce"),
         "teacher_contract_version": _TOPK_TEACHER_CONTRACT_VERSION,
         "teacher_source_note": (
-            "mortal-discard-q is the only allowed strength teacher source; "
+            "mortal-discard-q and mortal-action-q are the only allowed Mortal teacher sources; "
             "rule-prior-topk is a diagnostic negative control; rule-components is a legacy alias; "
             "rule-component-v1 is an action-feature diagnostic reranker; "
-            "mortal-discard-q requires Mortal q/mask tensors in policy_input.obs.extras"
+            "Mortal teacher sources require Mortal q/mask tensors in policy_input.obs.extras"
         ),
     }
 
@@ -3303,6 +3956,8 @@ def _teacher_version(source: str) -> str:
         return "action_feature_component_reranker_v1"
     if canonical == "mortal-discard-q":
         return MORTAL_DISCARD_TEACHER_CONTRACT_VERSION
+    if canonical == "mortal-action-q":
+        return MORTAL_ACTION_TEACHER_CONTRACT_VERSION
     return f"{canonical}_unimplemented"
 
 
@@ -3600,6 +4255,25 @@ def _fresh_validation_config(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _terminal_coverage_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "enabled": bool(args.terminal_coverage_gate),
+        "outcome_gate_enabled": bool(args.terminal_coverage_outcome_gate),
+        "role": "qualification_gate_for_terminal_decision_opportunity_coverage",
+        "min_legal_terminal_rows": int(args.terminal_coverage_min_legal_terminal_rows),
+        "min_score_changed_episode_rate": float(args.terminal_coverage_min_score_changed_episode_rate),
+        "min_legal_agari_rows": int(args.terminal_coverage_min_legal_agari_rows),
+        "min_prepared_legal_terminal_rows": int(args.terminal_coverage_min_prepared_legal_terminal_rows),
+        "min_prepared_legal_agari_rows": int(args.terminal_coverage_min_prepared_legal_agari_rows),
+        "min_selected_agari_count": int(args.terminal_coverage_min_selected_agari_count),
+        "min_selected_agari_episode_rate": float(args.terminal_coverage_min_selected_agari_episode_rate),
+        "note": (
+            "qualification is opportunity-based by default; score_changed/selected_agari thresholds are outcome "
+            "diagnostics and only gate when outcome_gate_enabled=true"
+        ),
+    }
+
+
 def _adaptive_recovery_config(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "enabled": bool(args.adaptive_recovery_gate),
@@ -3695,10 +4369,16 @@ def _fresh_validation_metrics(
             "fresh_validation_enabled": False,
             "fresh_validation_gate_pass": True,
             "fresh_validation_top1_action_changed_rate": 0.0,
+            "fresh_validation_terminal_coverage_gate_pass": True,
+            "fresh_validation_terminal_coverage_skip_reason": "",
+            **{
+                f"fresh_validation_{key}": value
+                for key, value in _empty_terminal_coverage_stats().items()
+            },
             **{f"fresh_validation_{key}": value for key, value in _empty_movement_quality_stats().items()},
         }
     episodes = collect_selfplay_episodes(
-        DiscardOnlyMahjongEnv(max_kyokus=args.max_kyokus),
+        _rollout_env(args),
         policy,
         num_episodes=int(args.fresh_validation_episodes),
         opponent_pool=opponent_pool,
@@ -3719,6 +4399,10 @@ def _fresh_validation_metrics(
     batch = batch.to(device)
     delta_stats = _policy_delta_stats(policy, batch)
     quality_stats = _movement_quality_stats(policy, batch)
+    terminal_coverage = _terminal_coverage_gate_fields(
+        _terminal_coverage_stats(episodes, batch=batch, prepared_steps=_prepared_steps),
+        args,
+    )
     gate_pass = _fresh_validation_gate_pass(delta_stats, quality_stats, args)
     return {
         "fresh_validation_enabled": True,
@@ -3729,6 +4413,10 @@ def _fresh_validation_metrics(
         "fresh_validation_rule_agreement": float(delta_stats["rule_agreement"]),
         "fresh_validation_neural_delta_abs_mean": float(delta_stats["neural_delta_abs_mean"]),
         "fresh_validation_neural_delta_abs_max": float(delta_stats["neural_delta_abs_max"]),
+        **{
+            f"fresh_validation_{key}": value
+            for key, value in terminal_coverage.items()
+        },
         **{f"fresh_validation_{key}": value for key, value in quality_stats.items()},
     }
 
@@ -3737,16 +4425,23 @@ def _early_stop_selection_key(
     final_row: dict[str, Any],
     fresh_validation: dict[str, Any],
     args: argparse.Namespace,
-) -> tuple[float, float, float, float, float, int]:
+) -> tuple[float, float, float, float, float, float, int]:
     train_pass = bool(final_row.get("train_movement_quality_pass", True))
     fresh_pass = bool(fresh_validation.get("fresh_validation_gate_pass", True))
+    terminal_pass = _terminal_coverage_gate_pass(final_row, args) and _terminal_coverage_gate_pass(
+        fresh_validation,
+        args,
+        prefix="fresh_validation_",
+    )
     train_violation = _train_gate_violation(final_row, args)
     fresh_violation = _fresh_gate_violation(fresh_validation, args)
+    terminal_violation = _terminal_coverage_gate_violation(final_row, fresh_validation, args)
     stability_violation = _stability_violation(final_row, args)
     fresh_top1 = float(fresh_validation.get("fresh_validation_top1_action_changed_rate", 0.0))
     iteration = int(final_row.get("iteration", 0))
     return (
-        0.0 if train_pass and fresh_pass else 1.0,
+        0.0 if train_pass and fresh_pass and terminal_pass else 1.0,
+        float(terminal_violation),
         float(fresh_violation),
         float(train_violation),
         float(stability_violation),
@@ -3766,8 +4461,9 @@ def _early_stop_score(
         + key[1] * 100.0
         + key[2] * 10.0
         + key[3]
-        + key[4] * 0.01
-        + key[5] * 1e-6
+        + key[4] * 0.1
+        + key[5] * 0.01
+        + key[6] * 1e-6
     )
 
 
@@ -3824,6 +4520,57 @@ def _fresh_gate_violation(fresh_validation: dict[str, Any], args: argparse.Names
     return float(violation)
 
 
+def _terminal_coverage_gate_violation(
+    final_row: dict[str, Any],
+    fresh_validation: dict[str, Any],
+    args: argparse.Namespace,
+) -> float:
+    if not bool(args.terminal_coverage_gate):
+        return 0.0
+    violation = 0.0
+    for stats, prefix in ((final_row, ""), (fresh_validation, "fresh_validation_")):
+        if prefix == "fresh_validation_" and not bool(stats.get("fresh_validation_enabled", True)):
+            continue
+        violation += max(
+            0.0,
+            float(args.terminal_coverage_min_legal_terminal_rows)
+            - float(stats.get(f"{prefix}terminal_coverage_legal_terminal_row_count", 0.0)),
+        )
+        violation += max(
+            0.0,
+            float(args.terminal_coverage_min_legal_agari_rows)
+            - float(stats.get(f"{prefix}terminal_coverage_legal_agari_row_count", 0.0)),
+        )
+        violation += max(
+            0.0,
+            float(args.terminal_coverage_min_prepared_legal_terminal_rows)
+            - float(stats.get(f"{prefix}terminal_coverage_prepared_legal_terminal_row_count", 0.0)),
+        )
+        violation += max(
+            0.0,
+            float(args.terminal_coverage_min_prepared_legal_agari_rows)
+            - float(stats.get(f"{prefix}terminal_coverage_prepared_legal_agari_row_count", 0.0)),
+        )
+        if not bool(args.terminal_coverage_outcome_gate):
+            continue
+        violation += max(
+            0.0,
+            float(args.terminal_coverage_min_score_changed_episode_rate)
+            - float(stats.get(f"{prefix}terminal_coverage_score_changed_episode_rate", 0.0)),
+        )
+        violation += max(
+            0.0,
+            float(args.terminal_coverage_min_selected_agari_count)
+            - float(stats.get(f"{prefix}terminal_coverage_selected_agari_count", 0.0)),
+        )
+        violation += max(
+            0.0,
+            float(args.terminal_coverage_min_selected_agari_episode_rate)
+            - float(stats.get(f"{prefix}terminal_coverage_selected_agari_episode_rate", 0.0)),
+        )
+    return float(violation)
+
+
 def _stability_violation(final_row: dict[str, Any], args: argparse.Namespace) -> float:
     return (
         max(0.0, float(final_row.get("tempered_post_update_approx_kl", 0.0)) - _recovery_max_tempered_kl(args))
@@ -3859,21 +4606,36 @@ def _fresh_validation_gate_pass(
 
 
 def _qualified_for_eval(final_row: dict[str, Any], fresh_validation: dict[str, Any], args: argparse.Namespace) -> bool:
-    if not bool(args.movement_quality_gate):
-        return True
-    return bool(final_row.get("train_movement_quality_pass", False)) and bool(
-        fresh_validation.get("fresh_validation_gate_pass", False)
+    movement_pass = (
+        True
+        if not bool(args.movement_quality_gate)
+        else bool(final_row.get("train_movement_quality_pass", False))
+        and bool(fresh_validation.get("fresh_validation_gate_pass", False))
     )
+    terminal_pass = _terminal_coverage_gate_pass(final_row, args) and _terminal_coverage_gate_pass(
+        fresh_validation,
+        args,
+        prefix="fresh_validation_",
+    )
+    return bool(movement_pass and terminal_pass)
 
 
 def _eval_skip_reason(final_row: dict[str, Any], fresh_validation: dict[str, Any], args: argparse.Namespace) -> str:
-    if not bool(args.movement_quality_gate):
-        return ""
     reasons: list[str] = []
-    if not bool(final_row.get("train_movement_quality_pass", False)):
+    if bool(args.movement_quality_gate) and not bool(final_row.get("train_movement_quality_pass", False)):
         reasons.append("train_movement_quality_gate_failed")
-    if not bool(fresh_validation.get("fresh_validation_gate_pass", False)):
+    if bool(args.movement_quality_gate) and not bool(fresh_validation.get("fresh_validation_gate_pass", False)):
         reasons.append("fresh_validation_gate_failed")
+    train_terminal_violations = _terminal_coverage_threshold_violations(final_row, args)
+    if train_terminal_violations:
+        reasons.append("train_terminal_coverage_gate_failed:" + "|".join(train_terminal_violations))
+    fresh_terminal_violations = _terminal_coverage_threshold_violations(
+        fresh_validation,
+        args,
+        prefix="fresh_validation_",
+    )
+    if fresh_terminal_violations:
+        reasons.append("fresh_terminal_coverage_gate_failed:" + "|".join(fresh_terminal_violations))
     return ",".join(reasons)
 
 
@@ -3957,16 +4719,24 @@ def _annotate_step38a_status(row: dict[str, Any], args: argparse.Namespace) -> N
             and bool(row.get("fresh_validation_gate_pass", False))
         )
     )
+    terminal_coverage_pass = _terminal_coverage_gate_pass(row, args, prefix="final_") and _terminal_coverage_gate_pass(
+        row,
+        args,
+        prefix="fresh_validation_",
+    )
 
     row["step38a_movement_pass"] = movement_pass
     row["step38a_stability_pass"] = stability_pass
     row["step38a_eval_sanity_pass"] = eval_sanity_pass
     row["step39_movement_quality_pass"] = quality_pass
-    row["step38a_pass"] = movement_pass and stability_pass and eval_sanity_pass and quality_pass
+    row["step40_terminal_coverage_pass"] = terminal_coverage_pass
+    row["step38a_pass"] = movement_pass and stability_pass and eval_sanity_pass and quality_pass and terminal_coverage_pass
 
 
 def _summary_metric_key(key: str) -> bool:
-    return key in {
+    return key.startswith(
+        ("reach_pre_", "reach_post_", "full_action_pre_", "full_action_post_", "terminal_coverage_")
+    ) or key in {
         "batch_size",
         "advantage_mean",
         "advantage_std",
@@ -4074,6 +4844,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
         f"delta_clip_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.delta_clip_values, name='delta_clip'))}`",
         f"delta_clip_coef_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.delta_clip_coef_values, name='delta_clip_coef'))}`",
         f"topk_ranking_aux: `{_topk_ranking_aux_config(args)}`",
+        f"action_scope: `{_action_scope_config(args)}`",
         f"low_rank_flip_topk_values: `{','.join(str(int(value)) for value in _positive_int_values(args.low_rank_flip_topk_values, name='low_rank_flip_topk'))}`",
         f"low_rank_flip_penalty_coef_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.low_rank_flip_penalty_coef_values, name='low_rank_flip_penalty_coef'))}`",
         f"weak_margin_threshold_values: `{','.join(str(float(value)) for value in _nonnegative_float_values(args.weak_margin_threshold_values, name='weak_margin_threshold'))}`",
@@ -4086,6 +4857,7 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
         f"adaptive_recovery: `{_adaptive_recovery_config(args)}`",
         f"movement_regularization: `{_movement_regularization_config(args)}`",
         f"movement_quality_gate: `{_movement_quality_gate_config(args)}`",
+        f"terminal_coverage_gate: `{_terminal_coverage_config(args)}`",
         f"fresh_validation: `{_fresh_validation_config(args)}`",
         f"eval_seed_registry_id: `{_eval_seed_registry_id(args)}`",
         f"eval_seed_hash: `{seed_registry_hash(_eval_seed_registry(args))}`",
@@ -4171,6 +4943,16 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"teacher_margin={row['final_tempered_post_update_topk_ranking_teacher_margin']:.6g} "
             f"teacher_entropy={row.get('final_tempered_post_update_topk_ranking_teacher_entropy', 0.0):.6g} "
             f"teacher_conf_keep={row.get('final_tempered_post_update_topk_ranking_teacher_confidence_kept_rate', 0.0):.6g} "
+            f"reach_n={row.get('final_reach_post_reach_opportunity_count', 0)} "
+            f"reach_policy={row.get('final_reach_post_policy_reach_rate', 0.0):.6g} "
+            f"reach_teacher={row.get('final_reach_post_teacher_reach_rate', 0.0):.6g} "
+            f"non_discard_n={row.get('final_full_action_post_non_discard_opportunity_count', 0)} "
+            f"call_n={row.get('final_full_action_post_call_opportunity_count', 0)} "
+            f"agari_n={row.get('final_full_action_post_agari_opportunity_count', 0)} "
+            f"score_changed_ep={row.get('final_terminal_coverage_score_changed_episode_count', 0)}/{row.get('final_terminal_coverage_episode_count', 0)} "
+            f"legal_agari_rows={row.get('final_terminal_coverage_legal_agari_row_count', 0)} "
+            f"selected_agari={row.get('final_terminal_coverage_selected_agari_count', 0)} "
+            f"terminal_quality={row.get('terminal_coverage_gate_pass')} "
             f"fresh_top1={row.get('fresh_validation_top1_action_changed_rate', 0.0):.6g} "
             f"fresh_quality={row.get('fresh_validation_gate_pass')} "
             f"qualified_eval={row.get('qualified_for_eval')} "

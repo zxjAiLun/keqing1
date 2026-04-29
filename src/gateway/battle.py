@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import random
 import uuid
 
@@ -12,8 +11,8 @@ from typing import Dict, List, Optional
 from mahjong_env.legal_actions import enumerate_legal_action_specs
 from mahjong_env.scoring import score_hora
 from mahjong_env.feature_tracker import SnapshotFeatureTracker
-from mahjong_env.state import GameState, PlayerState, TileStateError, apply_event
-from mahjong_env.tiles import normalize_tile, AKA_DORA_TILES
+from mahjong_env.state import GameState, PlayerState, TileStateError
+from mahjong_env.tiles import normalize_tile
 from mahjong_env.types import action_dict_to_spec, action_specs_match
 
 AKA5 = ("5mr", "5pr", "5sr")
@@ -683,8 +682,8 @@ class BattleManager:
             ura_dora_markers=self._active_ura_markers(room, actor),
             is_rinshan=is_tsumo and room.state.players[actor].rinshan_tsumo,
             is_chankan=is_chankan,
-            is_haitei=room.remaining_wall() == 0 and is_tsumo,
-            is_houtei=room.remaining_wall() == 0 and not is_tsumo,
+            is_haitei=self._logical_remaining_wall(room) == 0 and is_tsumo,
+            is_houtei=self._logical_remaining_wall(room) == 0 and not is_tsumo,
         )
         deltas = scoring.deltas
         hora_honba = room.state.honba
@@ -841,7 +840,7 @@ class BattleManager:
             return None
 
         if room.pending_rinshan:
-            if room.remaining_wall() < 1:
+            if self._logical_remaining_wall(room) < 1:
                 self.ryukyoku(room)
                 return None
             return self.draw(room, actor)
@@ -849,14 +848,35 @@ class BattleManager:
         if room.state.last_tsumo[actor] is not None:
             return room.state.last_tsumo[actor]  # 已有摸牌
 
+        if self._is_post_open_meld_discard_turn(room, actor):
+            return None
+
         hand_size = sum(room.state.players[actor].hand.values())
         if hand_size in (11, 12):  # 碰/吃后直接打牌
             return None
 
-        if room.remaining_wall() < 1:
+        if self._logical_remaining_wall(room) < 1:
             self.ryukyoku(room)
             return None
         return self.draw(room, actor)
+
+    @staticmethod
+    def _logical_remaining_wall(room: BattleRoom) -> int:
+        if room.state.remaining_wall is not None:
+            return max(0, int(room.state.remaining_wall))
+        return max(0, room.remaining_wall())
+
+    @staticmethod
+    def _is_post_open_meld_discard_turn(room: BattleRoom, actor: int) -> bool:
+        if not room.events:
+            return False
+        last_event = room.events[-1]
+        return (
+            last_event.get("type") in {"chi", "pon"}
+            and int(last_event.get("actor", -1)) == int(actor)
+            and room.state.last_tsumo[actor] is None
+            and room.state.last_tsumo_raw[actor] is None
+        )
 
     def apply_action(self, room: BattleRoom, actor: int, action: Dict) -> bool:
         """应用一个动作（dahai/pon/chi/kan/hora/reach/none），返回是否成功。
@@ -895,13 +915,17 @@ class BattleManager:
             if is_response:
                 discarder = last_discard["actor"]
                 next_actor = (actor + 1) % 4
+                room.events.append({"type": "none", "actor": actor})
                 if next_actor == discarder:
                     room.state.last_discard = None
                     room.state.actor_to_move = (discarder + 1) % 4
+                    room.events.append({"type": "none"})
                 else:
                     room.state.actor_to_move = next_actor
             elif is_kakan_response:
+                room.events.append({"type": "none", "actor": actor})
                 room.state.actor_to_move = last_kakan["actor"]
+                room.events.append({"type": "none"})
             else:
                 # 摸牌回合 none → 摸切
                 tsumo = room.state.last_tsumo_raw[actor] or room.state.last_tsumo[actor]

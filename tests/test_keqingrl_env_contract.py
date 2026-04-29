@@ -93,6 +93,23 @@ def test_runtime_rulebase_missing_capability_fails_closed(monkeypatch: pytest.Mo
     ) is None
 
 
+def test_runtime_legal_actions_are_keqing_core_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = DiscardOnlyMahjongEnv(max_kyokus=1)
+
+    monkeypatch.setattr(
+        keqing_core,
+        "enumerate_public_legal_action_specs",
+        lambda *_args: [
+            {"type": "dahai", "actor": 0, "pai": "4m", "tsumogiri": False},
+            {"type": "dahai", "actor": 0, "pai": "7m", "tsumogiri": True},
+        ],
+    )
+
+    legal = env._enumerate_runtime_legal_actions({"actor": 0}, 0)
+
+    assert [action.pai for action in legal] == ["4m", "7m"]
+
+
 def test_discard_only_env_keeps_ordered_legal_actions_stable_within_turn() -> None:
     env = DiscardOnlyMahjongEnv(max_kyokus=1)
     state = env.reset(seed=7)
@@ -337,6 +354,34 @@ def test_collect_controlled_self_turn_actions_expanded_scope_preserves_order() -
     assert [dispatch[-1].get("pai") for _spec, dispatch in controlled_pairs[:4]] == ["4m", "7m", "4m", "7m"]
 
 
+def test_collect_controlled_self_turn_actions_filters_late_reach() -> None:
+    env = DiscardOnlyMahjongEnv(
+        self_turn_action_types=(
+            ActionType.DISCARD,
+            ActionType.REACH_DISCARD,
+        )
+    )
+    env._enumerate_reach_discard_candidates = lambda _snapshot, _actor: [("7m", True), ("4m", False)]  # type: ignore[method-assign]
+    snapshot = {
+        **_self_turn_snapshot(),
+        "remaining_wall": 1,
+        "scores": [25000, 25000, 25000, 25000],
+        "reached": [False, False, False, False],
+        "pending_reach": [False, False, False, False],
+        "melds": [[], [], [], []],
+    }
+
+    controlled_pairs = env._collect_controlled_self_turn_actions(
+        snapshot,
+        _self_turn_raw_legal_actions(),
+    )
+
+    assert [spec.action_type for spec, _dispatch in controlled_pairs] == [
+        ActionType.DISCARD,
+        ActionType.DISCARD,
+    ]
+
+
 def test_collect_controlled_self_turn_actions_default_scope_keeps_discard_only() -> None:
     env = DiscardOnlyMahjongEnv()
 
@@ -421,6 +466,37 @@ def test_collect_controlled_response_actions_default_scope_keeps_auto_response()
     controlled_pairs = env._collect_controlled_response_actions(_response_raw_legal_actions())
 
     assert controlled_pairs == []
+
+
+def test_collect_controlled_response_actions_autopilots_bare_pass() -> None:
+    env = DiscardOnlyMahjongEnv(response_action_types=(ActionType.PASS,))
+
+    controlled_pairs = env._collect_controlled_response_actions((MahjongActionSpec(type="none"),))
+
+    assert controlled_pairs == []
+
+
+def test_mortal_events_for_response_turn_drops_trailing_reach_accepted() -> None:
+    env = DiscardOnlyMahjongEnv(response_action_types=(ActionType.PASS, ActionType.CHI))
+    env.room = SimpleNamespace(
+        events=(
+            {"type": "reach", "actor": 3},
+            {"type": "dahai", "actor": 3, "pai": "3s", "tsumogiri": False},
+            {"type": "reach_accepted", "actor": 3},
+        )
+    )
+    turn = _TurnContext(
+        actor=0,
+        snapshot={"actor": 0},
+        legal_actions=(ActionSpec(ActionType.PASS),),
+        dispatch_actions=(({"type": "none"},),),
+        rulebase_chosen=None,
+        control_action_types=("PASS",),
+    )
+
+    events = env._mortal_events_for_turn(turn)
+
+    assert tuple(events) == env.room.events[:-1]
 
 
 @pytest.mark.parametrize(

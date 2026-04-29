@@ -249,8 +249,16 @@ mortal_q_values     shape [B, 46]
 mortal_action_mask  shape [B, 46]
 ```
 
-The current KeqingRL integration consumes only discard actions from these
-tensors through `teacher_source=mortal-discard-q`.
+KeqingRL currently supports two Mortal teacher sources:
+
+```text
+teacher_source=mortal-discard-q  historical discard-only diagnostic
+teacher_source=mortal-action-q   46-id Mortal scorer over KeqingRL legal ActionSpec rows
+```
+
+`mortal-action-q` still does not let Mortal own legality or dispatch. KeqingCore
+enumerates legal actions, KeqingRL preserves `ActionSpec` identity/order, and
+Mortal only supplies Q/ranking over those legal candidates.
 
 The checkpoint runtime wrapper now lives at:
 
@@ -269,17 +277,19 @@ src/keqingrl/mortal_observation.py
 ```
 
 It replays KeqingRL mjai events into Mortal `PlayerState.encode_obs(version=4)`
-and returns Mortal-format `obs` plus the 46-wide action mask. `DiscardOnlyMahjongEnv`
-accepts `mortal_teacher_runtime` and `mortal_observation_bridge`; on discard-only
-learner turns it attaches `mortal_q_values` and `mortal_action_mask` to
-`PolicyInput.obs.extras`. The current integration has tests for direct
-observation parity and for extras surviving selfplay collection plus PPO batch
-collation.
+and returns Mortal-format `obs` plus the 46-wide action mask.
+`DiscardOnlyMahjongEnv` accepts `mortal_teacher_runtime` and
+`mortal_observation_bridge`; on controlled learner turns it attaches
+`mortal_q_values` and `mortal_action_mask` to `PolicyInput.obs.extras` when
+the Mortal mask is compatible with the KeqingRL legal row. The current
+integration has tests for observation parity, action mapping, runtime loading,
+extras surviving selfplay collection, and PPO batch collation.
 
 ## KeqingRL Pilot Probe
 
-Once a trained Mortal checkpoint exists, run the existing tempered-ratio pilot
-with Mortal as the only strength teacher:
+### Deprecated Probe Interpretation
+
+The following older discard-only probe is retained only as a contract smoke:
 
 ```bash
 uv run python scripts/run_keqingrl_tempered_ratio_pilot.py \
@@ -298,9 +308,127 @@ uv run python scripts/run_keqingrl_tempered_ratio_pilot.py \
   --rule-score-scales 0.25
 ```
 
-The pilot fails closed if `teacher_source=mortal-discard-q` is selected without
+Do not use that command to claim Mortal is weak or strong. It only tests whether
+Mortal q/mask extras can be consumed for discard topK CE. It does not cover
+reach, terminal, pass/call, or kan decisions.
+
+The previous reading:
+
+```text
+"discard-only Mortal teacher did not pass, so Mortal teacher has little value"
+```
+
+is now marked wrong. It was missing the key precondition: the rollout/batch must
+cover the relevant terminal/action opportunities before any teacher/topK
+conclusion is qualified.
+
+### Current Probe Contract
+
+Current Mortal teacher probes should use `mortal-action-q` with an
+opportunity-based terminal coverage gate:
+
+```bash
+uv run python scripts/run_keqingrl_tempered_ratio_pilot.py \
+  --candidate-summary artifacts/.../summary.csv \
+  --source-config-ids 93 \
+  --output-dir reports/.../mortal_action_q_probe \
+  --topk-ranking-aux-mode teacher-ce \
+  --topk-ranking-aux-coef 1.0 \
+  --topk-ranking-k 3 \
+  --teacher-source mortal-action-q \
+  --teacher-temperature 1.0 \
+  --mortal-teacher-checkpoint artifacts/mortal_training/mortal.pth \
+  --mortal-root third_party/Mortal \
+  --support-policy-mode support-only-topk \
+  --delta-support-mode topk \
+  --delta-support-topk 3 \
+  --actor-update-support-mode topk \
+  --actor-update-topk 3 \
+  --rule-score-scales 0.25 \
+  --self-turn-action-types DISCARD REACH_DISCARD TSUMO RYUKYOKU \
+  --response-action-types \
+  --forced-autopilot-action-types TSUMO RON RYUKYOKU \
+  --terminal-coverage-gate \
+  --terminal-coverage-min-legal-terminal-rows 1 \
+  --terminal-coverage-min-legal-agari-rows 1
+```
+
+The terminal coverage gate is opportunity-based by default:
+
+```text
+terminal_coverage_legal_terminal_row_count
+terminal_coverage_legal_agari_row_count
+terminal_coverage_prepared_legal_terminal_row_count
+terminal_coverage_prepared_legal_agari_row_count
+```
+
+Outcome counters are diagnostics only by default:
+
+```text
+terminal_coverage_score_changed_episode_count
+terminal_coverage_score_changed_without_selected_agari_episode_count
+terminal_coverage_selected_agari_count
+```
+
+Do not gate on actual `hora` count or `score_changed` unless the special flag is
+explicitly enabled:
+
+```text
+--terminal-coverage-outcome-gate
+```
+
+Rationale: actual hora is a stochastic outcome affected by wall luck and seat
+rotation. `score_changed` is also not an agari proxy because riichi sticks and
+ryukyoku tenpai payments can change scores without any `hora`.
+
+The pilot fails closed if `teacher_source=mortal-discard-q` or
+`teacher_source=mortal-action-q` is selected without
 `--mortal-teacher-checkpoint`. Non-Mortal diagnostic controls do not load a
 Mortal runtime.
+
+### Replay Before Reinterpreting Results
+
+When a probe appears to be "all ryukyoku", "no ron", or "teacher did not move",
+export the exact seed before updating conclusions:
+
+```bash
+uv run python scripts/export_keqingrl_mjai_replay.py \
+  --candidate-summary artifacts/.../summary.csv \
+  --source-config-ids 93 \
+  --output-dir reports/.../replays \
+  --episode-index 0 \
+  --seed-base 202604300000 \
+  --torch-seed 202604300000 \
+  --self-turn-action-types DISCARD REACH_DISCARD TSUMO RYUKYOKU \
+  --response-action-types \
+  --forced-autopilot-action-types TSUMO RON RYUKYOKU
+```
+
+This writes:
+
+```text
+episode_*.mjai.jsonl
+episode_*.readable.md
+episode_*.decisions.csv
+```
+
+Use the readable replay to distinguish:
+
+```text
+true hora
+ryukyoku
+riichi-stick score changes
+legal terminal/agari opportunities
+selected terminal/agari actions
+```
+
+### Current Full-Action Gap
+
+Full response-window teacher is not yet cleared for training. A direct full
+scope can fail closed when KeqingCore legal actions include response choices
+such as `PON + PASS` but Mortal's mask does not mark the corresponding source
+ids. This is a contract gap to investigate, not evidence that Mortal is weak.
+Do not paper over missing legal keys with silent fallback.
 
 ## Local Artifact Status
 
@@ -312,14 +440,16 @@ artifacts/mortal_training/grp.pth          steps=2000
 artifacts/mortal_training/mortal_step400.pth  steps=400
 artifacts/mortal_training/mortal_step2000.pth steps=2000
 artifacts/mortal_training/mortal_step5000.pth steps=5000
-artifacts/mortal_training/mortal.pth          steps=10000
+artifacts/mortal_training/mortal_step10000.pth steps=10000
+artifacts/mortal_training/mortal_step20000.pth steps=20000
+artifacts/mortal_training/mortal.pth           steps=20000
 ```
 
 The current `mortal.pth` is a trained Mortal-format teacher artifact and is
 useful for integration probes. It is not yet validated as a strength teacher;
 only report it as a candidate after the KeqingRL train/fresh/movement/paired
-gates pass. Previous step-400, step-2000, and step-5000 checkpoints are
-preserved for reproducibility.
+gates pass. Previous step-400, step-2000, step-5000, step-10000, and
+step-20000 checkpoints are preserved for reproducibility.
 
 Runtime smoke already passed:
 
@@ -338,6 +468,14 @@ teacher_topk_scores = [-3.5802, -5.9136, -5.9463]
 teacher_probs       = [0.8398, 0.0814, 0.0788]
 ```
 
+The step-20000 runtime smoke on `seed=1` produced a valid discard topK
+distribution:
+
+```text
+teacher_topk_scores = [-4.6350, -7.2691, -7.2102]
+teacher_probs       = [0.8711, 0.0625, 0.0663]
+```
+
 Mortal-only KeqingRL probes have been run under:
 
 ```text
@@ -350,6 +488,8 @@ reports/keqingrl_mortal_discard_q_narrow_grid_20260428_source93_step2000
 reports/keqingrl_mortal_discard_q_penalty_grid_20260428_source93_step2000
 reports/keqingrl_mortal_discard_q_narrow_gate_20260428_source93_step10000
 reports/keqingrl_mortal_discard_q_penalty_gate_20260428_source93_step10000
+reports/keqingrl_mortal_discard_q_narrow_gate_20260428_source93_step20000
+reports/keqingrl_mortal_discard_q_penalty_gate_20260428_source93_step20000
 ```
 
 Observed status:
@@ -361,6 +501,12 @@ mortal-discard-q teacher CE: passed
 moderate movement: possible
 train/fresh/movement gate: not passed yet
 ```
+
+Important correction: the older "train/fresh/movement gate not passed" lines
+above describe discard-only or terminal-coverage-poor diagnostics. They must
+not be read as a strength judgment on Mortal. Those probes did not cover enough
+reach / terminal / response decision opportunities to answer whether Mortal is
+a useful Mahjong teacher.
 
 The useful diagnostic facts are:
 
@@ -382,8 +528,26 @@ The useful diagnostic facts are:
 - Step-10000 weak-margin penalties also found no pass. `coef=0.01` and
   `coef=0.1` suppressed top1 movement to zero; `coef=0.05` reproduced the
   overmoving/high-margin failure.
+- Step-20000 still found no pass. The narrow gate again had no-move configs at
+  `lr=0.0023` and `lr=0.0027`; `lr=0.0025` moved top1 by `0.0952` but failed
+  movement quality and fresh validation (`fresh_top1=0.3548`,
+  `changed_prior_margin_p50=3.001`, `t_clip=0.3810`).
+- Step-20000 weak-margin penalties also found no pass. `coef=0.01` and
+  `coef=0.1` suppressed top1 movement to zero; `coef=0.05` reproduced the
+  overmoving/high-margin failure (`fresh_top1=0.3548`, `t_clip=0.3810`).
+
+These are now marked as **discard-teacher consumption diagnostics**, not
+teacher-strength results. The current conclusion is:
+
+```text
+Mortal checkpoint: trained and usable as a teacher artifact.
+Mortal as strength teacher: not yet validated.
+Discard-only no-pass: unqualified as strength evidence.
+Full response-window teacher: blocked by fail-closed mask parity gaps.
+Next valid probe: opportunity-qualified mortal-action-q over KeqingRL legal rows.
+```
 
 Do not treat the current Mortal checkpoint as validated strength. The next
-productive branch is either longer/better Mortal training or a teacher-consumer
-gate that only applies Mortal CE on rows where Mortal disagreement is plausible
-without flipping strong rule-prior margins.
+productive branch is to fix/understand full response-window mask parity, then
+rerun `mortal-action-q` with opportunity-based terminal/action coverage and
+paired replay review.

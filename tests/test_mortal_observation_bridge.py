@@ -39,6 +39,8 @@ class _EchoMortalRuntime:
 
 def test_sanitize_event_for_mortal_skips_keqing_kakan_accepted_extension() -> None:
     assert sanitize_event_for_mortal({"type": "kakan_accepted", "actor": 0}) is None
+    assert sanitize_event_for_mortal({"type": "none", "actor": 2}) is None
+    assert sanitize_event_for_mortal({"type": "none"}) == {"type": "none"}
     assert sanitize_event_for_mortal({"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False}) == {
         "type": "dahai",
         "actor": 0,

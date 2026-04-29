@@ -11,7 +11,7 @@ export function HomePage() {
         <PageHeader
           eyebrow="Compatibility Entry"
           title="Keqing1"
-          description="这是兼容保留的 `/home` 入口。当前 GUI 默认围绕 xmodel1 主线、keqingv4 备线和 rulebase 基线组织。"
+          description="这是兼容保留的 `/home` 入口。当前 GUI 支持 xmodel1、keqingv4、mortal 和 rulebase。"
         />
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14, alignItems: 'center' }}>

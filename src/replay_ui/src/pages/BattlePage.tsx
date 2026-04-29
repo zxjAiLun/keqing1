@@ -279,7 +279,7 @@ export function BattlePage() {
           </div>
         </div>
 
-        <p style={{ fontSize: 13, color: '#9ca3af' }}>默认主线为 xmodel1；需要兼容对照时再切到 keqingv4 或 rulebase。</p>
+        <p style={{ fontSize: 13, color: '#9ca3af' }}>默认主线为 xmodel1；也可切到 keqingv4、mortal 或 rulebase。</p>
 
         <style>{`
           @keyframes spinIcon { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }

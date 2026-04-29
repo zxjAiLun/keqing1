@@ -178,7 +178,7 @@ export function BotBattlePage() {
         </div>
 
         <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
-          默认观察 xmodel1 主线；需要 backup/baseline 对照时再切换。
+          默认观察 xmodel1 主线；也可切到 keqingv4、mortal 或 rulebase。
         </p>
         </div>
       </PageShell>
@@ -190,7 +190,7 @@ export function BotBattlePage() {
       <PageHeader
         eyebrow="Bot Arena"
         title="4 Bot 对战"
-        description="实时观察自动对战流程。结束后可以直接导出 Mjai 或 Tenhou6 牌谱。当前默认模型线为 xmodel1。"
+        description="实时观察自动对战流程。结束后可以直接导出 Mjai 或 Tenhou6 牌谱。当前默认模型线为 xmodel1，也支持 mortal。"
       />
       {state.phase === "ended" && (
         <div

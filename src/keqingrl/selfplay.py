@@ -116,6 +116,7 @@ def collect_policy_episode(
     seat_policy_tuple = tuple(seat_policies)
     state = env.reset(seed=seed)
     game_id = state.game_id
+    initial_scores = tuple(int(score) for score in state.scores)
     rollout_steps: list[RolloutStep] = []
     final_result = None
     _append_autopilot_trace_steps(
@@ -244,6 +245,7 @@ def collect_policy_episode(
         scores=tuple(int(score) for score in scores),  # type: ignore[arg-type]
         game_id=game_id,
         seed=seed,
+        initial_scores=initial_scores,
     )
 
 
@@ -895,6 +897,7 @@ def _filter_episodes_for_actors(
                 scores=episode.scores,
                 game_id=episode.game_id,
                 seed=episode.seed,
+                initial_scores=episode.initial_scores,
             )
         )
     if not filtered_episodes:

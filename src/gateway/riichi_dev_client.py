@@ -11,7 +11,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import websockets
 from dotenv import load_dotenv
@@ -132,6 +132,8 @@ def _resolve_model_path(
         return None
     if model_path is not None:
         return Path(model_path)
+    if bot_name == "mortal":
+        return Path(project_root) / "artifacts" / "mortal_serving" / "mortal.pth"
     return Path(project_root) / "artifacts" / "models" / bot_name / "best.pth"
 
 
@@ -249,15 +251,21 @@ def _enrich_message_for_audit(message: dict[str, Any]) -> dict[str, Any]:
 def _sanitize_action(action: dict[str, Any], actor_hint: int | None) -> dict[str, Any]:
     action_type = action.get("type", "none")
     if action_type == "none":
-        return {"type": "none"}
+        actor = action.get("actor", actor_hint)
+        out = {"type": "none"}
+        if actor is not None:
+            out["actor"] = actor
+        return out
     if action_type == "ryukyoku":
         return {"type": "ryukyoku"}
 
     if action_type == "hora":
         actor = action.get("actor", actor_hint)
-        target = action.get("target", actor)
-        out = {"type": "hora", "actor": actor, "target": target}
-        if target != actor and action.get("pai") is not None:
+        out = {"type": "hora", "actor": actor}
+        target = action.get("target")
+        if target is not None:
+            out["target"] = target
+        if target is not None and target != actor and action.get("pai") is not None:
             out["pai"] = action["pai"]
         return out
     if action_type == "reach":
@@ -337,6 +345,213 @@ def _action_to_mjai_dict(action: Any) -> dict[str, Any]:
         return json.loads(action)
     raise TypeError(f"unsupported action payload type: {type(action)!r}")
 
+
+def _last_self_tsumo_pai(new_events: list[dict[str, Any]] | None, actor: int | None) -> str | None:
+    for event in reversed(new_events or []):
+        if event.get("type") == "tsumo" and event.get("actor") == actor:
+            pai = event.get("pai")
+            if isinstance(pai, str) and pai != "?":
+                return pai
+    return None
+
+
+def _complete_wire_action(
+    action: Any,
+    *,
+    actor_hint: int | None = None,
+    new_events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    out = _sanitize_action(_action_to_mjai_dict(action), actor_hint)
+    if out.get("type") == "none":
+        return {"type": "none"}
+    if out.get("type") == "dahai" and "tsumogiri" not in out:
+        last_tsumo = _last_self_tsumo_pai(new_events, out.get("actor", actor_hint))
+        out["tsumogiri"] = bool(last_tsumo is not None and out.get("pai") == last_tsumo)
+    return out
+
+
+def _action_to_mjai_wire_payload(
+    action: Any,
+    *,
+    actor_hint: int | None = None,
+    new_events: list[dict[str, Any]] | None = None,
+) -> str:
+    if isinstance(action, str):
+        try:
+            parsed = json.loads(action)
+        except json.JSONDecodeError:
+            return action
+        return json.dumps(
+            _complete_wire_action(parsed, actor_hint=actor_hint, new_events=new_events),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    if hasattr(action, "to_mjai"):
+        mjai = action.to_mjai()
+        parsed = json.loads(mjai) if isinstance(mjai, str) else dict(mjai)
+        return json.dumps(
+            _complete_wire_action(parsed, actor_hint=actor_hint, new_events=new_events),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    return json.dumps(
+        _complete_wire_action(action, actor_hint=actor_hint, new_events=new_events),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _observation_new_events(obs: Any) -> list[dict[str, Any]]:
+    raw_events = getattr(obs, "new_events", None)
+    if raw_events is None:
+        raw_events = getattr(obs, "events", [])
+    if callable(raw_events):
+        raw_events = raw_events()
+    events: list[dict[str, Any]] = []
+    for event in raw_events or []:
+        if isinstance(event, dict):
+            events.append(dict(event))
+        elif isinstance(event, str):
+            events.append(json.loads(event))
+        else:
+            events.append(_action_to_mjai_dict(event))
+    return events
+
+
+def _action_exact_key(action: dict[str, Any]) -> str:
+    normalized = dict(action)
+    if "consumed" in normalized:
+        normalized["consumed"] = sorted(str(tile) for tile in normalized["consumed"])
+    return json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+
+
+def _same_meld_action(candidate: dict[str, Any], legal: dict[str, Any]) -> bool:
+    action_type = candidate.get("type")
+    if action_type not in {"chi", "pon", "daiminkan", "ankan", "kakan"}:
+        return False
+    if legal.get("type") != action_type:
+        return False
+    if candidate.get("actor") != legal.get("actor"):
+        return False
+    if candidate.get("pai") != legal.get("pai"):
+        return False
+    return sorted(str(tile) for tile in candidate.get("consumed", [])) == sorted(
+        str(tile) for tile in legal.get("consumed", [])
+    )
+
+
+def _same_hora_action(candidate: dict[str, Any], legal: dict[str, Any]) -> bool:
+    if candidate.get("type") != "hora" or legal.get("type") != "hora":
+        return False
+    if candidate.get("actor") != legal.get("actor"):
+        return False
+    if "target" in legal and "target" in candidate and legal.get("target") != candidate.get("target"):
+        return False
+    if "pai" in legal and "pai" in candidate and legal.get("pai") != candidate.get("pai"):
+        return False
+    return True
+
+
+def _action_log_text(action: dict[str, Any] | None) -> str:
+    if action is None:
+        return "null"
+    return json.dumps(action, sort_keys=True, ensure_ascii=False)
+
+
+def _warn_mortal_legality_fallback(
+    *,
+    reason: str,
+    actor: int | None,
+    candidate: dict[str, Any] | None,
+    fallback: dict[str, Any],
+    legal_actions: list[dict[str, Any]],
+) -> None:
+    legal_sample = legal_actions[:8]
+    logger.warning(
+        "mortal legality guard fallback: reason=%s actor=%s candidate=%s fallback=%s legal_count=%d legal_sample=%s",
+        reason,
+        actor,
+        _action_log_text(candidate),
+        _action_log_text(fallback),
+        len(legal_actions),
+        json.dumps(legal_sample, sort_keys=True, ensure_ascii=False),
+    )
+
+
+def _legalize_action(
+    action: dict[str, Any] | None,
+    *,
+    legal_actions: list[dict[str, Any]],
+    actor: int | None,
+) -> dict[str, Any]:
+    normalized_legal = [
+        _sanitize_action(_action_to_mjai_dict(item), actor)
+        for item in legal_actions
+    ]
+    if not normalized_legal:
+        return {"type": "none"}
+
+    candidate = _sanitize_action(action or {"type": "none"}, actor)
+    reason = "missing_action" if action is None else "illegal_action"
+    candidate_key = _action_exact_key(candidate)
+    for legal in normalized_legal:
+        if _action_exact_key(legal) == candidate_key:
+            return legal
+
+    if candidate.get("type") == "dahai":
+        for legal in normalized_legal:
+            if (
+                legal.get("type") == "dahai"
+                and legal.get("actor") == candidate.get("actor")
+                and legal.get("pai") == candidate.get("pai")
+            ):
+                if "tsumogiri" in candidate and "tsumogiri" not in legal:
+                    legal = dict(legal)
+                    legal["tsumogiri"] = bool(candidate["tsumogiri"])
+                return legal
+    if candidate.get("type") in {"chi", "pon", "daiminkan", "ankan", "kakan"}:
+        for legal in normalized_legal:
+            if _same_meld_action(candidate, legal):
+                return legal
+    if candidate.get("type") == "hora":
+        for legal in normalized_legal:
+            if _same_hora_action(candidate, legal):
+                return legal
+
+    for legal in normalized_legal:
+        if legal.get("type") == "none":
+            _warn_mortal_legality_fallback(
+                reason=reason,
+                actor=actor,
+                candidate=action,
+                fallback=legal,
+                legal_actions=normalized_legal,
+            )
+            return legal
+    fallback = normalized_legal[0]
+    _warn_mortal_legality_fallback(
+        reason=reason,
+        actor=actor,
+        candidate=action,
+        fallback=fallback,
+        legal_actions=normalized_legal,
+    )
+    return fallback
+
+
+def _select_observation_action(obs: Any, action: dict[str, Any], actor: int) -> Any:
+    selected = obs.select_action_from_mjai(json.dumps(action, ensure_ascii=False))
+    if selected is not None:
+        return selected
+
+    legal_actions = [_action_to_mjai_dict(item) for item in obs.legal_actions()]
+    fallback = _legalize_action(action, legal_actions=legal_actions, actor=actor)
+    selected = obs.select_action_from_mjai(json.dumps(fallback, ensure_ascii=False))
+    if selected is None:
+        raise RuntimeError(f"action could not be converted by RiichiEnv: {fallback}")
+    return selected
+
+
 def _tile136_to_str(tile136: int) -> str:
     if tile136 == FIVE_RED_MAN:
         return "5mr"
@@ -404,10 +619,13 @@ class RiichiDevDecisionAgent:
     def reset(self) -> None:
         return None
 
+    def observe(self, obs: Any) -> None:
+        return None
+
     def act(self, obs: Any):
         raise NotImplementedError
 
-    def select_action(self, message: dict[str, Any], seat: int | None) -> dict[str, Any]:
+    def select_action(self, message: dict[str, Any], seat: int | None) -> dict[str, Any] | str:
         raise NotImplementedError
 
 
@@ -457,6 +675,7 @@ class RiichiDevAuditLogger:
         message: dict[str, Any],
         response: dict[str, Any],
         latency_ms: float,
+        wire_payload: str | None = None,
     ) -> None:
         possible_actions = message.get("possible_actions") or []
         self.write(
@@ -470,6 +689,7 @@ class RiichiDevAuditLogger:
                 "message_type": message.get("type"),
                 "message_meta": _audit_message_meta(message),
                 "response": response,
+                "wire_payload": wire_payload,
                 "latency_ms": round(latency_ms, 3),
                 "possible_action_count": len(possible_actions),
                 "possible_actions": possible_actions,
@@ -488,6 +708,7 @@ class RiichiDevAuditLogger:
         request_seq: int | None,
         response: dict[str, Any],
         success: bool,
+        wire_payload: str | None = None,
         error: str | None = None,
     ) -> None:
         self.write(
@@ -500,6 +721,7 @@ class RiichiDevAuditLogger:
                 "request_seq": request_seq,
                 "success": success,
                 "response": response,
+                "wire_payload": wire_payload,
                 "error": error,
             }
         )
@@ -514,6 +736,7 @@ class RiichiDevAuditLogger:
         trigger_message: dict[str, Any],
         response: dict[str, Any],
         latency_ms: float,
+        wire_payload: str | None = None,
     ) -> None:
         self.write(
             {
@@ -525,6 +748,7 @@ class RiichiDevAuditLogger:
                 "trigger_type": trigger_message.get("type"),
                 "message_meta": _audit_message_meta(trigger_message),
                 "response": response,
+                "wire_payload": wire_payload,
                 "latency_ms": round(latency_ms, 3),
                 "state": self._state_summary(trigger_message),
                 "normalized_observation": trigger_message.get("_normalized_observation"),
@@ -633,10 +857,16 @@ class ValidationSafeAgent(RiichiDevDecisionAgent):
                 "tsumogiri": True,
             }
             if any(_action_to_mjai_dict(a) == candidate for a in legal_actions):
-                return obs.select_action_from_mjai(json.dumps(candidate, ensure_ascii=False))
-        return obs.select_action_from_mjai(json.dumps({"type": "none"}, ensure_ascii=False))
+                return _select_observation_action(obs, candidate, actor)
+        for action_type in ("hora", "reach", "dahai", "none"):
+            for action in legal_actions:
+                if action.get("type") == action_type:
+                    return _select_observation_action(obs, action, actor)
+        if legal_actions:
+            return _select_observation_action(obs, legal_actions[0], actor)
+        raise RuntimeError("validation-safe local observation has no legal actions")
 
-    def select_action(self, message: dict[str, Any], seat: int | None) -> dict[str, Any]:
+    def select_action(self, message: dict[str, Any], seat: int | None) -> dict[str, Any] | str:
         mtype = message.get("type")
         if mtype == "start_game":
             if seat is not None:
@@ -664,7 +894,7 @@ class ValidationSafeAgent(RiichiDevDecisionAgent):
                 self._last_tsumo = None
                 return candidate
         self._last_tsumo = None
-        return {"type": "none"}
+        return _sanitize_action({"type": "none"}, actor)
 
 
 class RulebaseObservationAgent(RiichiDevDecisionAgent):
@@ -712,11 +942,11 @@ class RulebaseObservationAgent(RiichiDevDecisionAgent):
 
         if not legal_actions:
             self._pending_reach_discard = None
-            return {"type": "none"}
+            return _sanitize_action({"type": "none"}, actor)
         chosen = keqing_core.choose_rulebase_action(snap, actor, legal_actions)
         if chosen is None:
             self._pending_reach_discard = None
-            return {"type": "none"}
+            return _sanitize_action({"type": "none"}, actor)
         self._remember_reach_followup(
             snap=snap,
             actor=actor,
@@ -725,7 +955,18 @@ class RulebaseObservationAgent(RiichiDevDecisionAgent):
         )
         return _sanitize_action(chosen, actor)
 
-    def select_action(self, message: dict[str, Any], seat: int | None) -> dict[str, Any]:
+    def act(self, obs: Any):
+        actor = int(getattr(obs, "player_id", 0))
+        snap = _normalize_observation_state(obs, obs.to_dict())
+        legal_actions = [_action_to_mjai_dict(action) for action in obs.legal_actions()]
+        chosen = self.choose_mjai_action(
+            snap=snap,
+            legal_actions=legal_actions,
+            actor=actor,
+        )
+        return _select_observation_action(obs, chosen, actor)
+
+    def select_action(self, message: dict[str, Any], seat: int | None) -> dict[str, Any] | str:
         mtype = message.get("type")
         if mtype != "request_action":
             if (
@@ -748,6 +989,107 @@ class RulebaseObservationAgent(RiichiDevDecisionAgent):
             legal_actions=[_action_to_mjai_dict(action) for action in legal_actions],
             actor=actor,
         )
+
+
+class MortalObservationAgent(RiichiDevDecisionAgent):
+    def __init__(
+        self,
+        *,
+        model_path: str | Path,
+        project_root: str | Path,
+        device: str = "cuda",
+        verbose: bool = False,
+    ) -> None:
+        self._model_path = Path(model_path)
+        self._mortal_root = Path(project_root) / "third_party" / "Mortal"
+        self._device = device
+        self._verbose = verbose
+        self._seat: int | None = None
+        self._bot: Any | None = None
+
+    def reset(self) -> None:
+        if self._bot is not None:
+            self._bot.reset()
+
+    def _ensure_bot(self, seat: int) -> None:
+        if self._bot is not None and self._seat == seat:
+            return
+        from inference.mortal_bot import MortalReviewBot
+
+        self._seat = seat
+        self._bot = MortalReviewBot(
+            player_id=seat,
+            model_path=self._model_path,
+            mortal_root=self._mortal_root,
+            device=self._device,
+            verbose=self._verbose,
+            enable_review_log=False,
+        )
+
+    def _react_new_events(self, events: list[dict[str, Any]], seat: int) -> dict[str, Any] | None:
+        self._ensure_bot(seat)
+        if self._bot is None:
+            return None
+
+        reaction: dict[str, Any] | None = None
+        for event in events:
+            response = self._bot.react(event)
+            reaction = _action_to_mjai_dict(response) if response is not None else None
+        return reaction
+
+    def choose_mjai_action(
+        self,
+        *,
+        new_events: list[dict[str, Any]],
+        legal_actions: list[dict[str, Any]],
+        actor: int,
+    ) -> dict[str, Any]:
+        reaction = self._react_new_events(new_events, actor)
+        return _legalize_action(reaction, legal_actions=legal_actions, actor=actor)
+
+    def observe(self, obs: Any) -> None:
+        actor = int(getattr(obs, "player_id", 0))
+        self._react_new_events(_observation_new_events(obs), actor)
+
+    def act(self, obs: Any):
+        actor = int(getattr(obs, "player_id", 0))
+        legal_actions = [_action_to_mjai_dict(action) for action in obs.legal_actions()]
+        chosen = self.choose_mjai_action(
+            new_events=_observation_new_events(obs),
+            legal_actions=legal_actions,
+            actor=actor,
+        )
+        action = obs.select_action_from_mjai(json.dumps(chosen, ensure_ascii=False))
+        if action is None:
+            raise RuntimeError(f"Mortal selected action could not be converted by RiichiEnv: {chosen}")
+        return action
+
+    def select_action(self, message: dict[str, Any], seat: int | None) -> dict[str, Any] | str:
+        mtype = message.get("type")
+        if mtype == "request_action":
+            obs, snap = _decode_observation(message)
+            actor = seat if seat is not None else int(snap.get("actor", 0))
+            new_events = _observation_new_events(obs)
+            legal_actions = list(message.get("possible_actions") or [])
+            if not legal_actions:
+                legal_actions = [_action_to_mjai_dict(action) for action in obs.legal_actions()]
+            else:
+                legal_actions = [_action_to_mjai_dict(action) for action in legal_actions]
+            chosen = self.choose_mjai_action(
+                new_events=new_events,
+                legal_actions=legal_actions,
+                actor=actor,
+            )
+            action = obs.select_action_from_mjai(json.dumps(chosen, ensure_ascii=False))
+            if action is None:
+                logger.warning(
+                    "mortal riichienv conversion fallback: actor=%s chosen=%s",
+                    actor,
+                    _action_log_text(chosen),
+                )
+            return _action_to_mjai_wire_payload(chosen, actor_hint=actor, new_events=new_events)
+
+        return {"type": "none"}
 
 
 class ObservationScoringAgent(RiichiDevDecisionAgent):
@@ -877,6 +1219,20 @@ def create_riichi_dev_agent(
         return ValidationSafeAgent()
     if bot_name == "rulebase":
         return RulebaseObservationAgent()
+    if bot_name == "mortal":
+        resolved_model_path = _resolve_model_path(
+            bot_name=bot_name,
+            project_root=project_root,
+            model_path=model_path,
+        )
+        if resolved_model_path is None:
+            raise ValueError("mortal requires a Mortal checkpoint path")
+        return MortalObservationAgent(
+            model_path=resolved_model_path,
+            project_root=project_root,
+            device=device,
+            verbose=verbose,
+        )
     spec = DECISION_AGENT_SPECS.get(model_version or bot_name)
     if spec is None:
         inferred_version = model_version or bot_name
@@ -980,7 +1336,7 @@ class RiichiDevBotClient:
             ping_timeout=self.config.ping_timeout,
         ) as websocket:
             async for raw_message in websocket:
-                message = _enrich_message_for_audit(json.loads(raw_message))
+                message = json.loads(raw_message)
                 request_seq: int | None = None
                 if message.get("type") == "request_action":
                     self._request_seq += 1
@@ -990,13 +1346,14 @@ class RiichiDevBotClient:
                     response = self.handle_message(message)
                 except Exception as exc:
                     latency_ms = (time.perf_counter() - t0) * 1000.0
+                    audit_message = _enrich_message_for_audit(message)
                     self.audit_logger.log_agent_error(
                         queue=self.config.queue,
                         bot_name=self.config.bot_name,
                         model_version=self.config.model_version,
                         seat=self.seat,
                         request_seq=request_seq,
-                        message=message,
+                        message=audit_message,
                         error=f"{type(exc).__name__}: {exc}",
                         traceback_text=traceback.format_exc(),
                     )
@@ -1008,42 +1365,11 @@ class RiichiDevBotClient:
                         )
                     raise
                 latency_ms = (time.perf_counter() - t0) * 1000.0
-                if message.get("type") == "request_action" and response is not None:
-                    self.audit_logger.log_request_action(
-                        queue=self.config.queue,
-                        bot_name=self.config.bot_name,
-                        model_version=self.config.model_version,
-                        seat=self.seat,
-                        request_seq=request_seq,
-                        message=message,
-                        response=response,
-                        latency_ms=latency_ms,
-                    )
-                elif response is not None:
-                    self.audit_logger.log_protocol_action(
-                        queue=self.config.queue,
-                        bot_name=self.config.bot_name,
-                        model_version=self.config.model_version,
-                        seat=self.seat,
-                        trigger_message=message,
-                        response=response,
-                        latency_ms=latency_ms,
-                    )
-                elif message.get("type") in {"start_game", "start_kyoku", "end_kyoku", "end_game", "validation_result", "error"}:
-                    self.audit_logger.log_event(
-                        queue=self.config.queue,
-                        bot_name=self.config.bot_name,
-                        model_version=self.config.model_version,
-                        seat=self.seat,
-                        message=message,
-                    )
-                if self.config.verbose:
-                    logger.info("recv: %s", message.get("type"))
-                    if response is not None:
-                        logger.info("send: %s latency_ms=%.1f", response, latency_ms)
+                audit_response = _action_to_mjai_dict(response) if response is not None else None
+                wire_payload = _action_to_mjai_wire_payload(response) if response is not None else None
                 if response is not None:
                     try:
-                        await websocket.send(json.dumps(response, ensure_ascii=False))
+                        await websocket.send(wire_payload)
                     except Exception as exc:
                         self.audit_logger.log_send_result(
                             queue=self.config.queue,
@@ -1051,23 +1377,61 @@ class RiichiDevBotClient:
                             model_version=self.config.model_version,
                             seat=self.seat,
                             request_seq=request_seq,
-                            response=response,
+                            response=audit_response,
                             success=False,
+                            wire_payload=wire_payload,
                             error=f"{type(exc).__name__}: {exc}",
                         )
                         raise
-                    else:
-                        self.audit_logger.log_send_result(
-                            queue=self.config.queue,
-                            bot_name=self.config.bot_name,
-                            model_version=self.config.model_version,
-                            seat=self.seat,
-                            request_seq=request_seq,
-                            response=response,
-                            success=True,
-                        )
 
-    def handle_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
+                audit_message = _enrich_message_for_audit(message)
+                if message.get("type") == "request_action" and response is not None:
+                    self.audit_logger.log_request_action(
+                        queue=self.config.queue,
+                        bot_name=self.config.bot_name,
+                        model_version=self.config.model_version,
+                        seat=self.seat,
+                        request_seq=request_seq,
+                        message=audit_message,
+                        response=audit_response,
+                        latency_ms=latency_ms,
+                        wire_payload=wire_payload,
+                    )
+                elif response is not None:
+                    self.audit_logger.log_protocol_action(
+                        queue=self.config.queue,
+                        bot_name=self.config.bot_name,
+                        model_version=self.config.model_version,
+                        seat=self.seat,
+                        trigger_message=audit_message,
+                        response=audit_response,
+                        latency_ms=latency_ms,
+                        wire_payload=wire_payload,
+                    )
+                elif message.get("type") in {"start_game", "start_kyoku", "end_kyoku", "end_game", "validation_result", "error"}:
+                    self.audit_logger.log_event(
+                        queue=self.config.queue,
+                        bot_name=self.config.bot_name,
+                        model_version=self.config.model_version,
+                        seat=self.seat,
+                        message=audit_message,
+                    )
+                if response is not None:
+                    self.audit_logger.log_send_result(
+                        queue=self.config.queue,
+                        bot_name=self.config.bot_name,
+                        model_version=self.config.model_version,
+                        seat=self.seat,
+                        request_seq=request_seq,
+                        response=audit_response,
+                        success=True,
+                        wire_payload=wire_payload,
+                    )
+                    if self.config.verbose:
+                        logger.info("recv: %s", message.get("type"))
+                        logger.info("send: %s latency_ms=%.1f", wire_payload, latency_ms)
+
+    def handle_message(self, message: dict[str, Any]) -> dict[str, Any] | str | None:
         mtype = message.get("type")
         if mtype == "start_game":
             self._saw_start_game = True
@@ -1078,8 +1442,6 @@ class RiichiDevBotClient:
         if mtype == "end_game":
             self._saw_end_game = True
             return None
-        if mtype == "reach":
-            return self.agent.select_action(message, self.seat)
         if mtype != "request_action":
             return None
         return self.agent.select_action(message, self.seat)
@@ -1151,30 +1513,52 @@ class RiichiDevBotClient:
 
 def run_local_game(
     *,
-    agent: RiichiDevDecisionAgent,
+    agent: RiichiDevDecisionAgent | None = None,
+    agents: Mapping[int, RiichiDevDecisionAgent] | Sequence[RiichiDevDecisionAgent] | None = None,
     game_mode: int = 2,
     seed: int | None = 42,
     max_steps: int = 10000,
 ) -> dict[str, Any]:
+    if agent is None and agents is None:
+        raise ValueError("run_local_game requires agent or agents")
+
+    def local_agent_for(pid: int) -> RiichiDevDecisionAgent:
+        if agents is None:
+            assert agent is not None
+            return agent
+        return agents[pid]
+
+    reset_seen: set[int] = set()
+    reset_candidates = agents.values() if isinstance(agents, Mapping) else agents
+    if reset_candidates is None:
+        reset_candidates = [agent]
+    for local_agent in reset_candidates:
+        if local_agent is None:
+            continue
+        marker = id(local_agent)
+        if marker in reset_seen:
+            continue
+        reset_seen.add(marker)
+        local_agent.reset()
+
     env = RiichiEnv(game_mode=game_mode, seed=seed)
     observations = env.get_observations()
     step_count = 0
 
     while not env.done():
-        acted = False
+        actions_to_step: dict[int, Any] = {}
         for pid, obs in observations.items():
             actions = obs.legal_actions()
             if not actions:
+                local_agent_for(int(pid)).observe(obs)
                 continue
-            action = agent.act(obs)
-            observations = env.step({pid: action})
-            step_count += 1
-            acted = True
-            if step_count >= max_steps:
-                raise RuntimeError(f"local game exceeded max_steps={max_steps}")
-            break
-        if not acted:
+            actions_to_step[int(pid)] = local_agent_for(int(pid)).act(obs)
+        if not actions_to_step:
             raise RuntimeError("local game stalled without any legal action")
+        observations = env.step(actions_to_step)
+        step_count += 1
+        if step_count >= max_steps:
+            raise RuntimeError(f"local game exceeded max_steps={max_steps}")
 
     return {
         "scores": list(env.scores()),
@@ -1189,7 +1573,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--bot-name",
         default="xmodel1",
-        help="bot family / checkpoint namespace to run (xmodel1, keqingv4, rulebase)",
+        help="bot family / checkpoint namespace to run (xmodel1, keqingv4, mortal, rulebase)",
     )
     parser.add_argument(
         "--model-version",
@@ -1287,18 +1671,37 @@ async def _async_main(args: argparse.Namespace) -> None:
     explicit_model_path = Path(args.model_path) if args.model_path else None
 
     if args.mode == "local":
-        agent = create_riichi_dev_agent(
-            bot_name=args.bot_name,
-            project_root=project_root,
-            model_path=explicit_model_path,
-            device=args.device,
-            verbose=args.verbose,
-            model_version=args.model_version or None,
-            rank_pt_lambda=args.rank_pt_lambda,
-            validation_safe=args.validation_safe,
-        )
+        isolated_agents = args.bot_name == "mortal" and not args.validation_safe
+        agent = None
+        agents = None
+        if isolated_agents:
+            agents = {
+                pid: create_riichi_dev_agent(
+                    bot_name=args.bot_name,
+                    project_root=project_root,
+                    model_path=explicit_model_path,
+                    device=args.device,
+                    verbose=args.verbose,
+                    model_version=args.model_version or None,
+                    rank_pt_lambda=args.rank_pt_lambda,
+                    validation_safe=args.validation_safe,
+                )
+                for pid in range(4)
+            }
+        else:
+            agent = create_riichi_dev_agent(
+                bot_name=args.bot_name,
+                project_root=project_root,
+                model_path=explicit_model_path,
+                device=args.device,
+                verbose=args.verbose,
+                model_version=args.model_version or None,
+                rank_pt_lambda=args.rank_pt_lambda,
+                validation_safe=args.validation_safe,
+            )
         result = run_local_game(
             agent=agent,
+            agents=agents,
             game_mode=args.game_mode,
             seed=args.seed,
             max_steps=args.max_steps,

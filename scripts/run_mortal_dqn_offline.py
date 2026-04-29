@@ -31,6 +31,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=20260428)
     parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--log-every", type=int, default=50)
     return parser.parse_args()
 
 
@@ -44,6 +45,7 @@ def main() -> None:
         device_override=args.device,
         seed=int(args.seed),
         num_workers=args.num_workers,
+        log_every=int(args.log_every),
     )
 
 
@@ -55,9 +57,12 @@ def train_to_target_steps(
     device_override: str | None = None,
     seed: int = 20260428,
     num_workers: int | None = None,
+    log_every: int = 50,
 ) -> dict[str, Any]:
     if target_steps <= 0:
         raise ValueError(f"target_steps must be positive, got {target_steps}")
+    if log_every <= 0:
+        raise ValueError(f"log_every must be positive, got {log_every}")
     random.seed(seed)
     torch.manual_seed(seed)
     mortal_python_dir = (mortal_root / "mortal").resolve()
@@ -146,7 +151,18 @@ def train_to_target_steps(
     )
 
     writer = SummaryWriter(str(control["tensorboard_dir"]))
-    stats = {"dqn_loss": 0.0, "cql_loss": 0.0, "next_rank_loss": 0.0}
+    stats = {
+        "dqn_loss": 0.0,
+        "cql_loss": 0.0,
+        "next_rank_loss": 0.0,
+        "total_loss": 0.0,
+        "next_rank_acc": 0.0,
+        "q_mean": 0.0,
+        "target_mean": 0.0,
+        "q_abs_err": 0.0,
+    }
+    window_stats = {key: 0.0 for key in stats}
+    window_count = 0
     trained_steps = 0
     optimizer.zero_grad(set_to_none=True)
     mse = nn.MSELoss()
@@ -155,6 +171,63 @@ def train_to_target_steps(
     dqn.train()
     aux_net.train()
 
+    def save_checkpoint() -> None:
+        Path(state_file).parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "mortal": mortal.state_dict(),
+                "current_dqn": dqn.state_dict(),
+                "aux_net": aux_net.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "scaler": scaler.state_dict(),
+                "steps": steps,
+                "timestamp": datetime.now().timestamp(),
+                "best_perf": best_perf,
+                "config": config,
+            },
+            state_file,
+        )
+        logging.info("saved Mortal checkpoint: %s steps=%s", state_file, steps)
+
+    def log_train_metrics(*, prefix: str = "Mortal train metrics") -> None:
+        nonlocal window_count, window_stats
+        if window_count <= 0:
+            return
+        avg = {key: value / window_count for key, value in window_stats.items()}
+        lr = float(scheduler.get_last_lr()[0])
+        logging.info(
+            "%s: steps=%s/%s window=%s "
+            "loss_total=%.6f dqn_loss=%.6f cql_loss=%.6f next_rank_loss=%.6f "
+            "next_rank_acc=%.4f q_mean=%.4f target_mean=%.4f q_abs_err=%.4f lr=%.8g",
+            prefix,
+            steps,
+            target_steps,
+            window_count,
+            avg["total_loss"],
+            avg["dqn_loss"],
+            avg["cql_loss"],
+            avg["next_rank_loss"],
+            avg["next_rank_acc"],
+            avg["q_mean"],
+            avg["target_mean"],
+            avg["q_abs_err"],
+            lr,
+        )
+        writer.add_scalar("loss/total_window", avg["total_loss"], steps)
+        writer.add_scalar("loss/dqn_window", avg["dqn_loss"], steps)
+        writer.add_scalar("loss/cql_window", avg["cql_loss"], steps)
+        writer.add_scalar("loss/next_rank_window", avg["next_rank_loss"], steps)
+        writer.add_scalar("acc/next_rank_window", avg["next_rank_acc"], steps)
+        writer.add_scalar("q/q_mean_window", avg["q_mean"], steps)
+        writer.add_scalar("q/target_mean_window", avg["target_mean"], steps)
+        writer.add_scalar("q/q_abs_err_window", avg["q_abs_err"], steps)
+        writer.add_scalar("hparam/lr", lr, steps)
+        writer.flush()
+        window_stats = {key: 0.0 for key in window_stats}
+        window_count = 0
+
+    save_every = int(control["save_every"])
     while steps < target_steps:
         try:
             obs, actions, masks, steps_to_done, kyoku_rewards, player_ranks = next(data_loader)
@@ -186,9 +259,20 @@ def train_to_target_steps(
 
         scaler.scale(loss / opt_step_every).backward()
         with torch.inference_mode():
-            stats["dqn_loss"] += float(dqn_loss.detach().cpu())
-            stats["cql_loss"] += float(cql_loss.detach().cpu())
-            stats["next_rank_loss"] += float(next_rank_loss.detach().cpu())
+            batch_metrics = {
+                "dqn_loss": float(dqn_loss.detach().cpu()),
+                "cql_loss": float(cql_loss.detach().cpu()),
+                "next_rank_loss": float(next_rank_loss.detach().cpu()),
+                "total_loss": float(loss.detach().cpu()),
+                "next_rank_acc": float((next_rank_logits.argmax(-1) == player_ranks).to(torch.float64).mean().detach().cpu()),
+                "q_mean": float(q.detach().to(torch.float32).mean().cpu()),
+                "target_mean": float(q_target_mc.detach().to(torch.float32).mean().cpu()),
+                "q_abs_err": float((q.detach().to(torch.float32) - q_target_mc.detach().to(torch.float32)).abs().mean().cpu()),
+            }
+            for key, value in batch_metrics.items():
+                stats[key] += value
+                window_stats[key] += value
+            window_count += 1
 
         steps += 1
         trained_steps += 1
@@ -204,33 +288,21 @@ def train_to_target_steps(
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
         scheduler.step()
-        if trained_steps == 1 or trained_steps % 10 == 0 or steps >= target_steps:
-            logging.info("Mortal train progress: steps=%s/%s", steps, target_steps)
+        if trained_steps == 1 or trained_steps % log_every == 0 or steps >= target_steps:
+            log_train_metrics()
+        if save_every > 0 and steps % save_every == 0:
+            save_checkpoint()
 
+    log_train_metrics(prefix="Mortal final train metrics")
     if trained_steps:
         for key, value in stats.items():
-            writer.add_scalar(f"loss/{key}", value / trained_steps, steps)
+            namespace = "acc" if key.endswith("_acc") else ("q" if key.startswith("q_") or key.startswith("target_") else "loss")
+            writer.add_scalar(f"{namespace}/{key}", value / trained_steps, steps)
         writer.add_scalar("hparam/lr", scheduler.get_last_lr()[0], steps)
         writer.flush()
     writer.close()
 
-    Path(state_file).parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "mortal": mortal.state_dict(),
-            "current_dqn": dqn.state_dict(),
-            "aux_net": aux_net.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "scaler": scaler.state_dict(),
-            "steps": steps,
-            "timestamp": datetime.now().timestamp(),
-            "best_perf": best_perf,
-            "config": config,
-        },
-        state_file,
-    )
-    logging.info("saved Mortal checkpoint: %s steps=%s", state_file, steps)
+    save_checkpoint()
     return {"steps": steps, "trained_steps": trained_steps, "state_file": state_file}
 
 

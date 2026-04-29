@@ -36,6 +36,16 @@ env/
 
 # Model checkpoints and training outputs
 artifacts/
+artifacts/mortal_mjai_gz*/
+artifacts/mortal_training*/
+artifacts/models/
+artifacts/**/weights/
+artifacts/**/weight/
+artifacts/**/checkpoints/
+artifacts/**/checkpoint/
+artifacts/**/ckpts/
+artifacts/**/ckpt/
+artifacts/**/runs/
 *.npz
 *.ckpt
 *.pth
@@ -112,6 +122,9 @@ archive/
 # Local-only working surfaces
 docs/**
 !docs/project_overview_current.md
+!docs/mortal_action_contract.md
+!docs/keqingrl/
+!docs/keqingrl/mortal_training_workflow.md
 deploy/
 tmp/
 agents.md

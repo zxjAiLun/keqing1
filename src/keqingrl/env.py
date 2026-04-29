@@ -31,7 +31,11 @@ from keqingrl.metadata import (
     RULE_SCORE_VERSION,
     STYLE_CONTEXT_VERSION,
 )
-from keqingrl.mortal_teacher import assert_mortal_discard_mask_parity
+from keqingrl.mortal_teacher import (
+    MortalTeacherMappingError,
+    assert_mortal_action_mask_compatible,
+    assert_mortal_discard_mask_parity,
+)
 from keqingrl.rewards import (
     DEFAULT_PT_MAP,
     build_rule_context,
@@ -147,6 +151,7 @@ class DiscardOnlyMahjongEnv:
         rule_score_config: RuleScoreConfig = DEFAULT_RULE_SCORE_CONFIG,
         mortal_teacher_runtime: Any | None = None,
         mortal_observation_bridge: Any | None = None,
+        mortal_teacher_strict_extra_mask: bool = True,
     ) -> None:
         keqing_core.enable_rust(True)
         self.native_schema_info = keqing_core.require_native_schema(**_KEQINGRL_NATIVE_SCHEMA_KWARGS)
@@ -185,6 +190,7 @@ class DiscardOnlyMahjongEnv:
         self.rule_score_config = rule_score_config
         self.mortal_teacher_runtime = mortal_teacher_runtime
         self.mortal_observation_bridge = mortal_observation_bridge
+        self.mortal_teacher_strict_extra_mask = bool(mortal_teacher_strict_extra_mask)
         self.rule_context = build_rule_context(
             self.pt_map,
             rank_score_scale=self.rank_score_scale,
@@ -268,6 +274,12 @@ class DiscardOnlyMahjongEnv:
             turn.legal_actions,
             config=self.rule_score_config,
         )
+        rulebase_chosen = turn.rulebase_chosen
+        rulebase_debug_key = turn.rulebase_debug_key
+        if rulebase_chosen is None:
+            rulebase_chosen = self._rule_score_top_action_key(turn.legal_actions, rule_scores.prior_logits)
+            if rulebase_debug_key is None and rulebase_chosen is not None:
+                rulebase_debug_key = f"rule_score_top1:{rulebase_chosen}"
         extras = self._mortal_teacher_extras_for_turn(turn)
         return PolicyInput(
             obs=ObsTensorBatch(tile_obs=tile_obs, scalar_obs=scalar_obs, extras=extras),
@@ -280,8 +292,8 @@ class DiscardOnlyMahjongEnv:
             style_context=self.style_context_tensor.unsqueeze(0).clone(),
             legal_actions=(turn.legal_actions,),
             metadata={
-                "rulebase_chosen": turn.rulebase_chosen,
-                "rulebase_debug_key": turn.rulebase_debug_key,
+                "rulebase_chosen": rulebase_chosen,
+                "rulebase_debug_key": rulebase_debug_key,
                 "control_action_types": turn.control_action_types,
                 "is_learner_controlled": True,
                 "observation_contract_version": OBSERVATION_CONTRACT_VERSION,
@@ -300,10 +312,18 @@ class DiscardOnlyMahjongEnv:
             },
         )
 
+    def _rule_score_top_action_key(
+        self,
+        legal_actions: Sequence[ActionSpec],
+        prior_logits: torch.Tensor,
+    ) -> str | None:
+        if not legal_actions or int(prior_logits.numel()) != len(legal_actions):
+            return None
+        top_index = int(prior_logits.float().argmax().item())
+        return legal_actions[top_index].canonical_key
+
     def _mortal_teacher_extras_for_turn(self, turn: _TurnContext) -> dict[str, torch.Tensor]:
         if self.mortal_teacher_runtime is None:
-            return {}
-        if any(action.action_type != ActionType.DISCARD for action in turn.legal_actions):
             return {}
         bridge = self.mortal_observation_bridge
         if bridge is None:
@@ -311,14 +331,56 @@ class DiscardOnlyMahjongEnv:
 
             bridge = MortalObservationBridge()
             self.mortal_observation_bridge = bridge
-        room = self._require_room()
-        encoded = bridge.encode_from_events(room.events, turn.actor)
-        assert_mortal_discard_mask_parity(encoded.action_mask, turn.legal_actions)
+        encoded = bridge.encode_from_events(self._mortal_events_for_turn(turn), turn.actor)
+        try:
+            if all(action.action_type == ActionType.DISCARD for action in turn.legal_actions):
+                assert_mortal_discard_mask_parity(encoded.action_mask, turn.legal_actions)
+            else:
+                assert_mortal_action_mask_compatible(
+                    encoded.action_mask,
+                    turn.legal_actions,
+                    strict_extra=self.mortal_teacher_strict_extra_mask,
+                )
+        except MortalTeacherMappingError as exc:
+            raise MortalTeacherMappingError(
+                f"{exc}; context={self._mortal_mapping_debug_context(turn)}"
+            ) from exc
         output = self.mortal_teacher_runtime.evaluate(
             encoded.obs.unsqueeze(0),
             encoded.action_mask.unsqueeze(0),
         )
         return output.extras()
+
+    def _mortal_mapping_debug_context(self, turn: _TurnContext) -> dict[str, object]:
+        snapshot = turn.snapshot
+        actor = int(turn.actor)
+        events = self._mortal_events_for_turn(turn)
+        melds = snapshot.get("melds")
+        actor_melds = None
+        if isinstance(melds, Sequence) and not isinstance(melds, (str, bytes)) and actor < len(melds):
+            actor_melds = melds[actor]
+        return {
+            "actor": actor,
+            "control_action_types": tuple(turn.control_action_types),
+            "hand": snapshot.get("hand"),
+            "tsumo_pai": snapshot.get("tsumo_pai"),
+            "last_tsumo": snapshot.get("last_tsumo"),
+            "last_discard": snapshot.get("last_discard"),
+            "actor_melds": actor_melds,
+            "legal_actions": [action.canonical_key for action in turn.legal_actions],
+            "events_tail": events[-8:],
+        }
+
+    def _mortal_events_for_turn(self, turn: _TurnContext) -> Sequence[dict[str, object]]:
+        room = self._require_room()
+        events = tuple(room.events)
+        if (
+            events
+            and events[-1].get("type") == "reach_accepted"
+            and any(action.action_type in _SUPPORTED_RESPONSE_ACTION_TYPES for action in turn.legal_actions)
+        ):
+            return events[:-1]
+        return events
 
     def step(self, actor: int, action_spec: ActionSpec) -> StepResult:
         room = self._require_room()
@@ -891,6 +953,8 @@ class DiscardOnlyMahjongEnv:
             action_spec = self._convert_supported_response_raw_action(raw_spec)
             if action_spec is not None:
                 controlled_pairs.append((action_spec, (raw_spec.to_mjai(),)))
+        if controlled_pairs and all(action.action_type == ActionType.PASS for action, _ in controlled_pairs):
+            return []
         return controlled_pairs
 
     def _collect_reach_discard_actions(
@@ -899,6 +963,8 @@ class DiscardOnlyMahjongEnv:
         raw_legal_actions: Sequence[MahjongActionSpec],
     ) -> list[tuple[ActionSpec, tuple[dict[str, object], ...]]]:
         actor = int(snapshot["actor"])
+        if not self._reach_declaration_preconditions(snapshot, actor):
+            return []
         candidate_keys = set(self._enumerate_reach_discard_candidates(snapshot, actor))
         if not candidate_keys:
             return []
@@ -923,6 +989,28 @@ class DiscardOnlyMahjongEnv:
             )
             seen_keys.add(key)
         return bindings
+
+    def _reach_declaration_preconditions(self, snapshot: dict[str, object], actor: int) -> bool:
+        remaining_wall = snapshot.get("remaining_wall")
+        if remaining_wall is not None and int(remaining_wall) < 4:
+            return False
+        scores = snapshot.get("scores")
+        if isinstance(scores, Sequence) and not isinstance(scores, (str, bytes)):
+            if actor < len(scores) and float(scores[actor]) < 1000.0:
+                return False
+        reached = snapshot.get("reached")
+        if isinstance(reached, Sequence) and not isinstance(reached, (str, bytes)):
+            if actor < len(reached) and bool(reached[actor]):
+                return False
+        pending_reach = snapshot.get("pending_reach")
+        if isinstance(pending_reach, Sequence) and not isinstance(pending_reach, (str, bytes)):
+            if actor < len(pending_reach) and bool(pending_reach[actor]):
+                return False
+        melds = snapshot.get("melds")
+        if isinstance(melds, Sequence) and not isinstance(melds, (str, bytes)):
+            if actor < len(melds) and bool(melds[actor]):
+                return False
+        return True
 
     def _enumerate_reach_discard_candidates(
         self,
@@ -1022,8 +1110,10 @@ class DiscardOnlyMahjongEnv:
         snapshot["actor"] = actor
         snapshot["tsumo_pai"] = room.state.last_tsumo_raw[actor] or room.state.last_tsumo[actor]
         self._inject_rust_shanten_waits(snapshot, actor)
-        snapshot["_hora_is_haitei"] = room.remaining_wall() == 0
-        snapshot["_hora_is_houtei"] = room.remaining_wall() == 0
+        remaining_wall = snapshot.get("remaining_wall")
+        wall_empty = remaining_wall is not None and int(remaining_wall) == 0
+        snapshot["_hora_is_haitei"] = wall_empty
+        snapshot["_hora_is_houtei"] = wall_empty
         snapshot["_hora_is_rinshan"] = room.state.players[actor].rinshan_tsumo
         snapshot["_hora_is_chankan"] = bool(
             room.state.last_kakan and room.state.last_kakan.get("actor") != actor

@@ -1,6 +1,6 @@
 # Keqing1 Project Progress
 
-Updated: 2026-04-24
+Updated: 2026-04-28
 
 This is the primary live status board for the repository.
 
@@ -9,6 +9,7 @@ This is the primary live status board for the repository.
 - `keqingrl` is now the only model-growth mainline.
 - The active design is `KeqingRL-Lite`: rulebase prior + neural delta + actor-critic + rollout-native PPO.
 - `xmodel1` and `keqingv4` are frozen assets/baselines. They remain useful for candidate features, after-state ideas, runtime/review adapters, and Rust ownership work, but they are no longer the default training path.
+- Teacher source rule: only trained Mortal checkpoints may be used as teacher sources. Do not use `xmodel`, `xmodel1`, or `keqingv4` logits/checkpoints/rollouts as teacher outputs.
 - Do not spend default mainline effort on full `xmodel1` preprocess/retrain, new `keqingv4` aux heads, or cache schema churn.
 - `rulebase` is now both a compatibility bot and the initial policy prior/autopilot baseline.
 - Rollout data is first-class: ordered legal actions, canonical action keys, raw rule scores, prior logits, old log-prob/value, rule/style context, and policy version are part of the learner contract.
@@ -40,6 +41,24 @@ final_logits = rule_score_scale * prior_logits + neural_delta
 `raw_rule_scores` preserve rulebase argmax parity. `prior_logits` are policy prior logits. Clipping must not change the raw best action except true raw-score ties.
 
 ## Active Workstream: KeqingRL-Lite
+
+### Mortal Teacher Correction
+
+The 2026-04-28 Mortal probes corrected an earlier interpretation mistake:
+
+```text
+WRONG: discard-only / terminal-poor no-move runs prove Mortal teacher weakness.
+RIGHT: such runs are unqualified unless the batch covers the action opportunities being tested.
+```
+
+Current gate policy:
+
+- `discard-only` Mortal probes are infrastructure diagnostics, not strength evidence.
+- `score_changed` is not an agari proxy; riichi sticks and ryukyoku payments can change scores without `hora`.
+- Actual `hora` count is an outcome metric affected by wall luck. It must not be a default teacher gate.
+- The default `--terminal-coverage-gate` is opportunity-based: legal terminal/agari rows and prepared legal terminal/agari rows.
+- Outcome thresholds only gate when `--terminal-coverage-outcome-gate` is explicitly enabled.
+- Surprising results must be checked with `scripts/export_keqingrl_mjai_replay.py` before changing conclusions.
 
 ### Contract Status
 
@@ -97,11 +116,11 @@ Not default work:
 
 ## Immediate Development Order
 
-1. Finish KeqingRL-Lite contracts and tests.
-2. Wire rulebase scoring into env observation and rollout storage.
-3. Verify zero-delta policy distribution equals rule prior distribution.
-4. Run discard-only PPO smoke with forced terminal autopilot.
-5. Add fixed-seed evaluation/duplicate smoke.
+1. Keep KeqingCore/Rust as legal-action owner and fail closed on `ActionSpec` / mask mismatch.
+2. Use Mortal trained checkpoints only as Q/ranking teachers over KeqingRL legal actions.
+3. Qualify teacher probes with opportunity-based terminal/action coverage before interpreting topK movement.
+4. Treat discard-only probes as contract diagnostics only.
+5. Investigate full response-window Mortal mask parity gaps before enabling PASS/RON/PON/CHI training.
 
 ## Current Known Environment Note
 

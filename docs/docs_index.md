@@ -1,6 +1,6 @@
 # Keqing1 Docs Index
 
-Updated: 2026-04-24
+Updated: 2026-04-28
 
 ## Active Control Surfaces
 
@@ -14,7 +14,16 @@ Updated: 2026-04-24
 ### KeqingRL-Lite
 
 - `docs/keqingrl/keqingrl_model_design_v1.md`: active model design
+- `docs/keqingrl/mortal_training_workflow.md`: Mortal data packaging, no-ds3 training workflow, and runtime promotion
+- `docs/mortal_action_contract.md`: active Mortal Q/mask/action mapping and teacher-gate correction notes
+- `plans/mortal_training_runbook_2026_04_28.md`: operational Mortal training and KeqingRL teacher probe runbook
 - `plans/keqingrl_lite_mainline_2026_04_24.md`: active implementation plan
+
+Deprecated Mortal context:
+
+- `plans/mortal_teacher_contract_2026_04_28.md`: historical `mortal-discard-q`
+  bridge notes only. It must not be used as the active teacher plan or as
+  evidence that discard-only no-pass proves Mortal teacher weakness.
 
 ## Frozen Asset References
 

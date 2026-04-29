@@ -24,6 +24,13 @@ export const BOT_CATALOG: BotCatalogEntry[] = [
     description: '当前备线与 Rust 语义收敛路径。',
   },
   {
+    value: 'mortal',
+    label: 'mortal',
+    shortLabel: 'Mortal',
+    badge: 'Review',
+    description: 'Mortal 原生 Brain+DQN checkpoint，用于打牌和牌谱 review。',
+  },
+  {
     value: 'rulebase',
     label: 'rulebase',
     shortLabel: '基线',
@@ -37,6 +44,7 @@ export const DEFAULT_BOT_TYPE: BotType = 'xmodel1';
 export const BOT_CHECKPOINT_DEFAULTS: Record<BotType, string> = {
   xmodel1: 'artifacts/models/xmodel1/best.pth',
   keqingv4: 'artifacts/models/keqingv4/best.pth',
+  mortal: 'artifacts/mortal_serving/mortal.pth',
   rulebase: '',
 };
 

@@ -29,6 +29,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=20260428)
     parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument("--log-every", type=int, default=50)
     return parser.parse_args()
 
 
@@ -43,6 +44,7 @@ def main() -> None:
         device_override=args.device,
         seed=int(args.seed),
         num_workers=int(args.num_workers),
+        log_every=int(args.log_every),
     )
 
 
@@ -55,11 +57,14 @@ def train_to_target_steps(
     device_override: str | None = None,
     seed: int = 20260428,
     num_workers: int = 1,
+    log_every: int = 50,
 ) -> dict[str, Any]:
     if target_steps <= 0:
         raise ValueError(f"target_steps must be positive, got {target_steps}")
     if num_workers < 0:
         raise ValueError(f"num_workers must be non-negative, got {num_workers}")
+    if log_every <= 0:
+        raise ValueError(f"log_every must be positive, got {log_every}")
     random.seed(seed)
     torch.manual_seed(seed)
     mortal_python_dir = (mortal_root / "mortal").resolve()
@@ -127,7 +132,36 @@ def train_to_target_steps(
     trained_steps = 0
     running_loss = 0.0
     running_acc = 0.0
+    window_loss = 0.0
+    window_acc = 0.0
+    window_count = 0
     grp.train()
+
+    def log_train_metrics(*, prefix: str = "GRP train metrics") -> None:
+        nonlocal window_loss, window_acc, window_count
+        if window_count <= 0:
+            return
+        avg_loss = window_loss / window_count
+        avg_acc = window_acc / window_count
+        lr = float(optimizer.param_groups[0]["lr"])
+        logging.info(
+            "%s: steps=%s/%s window=%s loss=%.6f acc=%.4f lr=%.8g",
+            prefix,
+            steps,
+            target_steps,
+            window_count,
+            avg_loss,
+            avg_acc,
+            lr,
+        )
+        writer.add_scalar("loss/train_window", avg_loss, steps)
+        writer.add_scalar("acc/train_window", avg_acc, steps)
+        writer.add_scalar("hparam/lr", lr, steps)
+        writer.flush()
+        window_loss = 0.0
+        window_acc = 0.0
+        window_count = 0
+
     while steps < target_steps:
         inputs, rank_by_players = next(train_loader)
         inputs = inputs.to(dtype=torch.float64, device=device)
@@ -142,13 +176,19 @@ def train_to_target_steps(
         optimizer.step()
 
         with torch.inference_mode():
-            running_loss += float(loss.detach().cpu())
-            running_acc += float((logits.argmax(-1) == labels).to(torch.float64).mean().detach().cpu())
+            batch_loss = float(loss.detach().cpu())
+            batch_acc = float((logits.argmax(-1) == labels).to(torch.float64).mean().detach().cpu())
+            running_loss += batch_loss
+            running_acc += batch_acc
+            window_loss += batch_loss
+            window_acc += batch_acc
+            window_count += 1
         steps += 1
         trained_steps += 1
-        if trained_steps == 1 or trained_steps % 50 == 0 or steps >= target_steps:
-            logging.info("GRP train progress: steps=%s/%s", steps, target_steps)
+        if trained_steps == 1 or trained_steps % log_every == 0 or steps >= target_steps:
+            log_train_metrics()
 
+    log_train_metrics(prefix="GRP final train metrics")
     if trained_steps:
         writer.add_scalar("loss/train", running_loss / trained_steps, steps)
         writer.add_scalar("acc/train", running_acc / trained_steps, steps)
@@ -164,6 +204,13 @@ def train_to_target_steps(
         num_workers=num_workers,
     )
     if val_summary is not None:
+        logging.info(
+            "GRP val metrics: steps=%s val_steps=%s loss=%.6f acc=%.4f",
+            steps,
+            resolved_val_steps,
+            val_summary["loss"],
+            val_summary["acc"],
+        )
         writer.add_scalar("loss/val", val_summary["loss"], steps)
         writer.add_scalar("acc/val", val_summary["acc"], steps)
     writer.flush()
@@ -246,7 +293,8 @@ def _validate(
             loss = F.cross_entropy(logits, labels)
             total_loss += float(loss.detach().cpu())
             total_acc += float((logits.argmax(-1) == labels).to(torch.float64).mean().detach().cpu())
-            logging.info("GRP val progress: %s/%s", idx + 1, val_steps)
+            if idx == 0 or (idx + 1) % 50 == 0 or idx + 1 >= val_steps:
+                logging.info("GRP val progress: %s/%s", idx + 1, val_steps)
     grp.train()
     return {"loss": total_loss / val_steps, "acc": total_acc / val_steps}
 

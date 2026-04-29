@@ -92,6 +92,8 @@ def sanitize_event_for_mortal(event: dict[str, Any]) -> dict[str, Any] | None:
     event_type = str(event.get("type", ""))
     if event_type in _MORTAL_UNSUPPORTED_ANNOUNCE_EVENTS:
         return None
+    if event_type == "none" and "actor" in event:
+        return None
     return dict(event)
 
 

@@ -30,10 +30,12 @@ for _dir in (str(_SRC_DIR), str(_SCRIPTS_DIR), str(_PROJECT_ROOT)):
 
 from inference.rulebase_bot import RulebaseBot
 from inference.runtime_bot import RuntimeBot
+from inference.mortal_bot import MortalReviewBot
 
 # bot 类型 → run_replay_from_source 内部创建 Bot 时用
 _BOT_CLASSES = {
     "keqingv4": RuntimeBot,
+    "mortal": MortalReviewBot,
     "xmodel1": RuntimeBot,
     "rulebase": RulebaseBot,
 }
@@ -43,6 +45,7 @@ PLAYER_NAMES = ["East", "South", "West", "North"]
 # 默认 checkpoint 路径（按 bot 类型，相对于 PROJECT_ROOT）
 _DEFAULT_CHECKPOINTS = {
     "keqingv4": _PROJECT_ROOT / "artifacts/models/keqingv4/best.pth",
+    "mortal": _PROJECT_ROOT / "artifacts/mortal_serving/mortal.pth",
     "xmodel1": _PROJECT_ROOT / "artifacts/models/xmodel1/best.pth",
 }
 _REVIEW_EXPORTER = DefaultRuntimeReviewExporter()
@@ -156,6 +159,7 @@ def run_replay_from_source(
     checkpoint: Union[str, Path] | None = None,
     input_type: str = "auto",
     bot_type: str = "xmodel1",
+    render_html_report: bool = True,
 ) -> tuple:
     """运行跑谱并返回 (Bot实例, HTML报告字符串)。
 
@@ -175,7 +179,7 @@ def run_replay_from_source(
         输入内容类型："auto"（自动检测）、"tenhou6"（tenhou6 JSON）、"mjai"（mjai JSONL）。
         "url" 模式下 source 已是 mjai 事件列表。
     bot_type : str
-        Bot 类型：`xmodel1` / `keqingv4` / `rulebase`。
+        Bot 类型：`xmodel1` / `keqingv4` / `mortal` / `rulebase`。
         `rulebase` 不加载 checkpoint；其余模型在 checkpoint 为 None 时使用默认路径。
 
     Returns
@@ -201,6 +205,12 @@ def run_replay_from_source(
     bot_cls = _BOT_CLASSES[bot_type]
     if bot_type == "rulebase":
         bot = bot_cls(player_id=player_id)
+    elif bot_type == "mortal":
+        bot = bot_cls(
+            player_id=player_id,
+            model_path=checkpoint,
+            mortal_root=_PROJECT_ROOT / "third_party" / "Mortal",
+        )
     else:
         bot = bot_cls(player_id=player_id, model_path=checkpoint, model_version=bot_type)
     setattr(bot, "player_names", [])
@@ -294,7 +304,7 @@ def run_replay_from_source(
             for idx in range(pre_react_len, len(bot.decision_log)):
                 bot.decision_log[idx]["step"] = idx
 
-    html = render_html(bot)
+    html = render_html(bot) if render_html_report else ""
     return bot, html
 
 

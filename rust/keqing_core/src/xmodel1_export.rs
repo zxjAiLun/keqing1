@@ -1813,7 +1813,10 @@ fn human_response_post_discard_event(
     actor: usize,
     chosen_action: &Value,
 ) -> Option<Value> {
-    let chosen_type = chosen_action.get("type").and_then(Value::as_str).unwrap_or("none");
+    let chosen_type = chosen_action
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
     if !matches!(chosen_type, "reach" | "chi" | "pon" | "daiminkan") {
         return None;
     }
@@ -3821,12 +3824,7 @@ fn write_full_npz(path: &Path, records: &[FullRecord]) -> Result<(), String> {
             &[n, 3],
             &opp_tenpai_target,
         )?;
-        write_npy_i8(
-            &mut zip,
-            "final_rank_target.npy",
-            &[n],
-            &final_rank_target,
-        )?;
+        write_npy_i8(&mut zip, "final_rank_target.npy", &[n], &final_rank_target)?;
         write_npy_i32(
             &mut zip,
             "final_score_delta_points_target.npy",

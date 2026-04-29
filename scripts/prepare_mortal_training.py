@@ -28,6 +28,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--source-dir", type=Path, default=Path("artifacts/converted_mjai"))
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/mortal_mjai_gz"))
     parser.add_argument("--training-dir", type=Path, default=Path("artifacts/mortal_training"))
+    parser.add_argument(
+        "--exclude-dir",
+        action="append",
+        default=[],
+        help="Relative source subdirectory to exclude from packaging; may be repeated, e.g. --exclude-dir ds3",
+    )
     parser.add_argument("--config-path", type=Path, default=None)
     parser.add_argument("--manifest-path", type=Path, default=None)
     parser.add_argument("--val-ratio", type=float, default=0.05)
@@ -64,6 +70,7 @@ def prepare_mortal_training(
     grp_save_every: int = 2000,
     grp_val_steps: int = 400,
     baseline_state_file: Path | None = None,
+    exclude_dirs: Sequence[str | Path] = (),
     skip_existing: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -76,7 +83,8 @@ def prepare_mortal_training(
         training_dir / "mortal_baseline_required.pth" if baseline_state_file is None else baseline_state_file
     ).resolve()
 
-    source_files = discover_mjson_files(source_dir)
+    normalized_exclude_dirs = _normalize_exclude_dirs(exclude_dirs)
+    source_files = discover_mjson_files(source_dir, exclude_dirs=normalized_exclude_dirs)
     if limit is not None:
         if int(limit) <= 0:
             raise ValueError(f"limit must be positive when provided, got {limit}")
@@ -127,6 +135,7 @@ def prepare_mortal_training(
         "seed": int(seed),
         "val_ratio": float(val_ratio),
         "source_count": len(source_files),
+        "exclude_dirs": [path.as_posix() for path in normalized_exclude_dirs],
         "train_count": len(train_rel),
         "val_count": len(val_rel),
         "skip_existing": bool(skip_existing),
@@ -147,13 +156,45 @@ def prepare_mortal_training(
     return manifest
 
 
-def discover_mjson_files(source_dir: Path) -> list[Path]:
+def discover_mjson_files(source_dir: Path, *, exclude_dirs: Sequence[str | Path] = ()) -> list[Path]:
     if not source_dir.exists():
         raise FileNotFoundError(f"source directory does not exist: {source_dir}")
-    files = sorted(path for path in source_dir.rglob("*.mjson") if path.is_file())
+    normalized_exclude_dirs = _normalize_exclude_dirs(exclude_dirs)
+    files = sorted(
+        path
+        for path in source_dir.rglob("*.mjson")
+        if path.is_file() and not _is_excluded_source(path, source_dir=source_dir, exclude_dirs=normalized_exclude_dirs)
+    )
     if not files:
         raise FileNotFoundError(f"no .mjson files found under {source_dir}")
     return files
+
+
+def _normalize_exclude_dirs(exclude_dirs: Sequence[str | Path]) -> tuple[Path, ...]:
+    normalized: list[Path] = []
+    for raw in exclude_dirs:
+        path = Path(raw)
+        if path.is_absolute():
+            raise ValueError(f"exclude-dir must be relative to source-dir, got absolute path: {path}")
+        parts = tuple(part for part in path.parts if part not in {"", "."})
+        if not parts:
+            continue
+        if any(part == ".." for part in parts):
+            raise ValueError(f"exclude-dir must stay under source-dir, got: {path}")
+        normalized.append(Path(*parts))
+    return tuple(dict.fromkeys(normalized))
+
+
+def _is_excluded_source(path: Path, *, source_dir: Path, exclude_dirs: Sequence[Path]) -> bool:
+    if not exclude_dirs:
+        return False
+    rel_path = path.relative_to(source_dir)
+    rel_parts = rel_path.parts
+    for excluded in exclude_dirs:
+        excluded_parts = excluded.parts
+        if rel_parts[: len(excluded_parts)] == excluded_parts:
+            return True
+    return False
 
 
 def split_relative_paths(
@@ -398,6 +439,7 @@ def main() -> None:
         grp_save_every=args.grp_save_every,
         grp_val_steps=args.grp_val_steps,
         baseline_state_file=args.baseline_state_file,
+        exclude_dirs=args.exclude_dir,
         skip_existing=args.skip_existing,
         dry_run=args.dry_run,
     )

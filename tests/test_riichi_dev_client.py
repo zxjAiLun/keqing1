@@ -69,7 +69,7 @@ def test_keqing_agent_scores_request_action_from_observation(monkeypatch) -> Non
         seat=None,
     )
 
-    assert action == {"type": "none"}
+    assert action == {"type": "none", "actor": 2}
 
 
 def test_client_tracks_seat_and_only_replies_to_request_action() -> None:
@@ -91,9 +91,10 @@ def test_client_tracks_seat_and_only_replies_to_request_action() -> None:
     assert agent.calls[0][1] == 1
 
 
-def test_sanitize_none_removes_actor() -> None:
+def test_sanitize_none_keeps_actor_when_available() -> None:
     assert rdc._sanitize_action({"type": "none", "actor": 3}, actor_hint=3) == {
-        "type": "none"
+        "type": "none",
+        "actor": 3,
     }
 
 
@@ -114,6 +115,13 @@ def test_sanitize_hora_keeps_ron_fields() -> None:
         "actor": 1,
         "target": 3,
         "pai": "C",
+    }
+
+
+def test_sanitize_hora_does_not_invent_target() -> None:
+    assert rdc._sanitize_action({"type": "hora", "actor": 1}, actor_hint=1) == {
+        "type": "hora",
+        "actor": 1,
     }
 
 
@@ -173,6 +181,31 @@ def test_sanitize_pon_without_target_does_not_crash() -> None:
 
 def test_action_to_mjai_dict_accepts_json_string() -> None:
     assert rdc._action_to_mjai_dict('{"type":"none"}') == {"type": "none"}
+
+
+def test_action_to_mjai_wire_payload_minifies_dict() -> None:
+    assert (
+        rdc._action_to_mjai_wire_payload({"type": "dahai", "actor": 0, "pai": "9s"})
+        == '{"type":"dahai","actor":0,"pai":"9s","tsumogiri":false}'
+    )
+
+
+def test_action_to_mjai_wire_payload_infers_tsumogiri_from_new_events() -> None:
+    assert (
+        rdc._action_to_mjai_wire_payload(
+            {"type": "dahai", "actor": 0, "pai": "9s"},
+            actor_hint=0,
+            new_events=[{"type": "tsumo", "actor": 0, "pai": "9s"}],
+        )
+        == '{"type":"dahai","actor":0,"pai":"9s","tsumogiri":true}'
+    )
+
+
+def test_action_to_mjai_wire_payload_strips_actor_from_none() -> None:
+    assert (
+        rdc._action_to_mjai_wire_payload({"type": "none", "actor": 0}, actor_hint=0)
+        == '{"type":"none"}'
+    )
 
 
 def test_ws_url_override_takes_precedence() -> None:
@@ -241,6 +274,14 @@ def test_resolve_model_path_uses_default_checkpoint() -> None:
         project_root=Path("/tmp/project"),
         model_path=None,
     ) == Path("/tmp/project/artifacts/models/keqingv4/best.pth")
+
+
+def test_resolve_model_path_uses_mortal_default_checkpoint() -> None:
+    assert rdc._resolve_model_path(
+        bot_name="mortal",
+        project_root=Path("/tmp/project"),
+        model_path=None,
+    ) == Path("/tmp/project/artifacts/mortal_serving/mortal.pth")
 
 
 def test_decode_jwt_payload_unverified_reads_name_and_bot_id() -> None:
@@ -333,6 +374,29 @@ def test_create_agent_supports_rulebase() -> None:
     assert isinstance(agent, rdc.RulebaseObservationAgent)
 
 
+def test_create_agent_supports_mortal(monkeypatch) -> None:
+    created = {}
+
+    class FakeMortalAgent:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+
+    monkeypatch.setattr(rdc, "MortalObservationAgent", FakeMortalAgent)
+    agent = rdc.create_riichi_dev_agent(
+        bot_name="mortal",
+        project_root=Path("/tmp/project"),
+        model_path=None,
+        device="cpu",
+        verbose=True,
+    )
+
+    assert isinstance(agent, FakeMortalAgent)
+    assert created["model_path"] == Path("/tmp/project/artifacts/mortal_serving/mortal.pth")
+    assert created["project_root"] == Path("/tmp/project")
+    assert created["device"] == "cpu"
+    assert created["verbose"] is True
+
+
 def test_local_game_returns_summary(monkeypatch) -> None:
     class FakeAction:
         def to_mjai(self):
@@ -379,6 +443,70 @@ def test_local_game_returns_summary(monkeypatch) -> None:
     assert result["scores"] == [25000, 25000, 25000, 25000]
     assert result["ranks"] == [1, 2, 3, 4]
     assert result["step_count"] == 1
+
+
+def test_local_game_uses_agent_for_acting_seat(monkeypatch) -> None:
+    class FakeAction:
+        pass
+
+    class FakeObs:
+        def __init__(self, player_id, legal):
+            self.player_id = player_id
+            self._legal = legal
+
+        def legal_actions(self):
+            return [FakeAction()] if self._legal else []
+
+    class FakeEnv:
+        def __init__(self, game_mode=None, seed=None):
+            self._done = False
+            self.mjai_log = []
+
+        def get_observations(self):
+            return {1: FakeObs(1, False), 2: FakeObs(2, True)}
+
+        def done(self):
+            return self._done
+
+        def step(self, actions):
+            assert list(actions) == [2]
+            self._done = True
+            return {}
+
+        def scores(self):
+            return [25000, 25000, 25000, 25000]
+
+        def ranks(self):
+            return [1, 2, 3, 4]
+
+    class FakeAgent(rdc.RiichiDevDecisionAgent):
+        def __init__(self):
+            self.act_calls = 0
+            self.observe_calls = 0
+            self.reset_calls = 0
+
+        def reset(self):
+            self.reset_calls += 1
+
+        def observe(self, obs):
+            self.observe_calls += 1
+
+        def act(self, obs):
+            self.act_calls += 1
+            return FakeAction()
+
+        def select_action(self, message, seat):
+            return {"type": "none"}
+
+    agents = {pid: FakeAgent() for pid in range(4)}
+    monkeypatch.setattr(rdc, "RiichiEnv", FakeEnv)
+
+    rdc.run_local_game(agents=agents, game_mode=2, seed=42)
+
+    assert agents[2].act_calls == 1
+    assert agents[1].observe_calls == 1
+    assert agents[0].act_calls == 0
+    assert all(agent.reset_calls == 1 for agent in agents.values())
 
 
 def test_rulebase_agent_replies_with_pending_reach_discard(monkeypatch) -> None:
@@ -428,6 +556,348 @@ def test_rulebase_agent_replies_with_pending_reach_discard(monkeypatch) -> None:
     assert action == {"type": "reach", "actor": 2}
     assert followup == {"type": "dahai", "actor": 2, "pai": "7p", "tsumogiri": False}
     assert fake_module.calls == 2
+
+
+def test_mortal_agent_syncs_observation_events_and_legalizes_action(monkeypatch) -> None:
+    import sys
+    import types
+
+    seen = []
+
+    class FakeMortalBot:
+        def __init__(self, **kwargs):
+            seen.append(("init", kwargs))
+
+        def reset(self):
+            seen.append(("reset", None))
+
+        def react(self, event):
+            seen.append(("event", dict(event)))
+            if event.get("type") == "tsumo":
+                return {"type": "dahai", "actor": 0, "pai": "5m", "tsumogiri": False}
+            return None
+
+    class FakeAction:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def to_mjai(self):
+            return json.dumps(self.payload, ensure_ascii=False, separators=(",", ":"))
+
+    class FakeObs:
+        player_id = 0
+
+        def new_events(self):
+            return [
+                {"type": "start_game", "id": 0},
+                {"type": "start_kyoku"},
+                {"type": "tsumo", "actor": 0, "pai": "5m"},
+            ]
+
+        events = [{"type": "fallback_events_should_not_be_used"}]
+
+        def legal_actions(self):
+            return [
+                FakeAction(
+                    {"type": "dahai", "actor": 0, "pai": "5m", "tsumogiri": False}
+                )
+            ]
+
+        def select_action_from_mjai(self, payload):
+            return json.loads(payload)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "inference.mortal_bot",
+        types.SimpleNamespace(MortalReviewBot=FakeMortalBot),
+    )
+
+    agent = rdc.MortalObservationAgent(
+        model_path=Path("mortal.pth"),
+        project_root=Path("/tmp/project"),
+        device="cpu",
+        verbose=True,
+    )
+    chosen = agent.act(FakeObs())
+
+    assert chosen == {"type": "dahai", "actor": 0, "pai": "5m", "tsumogiri": False}
+    assert seen[0][0] == "init"
+    assert seen[0][1]["mortal_root"] == Path("/tmp/project/third_party/Mortal")
+    assert seen[0][1]["enable_review_log"] is False
+    assert [item[1]["type"] for item in seen if item[0] == "event"] == [
+        "start_game",
+        "start_kyoku",
+        "tsumo",
+    ]
+
+    repeated = agent.act(FakeObs())
+    assert repeated == {"type": "dahai", "actor": 0, "pai": "5m", "tsumogiri": False}
+    assert [item[1]["type"] for item in seen if item[0] == "event"] == [
+        "start_game",
+        "start_kyoku",
+        "tsumo",
+        "start_game",
+        "start_kyoku",
+        "tsumo",
+    ]
+
+
+def test_mortal_agent_select_action_sends_complete_mjai_wire_shape(monkeypatch) -> None:
+    import sys
+    import types
+
+    class FakeMortalBot:
+        def __init__(self, **kwargs):
+            pass
+
+        def reset(self):
+            pass
+
+        def react(self, event):
+            if event.get("type") == "tsumo":
+                return {"type": "dahai", "actor": 0, "pai": "9s", "tsumogiri": True}
+            return None
+
+    class FakeAction:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def to_mjai(self):
+            return json.dumps(self.payload, ensure_ascii=False, separators=(",", ":"))
+
+    class FakeObs:
+        player_id = 0
+
+        def new_events(self):
+            return [{"type": "tsumo", "actor": 0, "pai": "9s"}]
+
+        def select_action_from_mjai(self, payload):
+            parsed = json.loads(payload)
+            assert parsed == {"type": "dahai", "actor": 0, "pai": "9s", "tsumogiri": True}
+            return FakeAction(parsed)
+
+    monkeypatch.setattr(rdc, "_decode_observation", lambda message: (FakeObs(), {"actor": 0}))
+    monkeypatch.setitem(
+        sys.modules,
+        "inference.mortal_bot",
+        types.SimpleNamespace(MortalReviewBot=FakeMortalBot),
+    )
+
+    agent = rdc.MortalObservationAgent(
+        model_path=Path("mortal.pth"),
+        project_root=Path("/tmp/project"),
+        device="cpu",
+        verbose=False,
+    )
+    response = agent.select_action(
+        {
+            "type": "request_action",
+            "observation": "encoded",
+            "possible_actions": [{"type": "dahai", "actor": 0, "pai": "9s"}],
+        },
+        seat=0,
+    )
+
+    assert response == '{"type":"dahai","actor":0,"pai":"9s","tsumogiri":true}'
+
+
+def test_mortal_agent_select_action_sends_actorless_none_on_call_pass(monkeypatch) -> None:
+    import sys
+    import types
+
+    class FakeMortalBot:
+        def __init__(self, **kwargs):
+            pass
+
+        def reset(self):
+            pass
+
+        def react(self, event):
+            return None
+
+    class FakeAction:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def to_mjai(self):
+            return json.dumps(self.payload, ensure_ascii=False, separators=(",", ":"))
+
+    class FakeObs:
+        player_id = 0
+
+        def new_events(self):
+            return [{"type": "dahai", "actor": 2, "pai": "1p"}]
+
+        def select_action_from_mjai(self, payload):
+            parsed = json.loads(payload)
+            assert parsed == {"type": "none", "actor": 0}
+            return FakeAction(parsed)
+
+    monkeypatch.setattr(rdc, "_decode_observation", lambda message: (FakeObs(), {"actor": 0}))
+    monkeypatch.setitem(
+        sys.modules,
+        "inference.mortal_bot",
+        types.SimpleNamespace(MortalReviewBot=FakeMortalBot),
+    )
+
+    agent = rdc.MortalObservationAgent(
+        model_path=Path("mortal.pth"),
+        project_root=Path("/tmp/project"),
+        device="cpu",
+        verbose=False,
+    )
+    response = agent.select_action(
+        {
+            "type": "request_action",
+            "observation": "encoded",
+            "possible_actions": [
+                {"type": "pon", "actor": 0, "pai": "1p", "consumed": ["1p", "1p"]},
+                {"type": "none", "actor": 0},
+            ],
+        },
+        seat=0,
+    )
+
+    assert response == '{"type":"none"}'
+
+
+def test_mortal_agent_ignores_informational_reach_messages(monkeypatch) -> None:
+    import sys
+    import types
+
+    seen = []
+
+    class FakeMortalBot:
+        def __init__(self, **kwargs):
+            pass
+
+        def reset(self):
+            pass
+
+        def react(self, event):
+            seen.append(dict(event))
+            return {"type": "dahai", "actor": 0, "pai": "5m"}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "inference.mortal_bot",
+        types.SimpleNamespace(MortalReviewBot=FakeMortalBot),
+    )
+    agent = rdc.MortalObservationAgent(
+        model_path=Path("mortal.pth"),
+        project_root=Path("/tmp/project"),
+        device="cpu",
+        verbose=False,
+    )
+
+    assert agent.select_action({"type": "reach", "actor": 0}, seat=0) == {"type": "none"}
+    assert seen == []
+
+
+def test_mortal_agent_does_not_reuse_stale_reaction(monkeypatch, caplog) -> None:
+    import sys
+    import types
+
+    class FakeMortalBot:
+        def __init__(self, **kwargs):
+            pass
+
+        def reset(self):
+            pass
+
+        def react(self, event):
+            if event.get("type") == "dahai":
+                return {"type": "hora", "actor": 2, "target": 0}
+            return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "inference.mortal_bot",
+        types.SimpleNamespace(MortalReviewBot=FakeMortalBot),
+    )
+    agent = rdc.MortalObservationAgent(
+        model_path=Path("mortal.pth"),
+        project_root=Path("/tmp/project"),
+        device="cpu",
+        verbose=False,
+    )
+
+    chosen = agent.choose_mjai_action(
+        new_events=[
+            {"type": "dahai", "actor": 0, "pai": "5m"},
+            {"type": "tsumo", "actor": 2, "pai": "7m"},
+        ],
+        legal_actions=[{"type": "dahai", "actor": 2, "pai": "7m"}, {"type": "none"}],
+        actor=2,
+    )
+
+    assert chosen == {"type": "none", "actor": 2}
+    assert "mortal legality guard fallback" not in caplog.text
+
+
+def test_client_does_not_send_none_for_protocol_reach() -> None:
+    agent = StubAgent({"type": "none"})
+    client = rdc.RiichiDevBotClient(
+        rdc.RiichiDevClientConfig(token="t", model_path=Path("fake.pth")),
+        agent=agent,
+    )
+    client.seat = 1
+
+    assert client.handle_message({"type": "reach", "actor": 1}) is None
+    assert agent.calls == []
+
+
+def test_mortal_legalize_warns_on_illegal_fallback(caplog) -> None:
+    caplog.set_level("WARNING", logger=rdc.logger.name)
+
+    fallback = rdc._legalize_action(
+        {"type": "dahai", "actor": 0, "pai": "9m", "tsumogiri": False},
+        legal_actions=[{"type": "none"}],
+        actor=0,
+    )
+
+    assert fallback == {"type": "none", "actor": 0}
+    assert "mortal legality guard fallback" in caplog.text
+    assert "illegal_action" in caplog.text
+    assert '"pai": "9m"' in caplog.text
+
+
+def test_mortal_legalize_preserves_dahai_tsumogiri_for_wire_payload() -> None:
+    chosen = rdc._legalize_action(
+        {"type": "dahai", "actor": 3, "pai": "4p", "tsumogiri": False},
+        legal_actions=[{"type": "dahai", "actor": 3, "pai": "4p"}],
+        actor=3,
+    )
+
+    assert chosen == {"type": "dahai", "actor": 3, "pai": "4p", "tsumogiri": False}
+
+
+def test_mortal_legalize_accepts_meld_when_only_target_differs(caplog) -> None:
+    caplog.set_level("WARNING", logger=rdc.logger.name)
+
+    legal = {"type": "pon", "actor": 2, "pai": "P", "consumed": ["P", "P"]}
+    chosen = rdc._legalize_action(
+        {"type": "pon", "actor": 2, "target": 1, "pai": "P", "consumed": ["P", "P"]},
+        legal_actions=[legal, {"type": "none"}],
+        actor=2,
+    )
+
+    assert chosen == legal
+    assert "mortal legality guard fallback" not in caplog.text
+
+
+def test_mortal_legalize_accepts_riichienv_hora_without_target(caplog) -> None:
+    caplog.set_level("WARNING", logger=rdc.logger.name)
+
+    legal = {"type": "hora", "actor": 2}
+    chosen = rdc._legalize_action(
+        {"type": "hora", "actor": 2, "target": 0},
+        legal_actions=[legal, {"type": "none"}],
+        actor=2,
+    )
+
+    assert chosen == legal
+    assert "mortal legality guard fallback" not in caplog.text
 
 
 def test_create_agent_passes_model_version_and_weights(monkeypatch) -> None:
@@ -662,7 +1132,7 @@ def test_observation_agent_reuses_cached_reach_discard(monkeypatch) -> None:
     assert second == {"type": "dahai", "actor": 1, "pai": "3p", "tsumogiri": False}
 
 
-def test_client_forwards_reach_event_to_agent_followup() -> None:
+def test_client_ignores_reach_event_without_agent_call() -> None:
     class ReachFollowupAgent(rdc.RiichiDevDecisionAgent):
         def __init__(self):
             self.calls = []
@@ -682,8 +1152,8 @@ def test_client_forwards_reach_event_to_agent_followup() -> None:
     client.handle_message({"type": "start_game", "id": 1})
     response = client.handle_message({"type": "reach", "actor": 1})
 
-    assert response == {"type": "dahai", "actor": 1, "pai": "4m", "tsumogiri": False}
-    assert agent.calls[-1] == ({"type": "reach", "actor": 1}, 1)
+    assert response is None
+    assert agent.calls == []
 
 
 def test_observation_agent_ignores_non_request_reach_without_pending_followup() -> None:
@@ -723,7 +1193,7 @@ def test_validation_safe_agent_falls_back_to_none() -> None:
         seat=0,
     )
 
-    assert action == {"type": "none"}
+    assert action == {"type": "none", "actor": 0}
 
 
 def test_disconnect_message_mentions_validate_queue(tmp_path: Path) -> None:
@@ -851,6 +1321,63 @@ def test_client_auto_reconnects_after_end_game_1005_and_resets_agent(tmp_path: P
 
     assert fake_connect.calls == 2
     assert agent.reset_calls == 2
+
+
+def test_client_sends_request_action_before_audit_enrichment(monkeypatch, tmp_path: Path) -> None:
+    order: list[str] = []
+
+    class FakeWebSocket:
+        def __init__(self):
+            self._messages = iter(
+                [
+                    '{"type":"start_game","id":0}',
+                    '{"type":"request_action","possible_actions":[{"type":"none"}]}',
+                ]
+            )
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._messages)
+            except StopIteration:
+                raise StopAsyncIteration
+
+        async def send(self, payload):
+            order.append(f"send:{payload}")
+
+    class FakeConnect:
+        def __call__(self, *args, **kwargs):
+            return self
+
+        async def __aenter__(self):
+            return FakeWebSocket()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    def fake_enrich(message):
+        order.append(f"enrich:{message.get('type')}")
+        return dict(message)
+
+    agent = StubAgent({"type": "none"})
+    client = rdc.RiichiDevBotClient(
+        rdc.RiichiDevClientConfig(
+            token="t",
+            queue="ranked",
+            model_path=Path("fake.pth"),
+            audit_log_path=tmp_path / "riichi.jsonl",
+        ),
+        agent=agent,
+    )
+
+    monkeypatch.setattr(rdc.websockets, "connect", FakeConnect())
+    monkeypatch.setattr(rdc, "_enrich_message_for_audit", fake_enrich)
+
+    asyncio.run(client._run_once())
+
+    assert order.index("send:{\"type\":\"none\"}") < order.index("enrich:request_action")
 
 
 def test_client_auto_reconnects_ranked_queue_wait_1006_before_start_game(tmp_path: Path) -> None:

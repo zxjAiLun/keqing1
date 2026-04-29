@@ -85,6 +85,7 @@ class RolloutEpisode:
     scores: tuple[int, int, int, int]
     game_id: str | None = None
     seed: int | None = None
+    initial_scores: tuple[int, int, int, int] = (25000, 25000, 25000, 25000)
 
 
 def backfill_terminal_rewards(

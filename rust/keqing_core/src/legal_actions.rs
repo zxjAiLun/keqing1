@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
 
@@ -6,7 +6,7 @@ use crate::counts::TILE_COUNT;
 use crate::hora_truth::evaluate_hora_truth_from_prepared;
 use crate::shanten_table::{calc_shanten_all, ensure_init};
 
-fn normalize_tile(tile: &str) -> String {
+pub(crate) fn normalize_tile(tile: &str) -> String {
     match tile {
         "5mr" | "0m" => "5m".to_string(),
         "5pr" | "0p" => "5p".to_string(),
@@ -16,7 +16,7 @@ fn normalize_tile(tile: &str) -> String {
     }
 }
 
-fn tile_to_34(tile: &str) -> Option<usize> {
+pub(crate) fn tile_to_34(tile: &str) -> Option<usize> {
     let normalized = normalize_tile(tile);
     let mut chars = normalized.chars();
     let first = chars.next()?;
@@ -245,6 +245,109 @@ fn chi_patterns(tile: &str) -> Vec<[String; 2]> {
     patterns
 }
 
+fn chi_kuikae_forbidden_tiles(pai: &str, consumed: &[Value]) -> BTreeSet<String> {
+    let pai_norm = normalize_tile(pai);
+    let mut forbidden = BTreeSet::new();
+    forbidden.insert(pai_norm.clone());
+    if pai_norm.len() != 2 {
+        return forbidden;
+    }
+    let suit = pai_norm.chars().nth(1).unwrap_or('z');
+    if !matches!(suit, 'm' | 'p' | 's') || consumed.len() != 2 {
+        return forbidden;
+    }
+    let mut tiles = vec![pai_norm.clone()];
+    for value in consumed {
+        let Some(tile) = value.as_str() else {
+            return forbidden;
+        };
+        let normalized = normalize_tile(tile);
+        if normalized.len() != 2 || normalized.chars().nth(1) != Some(suit) {
+            return forbidden;
+        }
+        tiles.push(normalized);
+    }
+    let mut ranks = Vec::with_capacity(3);
+    for tile in &tiles {
+        let Some(rank) = tile.chars().next().and_then(|ch| ch.to_digit(10)) else {
+            return forbidden;
+        };
+        ranks.push(rank as i32);
+    }
+    ranks.sort_unstable();
+    if ranks[1] != ranks[0] + 1 || ranks[2] != ranks[1] + 1 {
+        return forbidden;
+    }
+    let Some(called_rank) = pai_norm.chars().next().and_then(|ch| ch.to_digit(10)) else {
+        return forbidden;
+    };
+    let called_rank = called_rank as i32;
+    if called_rank == ranks[0] {
+        let outside_rank = ranks[2] + 1;
+        if outside_rank <= 9 {
+            forbidden.insert(format!("{outside_rank}{suit}"));
+        }
+    } else if called_rank == ranks[2] {
+        let outside_rank = ranks[0] - 1;
+        if outside_rank >= 1 {
+            forbidden.insert(format!("{outside_rank}{suit}"));
+        }
+    }
+    forbidden
+}
+
+fn post_open_meld_forbidden_discard_tiles(
+    state_snapshot: &Value,
+    actor: usize,
+    melds: &[Value],
+) -> BTreeSet<String> {
+    let actor_to_move = state_snapshot
+        .get("actor_to_move")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
+    if actor_to_move != Some(actor) {
+        return BTreeSet::new();
+    }
+    if state_snapshot
+        .get("last_discard")
+        .filter(|value| !value.is_null())
+        .is_some()
+        || state_snapshot
+            .get("last_kakan")
+            .filter(|value| !value.is_null())
+            .is_some()
+        || get_optional_tile_from_actor_list(state_snapshot, "last_tsumo", actor).is_some()
+        || get_optional_tile_from_actor_list(state_snapshot, "last_tsumo_raw", actor).is_some()
+    {
+        return BTreeSet::new();
+    }
+    let Some(last_meld) = melds.last() else {
+        return BTreeSet::new();
+    };
+    let Some(meld_type) = last_meld.get("type").and_then(Value::as_str) else {
+        return BTreeSet::new();
+    };
+    if !matches!(meld_type, "chi" | "pon") {
+        return BTreeSet::new();
+    }
+    let Some(pai) = last_meld
+        .get("pai_raw")
+        .or_else(|| last_meld.get("pai"))
+        .and_then(Value::as_str)
+    else {
+        return BTreeSet::new();
+    };
+    if meld_type == "chi" {
+        let consumed = last_meld
+            .get("consumed")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        return chi_kuikae_forbidden_tiles(pai, consumed);
+    }
+    BTreeSet::from([normalize_tile(pai)])
+}
+
 fn ankan_candidates(hand: &BTreeMap<String, u8>) -> Vec<(String, Vec<String>)> {
     let mut result = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -272,7 +375,7 @@ fn ankan_candidates(hand: &BTreeMap<String, u8>) -> Vec<(String, Vec<String>)> {
     result
 }
 
-fn counts34_from_hand(hand: &BTreeMap<String, u8>) -> [u8; TILE_COUNT] {
+pub(crate) fn counts34_from_hand(hand: &BTreeMap<String, u8>) -> [u8; TILE_COUNT] {
     let mut counts = [0u8; TILE_COUNT];
     for (tile, count) in hand {
         if let Some(tile34) = tile_to_34(tile) {
@@ -423,7 +526,7 @@ fn find_special_waits_tiles(counts34: &[u8; TILE_COUNT]) -> (i32, [bool; TILE_CO
     (special_shanten, waits)
 }
 
-fn calc_shanten_waits_like_python(
+pub(crate) fn calc_shanten_waits_like_python(
     counts34: &[u8; TILE_COUNT],
     has_melds: bool,
 ) -> (i8, u8, [bool; TILE_COUNT]) {
@@ -577,10 +680,11 @@ fn structural_reaction_specs(
     reached: bool,
     discarder: usize,
     tile_raw: &str,
+    calls_allowed: bool,
 ) -> Vec<Value> {
     let tile_norm = normalize_tile(tile_raw);
     let mut legal = Vec::new();
-    if !reached {
+    if !reached && calls_allowed {
         if can_pon(hand, tile_raw) {
             legal.push(json!({
                 "type": "pon",
@@ -663,8 +767,18 @@ pub fn enumerate_legal_action_specs_structural(
                 .or_else(|| last_discard.get("pai"))
                 .and_then(Value::as_str)
                 .ok_or_else(|| "invalid last_discard.pai".to_string())?;
+            let calls_allowed = state_snapshot
+                .get("remaining_wall")
+                .and_then(Value::as_i64)
+                .map(|remaining_wall| remaining_wall > 0)
+                .unwrap_or(true);
             return Ok(structural_reaction_specs(
-                &hand, actor, reached, discarder, tile_raw,
+                &hand,
+                actor,
+                reached,
+                discarder,
+                tile_raw,
+                calls_allowed,
             ));
         }
     }
@@ -678,6 +792,8 @@ pub fn enumerate_legal_action_specs_structural(
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let forbidden_discards =
+            post_open_meld_forbidden_discard_tiles(state_snapshot, actor, &melds);
         if reached {
             let mut legal = Vec::new();
             if let Some(pai) = last_tsumo_raw.as_deref().or(last_tsumo.as_deref()) {
@@ -752,6 +868,9 @@ pub fn enumerate_legal_action_specs_structural(
             } else {
                 tile.clone()
             };
+            if forbidden_discards.contains(&normalize_tile(&pai_out)) {
+                continue;
+            }
             legal.push(json!({
                 "type": "dahai",
                 "actor": actor,
@@ -823,8 +942,18 @@ pub fn enumerate_legal_action_specs_structural(
         .or_else(|| last_discard.get("pai"))
         .and_then(Value::as_str)
         .ok_or_else(|| "invalid last_discard.pai".to_string())?;
+    let calls_allowed = state_snapshot
+        .get("remaining_wall")
+        .and_then(Value::as_i64)
+        .map(|remaining_wall| remaining_wall > 0)
+        .unwrap_or(true);
     Ok(structural_reaction_specs(
-        &hand, actor, reached, discarder, tile_raw,
+        &hand,
+        actor,
+        reached,
+        discarder,
+        tile_raw,
+        calls_allowed,
     ))
 }
 
@@ -936,7 +1065,7 @@ fn candidate_flag_bool(candidate: &Value, key: &str) -> Option<bool> {
     candidate.get(key).and_then(Value::as_bool)
 }
 
-fn can_hora_from_snapshot_candidate(
+pub(crate) fn can_hora_from_snapshot_candidate(
     state_snapshot: &Value,
     actor: usize,
     target: usize,
@@ -1139,4 +1268,93 @@ pub fn prepare_hora_evaluation_from_snapshot(
         "actor": actor,
         "target": target,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::enumerate_legal_action_specs_structural;
+
+    fn discard_pais(actions: &[serde_json::Value]) -> Vec<String> {
+        actions
+            .iter()
+            .filter(|action| {
+                action.get("type").and_then(serde_json::Value::as_str) == Some("dahai")
+            })
+            .filter_map(|action| action.get("pai").and_then(serde_json::Value::as_str))
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn post_chi_low_called_tile_filters_suji_kuikae() {
+        let snapshot = json!({
+            "actor": 2,
+            "hand": ["4p", "5m"],
+            "melds": [
+                [],
+                [],
+                [{"type": "chi", "pai": "1p", "pai_raw": "1p", "consumed": ["2p", "3p"], "target": 1}],
+                []
+            ],
+            "reached": [false, false, false, false],
+            "pending_reach": [false, false, false, false],
+            "actor_to_move": 2,
+            "last_discard": null,
+            "last_kakan": null,
+            "last_tsumo": [null, null, null, null],
+            "last_tsumo_raw": [null, null, null, null]
+        });
+
+        let actions = enumerate_legal_action_specs_structural(&snapshot, 2).unwrap();
+
+        assert_eq!(discard_pais(&actions), vec!["5m"]);
+    }
+
+    #[test]
+    fn post_chi_middle_called_tile_keeps_outside_suji() {
+        let snapshot = json!({
+            "actor": 1,
+            "hand": ["7m", "9m", "5s"],
+            "melds": [
+                [],
+                [{"type": "chi", "pai": "7m", "pai_raw": "7m", "consumed": ["6m", "8m"], "target": 0}],
+                [],
+                []
+            ],
+            "reached": [false, false, false, false],
+            "pending_reach": [false, false, false, false],
+            "actor_to_move": 1,
+            "last_discard": null,
+            "last_kakan": null,
+            "last_tsumo": [null, null, null, null],
+            "last_tsumo_raw": [null, null, null, null]
+        });
+
+        let actions = enumerate_legal_action_specs_structural(&snapshot, 1).unwrap();
+
+        assert_eq!(discard_pais(&actions), vec!["5s", "9m"]);
+    }
+
+    #[test]
+    fn houtei_response_blocks_calls() {
+        let snapshot = json!({
+            "actor": 2,
+            "hand": ["7s", "8s", "1m", "2m", "3m", "4p", "5p"],
+            "melds": [[], [], [], []],
+            "reached": [false, false, false, false],
+            "pending_reach": [false, false, false, false],
+            "actor_to_move": 2,
+            "last_discard": {"actor": 1, "pai": "6s", "pai_raw": "6s"},
+            "last_kakan": null,
+            "last_tsumo": [null, null, null, null],
+            "last_tsumo_raw": [null, null, null, null],
+            "remaining_wall": 0
+        });
+
+        let actions = enumerate_legal_action_specs_structural(&snapshot, 2).unwrap();
+
+        assert_eq!(actions, vec![json!({"type": "none"})]);
+    }
 }
