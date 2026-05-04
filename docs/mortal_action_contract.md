@@ -102,7 +102,7 @@ Mortal's DQN outputs one Q value per action id and masks illegal actions to
 | `34` | discard red `5m` | `DISCARD(tile=5m)`, red collapsed |
 | `35` | discard red `5p` | `DISCARD(tile=5p)`, red collapsed |
 | `36` | discard red `5s` | `DISCARD(tile=5s)`, red collapsed |
-| `37` | riichi declaration | `ActionType.REACH_DISCARD`, declaration score only |
+| `37` | riichi declaration | `ActionType.REACH_DISCARD`, combined with discard tile Q |
 | `38` | chi low | `ActionType.CHI` where called tile is sequence low end |
 | `39` | chi mid | `ActionType.CHI` where called tile is sequence middle |
 | `40` | chi high | `ActionType.CHI` where called tile is sequence high end |
@@ -113,9 +113,9 @@ Mortal's DQN outputs one Q value per action id and masks illegal actions to
 | `45` | pass / none | `ActionType.PASS` |
 
 Ids `0..36` also serve as tile-choice ids in Mortal's separate
-`at_kan_select=true` observation. The first KeqingRL adapter does not consume
-that second kan-select observation; multiple legal kan choices therefore fail
-closed.
+`at_kan_select=true` observation. KeqingRL now consumes that second observation
+when KAN actions are in the controlled row, so multiple legal kan choices can
+be scored by concrete tile.
 
 ## Mapping Rules
 
@@ -146,7 +146,7 @@ Discard mapping collapses red fives:
 If multiple red/normal ids are masked for one KeqingRL tile, the adapter uses
 the maximum masked Q value.
 
-Reach mapping is intentionally coarse. Mortal id `37` emits only `reach`.
+Reach mapping is a composite score. Mortal id `37` emits only `reach`.
 KeqingRL `REACH_DISCARD` expands to:
 
 ```text
@@ -154,16 +154,23 @@ KeqingRL `REACH_DISCARD` expands to:
 {"type": "dahai", "actor": actor, "pai": ..., "tsumogiri": ...}
 ```
 
-So the first adapter can score reach-vs-nonreach, but it does not distinguish
-which reach discard tile Mortal would choose after declaration.
-
-For topK teacher training, every `REACH_DISCARD` candidate maps to the same
-Mortal source id `37`. The `mortal-action-q` topK selector keeps at most one
-KeqingRL action per Mortal source id, so duplicate reach candidates do not fill
-topK with the same q37 score. This restores the intended Stage-1 comparison:
+The adapter scores each concrete KeqingRL reach-discard candidate as:
 
 ```text
-reach declaration q37 vs non-reach discard q
+REACH_DISCARD(tile) = q[37] + max(q[discard_ids_for_tile])
+```
+
+The row is available only when both Mortal's reach id and the concrete discard
+tile id are legal in the Mortal mask. Red-five discard ids use the same
+red/normal max rule as normal discard scoring.
+
+For topK teacher training, every `REACH_DISCARD(tile)` candidate now has a
+source key that includes id `37` and that tile's discard ids. Multiple reach
+discard candidates therefore remain distinct in topK while still sharing the
+same reach declaration component. This supports the intended comparison:
+
+```text
+reach declaration q37 + concrete discard q vs non-reach discard q
 ```
 
 The pilot's support-only topK projection uses the same source-deduped support
@@ -184,9 +191,10 @@ chi high -> consumed = pai-2, pai-1
 Honors, malformed consumed sets, missing `from_who`, or ambiguous call payloads
 must fail closed.
 
-Kan mapping is coarse through id `42`. If the KeqingRL legal set contains
-multiple legal kan choices, the current adapter fails closed because Mortal
-needs an additional `at_kan_select=true` Q pass to choose the tile.
+Kan mapping uses id `42` for the first-stage kan decision. If multiple concrete
+KeqingRL kan choices are present, the adapter also requires an
+`at_kan_select=true` Q/mask pass and adds the tile-choice Q to id42. Without
+that second pass, multiple kan choices still fail closed as `ambiguous_kan`.
 
 ## Mask Contract
 
@@ -258,8 +266,8 @@ The tempered-ratio pilot exposes this as a contract/probe path:
 
 ```text
 teacher_source=mortal-action-q
---self-turn-action-types DISCARD REACH_DISCARD TSUMO RYUKYOKU
---response-action-types PASS RON PON CHI
+--self-turn-action-types DISCARD REACH_DISCARD TSUMO ANKAN KAKAN RYUKYOKU
+--response-action-types PASS RON PON CHI DAIMINKAN
 --no-mortal-teacher-strict-extra-mask
 ```
 
@@ -289,12 +297,25 @@ change Mortal's legal ownership role. KeqingCore still owns legal actions.
 `teacher_source=mortal-discard-q` remains available for historical discard-only
 diagnostics.
 
-For the current response-stage probe, KAN family actions stay out of learner
-scope. If Mortal marks id `42` legal while KeqingRL is controlling only
+For the current default response-stage probe, KAN family actions stay out of
+learner scope. If Mortal marks id `42` legal while KeqingRL is controlling only
 `PASS/RON/PON/CHI`, the pilot records that as an out-of-scope extra Mortal id in
 `mortal_action_mapping_audit.*`. It does not block this scoped contract when
 `--no-mortal-teacher-strict-extra-mask` is set. Missing controlled legal actions
-and ambiguous or unsupported mappings still fail closed.
+and unsupported mappings still fail closed.
+
+As of 2026-05-04, KeqingRL has the first KAN-training contract wired:
+
+```text
+normal Mortal obs/mask/q      -> score id42
+at_kan_select=true obs/mask/q -> score concrete kan tile id
+concrete KeqingRL KAN score   -> q42 + q_kan_select[tile]
+```
+
+This lets multiple legal `DAIMINKAN` / `ANKAN` / `KAKAN` rows be distinguished
+without letting Mortal own legality. If a row contains multiple KAN candidates
+but the kan-select Q/mask extras are absent, mapping still fails closed as
+`ambiguous_kan`.
 
 The pilot writes a main contract scoreboard:
 
@@ -316,14 +337,15 @@ replayable.
 
 ## Known Limits
 
-The current full-action scorer is suitable for contract tests and first reach /
-response teacher probes. It is not yet a full Mortal policy bridge.
+The current full-action scorer is suitable for Mortal imitation over the
+default controlled scope. It is not yet a full Mortal policy bridge.
 
 Known limits:
 
 ```text
-REACH_DISCARD uses only Mortal id 37 and does not bind the follow-up discard.
-KAN uses only Mortal id 42 and fails on multiple kan tile choices.
+REACH_DISCARD uses q37 + concrete discard tile Q and is in the default scope.
+ANKAN, DAIMINKAN, and KAKAN use first-stage id42 + at_kan_select tile-Q scoring
+  and are in the imitation defaults after the 2026-05-04 scoped probes.
 Call ids do not encode red-five selection; Mortal reconstructs consumed red use from state.
 from_who is validated for presence but not independently inferred from Mortal mask.
 Response-window PASS/RON/PON/CHI is in the current imitation scope, but still

@@ -17,6 +17,7 @@ def _self_turn_snapshot() -> dict[str, object]:
     return {
         "actor": 0,
         "hand": ["4m", "7m"],
+        "tsumo_pai": "7m",
         "last_tsumo": [None, None, None, None],
         "last_tsumo_raw": [None, None, None, None],
     }
@@ -369,6 +370,67 @@ def test_collect_controlled_self_turn_actions_filters_late_reach() -> None:
         "reached": [False, False, False, False],
         "pending_reach": [False, False, False, False],
         "melds": [[], [], [], []],
+    }
+
+    controlled_pairs = env._collect_controlled_self_turn_actions(
+        snapshot,
+        _self_turn_raw_legal_actions(),
+    )
+
+    assert [spec.action_type for spec, _dispatch in controlled_pairs] == [
+        ActionType.DISCARD,
+        ActionType.DISCARD,
+    ]
+
+
+def test_collect_controlled_self_turn_actions_keeps_reach_after_ankan() -> None:
+    env = DiscardOnlyMahjongEnv(
+        self_turn_action_types=(
+            ActionType.DISCARD,
+            ActionType.REACH_DISCARD,
+        )
+    )
+    env._enumerate_reach_discard_candidates = lambda _snapshot, _actor: [("7m", True)]  # type: ignore[method-assign]
+    snapshot = {
+        **_self_turn_snapshot(),
+        "remaining_wall": 12,
+        "scores": [25000, 25000, 25000, 25000],
+        "reached": [False, False, False, False],
+        "pending_reach": [False, False, False, False],
+        "melds": [[{"type": "ankan", "pai": "E", "consumed": ["E", "E", "E", "E"]}], [], [], []],
+    }
+
+    controlled_pairs = env._collect_controlled_self_turn_actions(
+        snapshot,
+        _self_turn_raw_legal_actions(),
+    )
+
+    assert [spec.action_type for spec, _dispatch in controlled_pairs] == [
+        ActionType.DISCARD,
+        ActionType.DISCARD,
+        ActionType.REACH_DISCARD,
+    ]
+    assert controlled_pairs[-1][1] == (
+        {"type": "reach", "actor": 0},
+        {"type": "dahai", "actor": 0, "pai": "7m", "tsumogiri": True},
+    )
+
+
+def test_collect_controlled_self_turn_actions_blocks_reach_after_open_meld() -> None:
+    env = DiscardOnlyMahjongEnv(
+        self_turn_action_types=(
+            ActionType.DISCARD,
+            ActionType.REACH_DISCARD,
+        )
+    )
+    env._enumerate_reach_discard_candidates = lambda _snapshot, _actor: [("7m", True)]  # type: ignore[method-assign]
+    snapshot = {
+        **_self_turn_snapshot(),
+        "remaining_wall": 12,
+        "scores": [25000, 25000, 25000, 25000],
+        "reached": [False, False, False, False],
+        "pending_reach": [False, False, False, False],
+        "melds": [[{"type": "pon", "pai": "E", "consumed": ["E", "E"], "target": 1}], [], [], []],
     }
 
     controlled_pairs = env._collect_controlled_self_turn_actions(

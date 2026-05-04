@@ -25,6 +25,10 @@ MORTAL_Q_VALUES_EXTRA_KEY = "mortal_q_values"
 MORTAL_ACTION_MASK_EXTRA_KEY = "mortal_action_mask"
 MORTAL_ENCODED_OBS_EXTRA_KEY = "mortal_encoded_obs"
 MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY = "mortal_encoded_action_mask"
+MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY = "mortal_kan_select_q_values"
+MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY = "mortal_kan_select_action_mask"
+MORTAL_KAN_SELECT_ENCODED_OBS_EXTRA_KEY = "mortal_kan_select_encoded_obs"
+MORTAL_KAN_SELECT_ENCODED_ACTION_MASK_EXTRA_KEY = "mortal_kan_select_encoded_action_mask"
 MORTAL_RIICHI_ACTION_ID = 37
 MORTAL_CHI_LOW_ACTION_ID = 38
 MORTAL_CHI_MID_ACTION_ID = 39
@@ -237,7 +241,7 @@ def mortal_action_ids_for_action_spec(action: ActionSpec) -> tuple[int, ...]:
     if action.action_type == ActionType.REACH_DISCARD:
         if action.tile is None:
             raise MortalTeacherMappingError("REACH_DISCARD action is missing discard tile")
-        return (MORTAL_RIICHI_ACTION_ID,)
+        return (MORTAL_RIICHI_ACTION_ID, *mortal_discard_ids_for_tile_id(int(action.tile)))
     if action.action_type in (ActionType.TSUMO, ActionType.RON):
         if action.action_type == ActionType.RON and action.from_who is None:
             raise MortalTeacherMappingError("RON action is missing from_who")
@@ -275,7 +279,7 @@ def assert_mortal_action_mask_compatible(
     missing = [
         action.canonical_key
         for action, ids in zip(legal_actions, mapped)
-        if not any(bool(mask[action_id].item()) for action_id in ids)
+        if not _action_mask_covers_action(mask, action, ids)
     ]
     extra = _extra_mortal_action_ids(mask, mapped) if strict_extra else ()
     if missing or extra:
@@ -288,6 +292,18 @@ def assert_mortal_action_mask_compatible(
         )
 
 
+def _action_mask_covers_action(
+    mask: torch.BoolTensor,
+    action: ActionSpec,
+    candidate_ids: Sequence[int],
+) -> bool:
+    if action.action_type == ActionType.REACH_DISCARD:
+        if action.tile is None or not bool(mask[MORTAL_RIICHI_ACTION_ID].item()):
+            return False
+        return any(bool(mask[action_id].item()) for action_id in mortal_discard_ids_for_tile_id(int(action.tile)))
+    return any(bool(mask[action_id].item()) for action_id in candidate_ids)
+
+
 def mortal_scores_for_legal_actions(
     q_values: torch.Tensor | Sequence[float],
     mortal_mask: torch.Tensor | Sequence[bool],
@@ -295,11 +311,23 @@ def mortal_scores_for_legal_actions(
     *,
     strict_mask: bool = True,
     fail_on_ambiguous_kan: bool = True,
+    kan_select_q_values: torch.Tensor | Sequence[float] | None = None,
+    kan_select_mask: torch.Tensor | Sequence[bool] | None = None,
 ) -> MortalActionTeacherScores:
     q = _as_1d_float_tensor(q_values, field_name="q_values")
     mask = _as_1d_bool_tensor(mortal_mask, field_name="mortal_mask")
+    kan_q = None if kan_select_q_values is None else _as_1d_float_tensor(
+        kan_select_q_values,
+        field_name="kan_select_q_values",
+    )
+    kan_mask = None if kan_select_mask is None else _as_1d_bool_tensor(
+        kan_select_mask,
+        field_name="kan_select_mask",
+    )
+    if (kan_q is None) != (kan_mask is None):
+        raise MortalTeacherMappingError("kan_select_q_values and kan_select_mask must be provided together")
     source_action_ids = _mortal_action_id_tuples_for_legal_actions(legal_actions)
-    if fail_on_ambiguous_kan:
+    if fail_on_ambiguous_kan and (kan_q is None or kan_mask is None):
         _assert_no_ambiguous_kan_mapping(legal_actions, source_action_ids)
 
     scores = torch.full((len(legal_actions),), float("-inf"), dtype=q.dtype, device=q.device)
@@ -307,6 +335,37 @@ def mortal_scores_for_legal_actions(
     missing_legal_keys: list[str] = []
 
     for index, (action, candidate_ids) in enumerate(zip(legal_actions, source_action_ids)):
+        if action.action_type == ActionType.REACH_DISCARD:
+            if action.tile is None:
+                missing_legal_keys.append(action.canonical_key)
+                continue
+            if not bool(mask[MORTAL_RIICHI_ACTION_ID].item()):
+                missing_legal_keys.append(action.canonical_key)
+                continue
+            discard_candidate_ids = tuple(
+                action_id
+                for action_id in mortal_discard_ids_for_tile_id(int(action.tile))
+                if bool(mask[action_id].item())
+            )
+            if not discard_candidate_ids:
+                missing_legal_keys.append(action.canonical_key)
+                continue
+            discard_tensor = torch.tensor(discard_candidate_ids, dtype=torch.long, device=q.device)
+            scores[index] = q[MORTAL_RIICHI_ACTION_ID] + q.index_select(0, discard_tensor).max()
+            score_mask[index] = True
+            continue
+        if _is_kan_action(action):
+            if not bool(mask[MORTAL_KAN_ACTION_ID].item()):
+                missing_legal_keys.append(action.canonical_key)
+                continue
+            if kan_q is not None and kan_mask is not None:
+                kan_tile_id = _kan_select_tile_id(action)
+                if not bool(kan_mask[kan_tile_id].item()):
+                    missing_legal_keys.append(action.canonical_key)
+                    continue
+                scores[index] = q[MORTAL_KAN_ACTION_ID] + kan_q[kan_tile_id].to(device=q.device, dtype=q.dtype)
+                score_mask[index] = True
+                continue
         legal_candidate_ids = tuple(action_id for action_id in candidate_ids if bool(mask[action_id].item()))
         if not legal_candidate_ids:
             missing_legal_keys.append(action.canonical_key)
@@ -339,6 +398,8 @@ def mortal_action_mapping_audit_row(
     legal_actions: Sequence[ActionSpec],
     *,
     context: Mapping[str, object] | None = None,
+    kan_select_q_values: torch.Tensor | Sequence[float] | None = None,
+    kan_select_mask: torch.Tensor | Sequence[bool] | None = None,
 ) -> dict[str, object] | None:
     """Return a diagnostic row for Mortal/KeqingRL action-mask mismatches.
 
@@ -370,7 +431,14 @@ def mortal_action_mapping_audit_row(
     mismatch_kind: str | None = "unsupported_action" if unsupported_keys else None
     if not unsupported_keys:
         try:
-            mapped = mortal_scores_for_legal_actions(q, mask, legal_actions, strict_mask=False)
+            mapped = mortal_scores_for_legal_actions(
+                q,
+                mask,
+                legal_actions,
+                strict_mask=False,
+                kan_select_q_values=kan_select_q_values,
+                kan_select_mask=kan_select_mask,
+            )
             source_action_ids = list(mapped.source_action_ids)
             missing_legal_keys = list(mapped.missing_legal_keys)
             missing_key_set = set(missing_legal_keys)
@@ -422,6 +490,7 @@ def mortal_action_mapping_audit_row(
         "missing_legal_types_json": _json_dumps(missing_legal_types),
         "extra_mortal_action_ids_json": _json_dumps(extra_mortal_action_ids),
         "events_tail_json": _json_dumps(events_tail),
+        "events_json": _json_dumps(context.get("mortal_teacher_events", context.get("events", ()))),
         "hand_json": _json_dumps(context.get("hand", "")),
         "last_discard_json": _json_dumps(context.get("last_discard", "")),
         "mismatch_kind": mismatch_kind or _mismatch_kind(missing_legal_keys, extra_mortal_action_ids),
@@ -691,6 +760,24 @@ def _assert_no_ambiguous_kan_mapping(
         )
 
 
+def _is_kan_action(action: ActionSpec) -> bool:
+    return action.action_type in (ActionType.DAIMINKAN, ActionType.ANKAN, ActionType.KAKAN)
+
+
+def _kan_select_tile_id(action: ActionSpec) -> int:
+    if action.action_type == ActionType.DAIMINKAN:
+        _validate_call_action(action, expected_consumed=3, require_from_who=True)
+    elif action.action_type == ActionType.ANKAN:
+        _validate_call_action(action, expected_consumed=4, require_from_who=False)
+    elif action.action_type == ActionType.KAKAN:
+        if action.tile is None:
+            raise MortalTeacherMappingError("KAKAN action is missing tile")
+    else:
+        raise MortalTeacherMappingError(f"{action.action_type.name} is not a KAN action")
+    tile = int(action.tile if action.tile is not None else action.consumed[0])
+    return int(TILE_NAME_TO_IDX[normalize_tile(str(IDX_TO_TILE_NAME[tile]))])
+
+
 def _mortal_chi_action_id(action: ActionSpec) -> int:
     _validate_call_action(action, expected_consumed=2, require_from_who=True)
     if action.tile is None:
@@ -816,6 +903,10 @@ __all__ = [
     "MORTAL_DISCARD_ID_TO_TILE",
     "MORTAL_DISCARD_TEACHER_CONTRACT_VERSION",
     "MORTAL_KAN_ACTION_ID",
+    "MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY",
+    "MORTAL_KAN_SELECT_ENCODED_ACTION_MASK_EXTRA_KEY",
+    "MORTAL_KAN_SELECT_ENCODED_OBS_EXTRA_KEY",
+    "MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY",
     "MORTAL_PASS_ACTION_ID",
     "MORTAL_PON_ACTION_ID",
     "MORTAL_Q_VALUES_EXTRA_KEY",

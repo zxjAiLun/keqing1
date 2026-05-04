@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import csv
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,8 +17,11 @@ from keqingrl.mortal_teacher import (
     MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY,
     MORTAL_ENCODED_OBS_EXTRA_KEY,
     MORTAL_KAN_ACTION_ID,
+    MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY,
+    MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY,
     MORTAL_PASS_ACTION_ID,
     MORTAL_Q_VALUES_EXTRA_KEY,
+    MORTAL_RIICHI_ACTION_ID,
 )
 from mahjong_env.action_space import TILE_NAME_TO_IDX
 from scripts.run_keqingrl_mortal_imitation import (
@@ -28,7 +32,9 @@ from scripts.run_keqingrl_mortal_imitation import (
     _load_imitation_candidates,
     _save_imitation_checkpoint,
     _validate_args,
+    _write_incremental_outputs,
     audit_mortal_action_mapping,
+    imitation_metrics,
     mortal_imitation_loss,
     prepare_mortal_imitation_teacher_data,
 )
@@ -190,6 +196,43 @@ def test_mortal_imitation_extra_kan_fails_closed_when_extra_mask_strict() -> Non
     assert result.summary["extra_mortal_count"] == 1
 
 
+def test_mortal_imitation_multiple_kan_choices_use_kan_select_teacher_scores() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.ANKAN, consumed=(_tile("5m"), _tile("5m"), _tile("5m"), _tile("5m"))),
+        ActionSpec(ActionType.KAKAN, tile=_tile("5p")),
+    )
+    policy_input = _policy_input(
+        legal_actions,
+        mask_ids=(MORTAL_KAN_ACTION_ID,),
+        prior_logits=torch.tensor([[2.0, 1.0, -100.0]], dtype=torch.float32),
+    )
+    kan_q = torch.zeros((1, MORTAL_ACTION_SPACE), dtype=torch.float32)
+    kan_q[0, _tile("5m")] = 0.1
+    kan_q[0, _tile("5p")] = 3.0
+    kan_mask = torch.zeros((1, MORTAL_ACTION_SPACE), dtype=torch.bool)
+    kan_mask[0, [_tile("5m"), _tile("5p")]] = True
+    extras = dict(policy_input.obs.extras)
+    extras[MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY] = kan_q
+    extras[MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY] = kan_mask
+    policy_input = replace(
+        policy_input,
+        obs=replace(policy_input.obs, extras=extras),
+    )
+
+    teacher_data = prepare_mortal_imitation_teacher_data(
+        policy_input,
+        strict_extra=False,
+        teacher_support="full-legal",
+        teacher_topk=2,
+    )
+
+    assert teacher_data.summary["fail_closed_count"] == 0
+    assert torch.allclose(
+        teacher_data.teacher_batch.teacher_scores[0, :2],
+        torch.tensor([42.1, 45.0], dtype=torch.float32),
+    )
+
+
 def test_mortal_imitation_loss_ignores_illegal_logits() -> None:
     legal_actions = (
         ActionSpec(ActionType.DISCARD, tile=_tile("1m")),
@@ -221,6 +264,113 @@ def test_mortal_imitation_loss_ignores_illegal_logits() -> None:
     )
 
     assert torch.isclose(low_illegal.teacher_ce, high_illegal.teacher_ce)
+
+
+def test_mortal_imitation_topk_keeps_reach_discard_tiles_distinct() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.REACH_DISCARD, tile=_tile("2m")),
+        ActionSpec(ActionType.REACH_DISCARD, tile=_tile("7p")),
+        ActionSpec(ActionType.DISCARD, tile=_tile("9s")),
+    )
+    policy_input = _policy_input(
+        legal_actions,
+        mask_ids=(MORTAL_RIICHI_ACTION_ID, _tile("2m"), _tile("7p"), _tile("9s")),
+        prior_logits=torch.tensor([[3.0, 2.0, 1.0]], dtype=torch.float32),
+    )
+
+    teacher_data = prepare_mortal_imitation_teacher_data(
+        policy_input,
+        prepared_steps=(),
+        teacher_support="topk",
+        teacher_topk=2,
+        strict_extra=False,
+    )
+
+    assert teacher_data.teacher_batch.topk_indices is not None
+    assert teacher_data.teacher_batch.topk_indices.tolist() == [[0, 1]]
+    assert teacher_data.teacher_batch.teacher_scores.tolist() == [
+        [
+            float(MORTAL_RIICHI_ACTION_ID + _tile("2m")),
+            float(MORTAL_RIICHI_ACTION_ID + _tile("7p")),
+        ]
+    ]
+
+
+def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.DISCARD, tile=_tile("2m")),
+        ActionSpec(ActionType.PASS),
+    )
+    policy_input = _policy_input(
+        legal_actions,
+        mask_ids=(1, MORTAL_PASS_ACTION_ID),
+        prior_logits=torch.tensor([[2.0, 1.0, -100.0]], dtype=torch.float32),
+    )
+    teacher_data = prepare_mortal_imitation_teacher_data(
+        policy_input,
+        prepared_steps=(),
+        teacher_support="topk",
+        teacher_topk=2,
+        strict_extra=False,
+    )
+
+    metrics, changed_rows, breakdown_rows = imitation_metrics(
+        _output([0.0, 3.0, -100.0]),
+        policy_input,
+        parent_output=_output([3.0, 0.0, -100.0]),
+        source_output=_output([3.0, 0.0, -100.0]),
+        prepared_steps=(SimpleNamespace(episode_id="ep", step_id=7, actor=0, mortal_teacher_events=()),),
+        teacher_support="topk",
+        teacher_topk=2,
+        teacher_temperature=1.0,
+        teacher_batch=teacher_data.teacher_batch,
+        mapping_summary=teacher_data.summary,
+    )
+
+    assert metrics["top1_changed_vs_parent_rate"] == 1.0
+    assert changed_rows[0]["changed_kind"] == "discard_to_pass"
+    assert changed_rows[0]["changed_to_pass"] is True
+    assert breakdown_rows == [
+        {
+            "action_type": "PASS",
+            "row_count": 1,
+            "teacher_ce": pytest.approx(breakdown_rows[0]["teacher_ce"]),
+            "teacher_kl": pytest.approx(breakdown_rows[0]["teacher_kl"]),
+            "teacher_agreement": 1.0,
+            "teacher_prior_agreement": 0.0,
+            "teacher_margin_mean": pytest.approx(44.0),
+            "teacher_entropy_mean": pytest.approx(breakdown_rows[0]["teacher_entropy_mean"]),
+            "policy_top1_vs_teacher_top1_rate": 1.0,
+            "top1_changed_vs_parent_rate": 1.0,
+            "rank_ge5_rate": 0.0,
+            "mapping_available_rate": 1.0,
+            "fail_closed_count": 0,
+        }
+    ]
+
+
+def test_incremental_outputs_include_action_type_breakdown(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        output_dir=tmp_path,
+        candidate_summary=Path("summary.csv"),
+        source_config_ids=(93,),
+        teacher_source="mortal-action-q",
+        mortal_teacher_checkpoint=Path("mortal.pth"),
+        teacher_support="topk",
+        teacher_topk=3,
+    )
+
+    _write_incremental_outputs(
+        args,
+        iteration_rows=(),
+        action_type_breakdown_rows=({"action_type": "RON", "row_count": 2},),
+        audit_rows=(),
+        changed_rows=(),
+        checkpoint_rows=(),
+    )
+
+    rows = list(csv.DictReader((tmp_path / "imitation_action_type_breakdown.csv").open()))
+    assert rows == [{"action_type": "RON", "row_count": "2"}]
 
 
 def test_deferred_mortal_observation_extras_are_materialized_after_rollout() -> None:
@@ -260,7 +410,7 @@ def test_deferred_mortal_observation_extras_are_materialized_after_rollout() -> 
         bridge=bridge,
     )
 
-    assert bridge.reset_count == 1
+    assert bridge.reset_count == 2
     assert len(bridge.calls) == 2
     assert set(materialized.obs.extras) == {
         MORTAL_ENCODED_OBS_EXTRA_KEY,

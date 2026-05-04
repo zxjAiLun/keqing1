@@ -65,7 +65,10 @@ audit/replay for changed decisions
 - Actual `TSUMO/RON` outcome counts are diagnostic unless `--terminal-coverage-outcome-gate` is explicitly enabled.
 - Before reinterpreting surprising Mortal probe results, export the exact seed with `scripts/export_keqingrl_mjai_replay.py` and inspect the readable MJAI trace.
 - Use `contract_scoreboard.*` as the Mortal action-Q go/no-go surface; use `mortal_action_mapping_audit.*` to debug response mask parity gaps.
-- For the current `PASS/RON/PON/CHI` response-stage probe, KAN is out of learner scope. Run with `--no-mortal-teacher-strict-extra-mask` so extra Mortal id `42` is audit-only; missing controlled legal actions remain fail-closed.
+- Current default imitation scope includes `ANKAN`, `DAIMINKAN`, and `KAKAN`.
+  Run with
+  `--no-mortal-teacher-strict-extra-mask` for scoped probes so unrelated extra
+  Mortal ids are audit-only; missing controlled legal actions remain fail-closed.
 - Historical 2026-04-29 `mortal-action-q` status:
   - Bridge-fix contract probe passed contract and opportunity gates.
   - Conservative movement grid still had no top1 movement.
@@ -108,9 +111,10 @@ audit/replay for changed decisions
   batched teacher eval, incremental MortalObservationBridge cache,
   post-rollout bridge materialization, checkpoint-row dedupe, iteration-specific
   checkpoints, and all-seat learner collection.
-- KAN remains out of training scope. Extra Mortal id `42` is audit-only under
-  `--no-mortal-teacher-strict-extra-mask`; missing controlled legal actions
-  still fail closed.
+- KAN id42 is scored with a second `at_kan_select=true` Mortal pass for concrete
+  tile choice. The 2026-05-04 `ANKAN + DAIMINKAN` probe passed
+  `mapping=666/666`, fail-closed `0`; the follow-up KAKAN probe passed
+  `mapping=584/584`, fail-closed `0`.
 - Style context is carried through but fixed neutral for the current imitation
   line unless a future status update opens style conditioning.
 - Checkpoint metadata must include policy/action/observation/action-feature/env/rule-score contract versions.

@@ -404,15 +404,16 @@ def test_tempered_ratio_pilot_mortal_action_q_teacher_keeps_fixed_topk_with_shor
     assert teacher["teacher_row_valid_mask"].tolist() == [True, False]
 
 
-def test_tempered_ratio_pilot_mortal_action_q_topk_dedupes_duplicate_reach_sources() -> None:
+def test_tempered_ratio_pilot_mortal_action_q_topk_keeps_reach_tiles_distinct() -> None:
     q_values = torch.zeros((1, MORTAL_ACTION_SPACE), dtype=torch.float32)
     q_values[0, 0] = 5.0
+    q_values[0, 1] = 2.0
     q_values[0, 37] = 1.0
     q_values[0, 45] = 0.5
     batch = _mortal_action_batch_with_duplicate_reach_sources(
         extras={
             MORTAL_Q_VALUES_EXTRA_KEY: q_values,
-            MORTAL_ACTION_MASK_EXTRA_KEY: _mortal_mask(0, 37, 45),
+            MORTAL_ACTION_MASK_EXTRA_KEY: _mortal_mask(0, 1, 37, 45),
         }
     )
 
@@ -424,13 +425,13 @@ def test_tempered_ratio_pilot_mortal_action_q_topk_dedupes_duplicate_reach_sourc
         teacher_temperature=1.0,
     )
 
-    assert teacher["topk_indices"].tolist() == [[0, 2, 3]]
-    assert teacher["teacher_topk_scores"].tolist() == [[1.0, 5.0, 0.5]]
-    assert teacher["teacher_argmax"].tolist() == [1]
+    assert teacher["topk_indices"].tolist() == [[0, 1, 2]]
+    assert teacher["teacher_topk_scores"].tolist() == [[6.0, 3.0, 5.0]]
+    assert teacher["teacher_argmax"].tolist() == [0]
     assert teacher["teacher_row_valid_mask"].tolist() == [True]
 
 
-def test_tempered_ratio_pilot_support_topk_dedupes_duplicate_reach_sources() -> None:
+def test_tempered_ratio_pilot_support_topk_keeps_reach_tiles_distinct() -> None:
     batch = _mortal_action_batch_with_duplicate_reach_sources()
 
     support = _delta_support_mask(
@@ -441,7 +442,7 @@ def test_tempered_ratio_pilot_support_topk_dedupes_duplicate_reach_sources() -> 
         margin_threshold=0.75,
     )
 
-    assert support.tolist() == [[True, False, True, True]]
+    assert support.tolist() == [[True, True, True, False]]
 
 
 def test_tempered_ratio_pilot_reach_probe_counts_mortal_action_teacher_decisions() -> None:

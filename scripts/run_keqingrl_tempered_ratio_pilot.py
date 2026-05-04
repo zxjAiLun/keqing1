@@ -3782,10 +3782,13 @@ def _source_deduped_topk_keep(
 
 def _support_source_key(action) -> tuple[object, ...]:
     action_type = getattr(action, "action_type", None)
+    tile = getattr(action, "tile", None)
+    if action_type == ActionType.REACH_DISCARD and tile is not None:
+        return ("reach_discard", int(tile))
     if action_type == ActionType.REACH_DISCARD:
-        return ("reach",)
-    if action_type == ActionType.DISCARD and getattr(action, "tile", None) is not None:
-        return ("discard", int(action.tile))
+        return ("reach_discard",)
+    if action_type == ActionType.DISCARD and tile is not None:
+        return ("discard", int(tile))
     return ("action", getattr(action, "canonical_key", repr(action)))
 
 

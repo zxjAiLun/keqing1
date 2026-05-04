@@ -415,7 +415,7 @@ class BattleManager:
             }
             room.state.last_tsumo[actor] = None
             room.state.last_tsumo_raw[actor] = None
-            room.state.actor_to_move = actor
+            room.state.actor_to_move = (actor + 1) % 4
             room.pending_kakan = {
                 "actor": actor,
                 "pai": _normalize_or_keep_aka(pai),
@@ -643,6 +643,7 @@ class BattleManager:
         room.state.last_kakan = None
         room.state.pending_rinshan_actor = None
         room.pending_rinshan = False
+        room.pending_kakan = None
 
         room.events.append(
             {
@@ -707,6 +708,7 @@ class BattleManager:
         room.state.last_kakan = None
         room.state.pending_rinshan_actor = None
         room.pending_rinshan = False
+        room.pending_kakan = None
 
         room.events.append(
             {
@@ -923,9 +925,14 @@ class BattleManager:
                 else:
                     room.state.actor_to_move = next_actor
             elif is_kakan_response:
+                kan_actor = last_kakan["actor"]
+                next_actor = (actor + 1) % 4
                 room.events.append({"type": "none", "actor": actor})
-                room.state.actor_to_move = last_kakan["actor"]
-                room.events.append({"type": "none"})
+                if next_actor == kan_actor:
+                    room.events.append({"type": "none"})
+                    self.accept_kakan(room)
+                else:
+                    room.state.actor_to_move = next_actor
             else:
                 # 摸牌回合 none → 摸切
                 tsumo = room.state.last_tsumo_raw[actor] or room.state.last_tsumo[actor]

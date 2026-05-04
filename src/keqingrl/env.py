@@ -34,6 +34,10 @@ from keqingrl.metadata import (
 from keqingrl.mortal_teacher import (
     MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY,
     MORTAL_ENCODED_OBS_EXTRA_KEY,
+    MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY,
+    MORTAL_KAN_SELECT_ENCODED_ACTION_MASK_EXTRA_KEY,
+    MORTAL_KAN_SELECT_ENCODED_OBS_EXTRA_KEY,
+    MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY,
     MortalTeacherMappingError,
     assert_mortal_action_mask_compatible,
     assert_mortal_discard_mask_parity,
@@ -343,6 +347,16 @@ class DiscardOnlyMahjongEnv:
             bridge = MortalObservationBridge()
             self.mortal_observation_bridge = bridge
         encoded = bridge.encode_from_events(self._mortal_events_for_turn(turn), turn.actor)
+        kan_encoded = None
+        if any(action.action_type in (ActionType.DAIMINKAN, ActionType.ANKAN, ActionType.KAKAN) for action in turn.legal_actions):
+            from keqingrl.mortal_observation import MortalObservationBridge  # noqa: PLC0415
+
+            kan_bridge = MortalObservationBridge(
+                mortal_root=bridge.mortal_root,
+                at_kan_select=True,
+                enable_incremental_cache=False,
+            )
+            kan_encoded = kan_bridge.encode_from_events(self._mortal_events_for_turn(turn), turn.actor)
         try:
             if all(action.action_type == ActionType.DISCARD for action in turn.legal_actions):
                 assert_mortal_discard_mask_parity(encoded.action_mask, turn.legal_actions)
@@ -367,15 +381,39 @@ class DiscardOnlyMahjongEnv:
                 context=context,
             ) from exc
         if self.mortal_teacher_defer_runtime:
-            return {
+            extras = {
                 MORTAL_ENCODED_OBS_EXTRA_KEY: encoded.obs.unsqueeze(0),
                 MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY: encoded.action_mask.unsqueeze(0),
             }
+            if kan_encoded is not None:
+                extras[MORTAL_KAN_SELECT_ENCODED_OBS_EXTRA_KEY] = kan_encoded.obs.unsqueeze(0)
+                extras[MORTAL_KAN_SELECT_ENCODED_ACTION_MASK_EXTRA_KEY] = kan_encoded.action_mask.unsqueeze(0)
+            elif self._kan_actions_enabled():
+                extras[MORTAL_KAN_SELECT_ENCODED_OBS_EXTRA_KEY] = torch.zeros_like(encoded.obs).unsqueeze(0)
+                extras[MORTAL_KAN_SELECT_ENCODED_ACTION_MASK_EXTRA_KEY] = torch.zeros_like(encoded.action_mask).unsqueeze(0)
+            return extras
         output = self.mortal_teacher_runtime.evaluate(
             encoded.obs.unsqueeze(0),
             encoded.action_mask.unsqueeze(0),
         )
-        return output.extras()
+        extras = output.extras()
+        if kan_encoded is not None:
+            kan_output = self.mortal_teacher_runtime.evaluate(
+                kan_encoded.obs.unsqueeze(0),
+                kan_encoded.action_mask.unsqueeze(0),
+            )
+            extras[MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY] = kan_output.q_values
+            extras[MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY] = kan_output.action_mask
+        elif self._kan_actions_enabled():
+            extras[MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY] = torch.zeros_like(output.q_values)
+            extras[MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY] = torch.zeros_like(output.action_mask)
+        return extras
+
+    def _kan_actions_enabled(self) -> bool:
+        return bool(
+            self._self_turn_action_type_set.intersection((ActionType.ANKAN, ActionType.KAKAN))
+            or ActionType.DAIMINKAN in self._response_action_type_set
+        )
 
     def _mortal_mapping_debug_context(self, turn: _TurnContext) -> dict[str, object]:
         snapshot = turn.snapshot
@@ -924,6 +962,7 @@ class DiscardOnlyMahjongEnv:
 
     def _convert_supported_self_turn_raw_action(
         self,
+        snapshot: dict[str, object],
         raw_spec: MahjongActionSpec,
     ) -> ActionSpec | None:
         if raw_spec.type == "dahai":
@@ -934,6 +973,8 @@ class DiscardOnlyMahjongEnv:
             action_spec = action_from_mahjong_spec(raw_spec)
         elif raw_spec.type in {"ankan", "kakan"}:
             action_spec = action_from_mahjong_spec(raw_spec)
+            if snapshot.get("tsumo_pai") is None:
+                return None
         elif raw_spec.type == "ryukyoku":
             action_spec = action_from_mahjong_spec(raw_spec)
         else:
@@ -956,7 +997,7 @@ class DiscardOnlyMahjongEnv:
                         self._collect_reach_discard_actions(snapshot, raw_legal_actions)
                     )
                 continue
-            action_spec = self._convert_supported_self_turn_raw_action(raw_spec)
+            action_spec = self._convert_supported_self_turn_raw_action(snapshot, raw_spec)
             if action_spec is not None:
                 controlled_pairs.append((action_spec, (raw_spec.to_mjai(),)))
         return controlled_pairs
@@ -1042,9 +1083,22 @@ class DiscardOnlyMahjongEnv:
                 return False
         melds = snapshot.get("melds")
         if isinstance(melds, Sequence) and not isinstance(melds, (str, bytes)):
-            if actor < len(melds) and bool(melds[actor]):
+            if actor < len(melds) and self._has_open_meld(melds[actor]):
                 return False
         return True
+
+    def _has_open_meld(self, actor_melds: object) -> bool:
+        if not isinstance(actor_melds, Sequence) or isinstance(actor_melds, (str, bytes)):
+            return False
+        for meld in actor_melds:
+            meld_type = None
+            if isinstance(meld, dict):
+                meld_type = meld.get("type")
+            else:
+                meld_type = getattr(meld, "type", None)
+            if str(meld_type) != "ankan":
+                return True
+        return False
 
     def _enumerate_reach_discard_candidates(
         self,
@@ -1096,6 +1150,8 @@ class DiscardOnlyMahjongEnv:
             self.manager.apply_action(room, actor, action)
         events = getattr(room, "events", None)
         if events is not None and len(events) != before_event_count:
+            if getattr(room, "pending_kakan", None):
+                return
             self._sync_rust_runtime_state(room, actor_hint=actor)
 
     def _sync_rust_runtime_state(self, room: BattleRoom, *, actor_hint: int | None = None) -> None:

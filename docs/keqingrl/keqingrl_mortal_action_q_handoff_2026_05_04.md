@@ -131,7 +131,8 @@ KeqingRL.
 Important mapping facts:
 
 - `0..36`: discard ids, red fives collapsed by the adapter.
-- `37`: reach declaration, coarse over all `REACH_DISCARD` candidates.
+- `37`: reach declaration. `REACH_DISCARD(tile)` is scored as q37 plus that
+  tile's Mortal discard Q, so reach candidates are tile-level distinct.
 - `38..40`: chi low/mid/high.
 - `41`: pon.
 - `42`: kan family, currently out of training scope.
@@ -283,6 +284,8 @@ Controlled self-turn actions:
 DISCARD
 REACH_DISCARD
 TSUMO
+ANKAN
+KAKAN
 RYUKYOKU
 ```
 
@@ -293,6 +296,7 @@ PASS
 RON
 PON
 CHI
+DAIMINKAN
 ```
 
 Forced/autopilot actions:
@@ -303,24 +307,41 @@ RON
 RYUKYOKU
 ```
 
-Out of training scope:
+Mortal id `42` is the coarse KAN family id. Missing controlled legal actions
+still fail closed.
+
+2026-05-04 implementation update: the first KAN mapping contract is now wired.
+For concrete KAN rows, KeqingRL can evaluate the normal Mortal decision Q for
+id42 and a second `at_kan_select=true` Mortal pass for the concrete kan tile:
 
 ```text
-DAIMINKAN
-ANKAN
-KAKAN
+KAN ActionSpec score = q[id42] + q_kan_select[tile]
 ```
 
-Mortal id `42` is the coarse KAN family id. When KAN is out of learner scope
-and `--no-mortal-teacher-strict-extra-mask` is set, id `42` is audit-only.
-Missing controlled legal actions still fail closed.
+This resolves the pure id42 ambiguity in the mapping layer. A small 2026-05-04
+probe passed for `ANKAN + DAIMINKAN`:
+
+```text
+reports/keqingrl_mortal_action_q_imitation_kan_scope_probe_20260504_ankan_daiminkan_from_best_ep8
+mapping=666/666
+fail_closed=0
+```
+
+`ANKAN` and `DAIMINKAN` entered the imitation script defaults first. A follow-up
+KAKAN scope probe passed:
+
+```text
+reports/keqingrl_mortal_action_q_imitation_kakan_scope_probe_20260504_from_best_ep32
+mapping=584/584
+fail_closed=0
+```
+
+`KAKAN` is therefore also in the imitation script defaults.
 
 ## Unresolved Issues
 
-- KAN family needs a separate contract. Mortal id `42` is too coarse for
-  KeqingRL's detailed kan `ActionSpec`; `at_kan_select` support is not wired.
-- `REACH_DISCARD` uses Mortal id `37` and scores reach declaration, but it does
-  not distinguish the follow-up reach discard tile.
+- `REACH_DISCARD` now uses Mortal id `37` plus concrete discard tile Q, so
+  reach-vs-discard and reach-tile choice are both represented in teacher scores.
 - Call ids do not encode every red-five detail; current adapter relies on
   state/context and fails closed on malformed payloads.
 - `changed_decisions.*` is useful but not yet a full hand/state/event-rich

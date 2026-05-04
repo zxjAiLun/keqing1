@@ -79,9 +79,14 @@ class MortalObservationBridge:
                 continue
             try:
                 cache.player_state.update(json.dumps(event, ensure_ascii=False))
-            except Exception as exc:
+            except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
                 raise MortalObservationBridgeError(
-                    f"Mortal PlayerState failed on event #{cache.replayed_event_count}: {event}"
+                    "Mortal PlayerState failed while replaying event "
+                    f"raw_index={cache.raw_event_count - 1} "
+                    f"replayed_index={cache.replayed_event_count} "
+                    f"actor={actor}: {event}"
                 ) from exc
             cache.replayed_event_count += 1
         obs, action_mask = cache.player_state.encode_obs(self.version, self.at_kan_select)

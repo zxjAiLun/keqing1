@@ -784,6 +784,11 @@ pub fn enumerate_legal_action_specs_structural(
     }
 
     if actor_to_move == Some(actor) {
+        let kan_allowed = state_snapshot
+            .get("remaining_wall")
+            .and_then(Value::as_i64)
+            .map(|remaining_wall| remaining_wall > 0)
+            .unwrap_or(true);
         let pending_reach = get_actor_list_bool(state_snapshot, "pending_reach", actor);
         let melds = state_snapshot
             .get("melds")
@@ -804,20 +809,22 @@ pub fn enumerate_legal_action_specs_structural(
                     "tsumogiri": true,
                 }));
             }
-            for (pai, consumed) in ankan_candidates(&hand) {
-                if ankan_allowed_after_reach(
-                    &hand,
-                    &melds,
-                    &consumed,
-                    last_tsumo.as_deref(),
-                    last_tsumo_raw.as_deref(),
-                ) {
-                    legal.push(json!({
-                        "type": "ankan",
-                        "actor": actor,
-                        "pai": pai,
-                        "consumed": consumed,
-                    }));
+            if kan_allowed {
+                for (pai, consumed) in ankan_candidates(&hand) {
+                    if ankan_allowed_after_reach(
+                        &hand,
+                        &melds,
+                        &consumed,
+                        last_tsumo.as_deref(),
+                        last_tsumo_raw.as_deref(),
+                    ) {
+                        legal.push(json!({
+                            "type": "ankan",
+                            "actor": actor,
+                            "pai": pai,
+                            "consumed": consumed,
+                        }));
+                    }
                 }
             }
             return Ok(legal);
@@ -890,35 +897,37 @@ pub fn enumerate_legal_action_specs_structural(
                 "actor": actor,
             }));
         }
-        for (pai, consumed) in ankan_candidates(&hand) {
-            legal.push(json!({
-                "type": "ankan",
-                "actor": actor,
-                "pai": pai,
-                "consumed": consumed,
-            }));
-        }
-        for meld in melds {
-            if meld.get("type").and_then(Value::as_str) != Some("pon") {
-                continue;
-            }
-            let Some(meld_pai) = meld.get("pai").and_then(Value::as_str) else {
-                continue;
-            };
-            let meld_norm = normalize_tile(meld_pai);
-            if hand_has_tile(&hand, &meld_norm) {
-                let mut consumed = meld
-                    .get("consumed")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                consumed.push(Value::String(meld_pai.to_string()));
+        if kan_allowed {
+            for (pai, consumed) in ankan_candidates(&hand) {
                 legal.push(json!({
-                    "type": "kakan",
+                    "type": "ankan",
                     "actor": actor,
-                    "pai": pick_chi_tile(&hand, &meld_norm),
+                    "pai": pai,
                     "consumed": consumed,
                 }));
+            }
+            for meld in melds {
+                if meld.get("type").and_then(Value::as_str) != Some("pon") {
+                    continue;
+                }
+                let Some(meld_pai) = meld.get("pai").and_then(Value::as_str) else {
+                    continue;
+                };
+                let meld_norm = normalize_tile(meld_pai);
+                if hand_has_tile(&hand, &meld_norm) {
+                    let mut consumed = meld
+                        .get("consumed")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    consumed.push(Value::String(meld_pai.to_string()));
+                    legal.push(json!({
+                        "type": "kakan",
+                        "actor": actor,
+                        "pai": pick_chi_tile(&hand, &meld_norm),
+                        "consumed": consumed,
+                    }));
+                }
             }
         }
         return Ok(legal);
@@ -1356,5 +1365,33 @@ mod tests {
         let actions = enumerate_legal_action_specs_structural(&snapshot, 2).unwrap();
 
         assert_eq!(actions, vec![json!({"type": "none"})]);
+    }
+
+    #[test]
+    fn haitei_self_turn_blocks_ankan_and_kakan() {
+        let snapshot = json!({
+            "actor": 0,
+            "hand": ["1m", "2m", "3m", "4m", "5p", "8s", "9s", "9s", "9s", "9s"],
+            "melds": [
+                [{"type": "pon", "pai": "5p", "pai_raw": "5p", "consumed": ["5p", "5p"], "target": 1}],
+                [],
+                [],
+                []
+            ],
+            "reached": [false, false, false, false],
+            "pending_reach": [false, false, false, false],
+            "actor_to_move": 0,
+            "last_discard": null,
+            "last_kakan": null,
+            "last_tsumo": ["9s", null, null, null],
+            "last_tsumo_raw": ["9s", null, null, null],
+            "remaining_wall": 0
+        });
+
+        let actions = enumerate_legal_action_specs_structural(&snapshot, 0).unwrap();
+
+        assert!(actions.iter().all(|action| action["type"] != "ankan"));
+        assert!(actions.iter().all(|action| action["type"] != "kakan"));
+        assert!(actions.iter().any(|action| action["type"] == "dahai"));
     }
 }

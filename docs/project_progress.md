@@ -73,14 +73,15 @@ changed_decisions.readable.md
 Current training scope:
 
 ```text
-self-turn: DISCARD / REACH_DISCARD / TSUMO / RYUKYOKU
-response:  PASS / RON / PON / CHI
+self-turn: DISCARD / REACH_DISCARD / TSUMO / ANKAN / KAKAN / RYUKYOKU
+response:  PASS / RON / PON / CHI / DAIMINKAN
 autopilot: TSUMO / RON / RYUKYOKU
-out:       DAIMINKAN / ANKAN / KAKAN
 ```
 
-KAN remains out of scope because Mortal id `42` is a coarse family decision
-while KeqingRL legal actions distinguish kan forms and tile choices.
+KAN id42 is now resolved with a second `at_kan_select=true` Mortal pass for
+concrete tile scoring. A scoped 2026-05-04 probe passed for `ANKAN + DAIMINKAN`
+with mapping `666/666` and fail-closed `0`; a follow-up KAKAN scope probe passed
+with mapping `584/584` and fail-closed `0`, so KAKAN is now in default scope.
 
 ### Latest Imitation Chain
 
@@ -231,8 +232,8 @@ Not default work:
 3. For current model growth, train Mortal Action-Q imitation directly; do not
    use paired eval as the default blocker.
 4. Treat discard-only probes as contract diagnostics only.
-5. Keep KAN family out of training scope until a separate id-42/kan-select
-   contract is implemented.
+5. Keep KAN probes in the runbook so regressions in added-kan/chankan handling
+   are caught before long imitation runs.
 6. Use readable replay/audit artifacts to inspect changed decisions before
    claiming strength.
 

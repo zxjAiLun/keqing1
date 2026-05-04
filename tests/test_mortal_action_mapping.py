@@ -43,7 +43,7 @@ def _tile(name: str) -> int:
 def test_mortal_full_action_ids_cover_reach_terminal_pass_and_calls() -> None:
     assert mortal_action_ids_for_action_spec(
         ActionSpec(ActionType.REACH_DISCARD, tile=_tile("5m"), flags=ACTION_FLAG_REACH)
-    ) == (MORTAL_RIICHI_ACTION_ID,)
+    ) == (MORTAL_RIICHI_ACTION_ID, _tile("5m"), 34)
     assert mortal_action_ids_for_action_spec(ActionSpec(ActionType.TSUMO, tile=_tile("7p"))) == (
         MORTAL_AGARI_ACTION_ID,
     )
@@ -98,14 +98,62 @@ def test_mortal_scores_for_legal_actions_scores_current_keqing_legal_set_only() 
     )
 
     assert mapped.score_mask.tolist() == [True, True, True, True, True]
-    assert mapped.scores.tolist() == [34.0, 37.0, 43.0, 45.0, 44.0]
+    assert mapped.scores.tolist() == [34.0, 71.0, 43.0, 45.0, 44.0]
     assert mapped.source_action_ids == (
         (4, 34),
-        (MORTAL_RIICHI_ACTION_ID,),
+        (MORTAL_RIICHI_ACTION_ID, 4, 34),
         (MORTAL_AGARI_ACTION_ID,),
         (MORTAL_PASS_ACTION_ID,),
         (MORTAL_RYUKYOKU_ACTION_ID,),
     )
+
+
+def test_mortal_reach_discard_scores_include_tile_level_discard_q() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.REACH_DISCARD, tile=_tile("2m"), flags=ACTION_FLAG_REACH),
+        ActionSpec(ActionType.REACH_DISCARD, tile=_tile("7p"), flags=ACTION_FLAG_REACH),
+    )
+    q_values = _q_values()
+    q_values[_tile("2m")] = 0.5
+    q_values[_tile("7p")] = 4.0
+    q_values[MORTAL_RIICHI_ACTION_ID] = 10.0
+
+    mapped = mortal_scores_for_legal_actions(
+        q_values,
+        _mask(MORTAL_RIICHI_ACTION_ID, _tile("2m"), _tile("7p")),
+        legal_actions,
+    )
+
+    assert mapped.score_mask.tolist() == [True, True]
+    assert mapped.scores.tolist() == [10.5, 14.0]
+    assert mapped.source_action_ids == (
+        (MORTAL_RIICHI_ACTION_ID, _tile("2m")),
+        (MORTAL_RIICHI_ACTION_ID, _tile("7p")),
+    )
+
+
+def test_mortal_reach_discard_requires_riichi_and_discard_tile_mask() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.REACH_DISCARD, tile=_tile("2m"), flags=ACTION_FLAG_REACH),
+    )
+
+    missing_riichi = mortal_scores_for_legal_actions(
+        _q_values(),
+        _mask(_tile("2m")),
+        legal_actions,
+        strict_mask=False,
+    )
+    missing_tile = mortal_scores_for_legal_actions(
+        _q_values(),
+        _mask(MORTAL_RIICHI_ACTION_ID),
+        legal_actions,
+        strict_mask=False,
+    )
+
+    assert missing_riichi.score_mask.tolist() == [False]
+    assert missing_tile.score_mask.tolist() == [False]
+    assert missing_riichi.missing_legal_keys == (legal_actions[0].canonical_key,)
+    assert missing_tile.missing_legal_keys == (legal_actions[0].canonical_key,)
 
 
 def test_mortal_action_mask_compatibility_fails_for_missing_or_extra_actions() -> None:
@@ -179,3 +227,44 @@ def test_mortal_action_mapping_fails_closed_on_multiple_kan_choices() -> None:
 
     with pytest.raises(MortalTeacherMappingError, match="ambiguous"):
         mortal_scores_for_legal_actions(_q_values(), _mask(MORTAL_KAN_ACTION_ID), legal_actions)
+
+
+def test_mortal_action_mapping_scores_multiple_kan_choices_with_kan_select_q() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.ANKAN, consumed=(_tile("5m"), _tile("5m"), _tile("5m"), _tile("5m"))),
+        ActionSpec(ActionType.KAKAN, tile=_tile("5p")),
+    )
+    kan_q = torch.zeros((MORTAL_ACTION_SPACE,), dtype=torch.float32)
+    kan_q[_tile("5m")] = 0.25
+    kan_q[_tile("5p")] = 2.5
+
+    mapped = mortal_scores_for_legal_actions(
+        _q_values(),
+        _mask(MORTAL_KAN_ACTION_ID),
+        legal_actions,
+        kan_select_q_values=kan_q,
+        kan_select_mask=_mask(_tile("5m"), _tile("5p")),
+    )
+
+    assert mapped.score_mask.tolist() == [True, True]
+    assert mapped.scores.tolist() == [42.25, 44.5]
+    assert mapped.missing_legal_keys == ()
+
+
+def test_mortal_action_mapping_fails_closed_when_kan_select_mask_missing_tile() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.ANKAN, consumed=(_tile("5m"), _tile("5m"), _tile("5m"), _tile("5m"))),
+        ActionSpec(ActionType.KAKAN, tile=_tile("5p")),
+    )
+
+    mapped = mortal_scores_for_legal_actions(
+        _q_values(),
+        _mask(MORTAL_KAN_ACTION_ID),
+        legal_actions,
+        strict_mask=False,
+        kan_select_q_values=_q_values(),
+        kan_select_mask=_mask(_tile("5m")),
+    )
+
+    assert mapped.score_mask.tolist() == [True, False]
+    assert mapped.missing_legal_keys == (legal_actions[1].canonical_key,)

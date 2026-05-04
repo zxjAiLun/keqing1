@@ -14,6 +14,7 @@ import sys
 import time
 from typing import Any, Mapping, Sequence
 
+import keqing_core
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +36,10 @@ from keqingrl.mortal_teacher import (
     MORTAL_ACTION_TEACHER_CONTRACT_VERSION,
     MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY,
     MORTAL_ENCODED_OBS_EXTRA_KEY,
+    MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY,
+    MORTAL_KAN_SELECT_ENCODED_ACTION_MASK_EXTRA_KEY,
+    MORTAL_KAN_SELECT_ENCODED_OBS_EXTRA_KEY,
+    MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY,
     MORTAL_Q_VALUES_EXTRA_KEY,
     MortalTeacherMappingError,
     mortal_action_mapping_audit_row,
@@ -151,13 +156,13 @@ def _parse_args() -> argparse.Namespace:
         "--self-turn-action-types",
         choices=_ACTION_TYPE_CHOICES,
         nargs="+",
-        default=("DISCARD", "REACH_DISCARD", "TSUMO", "RYUKYOKU"),
+        default=("DISCARD", "REACH_DISCARD", "TSUMO", "ANKAN", "KAKAN", "RYUKYOKU"),
     )
     parser.add_argument(
         "--response-action-types",
         choices=_ACTION_TYPE_CHOICES,
         nargs="*",
-        default=("PASS", "RON", "PON", "CHI"),
+        default=("PASS", "RON", "PON", "CHI", "DAIMINKAN"),
     )
     return parser.parse_args()
 
@@ -172,6 +177,7 @@ def main() -> None:
 
     summary_rows: list[dict[str, Any]] = []
     iteration_rows: list[dict[str, Any]] = []
+    action_type_breakdown_rows: list[dict[str, Any]] = []
     audit_rows: list[dict[str, Any]] = []
     changed_rows: list[dict[str, Any]] = []
     checkpoint_rows: list[dict[str, Any]] = []
@@ -270,6 +276,14 @@ def main() -> None:
                     max_examples=int(args.mortal_action_audit_max_examples),
                 )
             if int(teacher_data.summary["fail_closed_count"]) > 0:
+                _write_incremental_outputs(
+                    args,
+                    iteration_rows,
+                    action_type_breakdown_rows,
+                    audit_rows,
+                    changed_rows,
+                    checkpoint_rows,
+                )
                 raise MortalTeacherMappingError(
                     "Mortal imitation mapping failed closed: "
                     f"missing={teacher_data.summary['missing_legal_count']} "
@@ -309,7 +323,7 @@ def main() -> None:
                     strict_extra=bool(args.mortal_teacher_strict_extra_mask),
                     teacher_batch=teacher_data.teacher_batch,
                 )
-                metrics, new_changed_rows = imitation_metrics(
+                metrics, new_changed_rows, new_action_type_breakdown_rows = imitation_metrics(
                     output,
                     batch.policy_input,
                     parent_output=parent_output,
@@ -318,6 +332,8 @@ def main() -> None:
                     teacher_support=str(args.teacher_support),
                     teacher_topk=int(args.teacher_topk),
                     teacher_temperature=float(args.teacher_temperature),
+                    teacher_batch=teacher_data.teacher_batch,
+                    mapping_summary=teacher_data.summary,
                 )
             metrics_sec = time.perf_counter() - metrics_start
             changed_rows.extend(
@@ -327,6 +343,19 @@ def main() -> None:
                     **row,
                 }
                 for row in new_changed_rows
+            )
+            action_type_breakdown_rows.extend(
+                {
+                    "pilot_config_id": int(config_id),
+                    "iteration": int(iteration),
+                    "rollout_seed": int(rollout_seed),
+                    "torch_seed": int(torch_seed),
+                    "teacher_source": str(args.teacher_source),
+                    "teacher_support": str(args.teacher_support),
+                    "teacher_topk": int(args.teacher_topk),
+                    **row,
+                }
+                for row in new_action_type_breakdown_rows
             )
             batch_row_count = int(batch.policy_input.legal_action_mask.shape[0])
             checkpoint_sec = 0.0
@@ -410,7 +439,14 @@ def main() -> None:
                 f"metrics={metrics_sec:.1f}",
                 flush=True,
             )
-            _write_incremental_outputs(args, iteration_rows, audit_rows, changed_rows, checkpoint_rows)
+            _write_incremental_outputs(
+                args,
+                iteration_rows,
+                action_type_breakdown_rows,
+                audit_rows,
+                changed_rows,
+                checkpoint_rows,
+            )
 
         if final_row is not None:
             final_checkpoint = checkpoint_rows[-1] if checkpoint_rows else {}
@@ -424,7 +460,15 @@ def main() -> None:
             )
         config_id += 1
 
-    _write_outputs(args, summary_rows, iteration_rows, audit_rows, changed_rows, checkpoint_rows)
+    _write_outputs(
+        args,
+        summary_rows,
+        iteration_rows,
+        action_type_breakdown_rows,
+        audit_rows,
+        changed_rows,
+        checkpoint_rows,
+    )
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -508,23 +552,47 @@ def _ensure_mortal_encoded_observation_extras(
         )
     encoded_obs_rows: list[torch.Tensor] = []
     encoded_mask_rows: list[torch.Tensor] = []
-    previous_episode_id: object = object()
+    kan_encoded_obs_rows: list[torch.Tensor] = []
+    kan_encoded_mask_rows: list[torch.Tensor] = []
+    has_kan_rows: list[bool] = []
+    kan_bridge: MortalObservationBridge | None = None
     for row_idx, step in enumerate(prepared_steps):
         events = tuple(getattr(step, "mortal_teacher_events", ()))
         if not events:
             raise MortalTeacherMappingError(
                 f"Mortal observation events missing for deferred bridge row {row_idx}"
             )
-        episode_id = getattr(step, "episode_id", None)
-        if episode_id != previous_episode_id:
-            bridge.reset_cache()
-            previous_episode_id = episode_id
+        # Prepared PPO rows are not guaranteed to be chronological per actor.
+        # Reusing Mortal PlayerState across out-of-order rows can replay an
+        # invalid event suffix into libriichi, so post-rollout materialization
+        # rebuilds each row independently.
+        bridge.reset_cache()
         encoded = bridge.encode_from_events(events, int(step.actor))
         encoded_obs_rows.append(encoded.obs)
         encoded_mask_rows.append(encoded.action_mask)
+        row_actions = policy_input.legal_actions[row_idx] if policy_input.legal_actions is not None else ()
+        has_kan = any(action.action_type in (ActionType.DAIMINKAN, ActionType.ANKAN, ActionType.KAKAN) for action in row_actions)
+        has_kan_rows.append(has_kan)
+        if has_kan:
+            if kan_bridge is None:
+                kan_bridge = MortalObservationBridge(
+                    mortal_root=Path(getattr(bridge, "mortal_root", "third_party/Mortal")),
+                    at_kan_select=True,
+                    enable_incremental_cache=bool(getattr(bridge, "enable_incremental_cache", True)),
+                )
+            kan_bridge.reset_cache()
+            kan_encoded = kan_bridge.encode_from_events(events, int(step.actor))
+            kan_encoded_obs_rows.append(kan_encoded.obs)
+            kan_encoded_mask_rows.append(kan_encoded.action_mask)
+        else:
+            kan_encoded_obs_rows.append(torch.zeros_like(encoded.obs))
+            kan_encoded_mask_rows.append(torch.zeros_like(encoded.action_mask))
     new_extras = dict(extras)
     new_extras[MORTAL_ENCODED_OBS_EXTRA_KEY] = torch.stack(encoded_obs_rows, dim=0)
     new_extras[MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY] = torch.stack(encoded_mask_rows, dim=0)
+    if any(has_kan_rows):
+        new_extras[MORTAL_KAN_SELECT_ENCODED_OBS_EXTRA_KEY] = torch.stack(kan_encoded_obs_rows, dim=0)
+        new_extras[MORTAL_KAN_SELECT_ENCODED_ACTION_MASK_EXTRA_KEY] = torch.stack(kan_encoded_mask_rows, dim=0)
     return replace(policy_input, obs=replace(policy_input.obs, extras=new_extras))
 
 
@@ -537,59 +605,118 @@ def _ensure_mortal_teacher_q_extras(
     extras = policy_input.obs.extras
     has_q_values = MORTAL_Q_VALUES_EXTRA_KEY in extras
     has_action_mask = MORTAL_ACTION_MASK_EXTRA_KEY in extras
-    if has_q_values and has_action_mask:
+    has_kan_encoded = (
+        MORTAL_KAN_SELECT_ENCODED_OBS_EXTRA_KEY in extras
+        or MORTAL_KAN_SELECT_ENCODED_ACTION_MASK_EXTRA_KEY in extras
+    )
+    has_kan_q_values = MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY in extras
+    has_kan_action_mask = MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY in extras
+    if has_q_values and has_action_mask and (not has_kan_encoded or (has_kan_q_values and has_kan_action_mask)):
         return policy_input
-    if has_q_values or has_action_mask:
+    if has_q_values != has_action_mask:
         present = [key for key in (MORTAL_Q_VALUES_EXTRA_KEY, MORTAL_ACTION_MASK_EXTRA_KEY) if key in extras]
         raise MortalTeacherMappingError(f"Mortal teacher q/mask extras are incomplete: present={present}")
-    missing_encoded = [
-        key
-        for key in (MORTAL_ENCODED_OBS_EXTRA_KEY, MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY)
-        if key not in extras
-    ]
-    if missing_encoded:
-        raise MortalTeacherMappingError(f"Mortal encoded teacher extras missing required keys: {missing_encoded}")
     if teacher_runtime is None:
         raise MortalTeacherMappingError("Mortal teacher runtime is required to materialize deferred q/mask extras")
 
-    encoded_obs = extras[MORTAL_ENCODED_OBS_EXTRA_KEY]
-    encoded_action_mask = extras[MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY].bool()
-    if encoded_obs.ndim < 3:
-        raise MortalTeacherMappingError(
-            "Deferred Mortal encoded obs must be batched, "
-            f"got shape={tuple(encoded_obs.shape)}"
-        )
-    if encoded_action_mask.ndim != 2 or int(encoded_action_mask.shape[-1]) != MORTAL_ACTION_SPACE:
-        raise MortalTeacherMappingError(
-            f"Deferred Mortal encoded action mask must have shape [B, {MORTAL_ACTION_SPACE}], "
-            f"got shape={tuple(encoded_action_mask.shape)}"
-        )
     batch_size = int(policy_input.legal_action_mask.shape[0])
-    if int(encoded_obs.shape[0]) != batch_size or int(encoded_action_mask.shape[0]) != batch_size:
-        raise MortalTeacherMappingError(
-            "Deferred Mortal encoded extras batch size mismatch: "
-            f"policy={batch_size}, obs={tuple(encoded_obs.shape)}, mask={tuple(encoded_action_mask.shape)}"
-        )
-
-    output_q_values: list[torch.Tensor] = []
-    output_action_masks: list[torch.Tensor] = []
     chunk_size = int(eval_batch_size or 0)
     if chunk_size <= 0:
         chunk_size = batch_size
-    for start in range(0, batch_size, chunk_size):
-        end = min(batch_size, start + chunk_size)
-        output = teacher_runtime.evaluate(encoded_obs[start:end], encoded_action_mask[start:end])
-        output_q_values.append(output.q_values)
-        output_action_masks.append(output.action_mask)
     target_device = policy_input.legal_action_mask.device
-    new_extras = {
-        key: value
-        for key, value in extras.items()
-        if key not in {MORTAL_ENCODED_OBS_EXTRA_KEY, MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY}
-    }
-    new_extras[MORTAL_Q_VALUES_EXTRA_KEY] = torch.cat(output_q_values, dim=0).to(device=target_device)
-    new_extras[MORTAL_ACTION_MASK_EXTRA_KEY] = torch.cat(output_action_masks, dim=0).to(device=target_device)
+    new_extras = dict(extras)
+    if not (has_q_values and has_action_mask):
+        missing_encoded = [
+            key
+            for key in (MORTAL_ENCODED_OBS_EXTRA_KEY, MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY)
+            if key not in extras
+        ]
+        if missing_encoded:
+            raise MortalTeacherMappingError(f"Mortal encoded teacher extras missing required keys: {missing_encoded}")
+        encoded_obs = extras[MORTAL_ENCODED_OBS_EXTRA_KEY]
+        encoded_action_mask = extras[MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY].bool()
+        if encoded_obs.ndim < 3:
+            raise MortalTeacherMappingError(
+                "Deferred Mortal encoded obs must be batched, "
+                f"got shape={tuple(encoded_obs.shape)}"
+            )
+        if encoded_action_mask.ndim != 2 or int(encoded_action_mask.shape[-1]) != MORTAL_ACTION_SPACE:
+            raise MortalTeacherMappingError(
+                f"Deferred Mortal encoded action mask must have shape [B, {MORTAL_ACTION_SPACE}], "
+                f"got shape={tuple(encoded_action_mask.shape)}"
+            )
+        if int(encoded_obs.shape[0]) != batch_size or int(encoded_action_mask.shape[0]) != batch_size:
+            raise MortalTeacherMappingError(
+                "Deferred Mortal encoded extras batch size mismatch: "
+                f"policy={batch_size}, obs={tuple(encoded_obs.shape)}, mask={tuple(encoded_action_mask.shape)}"
+            )
+        output_q_values: list[torch.Tensor] = []
+        output_action_masks: list[torch.Tensor] = []
+        for start in range(0, batch_size, chunk_size):
+            end = min(batch_size, start + chunk_size)
+            output = teacher_runtime.evaluate(encoded_obs[start:end], encoded_action_mask[start:end])
+            output_q_values.append(output.q_values)
+            output_action_masks.append(output.action_mask)
+        new_extras.pop(MORTAL_ENCODED_OBS_EXTRA_KEY, None)
+        new_extras.pop(MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY, None)
+        new_extras[MORTAL_Q_VALUES_EXTRA_KEY] = torch.cat(output_q_values, dim=0).to(device=target_device)
+        new_extras[MORTAL_ACTION_MASK_EXTRA_KEY] = torch.cat(output_action_masks, dim=0).to(device=target_device)
+    if has_kan_encoded:
+        missing_kan = [
+            key
+            for key in (MORTAL_KAN_SELECT_ENCODED_OBS_EXTRA_KEY, MORTAL_KAN_SELECT_ENCODED_ACTION_MASK_EXTRA_KEY)
+            if key not in extras
+        ]
+        if missing_kan:
+            raise MortalTeacherMappingError(f"Mortal kan-select encoded extras are incomplete: missing={missing_kan}")
+        kan_encoded_obs = extras[MORTAL_KAN_SELECT_ENCODED_OBS_EXTRA_KEY]
+        kan_encoded_mask = extras[MORTAL_KAN_SELECT_ENCODED_ACTION_MASK_EXTRA_KEY].bool()
+        if int(kan_encoded_obs.shape[0]) != batch_size or int(kan_encoded_mask.shape[0]) != batch_size:
+            raise MortalTeacherMappingError(
+                "Deferred Mortal kan-select encoded extras batch size mismatch: "
+                f"policy={batch_size}, obs={tuple(kan_encoded_obs.shape)}, mask={tuple(kan_encoded_mask.shape)}"
+            )
+        kan_output_q_values: list[torch.Tensor] = []
+        kan_output_action_masks: list[torch.Tensor] = []
+        for start in range(0, batch_size, chunk_size):
+            end = min(batch_size, start + chunk_size)
+            output = teacher_runtime.evaluate(kan_encoded_obs[start:end], kan_encoded_mask[start:end])
+            kan_output_q_values.append(output.q_values)
+            kan_output_action_masks.append(output.action_mask)
+        new_extras.pop(MORTAL_KAN_SELECT_ENCODED_OBS_EXTRA_KEY, None)
+        new_extras.pop(MORTAL_KAN_SELECT_ENCODED_ACTION_MASK_EXTRA_KEY, None)
+        new_extras[MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY] = torch.cat(kan_output_q_values, dim=0).to(device=target_device)
+        new_extras[MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY] = torch.cat(kan_output_action_masks, dim=0).to(device=target_device)
     return replace(policy_input, obs=replace(policy_input.obs, extras=new_extras))
+
+
+def _optional_kan_select_teacher_tensors_from_extras(
+    extras: Mapping[str, torch.Tensor],
+) -> tuple[torch.Tensor | None, torch.BoolTensor | None]:
+    has_q = MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY in extras
+    has_mask = MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY in extras
+    if not has_q and not has_mask:
+        return None, None
+    if has_q != has_mask:
+        present = [
+            key
+            for key in (MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY, MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY)
+            if key in extras
+        ]
+        raise MortalTeacherMappingError(f"Mortal kan-select q/mask extras are incomplete: present={present}")
+    q_values = extras[MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY].float()
+    action_mask = extras[MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY].bool()
+    if q_values.ndim != 2 or int(q_values.shape[-1]) != MORTAL_ACTION_SPACE:
+        raise MortalTeacherMappingError(
+            f"Mortal kan-select q values must have shape [B, {MORTAL_ACTION_SPACE}], "
+            f"got {tuple(q_values.shape)}"
+        )
+    if action_mask.shape != q_values.shape:
+        raise MortalTeacherMappingError(
+            "Mortal kan-select mask shape must match q values: "
+            f"{tuple(action_mask.shape)} != {tuple(q_values.shape)}"
+        )
+    return q_values, action_mask
 
 
 def audit_mortal_action_mapping(
@@ -601,6 +728,7 @@ def audit_mortal_action_mapping(
     if policy_input.legal_actions is None:
         raise MortalTeacherMappingError("Mortal imitation requires policy_input.legal_actions")
     q_values, mortal_masks = mortal_discard_teacher_tensors_from_extras(policy_input.obs.extras)
+    kan_q_values, kan_masks = _optional_kan_select_teacher_tensors_from_extras(policy_input.obs.extras)
     mapping_row_count = int(q_values.shape[0])
     available_count = 0
     missing_count = 0
@@ -614,6 +742,8 @@ def audit_mortal_action_mapping(
                 mortal_masks[row_idx],
                 legal_actions,
                 strict_mask=False,
+                kan_select_q_values=None if kan_q_values is None else kan_q_values[row_idx],
+                kan_select_mask=None if kan_masks is None else kan_masks[row_idx],
             )
             row_missing = len(mapped.missing_legal_keys)
             row_extra = len(mapped.extra_mortal_action_ids)
@@ -629,6 +759,8 @@ def audit_mortal_action_mapping(
                 mortal_masks[row_idx],
                 legal_actions,
                 context=_mapping_context(prepared_steps, row_idx),
+                kan_select_q_values=None if kan_q_values is None else kan_q_values[row_idx],
+                kan_select_mask=None if kan_masks is None else kan_masks[row_idx],
             )
             if row is not None:
                 audit_rows.append(row)
@@ -672,12 +804,15 @@ def prepare_mortal_imitation_teacher_data(
     if policy_input.prior_logits is None:
         raise MortalTeacherMappingError("Mortal imitation requires policy_input.prior_logits")
     q_values, mortal_masks = mortal_discard_teacher_tensors_from_extras(policy_input.obs.extras)
+    kan_q_values, kan_masks = _optional_kan_select_teacher_tensors_from_extras(policy_input.obs.extras)
     mapping_row_count = int(q_values.shape[0])
     if str(teacher_support) == "topk":
         teacher_batch, summary, audit_rows = _prepare_mortal_topk_teacher_batch(
             policy_input,
             q_values=q_values,
             mortal_masks=mortal_masks,
+            kan_q_values=kan_q_values,
+            kan_masks=kan_masks,
             prepared_steps=prepared_steps,
             strict_extra=bool(strict_extra),
             teacher_topk=int(teacher_topk),
@@ -687,6 +822,8 @@ def prepare_mortal_imitation_teacher_data(
             policy_input,
             q_values=q_values,
             mortal_masks=mortal_masks,
+            kan_q_values=kan_q_values,
+            kan_masks=kan_masks,
             prepared_steps=prepared_steps,
             strict_extra=bool(strict_extra),
         )
@@ -706,6 +843,8 @@ def _prepare_mortal_topk_teacher_batch(
     *,
     q_values: torch.Tensor,
     mortal_masks: torch.Tensor,
+    kan_q_values: torch.Tensor | None,
+    kan_masks: torch.Tensor | None,
     prepared_steps: Sequence[Any] | None,
     strict_extra: bool,
     teacher_topk: int,
@@ -722,26 +861,29 @@ def _prepare_mortal_topk_teacher_batch(
     )
     masked_prior = prior_logits.masked_fill(~legal_mask, torch.finfo(torch.float32).min)
     topk_prior = masked_prior.gather(1, topk_indices.to(device=masked_prior.device))
-
-    teacher_scores_rows: list[torch.Tensor] = []
+    mapped_score_rows: list[torch.Tensor] = []
     summary, audit_rows = _collect_mortal_mapping_summary_and_audit(
         q_values=q_values,
         mortal_masks=mortal_masks,
+        kan_q_values=kan_q_values,
+        kan_masks=kan_masks,
         legal_actions=policy_input.legal_actions,
         prepared_steps=prepared_steps,
         strict_extra=bool(strict_extra),
-        mapped_scores_callback=lambda row_idx, mapped: teacher_scores_rows.append(
-            mapped.scores.gather(0, topk_indices[row_idx].to(mapped.scores.device)).to(
-                device=prior_logits.device,
-                dtype=prior_logits.dtype,
-            )
+        mapped_scores_callback=lambda _row_idx, mapped: mapped_score_rows.append(
+            mapped.scores.to(device=prior_logits.device, dtype=prior_logits.dtype)
         ),
     )
-    if len(teacher_scores_rows) != int(q_values.shape[0]):
+    if len(mapped_score_rows) != int(q_values.shape[0]):
         raise MortalTeacherMappingError("Mortal topK teacher cache row count mismatch")
-    teacher_scores = torch.stack(teacher_scores_rows, dim=0)
-    if not torch.isfinite(teacher_scores[valid_rows.to(device=teacher_scores.device)]).all():
-        raise MortalTeacherMappingError("Mortal imitation topK scores contain non-finite values")
+    mapped_scores = torch.full_like(prior_logits, float("-inf"))
+    for row_idx, row_scores in enumerate(mapped_score_rows):
+        width = min(int(row_scores.shape[0]), int(mapped_scores.shape[1]))
+        mapped_scores[row_idx, :width] = row_scores[:width]
+    teacher_scores = mapped_scores.gather(1, topk_indices.to(device=mapped_scores.device))
+    finite_rows = torch.isfinite(teacher_scores).all(dim=-1)
+    valid_rows = valid_rows.to(device=finite_rows.device) & finite_rows
+    teacher_scores = torch.where(torch.isfinite(teacher_scores), teacher_scores, torch.zeros_like(teacher_scores))
     return (
         MortalImitationTeacherBatch(
             teacher_support="topk",
@@ -761,6 +903,8 @@ def _prepare_mortal_full_legal_teacher_batch(
     *,
     q_values: torch.Tensor,
     mortal_masks: torch.Tensor,
+    kan_q_values: torch.Tensor | None,
+    kan_masks: torch.Tensor | None,
     prepared_steps: Sequence[Any] | None,
     strict_extra: bool,
 ) -> tuple[MortalImitationTeacherBatch, dict[str, Any], tuple[dict[str, Any], ...]]:
@@ -776,6 +920,8 @@ def _prepare_mortal_full_legal_teacher_batch(
     summary, audit_rows = _collect_mortal_mapping_summary_and_audit(
         q_values=q_values,
         mortal_masks=mortal_masks,
+        kan_q_values=kan_q_values,
+        kan_masks=kan_masks,
         legal_actions=policy_input.legal_actions,
         prepared_steps=prepared_steps,
         strict_extra=bool(strict_extra),
@@ -802,6 +948,8 @@ def _collect_mortal_mapping_summary_and_audit(
     *,
     q_values: torch.Tensor,
     mortal_masks: torch.Tensor,
+    kan_q_values: torch.Tensor | None,
+    kan_masks: torch.Tensor | None,
     legal_actions: Sequence[Sequence[ActionSpec]],
     prepared_steps: Sequence[Any] | None,
     strict_extra: bool,
@@ -820,6 +968,8 @@ def _collect_mortal_mapping_summary_and_audit(
                 mortal_masks[row_idx],
                 row_legal_actions,
                 strict_mask=False,
+                kan_select_q_values=None if kan_q_values is None else kan_q_values[row_idx],
+                kan_select_mask=None if kan_masks is None else kan_masks[row_idx],
             )
             row_missing = len(mapped.missing_legal_keys)
             row_extra = len(mapped.extra_mortal_action_ids)
@@ -836,6 +986,8 @@ def _collect_mortal_mapping_summary_and_audit(
                 mortal_masks[row_idx],
                 row_legal_actions,
                 context=_mapping_context(prepared_steps, row_idx),
+                kan_select_q_values=None if kan_q_values is None else kan_q_values[row_idx],
+                kan_select_mask=None if kan_masks is None else kan_masks[row_idx],
             )
             if row is not None:
                 audit_rows.append(row)
@@ -962,13 +1114,14 @@ def _mortal_topk_imitation_loss(
     q_values, mortal_masks = mortal_discard_teacher_tensors_from_extras(policy_input.obs.extras)
     prior_logits = policy_input.prior_logits.float()
     assert policy_input.legal_actions is not None
+    legal_mask = policy_input.legal_action_mask.bool()
     topk_indices, valid_rows = _unique_source_topk_indices(
         prior_logits,
-        policy_input.legal_action_mask.bool(),
+        legal_mask,
         policy_input.legal_actions,
         k=int(teacher_topk),
     )
-    teacher_scores_rows: list[torch.Tensor] = []
+    mapped_scores = torch.full_like(prior_logits, float("-inf"))
     for row_idx, legal_actions in enumerate(policy_input.legal_actions):
         mapped = mortal_scores_for_legal_actions(
             q_values[row_idx],
@@ -982,11 +1135,15 @@ def _mortal_topk_imitation_loss(
                 missing_legal_keys=mapped.missing_legal_keys,
                 mismatch_kind="missing_legal",
             )
-        row_scores = mapped.scores.gather(0, topk_indices[row_idx].to(mapped.scores.device))
-        if not torch.isfinite(row_scores).all():
-            raise MortalTeacherMappingError("Mortal imitation topK scores contain non-finite values")
-        teacher_scores_rows.append(row_scores.to(device=output.action_logits.device, dtype=output.action_logits.dtype))
-    teacher_scores = torch.stack(teacher_scores_rows, dim=0)
+        width = min(int(mapped.scores.shape[0]), int(mapped_scores.shape[1]))
+        mapped_scores[row_idx, :width] = mapped.scores[:width].to(device=mapped_scores.device)
+    teacher_scores = mapped_scores.gather(1, topk_indices.to(device=mapped_scores.device)).to(
+        device=output.action_logits.device,
+        dtype=output.action_logits.dtype,
+    )
+    finite_rows = torch.isfinite(teacher_scores).all(dim=-1)
+    valid_rows = valid_rows.to(device=finite_rows.device) & finite_rows
+    teacher_scores = torch.where(torch.isfinite(teacher_scores), teacher_scores, torch.zeros_like(teacher_scores))
     policy_logits = output.action_logits.gather(1, topk_indices.to(device=output.action_logits.device))
     prior_topk = prior_logits.gather(1, topk_indices.to(device=prior_logits.device))
     return _imitation_loss_from_scores(
@@ -1086,8 +1243,10 @@ def imitation_metrics(
     teacher_support: str,
     teacher_topk: int,
     teacher_temperature: float,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    del teacher_support, teacher_topk, teacher_temperature
+    teacher_batch: MortalImitationTeacherBatch,
+    mapping_summary: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    del teacher_support, teacher_topk
     mask = policy_input.legal_action_mask.bool().to(device=output.action_logits.device)
     final_logits = output.action_logits.float().masked_fill(~mask, torch.finfo(torch.float32).min)
     parent_logits = parent_output.action_logits.float().masked_fill(~mask, torch.finfo(torch.float32).min)
@@ -1116,8 +1275,32 @@ def imitation_metrics(
         rank = 1 + int((legal_prior > row_prior[chosen]).sum().item())
         ranks.append(float(rank))
         rank_ge5 += int(rank >= 5)
-        changed_rows.append(_changed_decision_row(policy_input, prepared_steps, row_idx, final_top1, prior_top1, rank))
+        changed_rows.append(
+            _changed_decision_row(
+                policy_input,
+                prepared_steps,
+                row_idx,
+                final_top1=final_top1,
+                parent_top1=parent_top1,
+                source_top1=source_top1,
+                prior_top1=prior_top1,
+                rank=rank,
+                final_logits=final_logits,
+                parent_logits=parent_logits,
+                prior_logits=prior_logits,
+                teacher_batch=teacher_batch,
+            )
+        )
     legal_delta = (final_logits - parent_logits).abs().masked_fill(~mask, 0.0)
+    action_type_breakdown = _imitation_action_type_breakdown(
+        output,
+        policy_input,
+        parent_output=parent_output,
+        prior_logits=prior_logits,
+        teacher_batch=teacher_batch,
+        teacher_temperature=float(teacher_temperature),
+        mapping_summary=mapping_summary,
+    )
     return (
         {
             "top1_changed_vs_parent_rate": _mean_bool(changed_vs_parent),
@@ -1128,6 +1311,7 @@ def imitation_metrics(
             "clip_like_logit_delta_max": float(legal_delta.max().detach().cpu().item()),
         },
         changed_rows,
+        action_type_breakdown,
     )
 
 
@@ -1135,26 +1319,325 @@ def _changed_decision_row(
     policy_input: PolicyInput,
     prepared_steps: Sequence[Any],
     row_idx: int,
+    *,
     final_top1: torch.Tensor,
+    parent_top1: torch.Tensor,
+    source_top1: torch.Tensor,
     prior_top1: torch.Tensor,
     rank: int,
+    final_logits: torch.Tensor,
+    parent_logits: torch.Tensor,
+    prior_logits: torch.Tensor,
+    teacher_batch: MortalImitationTeacherBatch,
 ) -> dict[str, Any]:
     step = prepared_steps[row_idx] if row_idx < len(prepared_steps) else None
     legal_actions = () if policy_input.legal_actions is None else policy_input.legal_actions[row_idx]
     student_idx = int(final_top1[row_idx].item())
+    parent_idx = int(parent_top1[row_idx].item())
+    source_idx = int(source_top1[row_idx].item())
     prior_idx = int(prior_top1[row_idx].item())
+    teacher_idx = _teacher_top1_legal_index(teacher_batch, row_idx)
+    state = _review_state_context(step)
+    before_type = _action_type_name(legal_actions, parent_idx)
+    after_type = _action_type_name(legal_actions, student_idx)
+    teacher_type = _action_type_name(legal_actions, teacher_idx)
     return {
+        "row_id": int(row_idx),
         "episode_id": "" if step is None else step.episode_id,
         "step_id": "" if step is None else int(step.step_id),
+        "kyoku": state.get("kyoku", ""),
+        "honba": state.get("honba", ""),
         "actor": "" if step is None else int(step.actor),
+        "action_scope": _action_scope_for_legal_actions(legal_actions),
+        "hand": state.get("hand_json", ""),
+        "draw": state.get("draw", ""),
+        "dora": state.get("dora_json", ""),
+        "scores": state.get("scores_json", ""),
+        "riichi_sticks": state.get("riichi_sticks", ""),
+        "kyotaku": state.get("riichi_sticks", ""),
+        "last_discard": state.get("last_discard_json", ""),
+        "legal_actions": _json_dumps([_action_display(action) for action in legal_actions]),
+        "rule_prior_topk": _topk_action_labels(legal_actions, prior_logits[row_idx], k=5),
+        "mortal_q_topk": _teacher_topk_action_labels(legal_actions, teacher_batch, row_idx, k=5),
+        "student_before_topk": _topk_action_labels(legal_actions, parent_logits[row_idx], k=5),
+        "student_after_topk": _topk_action_labels(legal_actions, final_logits[row_idx], k=5),
+        "selected_before": _action_label(legal_actions, parent_idx),
+        "selected_after": _action_label(legal_actions, student_idx),
+        "selected_source": _action_label(legal_actions, source_idx),
+        "teacher_top1": _action_label(legal_actions, teacher_idx),
+        "teacher_top1_action_type": teacher_type,
         "student_top1": _action_label(legal_actions, student_idx),
         "rule_prior_top1": _action_label(legal_actions, prior_idx),
+        "student_before_top1": _action_label(legal_actions, parent_idx),
+        "student_after_top1": _action_label(legal_actions, student_idx),
         "changed_action_prior_rank": int(rank),
-        "legal_actions": " | ".join(action.canonical_key for action in legal_actions),
-        "hand": "unavailable_in_rollout_step",
-        "last_discard": "unavailable_in_rollout_step",
-        "events_tail": "unavailable_in_rollout_step",
+        "changed_kind": _changed_kind(before_type, after_type),
+        "changed_to_reach": bool(after_type == "REACH_DISCARD" and before_type != "REACH_DISCARD"),
+        "changed_from_reach": bool(before_type == "REACH_DISCARD" and after_type != "REACH_DISCARD"),
+        "changed_to_pass": bool(after_type == "PASS" and before_type != "PASS"),
+        "changed_from_pass": bool(before_type == "PASS" and after_type != "PASS"),
+        "changed_to_ron": bool(after_type == "RON" and before_type != "RON"),
+        "changed_to_chi_or_pon": bool(after_type in {"CHI", "PON"} and before_type not in {"CHI", "PON"}),
+        "changed_to_kan": bool(after_type in {"ANKAN", "KAKAN", "DAIMINKAN"} and before_type not in {"ANKAN", "KAKAN", "DAIMINKAN"}),
+        "changed_from_kan": bool(before_type in {"ANKAN", "KAKAN", "DAIMINKAN"} and after_type not in {"ANKAN", "KAKAN", "DAIMINKAN"}),
+        "events_tail": state.get("events_tail_json", ""),
     }
+
+
+def _imitation_action_type_breakdown(
+    output: PolicyOutput,
+    policy_input: PolicyInput,
+    *,
+    parent_output: PolicyOutput,
+    prior_logits: torch.Tensor,
+    teacher_batch: MortalImitationTeacherBatch,
+    teacher_temperature: float,
+    mapping_summary: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if policy_input.legal_actions is None:
+        return []
+    support_logits, support_prior, support_teacher, support_mask, support_indices = _teacher_support_tensors(
+        output,
+        policy_input,
+        teacher_batch,
+    )
+    parent_support_logits = parent_output.action_logits.float().to(device=support_logits.device).gather(
+        1,
+        support_indices.to(device=support_logits.device),
+    )
+    teacher_probs = torch.softmax(support_teacher / float(teacher_temperature), dim=-1)
+    teacher_log_probs = torch.log(teacher_probs.clamp_min(1e-12))
+    policy_log_probs = torch.log_softmax(support_logits, dim=-1)
+    per_row_ce = -(teacher_probs * policy_log_probs).sum(dim=-1)
+    per_row_kl = (teacher_probs * (teacher_log_probs - policy_log_probs)).sum(dim=-1)
+    per_row_entropy = -(teacher_probs * teacher_log_probs).sum(dim=-1)
+    if support_teacher.shape[-1] > 1:
+        top2 = torch.topk(support_teacher, k=2, dim=-1).values
+        per_row_margin = top2[:, 0] - top2[:, 1]
+    else:
+        per_row_margin = torch.zeros_like(per_row_ce)
+    teacher_argmax = support_teacher.argmax(dim=-1)
+    policy_argmax = support_logits.argmax(dim=-1)
+    parent_argmax = parent_support_logits.argmax(dim=-1)
+    prior_argmax = support_prior.argmax(dim=-1)
+    row_valid = teacher_batch.row_valid_mask.to(device=support_logits.device).bool() & support_mask.any(dim=-1)
+    buckets: dict[str, dict[str, Any]] = {}
+    for row_idx, row_actions in enumerate(policy_input.legal_actions):
+        if not bool(row_valid[row_idx].item()):
+            continue
+        support_pos = int(teacher_argmax[row_idx].item())
+        legal_idx = int(support_indices[row_idx, support_pos].item())
+        action_type = _action_type_name(row_actions, legal_idx)
+        bucket = buckets.setdefault(
+            action_type,
+            {
+                "action_type": action_type,
+                "row_count": 0,
+                "teacher_ce_values": [],
+                "teacher_kl_values": [],
+                "teacher_margin_values": [],
+                "teacher_entropy_values": [],
+                "teacher_policy_agree_count": 0,
+                "teacher_prior_agree_count": 0,
+                "policy_top1_vs_teacher_top1_count": 0,
+                "top1_changed_vs_parent_count": 0,
+                "rank_ge5_count": 0,
+            },
+        )
+        bucket["row_count"] += 1
+        bucket["teacher_ce_values"].append(float(per_row_ce[row_idx].detach().cpu().item()))
+        bucket["teacher_kl_values"].append(float(per_row_kl[row_idx].detach().cpu().item()))
+        bucket["teacher_margin_values"].append(float(per_row_margin[row_idx].detach().cpu().item()))
+        bucket["teacher_entropy_values"].append(float(per_row_entropy[row_idx].detach().cpu().item()))
+        policy_matches_teacher = bool(policy_argmax[row_idx].item() == teacher_argmax[row_idx].item())
+        prior_matches_teacher = bool(prior_argmax[row_idx].item() == teacher_argmax[row_idx].item())
+        changed_vs_parent = bool(policy_argmax[row_idx].item() != parent_argmax[row_idx].item())
+        bucket["teacher_policy_agree_count"] += int(policy_matches_teacher)
+        bucket["teacher_prior_agree_count"] += int(prior_matches_teacher)
+        bucket["policy_top1_vs_teacher_top1_count"] += int(policy_matches_teacher)
+        bucket["top1_changed_vs_parent_count"] += int(changed_vs_parent)
+        final_legal_idx = int(support_indices[row_idx, int(policy_argmax[row_idx].item())].item())
+        rank = _prior_rank_for_index(policy_input, prior_logits, row_idx, final_legal_idx)
+        bucket["rank_ge5_count"] += int(rank >= 5)
+
+    rows: list[dict[str, Any]] = []
+    for action_type in sorted(buckets):
+        bucket = buckets[action_type]
+        row_count = int(bucket["row_count"])
+        rows.append(
+            {
+                "action_type": action_type,
+                "row_count": row_count,
+                "teacher_ce": _mean_float(bucket["teacher_ce_values"]),
+                "teacher_kl": _mean_float(bucket["teacher_kl_values"]),
+                "teacher_agreement": bucket["teacher_policy_agree_count"] / max(1, row_count),
+                "teacher_prior_agreement": bucket["teacher_prior_agree_count"] / max(1, row_count),
+                "teacher_margin_mean": _mean_float(bucket["teacher_margin_values"]),
+                "teacher_entropy_mean": _mean_float(bucket["teacher_entropy_values"]),
+                "policy_top1_vs_teacher_top1_rate": bucket["policy_top1_vs_teacher_top1_count"] / max(1, row_count),
+                "top1_changed_vs_parent_rate": bucket["top1_changed_vs_parent_count"] / max(1, row_count),
+                "rank_ge5_rate": bucket["rank_ge5_count"] / max(1, row_count),
+                "mapping_available_rate": float(mapping_summary.get("mapping_available_rate", 0.0)),
+                "fail_closed_count": int(mapping_summary.get("fail_closed_count", 0)),
+            }
+        )
+    return rows
+
+
+def _teacher_support_tensors(
+    output: PolicyOutput,
+    policy_input: PolicyInput,
+    teacher_batch: MortalImitationTeacherBatch,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.BoolTensor, torch.LongTensor]:
+    device = output.action_logits.device
+    if teacher_batch.teacher_support == "topk":
+        if teacher_batch.topk_indices is None:
+            raise MortalTeacherMappingError("cached topK teacher batch is missing topk_indices")
+        indices = teacher_batch.topk_indices.to(device=device)
+        support_logits = output.action_logits.float().gather(1, indices)
+        support_prior = teacher_batch.prior_logits.to(device=device).float()
+        support_teacher = teacher_batch.teacher_scores.to(device=device).float()
+        support_mask = torch.ones_like(support_teacher, dtype=torch.bool, device=device)
+        return support_logits, support_prior, support_teacher, support_mask, indices
+    if teacher_batch.teacher_support == "full-legal":
+        if teacher_batch.legal_action_mask is None:
+            raise MortalTeacherMappingError("cached full-legal teacher batch is missing legal_action_mask")
+        width = int(output.action_logits.shape[1])
+        indices = torch.arange(width, dtype=torch.long, device=device).unsqueeze(0).repeat(output.action_logits.shape[0], 1)
+        support_mask = teacher_batch.legal_action_mask.to(device=device).bool()
+        support_logits = output.action_logits.float().masked_fill(~support_mask, torch.finfo(torch.float32).min)
+        support_prior = teacher_batch.prior_logits.to(device=device).float()
+        support_teacher = teacher_batch.teacher_scores.to(device=device).float()
+        return support_logits, support_prior, support_teacher, support_mask, indices
+    raise ValueError(f"unsupported teacher support: {teacher_batch.teacher_support}")
+
+
+def _teacher_top1_legal_index(teacher_batch: MortalImitationTeacherBatch, row_idx: int) -> int:
+    teacher_scores = teacher_batch.teacher_scores[row_idx]
+    support_pos = int(teacher_scores.argmax().detach().cpu().item())
+    if teacher_batch.topk_indices is not None:
+        return int(teacher_batch.topk_indices[row_idx, support_pos].detach().cpu().item())
+    return support_pos
+
+
+def _teacher_topk_action_labels(
+    legal_actions: Sequence[ActionSpec],
+    teacher_batch: MortalImitationTeacherBatch,
+    row_idx: int,
+    *,
+    k: int,
+) -> str:
+    scores = teacher_batch.teacher_scores[row_idx].detach().cpu()
+    order = torch.argsort(scores, descending=True).tolist()
+    labels: list[dict[str, Any]] = []
+    for support_pos in order[: int(k)]:
+        legal_idx = (
+            int(teacher_batch.topk_indices[row_idx, support_pos].detach().cpu().item())
+            if teacher_batch.topk_indices is not None
+            else int(support_pos)
+        )
+        labels.append(
+            {
+                "index": legal_idx,
+                "score": float(scores[support_pos].item()),
+                "action": _action_display(legal_actions[legal_idx]) if 0 <= legal_idx < len(legal_actions) else f"index:{legal_idx}",
+            }
+        )
+    return _json_dumps(labels)
+
+
+def _topk_action_labels(legal_actions: Sequence[ActionSpec], logits: torch.Tensor, *, k: int) -> str:
+    width = min(int(logits.shape[0]), len(legal_actions))
+    if width <= 0:
+        return "[]"
+    values = logits[:width].detach().cpu()
+    order = torch.argsort(values, descending=True).tolist()
+    labels = [
+        {
+            "index": int(index),
+            "score": float(values[index].item()),
+            "action": _action_display(legal_actions[int(index)]),
+        }
+        for index in order[: int(k)]
+    ]
+    return _json_dumps(labels)
+
+
+def _prior_rank_for_index(
+    policy_input: PolicyInput,
+    prior_logits: torch.Tensor,
+    row_idx: int,
+    action_index: int,
+) -> int:
+    mask = policy_input.legal_action_mask[row_idx].bool().to(device=prior_logits.device)
+    if int(action_index) < 0 or int(action_index) >= int(prior_logits.shape[1]):
+        return 999
+    row_prior = prior_logits[row_idx]
+    return 1 + int((row_prior[mask] > row_prior[int(action_index)]).sum().detach().cpu().item())
+
+
+def _review_state_context(step: Any | None) -> dict[str, Any]:
+    if step is None:
+        return {}
+    events = tuple(getattr(step, "mortal_teacher_events", ()))
+    actor = int(getattr(step, "actor", 0))
+    context: dict[str, Any] = {
+        "events_tail_json": _json_dumps(events[-8:]),
+    }
+    if not events:
+        return context
+    try:
+        snapshot = keqing_core.replay_state_snapshot(events, actor)
+    except Exception as exc:  # pragma: no cover - diagnostic best effort.
+        context["state_error"] = str(exc)
+        return context
+    context.update(
+        {
+            "kyoku": snapshot.get("kyoku", ""),
+            "honba": snapshot.get("honba", ""),
+            "riichi_sticks": snapshot.get("kyotaku", ""),
+            "hand_json": _json_dumps(snapshot.get("hand", ())),
+            "draw": snapshot.get("tsumo_pai") or snapshot.get("drawn_tile") or "",
+            "dora_json": _json_dumps(snapshot.get("dora_markers", ())),
+            "scores_json": _json_dumps(snapshot.get("scores", ())),
+            "last_discard_json": _json_dumps(snapshot.get("last_discard")),
+        }
+    )
+    return context
+
+
+def _action_scope_for_legal_actions(legal_actions: Sequence[ActionSpec]) -> str:
+    response_types = {ActionType.PASS, ActionType.RON, ActionType.PON, ActionType.CHI, ActionType.DAIMINKAN}
+    if any(action.action_type in response_types for action in legal_actions):
+        return "response"
+    return "self-turn"
+
+
+def _action_type_name(legal_actions: Sequence[ActionSpec], index: int) -> str:
+    if int(index) < 0 or int(index) >= len(legal_actions):
+        return "UNKNOWN"
+    return legal_actions[int(index)].action_type.name
+
+
+def _changed_kind(before_type: str, after_type: str) -> str:
+    if before_type == after_type:
+        return f"same_type:{after_type}"
+    return f"{before_type.lower()}_to_{after_type.lower()}"
+
+
+def _action_display(action: ActionSpec) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": action.action_type.name,
+        "canonical_key": action.canonical_key,
+    }
+    try:
+        payload["mjai_events"] = action.to_mjai_events(actor=0)
+    except Exception:
+        try:
+            payload["mjai"] = action.to_mjai_action(actor=0)
+        except Exception as exc:  # pragma: no cover - diagnostic best effort.
+            payload["error"] = str(exc)
+    return payload
 
 
 def _unique_source_topk_indices(
@@ -1184,6 +1667,51 @@ def _unique_source_topk_indices(
         seen: set[tuple[int, ...]] = set()
         for index in sorted_indices:
             source = mortal_action_ids_for_action_spec(row_actions[index])
+            if source in seen:
+                continue
+            selected.append(index)
+            seen.add(source)
+            if len(selected) == int(k):
+                break
+        valid = len(selected) == int(k)
+        if not selected:
+            selected = [0]
+        while len(selected) < int(k):
+            selected.append(selected[-1])
+        rows.append(torch.tensor(selected[: int(k)], dtype=torch.long, device=prior_logits.device))
+        valid_rows.append(valid)
+    return torch.stack(rows, dim=0), torch.tensor(valid_rows, dtype=torch.bool, device=prior_logits.device)
+
+
+def _finite_teacher_topk_indices(
+    prior_logits: torch.Tensor,
+    legal_action_mask: torch.Tensor,
+    teacher_scores: torch.Tensor,
+    legal_actions: Sequence[Sequence[ActionSpec]],
+    *,
+    k: int,
+) -> tuple[torch.LongTensor, torch.BoolTensor]:
+    rows: list[torch.Tensor] = []
+    valid_rows: list[bool] = []
+    masked_prior = prior_logits.float().masked_fill(~legal_action_mask.bool(), torch.finfo(torch.float32).min)
+    finite_teacher = torch.isfinite(teacher_scores.float())
+    for row_idx, row_actions in enumerate(legal_actions):
+        legal_indices = [
+            index
+            for index in range(len(row_actions))
+            if index < int(legal_action_mask.shape[1])
+            and bool(legal_action_mask[row_idx, index].item())
+            and bool(finite_teacher[row_idx, index].item())
+        ]
+        sorted_indices = sorted(
+            legal_indices,
+            key=lambda index: float(masked_prior[row_idx, index].detach().cpu()),
+            reverse=True,
+        )
+        selected: list[int] = []
+        seen: set[str] = set()
+        for index in sorted_indices:
+            source = row_actions[index].canonical_key
             if source in seen:
                 continue
             selected.append(index)
@@ -1335,12 +1863,14 @@ def _write_outputs(
     args: argparse.Namespace,
     summary_rows: Sequence[dict[str, Any]],
     iteration_rows: Sequence[dict[str, Any]],
+    action_type_breakdown_rows: Sequence[dict[str, Any]],
     audit_rows: Sequence[dict[str, Any]],
     changed_rows: Sequence[dict[str, Any]],
     checkpoint_rows: Sequence[dict[str, Any]],
 ) -> None:
     _write_csv(args.output_dir / "imitation_summary.csv", summary_rows)
     _write_csv(args.output_dir / "imitation_iterations.csv", iteration_rows)
+    _write_csv(args.output_dir / "imitation_action_type_breakdown.csv", action_type_breakdown_rows)
     _write_csv(args.output_dir / "mortal_action_mapping_audit.csv", audit_rows)
     _write_jsonl(args.output_dir / "mortal_action_mapping_examples.jsonl", audit_rows)
     _write_csv(args.output_dir / "changed_decisions.csv", changed_rows)
@@ -1358,6 +1888,7 @@ def _write_outputs(
             "teacher_topk": int(args.teacher_topk),
             "summaries": summary_rows,
             "iterations": iteration_rows,
+            "action_type_breakdown": action_type_breakdown_rows,
             "checkpoints": checkpoint_rows,
         },
     )
@@ -1375,12 +1906,14 @@ def _write_outputs(
 def _write_incremental_outputs(
     args: argparse.Namespace,
     iteration_rows: Sequence[dict[str, Any]],
+    action_type_breakdown_rows: Sequence[dict[str, Any]],
     audit_rows: Sequence[dict[str, Any]],
     changed_rows: Sequence[dict[str, Any]],
     checkpoint_rows: Sequence[dict[str, Any]],
 ) -> None:
     """Persist per-iteration artifacts so interrupted runs remain inspectable."""
     _write_csv(args.output_dir / "imitation_iterations.csv", iteration_rows)
+    _write_csv(args.output_dir / "imitation_action_type_breakdown.csv", action_type_breakdown_rows)
     _write_csv(args.output_dir / "mortal_action_mapping_audit.csv", audit_rows)
     _write_jsonl(args.output_dir / "mortal_action_mapping_examples.jsonl", audit_rows)
     _write_csv(args.output_dir / "changed_decisions.csv", changed_rows)
@@ -1397,6 +1930,7 @@ def _write_incremental_outputs(
             "teacher_support": str(args.teacher_support),
             "teacher_topk": int(args.teacher_topk),
             "iterations": iteration_rows,
+            "action_type_breakdown": action_type_breakdown_rows,
             "checkpoints": checkpoint_rows,
         },
     )
@@ -1454,12 +1988,39 @@ def _changed_decisions_markdown(rows: Sequence[dict[str, Any]]) -> str:
     if not rows:
         lines.append("_No changed decisions recorded._")
         return "\n".join(lines) + "\n"
-    for row in rows[:200]:
-        lines.append(
-            "- "
-            f"iter={row.get('iteration')} episode={row.get('episode_id')} step={row.get('step_id')} "
-            f"actor={row.get('actor')} rule=`{row.get('rule_prior_top1')}` "
-            f"student=`{row.get('student_top1')}` rank={row.get('changed_action_prior_rank')}"
+    for index, row in enumerate(rows[:200], start=1):
+        lines.extend(
+            [
+                f"## Row {index}",
+                "",
+                (
+                    f"- iter={row.get('iteration')} episode={row.get('episode_id')} "
+                    f"step={row.get('step_id')} actor={row.get('actor')} "
+                    f"kyoku={row.get('kyoku')} honba={row.get('honba')} "
+                    f"scope={row.get('action_scope')} kind={row.get('changed_kind')}"
+                ),
+                (
+                    f"- selected_before=`{row.get('selected_before')}` "
+                    f"selected_after=`{row.get('selected_after')}` "
+                    f"teacher_top1=`{row.get('teacher_top1')}` "
+                    f"rank={row.get('changed_action_prior_rank')}"
+                ),
+                (
+                    f"- flags: reach +{row.get('changed_to_reach')} -{row.get('changed_from_reach')} "
+                    f"pass +{row.get('changed_to_pass')} -{row.get('changed_from_pass')} "
+                    f"ron +{row.get('changed_to_ron')} "
+                    f"call +{row.get('changed_to_chi_or_pon')} "
+                    f"kan +{row.get('changed_to_kan')} -{row.get('changed_from_kan')}"
+                ),
+                f"- hand: `{row.get('hand')}` draw: `{row.get('draw')}` dora: `{row.get('dora')}`",
+                f"- scores: `{row.get('scores')}` riichi_sticks={row.get('riichi_sticks')} last_discard: `{row.get('last_discard')}`",
+                f"- rule_prior_topk: `{row.get('rule_prior_topk')}`",
+                f"- mortal_q_topk: `{row.get('mortal_q_topk')}`",
+                f"- student_before_topk: `{row.get('student_before_topk')}`",
+                f"- student_after_topk: `{row.get('student_after_topk')}`",
+                f"- legal_actions: `{row.get('legal_actions')}`",
+                "",
+            ]
         )
     return "\n".join(lines) + "\n"
 
@@ -1478,6 +2039,9 @@ def _mapping_context(prepared_steps: Sequence[Any] | None, row_idx: int) -> dict
         "step_index": int(step.step_id),
         "actor": int(step.actor),
         "control_action_types": tuple(step.control_action_types),
+        "mortal_teacher_events": tuple(getattr(step, "mortal_teacher_events", ())),
+        "events_tail": tuple(getattr(step, "mortal_teacher_events", ()))[-8:],
+        "mortal_events_tail": tuple(getattr(step, "mortal_teacher_events", ()))[-8:],
     }
 
 
