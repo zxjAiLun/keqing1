@@ -314,7 +314,7 @@ def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> No
         strict_extra=False,
     )
 
-    metrics, changed_rows, breakdown_rows = imitation_metrics(
+    metrics, changed_rows, teacher_disagreement_rows, review_rows, breakdown_rows = imitation_metrics(
         _output([0.0, 3.0, -100.0]),
         policy_input,
         parent_output=_output([3.0, 0.0, -100.0]),
@@ -330,9 +330,19 @@ def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> No
     assert metrics["top1_changed_vs_parent_rate"] == 1.0
     assert changed_rows[0]["changed_kind"] == "discard_to_pass"
     assert changed_rows[0]["changed_to_pass"] is True
+    assert changed_rows[0]["selected_changed"] is True
+    assert teacher_disagreement_rows == []
+    assert review_rows[0]["review_reason"] == "selected_changed"
     assert breakdown_rows == [
         {
             "action_type": "PASS",
+            "teacher_top1_action_type": "PASS",
+            "row_scope": "response",
+            "legal_action_types": "DISCARD,PASS",
+            "contains_reach": "false",
+            "contains_kan": "false",
+            "contains_call": "false",
+            "contains_terminal": "false",
             "row_count": 1,
             "teacher_ce": pytest.approx(breakdown_rows[0]["teacher_ce"]),
             "teacher_kl": pytest.approx(breakdown_rows[0]["teacher_kl"]),
@@ -344,9 +354,82 @@ def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> No
             "top1_changed_vs_parent_rate": 1.0,
             "rank_ge5_rate": 0.0,
             "mapping_available_rate": 1.0,
+            "mapping_row_count": 1,
+            "mapping_available_count": 1,
             "fail_closed_count": 0,
+            "teacher_row_valid_count": 1,
+            "teacher_row_valid_rate": 1.0,
+            "teacher_row_invalid_count": 0,
         }
     ]
+
+
+def test_imitation_metrics_separates_teacher_disagreements_from_changes() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.DISCARD, tile=_tile("2m")),
+        ActionSpec(ActionType.PASS),
+    )
+    policy_input = _policy_input(
+        legal_actions,
+        mask_ids=(1, MORTAL_PASS_ACTION_ID),
+        prior_logits=torch.tensor([[2.0, 1.0, -100.0]], dtype=torch.float32),
+    )
+    teacher_data = prepare_mortal_imitation_teacher_data(
+        policy_input,
+        prepared_steps=(),
+        teacher_support="topk",
+        teacher_topk=2,
+        strict_extra=False,
+    )
+
+    _metrics, changed_rows, teacher_disagreement_rows, review_rows, _breakdown = imitation_metrics(
+        _output([3.0, 0.0, -100.0]),
+        policy_input,
+        parent_output=_output([3.0, 0.0, -100.0]),
+        source_output=_output([3.0, 0.0, -100.0]),
+        prepared_steps=(SimpleNamespace(episode_id="ep", step_id=7, actor=0, mortal_teacher_events=()),),
+        teacher_support="topk",
+        teacher_topk=2,
+        teacher_temperature=1.0,
+        teacher_batch=teacher_data.teacher_batch,
+        mapping_summary=teacher_data.summary,
+    )
+
+    assert changed_rows == []
+    assert len(teacher_disagreement_rows) == 1
+    assert teacher_disagreement_rows[0]["selected_changed"] is False
+    assert teacher_disagreement_rows[0]["teacher_disagreed"] is True
+    assert teacher_disagreement_rows[0]["review_reason"] == "teacher_disagreement"
+    assert review_rows == teacher_disagreement_rows
+
+
+def test_adaptive_topk_keeps_low_candidate_response_rows_valid() -> None:
+    legal_actions = (ActionSpec(ActionType.PASS),)
+    policy_input = _policy_input(
+        legal_actions,
+        mask_ids=(MORTAL_PASS_ACTION_ID,),
+        prior_logits=torch.tensor([[1.0, -100.0, -100.0]], dtype=torch.float32),
+    )
+
+    strict_topk = prepare_mortal_imitation_teacher_data(
+        policy_input,
+        prepared_steps=(),
+        teacher_support="topk",
+        teacher_topk=3,
+        strict_extra=False,
+    )
+    adaptive_topk = prepare_mortal_imitation_teacher_data(
+        policy_input,
+        prepared_steps=(),
+        teacher_support="adaptive-topk",
+        teacher_topk=3,
+        strict_extra=False,
+    )
+
+    assert strict_topk.summary["teacher_row_valid_count"] == 0
+    assert adaptive_topk.summary["teacher_row_valid_count"] == 1
+    assert adaptive_topk.teacher_batch.support_mask is not None
+    assert adaptive_topk.teacher_batch.support_mask.tolist() == [[True, False, False]]
 
 
 def test_incremental_outputs_include_action_type_breakdown(tmp_path: Path) -> None:
@@ -366,11 +449,15 @@ def test_incremental_outputs_include_action_type_breakdown(tmp_path: Path) -> No
         action_type_breakdown_rows=({"action_type": "RON", "row_count": 2},),
         audit_rows=(),
         changed_rows=(),
+        teacher_disagreement_rows=(),
+        decision_review_rows=(),
         checkpoint_rows=(),
     )
 
     rows = list(csv.DictReader((tmp_path / "imitation_action_type_breakdown.csv").open()))
     assert rows == [{"action_type": "RON", "row_count": "2"}]
+    assert (tmp_path / "teacher_disagreements.csv").exists()
+    assert (tmp_path / "decision_review_candidates.csv").exists()
 
 
 def test_deferred_mortal_observation_extras_are_materialized_after_rollout() -> None:
