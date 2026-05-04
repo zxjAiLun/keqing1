@@ -1304,11 +1304,7 @@ def _imitation_loss_from_scores(
     teacher_argmax = teacher_scores.argmax(dim=-1)
     policy_argmax = policy_logits.argmax(dim=-1)
     prior_argmax = prior_logits.argmax(dim=-1)
-    if teacher_scores.shape[-1] > 1:
-        teacher_top2 = torch.topk(teacher_scores, k=2, dim=-1).values
-        teacher_margin = teacher_top2[:, 0] - teacher_top2[:, 1]
-    else:
-        teacher_margin = torch.zeros_like(per_row_ce)
+    teacher_margin = _teacher_margin_from_scores(teacher_scores, support_mask=support_mask)
     entropy = -(teacher_probs * teacher_log_probs).sum(dim=-1)
     return MortalImitationLossResult(
         loss=_weighted_mean(per_row_ce, weights),
@@ -1322,6 +1318,30 @@ def _imitation_loss_from_scores(
         policy_top1_vs_rule_top1_rate=_weighted_mean((policy_argmax == prior_argmax).float(), weights),
         teacher_row_valid_count=weights.sum(),
     )
+
+
+def _teacher_margin_from_scores(
+    teacher_scores: torch.Tensor,
+    *,
+    support_mask: torch.Tensor | None,
+) -> torch.Tensor:
+    if teacher_scores.shape[-1] <= 1:
+        return torch.zeros(teacher_scores.shape[0], dtype=teacher_scores.dtype, device=teacher_scores.device)
+    scores = teacher_scores.float()
+    if support_mask is None:
+        valid_count = torch.full(
+            (scores.shape[0],),
+            int(scores.shape[-1]),
+            dtype=torch.long,
+            device=scores.device,
+        )
+    else:
+        support_mask = support_mask.bool().to(device=scores.device)
+        valid_count = support_mask.sum(dim=-1)
+        scores = scores.masked_fill(~support_mask, torch.finfo(torch.float32).min)
+    top2 = torch.topk(scores, k=2, dim=-1).values
+    margin = top2[:, 0] - top2[:, 1]
+    return torch.where(valid_count >= 2, margin, torch.zeros_like(margin))
 
 
 def imitation_metrics(
@@ -1532,11 +1552,7 @@ def _imitation_action_type_breakdown(
     per_row_ce = -(teacher_probs * policy_log_probs).sum(dim=-1)
     per_row_kl = (teacher_probs * (teacher_log_probs - policy_log_probs)).sum(dim=-1)
     per_row_entropy = -(teacher_probs * teacher_log_probs).sum(dim=-1)
-    if support_teacher.shape[-1] > 1:
-        top2 = torch.topk(support_teacher, k=2, dim=-1).values
-        per_row_margin = top2[:, 0] - top2[:, 1]
-    else:
-        per_row_margin = torch.zeros_like(per_row_ce)
+    per_row_margin = _teacher_margin_from_scores(support_teacher, support_mask=support_mask)
     teacher_argmax = support_teacher.argmax(dim=-1)
     policy_argmax = support_logits.argmax(dim=-1)
     parent_argmax = parent_support_logits.argmax(dim=-1)

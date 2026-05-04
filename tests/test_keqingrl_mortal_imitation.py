@@ -431,6 +431,17 @@ def test_adaptive_topk_keeps_low_candidate_response_rows_valid() -> None:
     assert adaptive_topk.teacher_batch.support_mask is not None
     assert adaptive_topk.teacher_batch.support_mask.tolist() == [[True, False, False]]
 
+    loss = mortal_imitation_loss(
+        _output([1.0, -100.0, -100.0]),
+        policy_input,
+        teacher_support="adaptive-topk",
+        teacher_topk=3,
+        teacher_temperature=1.0,
+        strict_extra=False,
+        teacher_batch=adaptive_topk.teacher_batch,
+    )
+    assert float(loss.teacher_margin.item()) == 0.0
+
 
 def test_incremental_outputs_include_action_type_breakdown(tmp_path: Path) -> None:
     args = SimpleNamespace(
