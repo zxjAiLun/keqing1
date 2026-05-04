@@ -8,6 +8,7 @@ without letting Mortal generate or authorize actions.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Mapping, Sequence
 
 import torch
@@ -22,6 +23,8 @@ MORTAL_DISCARD_TEACHER_CONTRACT_VERSION = "mortal_discard_teacher_v1"
 MORTAL_ACTION_TEACHER_CONTRACT_VERSION = "mortal_action_teacher_v1"
 MORTAL_Q_VALUES_EXTRA_KEY = "mortal_q_values"
 MORTAL_ACTION_MASK_EXTRA_KEY = "mortal_action_mask"
+MORTAL_ENCODED_OBS_EXTRA_KEY = "mortal_encoded_obs"
+MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY = "mortal_encoded_action_mask"
 MORTAL_RIICHI_ACTION_ID = 37
 MORTAL_CHI_LOW_ACTION_ID = 38
 MORTAL_CHI_MID_ACTION_ID = 39
@@ -74,7 +77,22 @@ MORTAL_DISCARD_ID_TO_TILE = (
 
 
 class MortalTeacherMappingError(ValueError):
-    """Raised when Mortal discard ids cannot be aligned to KeqingRL actions."""
+    """Raised when Mortal ids cannot be aligned to KeqingRL legal actions."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        missing_legal_keys: Sequence[str] = (),
+        extra_mortal_action_ids: Sequence[int] = (),
+        mismatch_kind: str | None = None,
+        context: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.missing_legal_keys = tuple(str(value) for value in missing_legal_keys)
+        self.extra_mortal_action_ids = tuple(int(value) for value in extra_mortal_action_ids)
+        self.mismatch_kind = mismatch_kind
+        self.context = dict(context or {})
 
 
 @dataclass(frozen=True)
@@ -150,7 +168,10 @@ def assert_mortal_discard_mask_parity(
     if missing or extra:
         raise MortalTeacherMappingError(
             "Mortal/KeqingRL discard mask mismatch: "
-            f"missing_keqing_tiles={missing}, extra_mortal_tiles={extra}"
+            f"missing_keqing_tiles={missing}, extra_mortal_tiles={extra}",
+            missing_legal_keys=[f"discard_tile:{tile_id}" for tile_id in missing],
+            extra_mortal_action_ids=extra,
+            mismatch_kind=_mismatch_kind(missing, extra),
         )
 
 
@@ -189,7 +210,10 @@ def mortal_discard_scores_for_legal_actions(
     if strict_mask and (missing_legal_keys or extra_mortal_ids):
         raise MortalTeacherMappingError(
             "Mortal/KeqingRL discard score mapping mismatch: "
-            f"missing_legal_keys={missing_legal_keys}, extra_mortal_discard_ids={extra_mortal_ids}"
+            f"missing_legal_keys={missing_legal_keys}, extra_mortal_discard_ids={extra_mortal_ids}",
+            missing_legal_keys=missing_legal_keys,
+            extra_mortal_action_ids=extra_mortal_ids,
+            mismatch_kind=_mismatch_kind(missing_legal_keys, extra_mortal_ids),
         )
     return MortalDiscardTeacherScores(
         scores=scores,
@@ -257,7 +281,10 @@ def assert_mortal_action_mask_compatible(
     if missing or extra:
         raise MortalTeacherMappingError(
             "Mortal/KeqingRL action mask mismatch: "
-            f"missing_legal_keys={missing}, extra_mortal_action_ids={extra}"
+            f"missing_legal_keys={missing}, extra_mortal_action_ids={extra}",
+            missing_legal_keys=missing,
+            extra_mortal_action_ids=extra,
+            mismatch_kind=_mismatch_kind(missing, extra),
         )
 
 
@@ -292,7 +319,10 @@ def mortal_scores_for_legal_actions(
     if strict_mask and (missing_legal_keys or extra_mortal_ids):
         raise MortalTeacherMappingError(
             "Mortal/KeqingRL action score mapping mismatch: "
-            f"missing_legal_keys={missing_legal_keys}, extra_mortal_action_ids={extra_mortal_ids}"
+            f"missing_legal_keys={missing_legal_keys}, extra_mortal_action_ids={extra_mortal_ids}",
+            missing_legal_keys=missing_legal_keys,
+            extra_mortal_action_ids=extra_mortal_ids,
+            mismatch_kind=_mismatch_kind(missing_legal_keys, extra_mortal_ids),
         )
     return MortalActionTeacherScores(
         scores=scores,
@@ -301,6 +331,102 @@ def mortal_scores_for_legal_actions(
         missing_legal_keys=tuple(missing_legal_keys),
         extra_mortal_action_ids=tuple(extra_mortal_ids),
     )
+
+
+def mortal_action_mapping_audit_row(
+    q_values: torch.Tensor | Sequence[float] | None,
+    mortal_mask: torch.Tensor | Sequence[bool],
+    legal_actions: Sequence[ActionSpec],
+    *,
+    context: Mapping[str, object] | None = None,
+) -> dict[str, object] | None:
+    """Return a diagnostic row for Mortal/KeqingRL action-mask mismatches.
+
+    This helper is intentionally read-only: it does not produce teacher
+    probabilities and must not be used as a fallback for training.
+    """
+
+    context = dict(context or {})
+    mask = _as_1d_bool_tensor(mortal_mask, field_name="mortal_mask")
+    q = (
+        torch.zeros((MORTAL_ACTION_SPACE,), dtype=torch.float32)
+        if q_values is None
+        else _as_1d_float_tensor(q_values, field_name="q_values")
+    )
+    source_action_ids: list[tuple[int, ...]] = []
+    unsupported_keys: list[str] = []
+    unsupported_types: list[str] = []
+    for action in legal_actions:
+        try:
+            source_action_ids.append(mortal_action_ids_for_action_spec(action))
+        except MortalTeacherMappingError:
+            source_action_ids.append(())
+            unsupported_keys.append(action.canonical_key)
+            unsupported_types.append(action.action_type.name)
+
+    missing_legal_keys: list[str] = list(unsupported_keys)
+    missing_legal_types: list[str] = list(unsupported_types)
+    extra_mortal_action_ids: list[int] = []
+    mismatch_kind: str | None = "unsupported_action" if unsupported_keys else None
+    if not unsupported_keys:
+        try:
+            mapped = mortal_scores_for_legal_actions(q, mask, legal_actions, strict_mask=False)
+            source_action_ids = list(mapped.source_action_ids)
+            missing_legal_keys = list(mapped.missing_legal_keys)
+            missing_key_set = set(missing_legal_keys)
+            missing_legal_types = [
+                action.action_type.name
+                for action in legal_actions
+                if action.canonical_key in missing_key_set
+            ]
+            extra_mortal_action_ids = list(mapped.extra_mortal_action_ids)
+            mismatch_kind = _mismatch_kind(missing_legal_keys, extra_mortal_action_ids)
+        except MortalTeacherMappingError as exc:
+            missing_legal_keys = list(exc.missing_legal_keys)
+            missing_key_set = set(missing_legal_keys)
+            missing_legal_types = [
+                action.action_type.name
+                for action in legal_actions
+                if action.canonical_key in missing_key_set
+            ]
+            extra_mortal_action_ids = list(exc.extra_mortal_action_ids)
+            message = str(exc).lower()
+            mismatch_kind = exc.mismatch_kind
+            if mismatch_kind is None and "ambiguous" in message and "kan" in message:
+                mismatch_kind = "ambiguous_kan"
+            if mismatch_kind is None:
+                mismatch_kind = "unsupported_action"
+
+    if not missing_legal_keys and not extra_mortal_action_ids and mismatch_kind not in {
+        "ambiguous_kan",
+        "unsupported_action",
+    }:
+        return None
+
+    legal_keys = [action.canonical_key for action in legal_actions]
+    legal_types = [action.action_type.name for action in legal_actions]
+    events_tail = context.get("mortal_events_tail", context.get("events_tail", ()))
+    return {
+        "episode_id": context.get("episode_id", ""),
+        "step_index": context.get("step_index", context.get("step_id", "")),
+        "actor": context.get("actor", ""),
+        "control_action_types": ",".join(str(value) for value in context.get("control_action_types", ())),
+        "legal_action_count": int(len(legal_actions)),
+        "legal_action_keys_json": _json_dumps(legal_keys),
+        "legal_action_types_json": _json_dumps(legal_types),
+        "source_action_ids_json": _json_dumps([list(ids) for ids in source_action_ids]),
+        "mortal_mask_true_ids_json": _json_dumps(
+            [action_id for action_id in range(MORTAL_ACTION_SPACE) if bool(mask[action_id].item())]
+        ),
+        "missing_legal_keys_json": _json_dumps(missing_legal_keys),
+        "missing_legal_types_json": _json_dumps(missing_legal_types),
+        "extra_mortal_action_ids_json": _json_dumps(extra_mortal_action_ids),
+        "events_tail_json": _json_dumps(events_tail),
+        "hand_json": _json_dumps(context.get("hand", "")),
+        "last_discard_json": _json_dumps(context.get("last_discard", "")),
+        "mismatch_kind": mismatch_kind or _mismatch_kind(missing_legal_keys, extra_mortal_action_ids),
+        "replay_hint": str(context.get("replay_hint", "")),
+    }
 
 
 def mortal_discard_topk_teacher_context(
@@ -626,6 +752,22 @@ def _extra_mortal_discard_ids(mask: torch.Tensor, legal_actions: Sequence[Action
     )
 
 
+def _mismatch_kind(missing: Sequence[object], extra: Sequence[object]) -> str:
+    has_missing = bool(missing)
+    has_extra = bool(extra)
+    if has_missing and has_extra:
+        return "missing_and_extra"
+    if has_missing:
+        return "missing_legal"
+    if has_extra:
+        return "extra_mortal"
+    return ""
+
+
+def _json_dumps(value: object) -> str:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), default=str)
+
+
 def _as_1d_float_tensor(value: torch.Tensor | Sequence[float], *, field_name: str) -> torch.Tensor:
     tensor = torch.as_tensor(value, dtype=torch.float32)
     if tensor.ndim != 1:
@@ -686,6 +828,7 @@ __all__ = [
     "assert_mortal_discard_mask_parity",
     "keqing_legal_discard_tile_ids",
     "mortal_action_topk_teacher_context",
+    "mortal_action_mapping_audit_row",
     "mortal_action_ids_for_action_spec",
     "mortal_discard_action_spec",
     "mortal_discard_ids_for_tile_id",

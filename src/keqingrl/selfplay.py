@@ -112,6 +112,8 @@ def collect_policy_episode(
     seed: int | None = None,
     max_steps: int = 512,
     device: torch.device | str | None = None,
+    include_mortal_teacher_extras: bool = True,
+    collect_mortal_teacher_events: bool = False,
 ) -> RolloutEpisode:
     seat_policy_tuple = tuple(seat_policies)
     state = env.reset(seed=seed)
@@ -140,7 +142,13 @@ def collect_policy_episode(
 
         seat_policy = seat_policy_tuple[actor]
         target_device = torch.device(device) if device is not None else _policy_device(seat_policy.policy)
-        policy_input_cpu = env.observe(actor)
+        include_teacher_extras = bool(seat_policy.is_learner and include_mortal_teacher_extras)
+        policy_input_cpu = env.observe(actor, include_mortal_teacher_extras=include_teacher_extras)
+        mortal_teacher_events: tuple[dict[str, object], ...] = ()
+        if bool(seat_policy.is_learner and collect_mortal_teacher_events):
+            event_snapshot = getattr(env, "mortal_teacher_events", None)
+            if event_snapshot is not None:
+                mortal_teacher_events = tuple(event_snapshot(actor))
         policy_input = _policy_input_to_device(policy_input_cpu, target_device)
         with torch.no_grad():
             sample = seat_policy.policy.sample_action(policy_input, greedy=seat_policy.greedy)
@@ -208,6 +216,7 @@ def collect_policy_episode(
                 legal_actions=tuple(policy_input_cpu.legal_actions[0]),
                 game_id=game_id,
                 step_id=len(rollout_steps),
+                mortal_teacher_events=mortal_teacher_events,
             )
         )
         _append_autopilot_trace_steps(
@@ -259,6 +268,8 @@ def collect_policy_episodes(
     seed_stride: int = 1,
     max_steps: int = 512,
     device: torch.device | str | None = None,
+    include_mortal_teacher_extras: bool = True,
+    collect_mortal_teacher_events: bool = False,
 ) -> tuple[RolloutEpisode, ...]:
     if num_episodes <= 0:
         raise ValueError(f"num_episodes must be positive, got {num_episodes}")
@@ -280,6 +291,8 @@ def collect_policy_episodes(
                 seed=episode_seed,
                 max_steps=max_steps,
                 device=device,
+                include_mortal_teacher_extras=include_mortal_teacher_extras,
+                collect_mortal_teacher_events=collect_mortal_teacher_events,
             )
         )
     return tuple(episodes)
@@ -296,6 +309,8 @@ def collect_selfplay_episode(
     policy_version: int = 0,
     max_steps: int = 512,
     device: torch.device | str | None = None,
+    include_mortal_teacher_extras: bool = True,
+    collect_mortal_teacher_events: bool = False,
 ) -> RolloutEpisode:
     seat_policies = build_selfplay_seat_assignments(
         learner_policy=policy,
@@ -311,6 +326,8 @@ def collect_selfplay_episode(
         seed=seed,
         max_steps=max_steps,
         device=device,
+        include_mortal_teacher_extras=include_mortal_teacher_extras,
+        collect_mortal_teacher_events=collect_mortal_teacher_events,
     )
 
 
@@ -327,6 +344,8 @@ def collect_selfplay_episodes(
     policy_version: int = 0,
     max_steps: int = 512,
     device: torch.device | str | None = None,
+    include_mortal_teacher_extras: bool = True,
+    collect_mortal_teacher_events: bool = False,
 ) -> tuple[RolloutEpisode, ...]:
     return collect_policy_episodes(
         env,
@@ -343,6 +362,8 @@ def collect_selfplay_episodes(
         seed_stride=seed_stride,
         max_steps=max_steps,
         device=device,
+        include_mortal_teacher_extras=include_mortal_teacher_extras,
+        collect_mortal_teacher_events=collect_mortal_teacher_events,
     )
 
 

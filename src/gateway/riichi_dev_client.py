@@ -4,11 +4,15 @@ import argparse
 import asyncio
 import base64
 import hashlib
+import inspect
 import json
 import logging
 import os
+import re
+import socket
 import time
 import traceback
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -19,6 +23,7 @@ from websockets.exceptions import ConnectionClosed
 from riichienv import Observation, Observation3P, RiichiEnv
 
 from mahjong_env.action_space import IDX_TO_TILE_NAME
+from mahjong_env.tiles import normalize_tile
 from mahjong.tile import FIVE_RED_MAN, FIVE_RED_PIN, FIVE_RED_SOU
 
 torch = None
@@ -42,6 +47,18 @@ DEFAULT_BASE_URL = "wss://game.riichi.dev"
 DEFAULT_VALIDATE_PATH = "/ws/validate"
 DEFAULT_RANKED_PATH = "/ws/ranked"
 _ROUND_WINDS = ("E", "S", "W", "N")
+DEFAULT_ACTION_DEADLINE_MS = 2500.0
+_PROXY_ENV_KEYS = (
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "all_proxy",
+    "no_proxy",
+)
+_HTTP_PROXY_SCHEMES = {"http"}
 _MELD_TYPE_MAP = {
     "Chi": "chi",
     "Pon": "pon",
@@ -111,6 +128,136 @@ def _resolve_default_token_with_source(bot_name: str) -> tuple[str, str]:
     if os.getenv("LATTEKEY"):
         return os.getenv("LATTEKEY", ""), "LATTEKEY"
     return os.getenv("RIICHI_BOT_TOKEN", ""), "RIICHI_BOT_TOKEN"
+
+
+def _redact_proxy_value(value: str) -> str:
+    if "@" not in value:
+        return value
+    scheme, sep, rest = value.partition("://")
+    if not sep:
+        return "<set-with-credentials>"
+    _userinfo, at, host = rest.rpartition("@")
+    if not at:
+        return value
+    return f"{scheme}://<redacted>@{host}"
+
+
+def _proxy_env_for_log() -> dict[str, str]:
+    return {
+        key: _redact_proxy_value(value)
+        for key in _PROXY_ENV_KEYS
+        if (value := os.getenv(key))
+    }
+
+
+def _redact_url_for_log(value: str | None) -> str | None:
+    if not value:
+        return None
+    return _redact_proxy_value(value)
+
+
+def _websockets_connect_supports_proxy_arg() -> bool:
+    try:
+        return "proxy" in inspect.signature(websockets.connect).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _websockets_connect_source_mentions_proxy() -> bool:
+    try:
+        source = inspect.getsource(websockets.connect)
+    except (OSError, TypeError):
+        return False
+    lowered = source.lower()
+    return "proxy" in lowered or "getproxies" in lowered
+
+
+def _websocket_diagnostics(*, disable_ws_proxy: bool, ws_proxy: str | None = None) -> dict[str, Any]:
+    proxy_arg_supported = _websockets_connect_supports_proxy_arg()
+    proxy_env = _proxy_env_for_log()
+    proxy_disabled_by_kwarg = bool(disable_ws_proxy and proxy_arg_supported)
+    proxy_env_used_by_websockets = bool(
+        proxy_env
+        and (
+            (proxy_arg_supported and not disable_ws_proxy)
+            or (not proxy_arg_supported and _websockets_connect_source_mentions_proxy())
+        )
+    )
+    return {
+        "websockets_version": getattr(websockets, "__version__", "unknown"),
+        "proxy_env": proxy_env,
+        "explicit_ws_proxy": _redact_url_for_log(ws_proxy),
+        "proxy_arg_supported": proxy_arg_supported,
+        "proxy_disabled_by_kwarg": proxy_disabled_by_kwarg,
+        "proxy_env_used_by_websockets": proxy_env_used_by_websockets and not ws_proxy,
+        "manual_http_connect_proxy": bool(ws_proxy),
+    }
+
+
+def _proxy_basic_auth_header(parsed_proxy: urllib.parse.ParseResult) -> str | None:
+    if parsed_proxy.username is None:
+        return None
+    username = urllib.parse.unquote(parsed_proxy.username)
+    password = urllib.parse.unquote(parsed_proxy.password or "")
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    return f"Basic {token}"
+
+
+def _open_http_connect_socket(
+    *,
+    ws_url: str,
+    proxy_url: str,
+    timeout: float | None,
+) -> socket.socket:
+    parsed_ws = urllib.parse.urlparse(ws_url)
+    if parsed_ws.scheme != "wss":
+        raise ValueError(f"HTTP CONNECT proxy is only supported for wss URLs: {ws_url!r}")
+    target_host = parsed_ws.hostname
+    if not target_host:
+        raise ValueError(f"WebSocket URL missing host: {ws_url!r}")
+    target_port = parsed_ws.port or 443
+
+    parsed_proxy = urllib.parse.urlparse(proxy_url)
+    if parsed_proxy.scheme not in _HTTP_PROXY_SCHEMES:
+        raise ValueError(
+            "ws_proxy currently supports HTTP CONNECT proxies only; "
+            f"got scheme={parsed_proxy.scheme!r}"
+        )
+    proxy_host = parsed_proxy.hostname
+    if not proxy_host:
+        raise ValueError(f"proxy URL missing host: {proxy_url!r}")
+    proxy_port = parsed_proxy.port or 8080
+
+    sock = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
+    try:
+        request_lines = [
+            f"CONNECT {target_host}:{target_port} HTTP/1.1",
+            f"Host: {target_host}:{target_port}",
+            "Proxy-Connection: Keep-Alive",
+        ]
+        auth_header = _proxy_basic_auth_header(parsed_proxy)
+        if auth_header is not None:
+            request_lines.append(f"Proxy-Authorization: {auth_header}")
+        request = ("\r\n".join(request_lines) + "\r\n\r\n").encode("ascii")
+        sock.sendall(request)
+
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("HTTP proxy closed while establishing CONNECT tunnel")
+            response += chunk
+            if len(response) > 65536:
+                raise ConnectionError("HTTP proxy CONNECT response exceeded 64 KiB")
+        status_line = response.split(b"\r\n", 1)[0].decode("latin1", errors="replace")
+        parts = status_line.split(" ", 2)
+        if len(parts) < 2 or parts[1] != "200":
+            raise ConnectionError(f"HTTP proxy CONNECT failed: {status_line}")
+        sock.setblocking(False)
+        return sock
+    except Exception:
+        sock.close()
+        raise
 
 
 def _format_connection_closed_message(queue: str, code: int, reason: str | None) -> str:
@@ -243,6 +390,7 @@ def _enrich_message_for_audit(message: dict[str, Any]) -> dict[str, Any]:
             try:
                 _obs, normalized = _decode_observation(enriched)
                 enriched["_normalized_observation"] = normalized
+                enriched["_new_events"] = _observation_new_events(_obs)
             except Exception as exc:
                 enriched["_observation_decode_error"] = f"{type(exc).__name__}: {exc}"
     return enriched
@@ -312,11 +460,17 @@ def _sanitize_action(action: dict[str, Any], actor_hint: int | None) -> dict[str
         return out
     if action_type == "ankan":
         actor = action.get("actor", actor_hint)
-        return {
+        out = {
             "type": "ankan",
             "actor": actor,
             "consumed": list(action["consumed"]),
         }
+        pai = action.get("pai")
+        if pai is None and out["consumed"]:
+            pai = out["consumed"][0]
+        if pai is not None:
+            out["pai"] = pai
+        return out
     if action_type == "kakan":
         actor = action.get("actor", actor_hint)
         return {
@@ -346,27 +500,92 @@ def _action_to_mjai_dict(action: Any) -> dict[str, Any]:
     raise TypeError(f"unsupported action payload type: {type(action)!r}")
 
 
-def _last_self_tsumo_pai(new_events: list[dict[str, Any]] | None, actor: int | None) -> str | None:
+def _meld_type_key(meld_type: Any) -> str | None:
+    if meld_type is None:
+        return None
+    name = getattr(meld_type, "name", None)
+    if isinstance(name, str):
+        return name
+    text = str(meld_type)
+    return text.rsplit(".", 1)[-1] if text else None
+
+
+def _last_unanswered_self_tsumo_pai(
+    new_events: list[dict[str, Any]] | None,
+    actor: int | None,
+) -> str | None:
+    if actor is None:
+        return None
     for event in reversed(new_events or []):
-        if event.get("type") == "tsumo" and event.get("actor") == actor:
+        event_type = event.get("type")
+        if event.get("actor") != actor:
+            continue
+        if event_type == "tsumo":
             pai = event.get("pai")
-            if isinstance(pai, str) and pai != "?":
-                return pai
+            return pai if isinstance(pai, str) and pai != "?" else None
+        if event_type in {"dahai", "chi", "pon", "daiminkan", "ankan", "kakan", "hora"}:
+            return None
     return None
 
 
-def _complete_wire_action(
+def _reach_followup_tsumo_pai(
+    *,
+    new_events: list[dict[str, Any]] | None,
+    state: Mapping[str, Any] | None,
+    actor: int | None,
+) -> str | None:
+    if actor is None or not state:
+        return None
+    has_self_reach = any(
+        event.get("actor") == actor and event.get("type") == "reach"
+        for event in (new_events or [])
+    )
+    if not has_self_reach:
+        return None
+    hand = state.get("hand")
+    if isinstance(hand, Sequence) and not isinstance(hand, (str, bytes)) and hand:
+        pai = hand[-1]
+        return pai if isinstance(pai, str) and pai != "?" else None
+    return None
+
+
+def _last_dahai_event(events: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    for event in reversed(events or []):
+        if event.get("type") == "dahai":
+            return event
+    return None
+
+
+def _riichi_dev_wire_action(
     action: Any,
     *,
     actor_hint: int | None = None,
     new_events: list[dict[str, Any]] | None = None,
+    state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     out = _sanitize_action(_action_to_mjai_dict(action), actor_hint)
     if out.get("type") == "none":
         return {"type": "none"}
     if out.get("type") == "dahai" and "tsumogiri" not in out:
-        last_tsumo = _last_self_tsumo_pai(new_events, out.get("actor", actor_hint))
+        actor = out.get("actor", actor_hint)
+        last_tsumo = _last_unanswered_self_tsumo_pai(new_events, actor)
+        if last_tsumo is None:
+            last_tsumo = _reach_followup_tsumo_pai(
+                new_events=new_events,
+                state=state,
+                actor=actor,
+            )
         out["tsumogiri"] = bool(last_tsumo is not None and out.get("pai") == last_tsumo)
+    if out.get("type") in {"chi", "pon", "daiminkan"} and "target" not in out:
+        last_dahai = _last_dahai_event(new_events)
+        target = last_dahai.get("actor") if last_dahai is not None else None
+        if target is None:
+            logger.warning(
+                "riichi.dev wire action missing call target; sending none instead: action=%s",
+                _action_log_text(out),
+            )
+            return {"type": "none"}
+        out["target"] = target
     return out
 
 
@@ -375,27 +594,15 @@ def _action_to_mjai_wire_payload(
     *,
     actor_hint: int | None = None,
     new_events: list[dict[str, Any]] | None = None,
+    state: Mapping[str, Any] | None = None,
 ) -> str:
-    if isinstance(action, str):
-        try:
-            parsed = json.loads(action)
-        except json.JSONDecodeError:
-            return action
-        return json.dumps(
-            _complete_wire_action(parsed, actor_hint=actor_hint, new_events=new_events),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-    if hasattr(action, "to_mjai"):
-        mjai = action.to_mjai()
-        parsed = json.loads(mjai) if isinstance(mjai, str) else dict(mjai)
-        return json.dumps(
-            _complete_wire_action(parsed, actor_hint=actor_hint, new_events=new_events),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
     return json.dumps(
-        _complete_wire_action(action, actor_hint=actor_hint, new_events=new_events),
+        _riichi_dev_wire_action(
+            action,
+            actor_hint=actor_hint,
+            new_events=new_events,
+            state=state,
+        ),
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -440,6 +647,21 @@ def _same_meld_action(candidate: dict[str, Any], legal: dict[str, Any]) -> bool:
     )
 
 
+def _same_meld_echo_action(expected: dict[str, Any], observed: dict[str, Any]) -> bool:
+    action_type = expected.get("type")
+    if action_type != observed.get("type"):
+        return False
+    if expected.get("actor") != observed.get("actor"):
+        return False
+    if expected.get("pai") != observed.get("pai"):
+        return False
+    if "target" in expected and "target" in observed and expected.get("target") != observed.get("target"):
+        return False
+    if action_type == "chi":
+        return True
+    return _same_meld_action(expected, observed)
+
+
 def _same_hora_action(candidate: dict[str, Any], legal: dict[str, Any]) -> bool:
     if candidate.get("type") != "hora" or legal.get("type") != "hora":
         return False
@@ -452,10 +674,144 @@ def _same_hora_action(candidate: dict[str, Any], legal: dict[str, Any]) -> bool:
     return True
 
 
+def _same_dahai_tile(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return left == right
+    return normalize_tile(str(left)) == normalize_tile(str(right))
+
+
 def _action_log_text(action: dict[str, Any] | None) -> str:
     if action is None:
         return "null"
     return json.dumps(action, sort_keys=True, ensure_ascii=False)
+
+
+_ECHO_TRACKED_ACTION_TYPES = {
+    "reach",
+    "dahai",
+    "chi",
+    "pon",
+    "daiminkan",
+    "ankan",
+    "kakan",
+    "hora",
+}
+
+
+class RiichiDevActionEchoMismatch(RuntimeError):
+    pass
+
+
+class RiichiDevStaleActionDeadline(RuntimeError):
+    pass
+
+
+class RiichiDevServerIllegalAction(RuntimeError):
+    pass
+
+
+def _echo_tracked_action(action: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not action or action.get("type") not in _ECHO_TRACKED_ACTION_TYPES:
+        return None
+    return _sanitize_action(action, action.get("actor"))
+
+
+def _actions_equivalent_for_echo(expected: dict[str, Any], observed: dict[str, Any]) -> bool:
+    expected = _sanitize_action(expected, expected.get("actor"))
+    observed = _sanitize_action(observed, expected.get("actor"))
+    if expected.get("type") != observed.get("type"):
+        return False
+    if expected.get("actor") != observed.get("actor"):
+        return False
+    action_type = expected.get("type")
+    if action_type == "dahai":
+        return _same_dahai_tile(expected.get("pai"), observed.get("pai"))
+    if action_type in {"chi", "pon", "daiminkan", "ankan", "kakan"}:
+        return _same_meld_echo_action(expected, observed)
+    if action_type == "hora":
+        return _same_hora_action(expected, observed)
+    return expected == observed
+
+
+def _looks_like_server_timeout_fallback(
+    expected: dict[str, Any],
+    observed: dict[str, Any],
+) -> bool:
+    if expected.get("actor") != observed.get("actor"):
+        return False
+    if observed.get("type") != "dahai":
+        return False
+    return bool(observed.get("tsumogiri"))
+
+
+def _first_echo_candidate(
+    events: list[dict[str, Any]],
+    expected: dict[str, Any],
+) -> dict[str, Any] | None:
+    actor = expected.get("actor")
+    if actor is None:
+        return None
+    for event in events:
+        if event.get("type") == "start_kyoku":
+            return None
+        if event.get("actor") != actor:
+            continue
+        if event.get("type") in _ECHO_TRACKED_ACTION_TYPES:
+            return event
+    return None
+
+
+def _server_illegal_action_offenders(event: dict[str, Any]) -> set[int]:
+    offenders: set[int] = set()
+    penalized = event.get("penalized")
+    if isinstance(penalized, Mapping):
+        for key, value in penalized.items():
+            if not value:
+                continue
+            try:
+                offenders.add(int(key))
+            except (TypeError, ValueError):
+                continue
+    elif isinstance(penalized, Sequence) and not isinstance(penalized, str):
+        offenders.update(idx for idx, value in enumerate(penalized) if value)
+
+    reason = str(event.get("reason") or "")
+    for match in re.finditer(r"\bPlayer\s+([0-3])\b", reason, flags=re.IGNORECASE):
+        offenders.add(int(match.group(1)))
+
+    deltas = event.get("deltas")
+    if not offenders and isinstance(deltas, Sequence) and not isinstance(deltas, str):
+        for idx, delta in enumerate(deltas):
+            if isinstance(delta, (int, float)) and delta <= -8000:
+                offenders.add(idx)
+    return offenders
+
+
+def _server_illegal_action_event(
+    events: list[dict[str, Any]],
+    *,
+    seat: int | None = None,
+) -> dict[str, Any] | None:
+    for event in events:
+        if event.get("type") != "ryukyoku":
+            continue
+        reason = str(event.get("reason") or "")
+        penalized = event.get("penalized")
+        has_penalty = False
+        if isinstance(penalized, Mapping):
+            has_penalty = any(bool(value) for value in penalized.values())
+        elif isinstance(penalized, Sequence) and not isinstance(penalized, str):
+            has_penalty = any(bool(value) for value in penalized)
+        else:
+            has_penalty = bool(penalized)
+        if not (has_penalty or "Illegal Action" in reason or "Penalty" in reason):
+            continue
+        if seat is None:
+            return event
+        offenders = _server_illegal_action_offenders(event)
+        if not offenders or int(seat) in offenders:
+            return event
+    return None
 
 
 def _warn_mortal_legality_fallback(
@@ -503,11 +859,8 @@ def _legalize_action(
             if (
                 legal.get("type") == "dahai"
                 and legal.get("actor") == candidate.get("actor")
-                and legal.get("pai") == candidate.get("pai")
+                and _same_dahai_tile(legal.get("pai"), candidate.get("pai"))
             ):
-                if "tsumogiri" in candidate and "tsumogiri" not in legal:
-                    legal = dict(legal)
-                    legal["tsumogiri"] = bool(candidate["tsumogiri"])
                 return legal
     if candidate.get("type") in {"chi", "pon", "daiminkan", "ankan", "kakan"}:
         for legal in normalized_legal:
@@ -569,7 +922,7 @@ def _normalize_observation_state(obs: Any, raw_state: dict[str, Any]) -> dict[st
     for seat, seat_melds in enumerate(raw_melds):
         normalized_seat: list[dict[str, Any]] = []
         for meld in seat_melds:
-            meld_type_name = getattr(getattr(meld, "meld_type", None), "name", None)
+            meld_type_name = _meld_type_key(getattr(meld, "meld_type", None))
             tiles = [_tile136_to_str(int(tile)) for tile in list(meld.tiles)]
             called_tile = getattr(meld, "called_tile", None)
             pai = (
@@ -619,6 +972,9 @@ class RiichiDevDecisionAgent:
     def reset(self) -> None:
         return None
 
+    def start_game(self, seat: int) -> None:
+        return None
+
     def observe(self, obs: Any) -> None:
         return None
 
@@ -664,6 +1020,34 @@ class RiichiDevAuditLogger:
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    def log_connection_start(
+        self,
+        *,
+        queue: str,
+        bot_name: str,
+        model_version: str | None,
+        seat: int | None,
+        ws_url: str,
+        diagnostics: dict[str, Any],
+        open_timeout: float,
+        ping_interval: float,
+        ping_timeout: float,
+    ) -> None:
+        self.write(
+            {
+                "kind": "connection_start",
+                "queue": queue,
+                "bot_name": bot_name,
+                "model_version": model_version,
+                "seat": seat,
+                "ws_url": ws_url,
+                "diagnostics": diagnostics,
+                "open_timeout": open_timeout,
+                "ping_interval": ping_interval,
+                "ping_timeout": ping_timeout,
+            }
+        )
+
     def log_request_action(
         self,
         *,
@@ -693,6 +1077,7 @@ class RiichiDevAuditLogger:
                 "latency_ms": round(latency_ms, 3),
                 "possible_action_count": len(possible_actions),
                 "possible_actions": possible_actions,
+                "new_events": message.get("_new_events"),
                 "state": self._state_summary(message),
                 "normalized_observation": message.get("_normalized_observation"),
             }
@@ -710,6 +1095,10 @@ class RiichiDevAuditLogger:
         success: bool,
         wire_payload: str | None = None,
         error: str | None = None,
+        decision_latency_ms: float | None = None,
+        send_latency_ms: float | None = None,
+        total_latency_ms: float | None = None,
+        deadline_ms: float | None = None,
     ) -> None:
         self.write(
             {
@@ -723,6 +1112,16 @@ class RiichiDevAuditLogger:
                 "response": response,
                 "wire_payload": wire_payload,
                 "error": error,
+                "decision_latency_ms": round(decision_latency_ms, 3)
+                if decision_latency_ms is not None
+                else None,
+                "send_latency_ms": round(send_latency_ms, 3)
+                if send_latency_ms is not None
+                else None,
+                "total_latency_ms": round(total_latency_ms, 3)
+                if total_latency_ms is not None
+                else None,
+                "deadline_ms": round(deadline_ms, 3) if deadline_ms is not None else None,
             }
         )
 
@@ -777,10 +1176,99 @@ class RiichiDevAuditLogger:
                 "request_seq": request_seq,
                 "message_meta": _audit_message_meta(message),
                 "possible_actions": message.get("possible_actions") or [],
+                "new_events": message.get("_new_events"),
                 "state": self._state_summary(message),
                 "normalized_observation": message.get("_normalized_observation"),
                 "error": error,
                 "traceback": traceback_text,
+            }
+        )
+
+    def log_echo_mismatch(
+        self,
+        *,
+        queue: str,
+        bot_name: str,
+        model_version: str | None,
+        seat: int | None,
+        request_seq: int | None,
+        last_request_seq: int | None,
+        expected: dict[str, Any],
+        observed: dict[str, Any],
+        message: dict[str, Any],
+        wire_payload: str | None,
+        classification: str = "echo_mismatch",
+    ) -> None:
+        self.write(
+            {
+                "kind": "echo_mismatch",
+                "classification": classification,
+                "queue": queue,
+                "bot_name": bot_name,
+                "model_version": model_version,
+                "seat": seat,
+                "request_seq": request_seq,
+                "last_request_seq": last_request_seq,
+                "expected": expected,
+                "observed": observed,
+                "last_wire_payload": wire_payload,
+                "message_meta": _audit_message_meta(message),
+                "new_events": message.get("_new_events"),
+                "state": self._state_summary(message),
+                "normalized_observation": message.get("_normalized_observation"),
+            }
+        )
+
+    def log_server_illegal_action(
+        self,
+        *,
+        queue: str,
+        bot_name: str,
+        model_version: str | None,
+        seat: int | None,
+        request_seq: int | None,
+        illegal_event: dict[str, Any],
+        message: dict[str, Any],
+    ) -> None:
+        self.write(
+            {
+                "kind": "server_illegal_action",
+                "queue": queue,
+                "bot_name": bot_name,
+                "model_version": model_version,
+                "seat": seat,
+                "request_seq": request_seq,
+                "illegal_event": illegal_event,
+                "message_meta": _audit_message_meta(message),
+                "new_events": message.get("_new_events"),
+                "state": self._state_summary(message),
+                "normalized_observation": message.get("_normalized_observation"),
+            }
+        )
+
+    def log_unconfirmed_action_boundary(
+        self,
+        *,
+        queue: str,
+        bot_name: str,
+        model_version: str | None,
+        seat: int | None,
+        boundary_message: dict[str, Any],
+        last_request_seq: int | None,
+        expected: dict[str, Any],
+        wire_payload: str | None,
+    ) -> None:
+        self.write(
+            {
+                "kind": "unconfirmed_action_boundary",
+                "queue": queue,
+                "bot_name": bot_name,
+                "model_version": model_version,
+                "seat": seat,
+                "boundary_message": boundary_message,
+                "last_request_seq": last_request_seq,
+                "expected": expected,
+                "last_wire_payload": wire_payload,
             }
         )
 
@@ -999,6 +1487,7 @@ class MortalObservationAgent(RiichiDevDecisionAgent):
         project_root: str | Path,
         device: str = "cuda",
         verbose: bool = False,
+        preload: bool = False,
     ) -> None:
         self._model_path = Path(model_path)
         self._mortal_root = Path(project_root) / "third_party" / "Mortal"
@@ -1006,6 +1495,13 @@ class MortalObservationAgent(RiichiDevDecisionAgent):
         self._verbose = verbose
         self._seat: int | None = None
         self._bot: Any | None = None
+        if preload:
+            t0 = time.perf_counter()
+            self._ensure_bot(0)
+            logger.info(
+                "preloaded Mortal model for riichi.dev serving in %.1fms",
+                (time.perf_counter() - t0) * 1000.0,
+            )
 
     def reset(self) -> None:
         if self._bot is not None:
@@ -1014,6 +1510,15 @@ class MortalObservationAgent(RiichiDevDecisionAgent):
     def _ensure_bot(self, seat: int) -> None:
         if self._bot is not None and self._seat == seat:
             return
+        if self._bot is not None and hasattr(self._bot, "set_player_id"):
+            self._bot.set_player_id(seat)
+            self._seat = seat
+            return
+        if str(self._device).startswith("cuda"):
+            import torch
+
+            if torch.cuda.is_available():
+                torch.empty(1, device=self._device).sum().item()
         from inference.mortal_bot import MortalReviewBot
 
         self._seat = seat
@@ -1026,13 +1531,46 @@ class MortalObservationAgent(RiichiDevDecisionAgent):
             enable_review_log=False,
         )
 
+    def start_game(self, seat: int) -> None:
+        self._ensure_bot(seat)
+
+    def _reset_for_new_kyoku(self) -> None:
+        if self._bot is not None:
+            self._bot.reset()
+
+    @staticmethod
+    def _current_kyoku_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        last_start_kyoku = None
+        for idx, event in enumerate(events):
+            if event.get("type") == "start_kyoku":
+                last_start_kyoku = idx
+        if last_start_kyoku is None:
+            return events
+
+        sync_start = last_start_kyoku
+        if (
+            last_start_kyoku > 0
+            and events[last_start_kyoku - 1].get("type") == "start_game"
+        ):
+            sync_start = last_start_kyoku - 1
+
+        if sync_start > 0:
+            logger.debug(
+                "mortal observation event stream includes previous kyoku tail; "
+                "dropping %d pre-start_kyoku events before syncing from latest start_kyoku",
+                sync_start,
+            )
+        return events[sync_start:]
+
     def _react_new_events(self, events: list[dict[str, Any]], seat: int) -> dict[str, Any] | None:
         self._ensure_bot(seat)
         if self._bot is None:
             return None
 
         reaction: dict[str, Any] | None = None
-        for event in events:
+        for event in self._current_kyoku_events(events):
+            if event.get("type") == "start_kyoku":
+                self._reset_for_new_kyoku()
             response = self._bot.react(event)
             reaction = _action_to_mjai_dict(response) if response is not None else None
         return reaction
@@ -1044,7 +1582,19 @@ class MortalObservationAgent(RiichiDevDecisionAgent):
         legal_actions: list[dict[str, Any]],
         actor: int,
     ) -> dict[str, Any]:
-        reaction = self._react_new_events(new_events, actor)
+        try:
+            reaction = self._react_new_events(new_events, actor)
+        except RuntimeError as exc:
+            logger.warning(
+                "mortal observation sync failed; falling back to legal action: "
+                "actor=%s error=%s new_event_count=%d recent_events=%s",
+                actor,
+                exc,
+                len(new_events),
+                json.dumps(new_events[-8:], ensure_ascii=False),
+                exc_info=True,
+            )
+            return _legalize_action(None, legal_actions=legal_actions, actor=actor)
         return _legalize_action(reaction, legal_actions=legal_actions, actor=actor)
 
     def observe(self, obs: Any) -> None:
@@ -1087,7 +1637,14 @@ class MortalObservationAgent(RiichiDevDecisionAgent):
                     actor,
                     _action_log_text(chosen),
                 )
-            return _action_to_mjai_wire_payload(chosen, actor_hint=actor, new_events=new_events)
+                legal_actions = [_action_to_mjai_dict(action) for action in obs.legal_actions()]
+                fallback = _legalize_action(chosen, legal_actions=legal_actions, actor=actor)
+                action = obs.select_action_from_mjai(json.dumps(fallback, ensure_ascii=False))
+                if action is None:
+                    raise RuntimeError(
+                        f"Mortal selected action could not be converted by RiichiEnv: {chosen}"
+                    )
+            return action.to_mjai()
 
         return {"type": "none"}
 
@@ -1214,6 +1771,7 @@ def create_riichi_dev_agent(
     model_version: str | None = None,
     rank_pt_lambda: float | None = None,
     validation_safe: bool = False,
+    preload_mortal: bool = False,
 ) -> RiichiDevDecisionAgent:
     if validation_safe:
         return ValidationSafeAgent()
@@ -1232,6 +1790,7 @@ def create_riichi_dev_agent(
             project_root=project_root,
             device=device,
             verbose=verbose,
+            preload=preload_mortal,
         )
     spec = DECISION_AGENT_SPECS.get(model_version or bot_name)
     if spec is None:
@@ -1281,6 +1840,10 @@ class RiichiDevClientConfig:
     ping_timeout: float = 20.0
     auto_reconnect: bool = True
     reconnect_delay_sec: float = 1.0
+    action_deadline_ms: float = DEFAULT_ACTION_DEADLINE_MS
+    preload_mortal: bool = False
+    disable_ws_proxy: bool = True
+    ws_proxy: str | None = None
 
     def ws_url(self) -> str:
         if self.ws_url_override:
@@ -1305,11 +1868,16 @@ class RiichiDevBotClient:
             model_version=config.model_version,
             rank_pt_lambda=config.rank_pt_lambda,
             validation_safe=False,
+            preload_mortal=config.preload_mortal,
         )
         self.seat: int | None = None
         self._saw_start_game = False
         self._saw_end_game = False
         self._request_seq = 0
+        self._last_sent_action: dict[str, Any] | None = None
+        self._last_sent_request_seq: int | None = None
+        self._last_sent_wire_payload: str | None = None
+        self._must_check_server_state = False
         default_audit_path = Path("logs/riichi_dev") / f"{self.config.queue}-{self.config.bot_name}.jsonl"
         self.audit_logger = RiichiDevAuditLogger(self.config.audit_log_path or default_audit_path)
 
@@ -1318,7 +1886,165 @@ class RiichiDevBotClient:
         self._saw_start_game = False
         self._saw_end_game = False
         self._request_seq = 0
+        self._last_sent_action = None
+        self._last_sent_request_seq = None
+        self._last_sent_wire_payload = None
+        self._must_check_server_state = False
         self.agent.reset()
+
+    def _remember_sent_action(
+        self,
+        *,
+        action: dict[str, Any] | None,
+        request_seq: int | None,
+        wire_payload: str | None,
+    ) -> None:
+        wire_action: dict[str, Any] | None = None
+        if wire_payload is not None:
+            try:
+                parsed_wire_action = json.loads(wire_payload)
+            except json.JSONDecodeError:
+                parsed_wire_action = None
+            if isinstance(parsed_wire_action, dict):
+                wire_action = parsed_wire_action
+        if wire_action is None and action is not None:
+            wire_action = _riichi_dev_wire_action(action, actor_hint=action.get("actor"))
+        tracked = _echo_tracked_action(wire_action)
+        if tracked is None:
+            return
+        self._last_sent_action = tracked
+        self._last_sent_request_seq = request_seq
+        self._last_sent_wire_payload = wire_payload
+
+    def _clear_last_sent_action(self) -> None:
+        self._last_sent_action = None
+        self._last_sent_request_seq = None
+        self._last_sent_wire_payload = None
+        self._must_check_server_state = False
+
+    def _in_active_game(self) -> bool:
+        return self._saw_start_game and not self._saw_end_game
+
+    def _websocket_connect_kwargs(self, headers: dict[str, str]) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "extra_headers": headers,
+            "origin": self.config.origin,
+            "open_timeout": self.config.open_timeout,
+            "ping_interval": self.config.ping_interval,
+            "ping_timeout": self.config.ping_timeout,
+        }
+        if self.config.ws_proxy:
+            ws_url = self.config.ws_url()
+            parsed_ws = urllib.parse.urlparse(ws_url)
+            kwargs["sock"] = _open_http_connect_socket(
+                ws_url=ws_url,
+                proxy_url=self.config.ws_proxy,
+                timeout=self.config.open_timeout,
+            )
+            if parsed_ws.hostname:
+                kwargs["server_hostname"] = parsed_ws.hostname
+        if self.config.disable_ws_proxy and _websockets_connect_supports_proxy_arg():
+            kwargs["proxy"] = None
+        return kwargs
+
+    def _log_connection_start(self) -> None:
+        diagnostics = _websocket_diagnostics(
+            disable_ws_proxy=self.config.disable_ws_proxy,
+            ws_proxy=self.config.ws_proxy,
+        )
+        if self.config.verbose:
+            logger.info(
+                "websocket diagnostics: websockets=%s proxy_env=%s "
+                "explicit_ws_proxy=%s proxy_arg_supported=%s "
+                "proxy_disabled_by_kwarg=%s proxy_env_used_by_websockets=%s "
+                "manual_http_connect_proxy=%s",
+                diagnostics["websockets_version"],
+                diagnostics["proxy_env"] or {},
+                diagnostics["explicit_ws_proxy"],
+                diagnostics["proxy_arg_supported"],
+                diagnostics["proxy_disabled_by_kwarg"],
+                diagnostics["proxy_env_used_by_websockets"],
+                diagnostics["manual_http_connect_proxy"],
+            )
+        self.audit_logger.log_connection_start(
+            queue=self.config.queue,
+            bot_name=self.config.bot_name,
+            model_version=self.config.model_version,
+            seat=self.seat,
+            ws_url=self.config.ws_url(),
+            diagnostics=diagnostics,
+            open_timeout=self.config.open_timeout,
+            ping_interval=self.config.ping_interval,
+            ping_timeout=self.config.ping_timeout,
+        )
+
+    def _check_last_action_echo(self, message: dict[str, Any], request_seq: int | None) -> None:
+        if message.get("type") != "request_action":
+            return
+        expected = self._last_sent_action
+        enriched = _enrich_message_for_audit(message)
+        events = enriched.get("_new_events") or []
+        illegal_event = _server_illegal_action_event(events, seat=self.seat)
+        if illegal_event is not None:
+            error = (
+                "riichi.dev reported an illegal action in the server event stream; "
+                f"aborting before sending another action. event={_action_log_text(illegal_event)}"
+            )
+            logger.error(error)
+            self.audit_logger.log_server_illegal_action(
+                queue=self.config.queue,
+                bot_name=self.config.bot_name,
+                model_version=self.config.model_version,
+                seat=self.seat,
+                request_seq=request_seq,
+                illegal_event=illegal_event,
+                message=enriched,
+            )
+            raise RiichiDevServerIllegalAction(error)
+
+        if expected is None:
+            self._must_check_server_state = False
+            return
+        observed = _first_echo_candidate(events, expected)
+        if observed is None:
+            return
+        if _actions_equivalent_for_echo(expected, observed):
+            self._clear_last_sent_action()
+            return
+        if _looks_like_server_timeout_fallback(expected, observed):
+            classification = "server_timeout_or_disconnect_fallback"
+            error = (
+                "riichi.dev appears to have applied its timeout/disconnect fallback "
+                "instead of the previous action; local websocket send completed, but "
+                "the server observation shows a self tsumogiri fallback. Aborting "
+                "before sending another action because riichi.dev actions have no "
+                "request id and continuing would desync Mortal state. "
+                f"expected={_action_log_text(expected)} observed={_action_log_text(observed)}"
+            )
+        else:
+            classification = "echo_mismatch"
+            error = (
+                "riichi.dev action echo mismatch; server observation did not echo the "
+                "previous sent action. Aborting before sending another action because "
+                "riichi.dev actions have no request id and a stale in-flight action can "
+                "be applied to the next request window. "
+                f"expected={_action_log_text(expected)} observed={_action_log_text(observed)}"
+            )
+        logger.error(error)
+        self.audit_logger.log_echo_mismatch(
+            queue=self.config.queue,
+            bot_name=self.config.bot_name,
+            model_version=self.config.model_version,
+            seat=self.seat,
+            request_seq=request_seq,
+            last_request_seq=self._last_sent_request_seq,
+            expected=expected,
+            observed=observed,
+            message=enriched,
+            wire_payload=self._last_sent_wire_payload,
+            classification=classification,
+        )
+        raise RiichiDevActionEchoMismatch(error)
 
     async def _run_once(self) -> None:
         self._reset_session_state()
@@ -1327,20 +2053,24 @@ class RiichiDevBotClient:
             "User-Agent": self.config.user_agent,
         }
         logger.info("connecting to %s", self.config.ws_url())
+        self._log_connection_start()
         async with websockets.connect(
             self.config.ws_url(),
-            extra_headers=headers,
-            origin=self.config.origin,
-            open_timeout=self.config.open_timeout,
-            ping_interval=self.config.ping_interval,
-            ping_timeout=self.config.ping_timeout,
+            **self._websocket_connect_kwargs(headers),
         ) as websocket:
             async for raw_message in websocket:
                 message = json.loads(raw_message)
                 request_seq: int | None = None
+                post_send_deadline_error: str | None = None
+                send_latency_ms: float | None = None
+                total_latency_ms: float | None = None
                 if message.get("type") == "request_action":
                     self._request_seq += 1
                     request_seq = self._request_seq
+                    self._check_last_action_echo(message, request_seq)
+                audit_message_for_wire: dict[str, Any] | None = None
+                if message.get("type") == "request_action":
+                    audit_message_for_wire = _enrich_message_for_audit(message)
                 t0 = time.perf_counter()
                 try:
                     response = self.handle_message(message)
@@ -1366,11 +2096,69 @@ class RiichiDevBotClient:
                     raise
                 latency_ms = (time.perf_counter() - t0) * 1000.0
                 audit_response = _action_to_mjai_dict(response) if response is not None else None
-                wire_payload = _action_to_mjai_wire_payload(response) if response is not None else None
+                wire_payload = (
+                    _action_to_mjai_wire_payload(
+                        response,
+                        actor_hint=self.seat,
+                        new_events=(audit_message_for_wire or {}).get("_new_events"),
+                        state=(audit_message_for_wire or {}).get("_normalized_observation"),
+                    )
+                    if response is not None
+                    else None
+                )
                 if response is not None:
+                    elapsed_before_send_ms = (time.perf_counter() - t0) * 1000.0
+                    action_deadline_ms = float(self.config.action_deadline_ms or 0.0)
+                    if (
+                        message.get("type") == "request_action"
+                        and action_deadline_ms > 0.0
+                        and elapsed_before_send_ms > action_deadline_ms
+                    ):
+                        error = (
+                            "decision exceeded riichi.dev safety deadline "
+                            f"elapsed_ms={elapsed_before_send_ms:.1f} "
+                            f"deadline_ms={action_deadline_ms:.1f}; not sending stale action"
+                        )
+                        logger.warning(
+                            "dropping late riichi.dev response and aborting connection: "
+                            "request_seq=%s %s payload=%s",
+                            request_seq,
+                            error,
+                            wire_payload,
+                        )
+                        audit_message = _enrich_message_for_audit(message)
+                        self.audit_logger.log_request_action(
+                            queue=self.config.queue,
+                            bot_name=self.config.bot_name,
+                            model_version=self.config.model_version,
+                            seat=self.seat,
+                            request_seq=request_seq,
+                            message=audit_message,
+                            response=audit_response,
+                            latency_ms=latency_ms,
+                            wire_payload=wire_payload,
+                        )
+                        self.audit_logger.log_send_result(
+                            queue=self.config.queue,
+                            bot_name=self.config.bot_name,
+                            model_version=self.config.model_version,
+                            seat=self.seat,
+                            request_seq=request_seq,
+                            response=audit_response,
+                            success=False,
+                            wire_payload=wire_payload,
+                            error=error,
+                            decision_latency_ms=latency_ms,
+                            total_latency_ms=elapsed_before_send_ms,
+                            deadline_ms=action_deadline_ms,
+                        )
+                        raise RiichiDevStaleActionDeadline(error)
+                    send_start = time.perf_counter()
                     try:
                         await websocket.send(wire_payload)
                     except Exception as exc:
+                        send_latency_ms = (time.perf_counter() - send_start) * 1000.0
+                        total_latency_ms = (time.perf_counter() - t0) * 1000.0
                         self.audit_logger.log_send_result(
                             queue=self.config.queue,
                             bot_name=self.config.bot_name,
@@ -1381,8 +2169,33 @@ class RiichiDevBotClient:
                             success=False,
                             wire_payload=wire_payload,
                             error=f"{type(exc).__name__}: {exc}",
+                            decision_latency_ms=latency_ms,
+                            send_latency_ms=send_latency_ms,
+                            total_latency_ms=total_latency_ms,
+                            deadline_ms=action_deadline_ms or None,
                         )
                         raise
+                    send_latency_ms = (time.perf_counter() - send_start) * 1000.0
+                    total_latency_ms = (time.perf_counter() - t0) * 1000.0
+                    if (
+                        message.get("type") == "request_action"
+                        and action_deadline_ms > 0.0
+                        and total_latency_ms > action_deadline_ms
+                    ):
+                        post_send_deadline_error = (
+                            "response crossed riichi.dev safety deadline after websocket send "
+                            f"total_ms={total_latency_ms:.1f} "
+                            f"decision_ms={latency_ms:.1f} "
+                            f"send_ms={send_latency_ms:.1f} "
+                            f"deadline_ms={action_deadline_ms:.1f}; exiting to avoid stale action reuse"
+                        )
+                        logger.warning(post_send_deadline_error)
+                    self._remember_sent_action(
+                        action=audit_response,
+                        request_seq=request_seq,
+                        wire_payload=wire_payload,
+                    )
+                    self._must_check_server_state = True
 
                 audit_message = _enrich_message_for_audit(message)
                 if message.get("type") == "request_action" and response is not None:
@@ -1424,23 +2237,71 @@ class RiichiDevBotClient:
                         seat=self.seat,
                         request_seq=request_seq,
                         response=audit_response,
-                        success=True,
+                        success=post_send_deadline_error is None,
                         wire_payload=wire_payload,
+                        error=post_send_deadline_error,
+                        decision_latency_ms=latency_ms,
+                        send_latency_ms=send_latency_ms,
+                        total_latency_ms=total_latency_ms,
+                        deadline_ms=float(self.config.action_deadline_ms or 0.0) or None,
                     )
                     if self.config.verbose:
                         logger.info("recv: %s", message.get("type"))
-                        logger.info("send: %s latency_ms=%.1f", wire_payload, latency_ms)
+                        logger.info(
+                            "send: %s latency_ms=%.1f send_ms=%.1f total_ms=%.1f",
+                            wire_payload,
+                            latency_ms,
+                            send_latency_ms or 0.0,
+                            total_latency_ms or latency_ms,
+                        )
+                    if post_send_deadline_error is not None:
+                        raise RiichiDevStaleActionDeadline(post_send_deadline_error)
 
     def handle_message(self, message: dict[str, Any]) -> dict[str, Any] | str | None:
         mtype = message.get("type")
         if mtype == "start_game":
+            self._clear_last_sent_action()
+            if self._saw_start_game and not self._saw_end_game:
+                logger.warning(
+                    "riichi.dev sent start_game before end_game; resetting local session state "
+                    "to avoid carrying stale bot state"
+                )
+                self.agent.reset()
+                self._request_seq = 0
             self._saw_start_game = True
+            self._saw_end_game = False
             seat = message.get("id", message.get("seat"))
             if seat is not None:
                 self.seat = int(seat)
+                self.agent.start_game(self.seat)
             return None
         if mtype == "end_game":
             self._saw_end_game = True
+            self._clear_last_sent_action()
+            return None
+        if mtype in {"end_kyoku", "start_kyoku"}:
+            if self._last_sent_action is not None:
+                logger.debug(
+                    "riichi.dev sent %s before echoing previous action; "
+                    "treating kyoku boundary as normal confirmation boundary. "
+                    "last_request_seq=%s expected=%s wire_payload=%s",
+                    mtype,
+                    self._last_sent_request_seq,
+                    _action_log_text(self._last_sent_action),
+                    self._last_sent_wire_payload,
+                )
+                self.audit_logger.log_unconfirmed_action_boundary(
+                    queue=self.config.queue,
+                    bot_name=self.config.bot_name,
+                    model_version=self.config.model_version,
+                    seat=self.seat,
+                    boundary_message=message,
+                    last_request_seq=self._last_sent_request_seq,
+                    expected=self._last_sent_action,
+                    wire_payload=self._last_sent_wire_payload,
+                )
+            self._clear_last_sent_action()
+            self.agent.reset()
             return None
         if mtype != "request_action":
             return None
@@ -1455,6 +2316,11 @@ class RiichiDevBotClient:
             and retryable_disconnect
         )
         return self.config.auto_reconnect and (retry_after_game or retry_ranked_queue_wait)
+
+    def _should_retry_state_error(self) -> bool:
+        if self._in_active_game():
+            return False
+        return self.config.auto_reconnect and self.config.queue == "ranked"
 
     async def run(self) -> None:
         while True:
@@ -1500,6 +2366,23 @@ class RiichiDevBotClient:
                 raise SystemExit(
                     f"timed out while opening {self.config.queue} connection"
                 ) from None
+            except (
+                RiichiDevActionEchoMismatch,
+                RiichiDevStaleActionDeadline,
+                RiichiDevServerIllegalAction,
+            ) as exc:
+                should_retry_state_error = self._should_retry_state_error()
+                if should_retry_state_error:
+                    if self.config.verbose:
+                        logger.warning(
+                            "detected riichi.dev pre-game/post-game state-risk condition; "
+                            "reconnecting in %.1fs: %s",
+                            self.config.reconnect_delay_sec,
+                            exc,
+                        )
+                    await asyncio.sleep(self.config.reconnect_delay_sec)
+                    continue
+                raise SystemExit(str(exc)) from None
             if not self.config.auto_reconnect or not self._saw_end_game:
                 return
             if self.config.verbose:
@@ -1654,13 +2537,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-auto-reconnect",
         action="store_true",
-        help="exit after the current online session instead of reconnecting for the next game",
+        help=(
+            "exit after the current online session instead of reconnecting before matchmaking "
+            "or for the next game; active games are never reconnected"
+        ),
     )
     parser.add_argument(
         "--reconnect-delay-sec",
         type=float,
         default=1.0,
-        help="delay before reconnecting after an online game ends or the server closes with code 1005",
+        help=(
+            "delay before reconnecting before matchmaking or after a clean end_game; "
+            "active games are never reconnected"
+        ),
+    )
+    parser.add_argument(
+        "--action-deadline-ms",
+        type=float,
+        default=float(os.getenv("RIICHI_ACTION_DEADLINE_MS", DEFAULT_ACTION_DEADLINE_MS)),
+        help="drop request_action responses after this local deadline to avoid stale WebSocket actions",
+    )
+    parser.add_argument(
+        "--allow-ws-proxy",
+        action="store_true",
+        help=(
+            "allow websockets versions with proxy support to use proxy environment variables; "
+            "by default the client disables WebSocket proxy use when the installed library supports it"
+        ),
+    )
+    parser.add_argument(
+        "--ws-proxy",
+        default=os.getenv("RIICHI_WS_PROXY", ""),
+        help=(
+            "explicit HTTP CONNECT proxy for WebSocket traffic, e.g. http://127.0.0.1:7890; "
+            "also configurable with RIICHI_WS_PROXY"
+        ),
     )
     parser.add_argument("--verbose", action="store_true")
     return parser
@@ -1741,6 +2652,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         model_version=args.model_version or None,
         rank_pt_lambda=args.rank_pt_lambda,
         validation_safe=args.validation_safe,
+        preload_mortal=args.bot_name == "mortal",
     )
 
     config = RiichiDevClientConfig(
@@ -1760,6 +2672,10 @@ async def _async_main(args: argparse.Namespace) -> None:
         audit_log_path=Path(args.audit_log_path) if args.audit_log_path else None,
         auto_reconnect=not args.no_auto_reconnect,
         reconnect_delay_sec=args.reconnect_delay_sec,
+        action_deadline_ms=args.action_deadline_ms,
+        preload_mortal=args.bot_name == "mortal",
+        disable_ws_proxy=not args.allow_ws_proxy,
+        ws_proxy=args.ws_proxy or None,
     )
     client = RiichiDevBotClient(config, agent=agent)
     await client.run()

@@ -483,6 +483,7 @@ def test_mortal_events_for_response_turn_drops_trailing_reach_accepted() -> None
             {"type": "reach", "actor": 3},
             {"type": "dahai", "actor": 3, "pai": "3s", "tsumogiri": False},
             {"type": "reach_accepted", "actor": 3},
+            {"type": "none", "actor": 1},
         )
     )
     turn = _TurnContext(
@@ -496,7 +497,7 @@ def test_mortal_events_for_response_turn_drops_trailing_reach_accepted() -> None
 
     events = env._mortal_events_for_turn(turn)
 
-    assert tuple(events) == env.room.events[:-1]
+    assert tuple(events) == env.room.events[:-2]
 
 
 @pytest.mark.parametrize(

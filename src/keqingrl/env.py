@@ -32,6 +32,8 @@ from keqingrl.metadata import (
     STYLE_CONTEXT_VERSION,
 )
 from keqingrl.mortal_teacher import (
+    MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY,
+    MORTAL_ENCODED_OBS_EXTRA_KEY,
     MortalTeacherMappingError,
     assert_mortal_action_mask_compatible,
     assert_mortal_discard_mask_parity,
@@ -152,6 +154,7 @@ class DiscardOnlyMahjongEnv:
         mortal_teacher_runtime: Any | None = None,
         mortal_observation_bridge: Any | None = None,
         mortal_teacher_strict_extra_mask: bool = True,
+        mortal_teacher_defer_runtime: bool = False,
     ) -> None:
         keqing_core.enable_rust(True)
         self.native_schema_info = keqing_core.require_native_schema(**_KEQINGRL_NATIVE_SCHEMA_KWARGS)
@@ -191,6 +194,7 @@ class DiscardOnlyMahjongEnv:
         self.mortal_teacher_runtime = mortal_teacher_runtime
         self.mortal_observation_bridge = mortal_observation_bridge
         self.mortal_teacher_strict_extra_mask = bool(mortal_teacher_strict_extra_mask)
+        self.mortal_teacher_defer_runtime = bool(mortal_teacher_defer_runtime)
         self.rule_context = build_rule_context(
             self.pt_map,
             rank_score_scale=self.rank_score_scale,
@@ -216,6 +220,9 @@ class DiscardOnlyMahjongEnv:
         self._completed_kyokus = 0
         self._turn = None
         self._autopilot_events.clear()
+        bridge_reset = getattr(self.mortal_observation_bridge, "reset_cache", None)
+        if bridge_reset is not None:
+            bridge_reset()
         self.room = self.manager.create_room(_default_battle_config())
         self._rust_synced_event_count = 0
         self.manager.start_kyoku(self.room, seed=self._next_seed())
@@ -248,12 +255,16 @@ class DiscardOnlyMahjongEnv:
         turn = self._require_turn(actor)
         return turn.legal_actions
 
+    def mortal_teacher_events(self, actor: int) -> tuple[dict[str, object], ...]:
+        turn = self._require_turn(actor)
+        return tuple(dict(event) for event in self._mortal_events_for_turn(turn))
+
     def drain_autopilot_events(self) -> tuple[AutopilotTraceEvent, ...]:
         events = tuple(self._autopilot_events)
         self._autopilot_events.clear()
         return events
 
-    def observe(self, actor: int) -> PolicyInput:
+    def observe(self, actor: int, *, include_mortal_teacher_extras: bool = True) -> PolicyInput:
         turn = self._require_turn(actor)
         tile_obs_np, scalar_obs_np = encode_state_features(turn.snapshot, actor)
 
@@ -280,7 +291,7 @@ class DiscardOnlyMahjongEnv:
             rulebase_chosen = self._rule_score_top_action_key(turn.legal_actions, rule_scores.prior_logits)
             if rulebase_debug_key is None and rulebase_chosen is not None:
                 rulebase_debug_key = f"rule_score_top1:{rulebase_chosen}"
-        extras = self._mortal_teacher_extras_for_turn(turn)
+        extras = self._mortal_teacher_extras_for_turn(turn) if include_mortal_teacher_extras else {}
         return PolicyInput(
             obs=ObsTensorBatch(tile_obs=tile_obs, scalar_obs=scalar_obs, extras=extras),
             legal_action_ids=legal_action_ids,
@@ -323,7 +334,7 @@ class DiscardOnlyMahjongEnv:
         return legal_actions[top_index].canonical_key
 
     def _mortal_teacher_extras_for_turn(self, turn: _TurnContext) -> dict[str, torch.Tensor]:
-        if self.mortal_teacher_runtime is None:
+        if self.mortal_teacher_runtime is None and not self.mortal_teacher_defer_runtime:
             return {}
         bridge = self.mortal_observation_bridge
         if bridge is None:
@@ -342,9 +353,24 @@ class DiscardOnlyMahjongEnv:
                     strict_extra=self.mortal_teacher_strict_extra_mask,
                 )
         except MortalTeacherMappingError as exc:
+            context = self._mortal_mapping_debug_context(turn)
+            context["mortal_mask_true_ids"] = [
+                action_id
+                for action_id, enabled in enumerate(encoded.action_mask.tolist())
+                if bool(enabled)
+            ]
             raise MortalTeacherMappingError(
-                f"{exc}; context={self._mortal_mapping_debug_context(turn)}"
+                f"{exc}; context={context}",
+                missing_legal_keys=exc.missing_legal_keys,
+                extra_mortal_action_ids=exc.extra_mortal_action_ids,
+                mismatch_kind=exc.mismatch_kind,
+                context=context,
             ) from exc
+        if self.mortal_teacher_defer_runtime:
+            return {
+                MORTAL_ENCODED_OBS_EXTRA_KEY: encoded.obs.unsqueeze(0),
+                MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY: encoded.action_mask.unsqueeze(0),
+            }
         output = self.mortal_teacher_runtime.evaluate(
             encoded.obs.unsqueeze(0),
             encoded.action_mask.unsqueeze(0),
@@ -362,13 +388,17 @@ class DiscardOnlyMahjongEnv:
         return {
             "actor": actor,
             "control_action_types": tuple(turn.control_action_types),
+            "response_window": self._is_response_window(actor),
             "hand": snapshot.get("hand"),
             "tsumo_pai": snapshot.get("tsumo_pai"),
             "last_tsumo": snapshot.get("last_tsumo"),
             "last_discard": snapshot.get("last_discard"),
             "actor_melds": actor_melds,
             "legal_actions": [action.canonical_key for action in turn.legal_actions],
+            "legal_action_types": [action.action_type.name for action in turn.legal_actions],
+            "legal_action_payloads": [_action_debug_payload(action, actor=actor) for action in turn.legal_actions],
             "events_tail": events[-8:],
+            "mortal_events_tail": events[-8:],
         }
 
     def _mortal_events_for_turn(self, turn: _TurnContext) -> Sequence[dict[str, object]]:
@@ -376,10 +406,14 @@ class DiscardOnlyMahjongEnv:
         events = tuple(room.events)
         if (
             events
-            and events[-1].get("type") == "reach_accepted"
             and any(action.action_type in _SUPPORTED_RESPONSE_ACTION_TYPES for action in turn.legal_actions)
         ):
-            return events[:-1]
+            trimmed = list(events)
+            while trimmed and trimmed[-1].get("type") == "none" and "actor" in trimmed[-1]:
+                trimmed.pop()
+            if trimmed and trimmed[-1].get("type") == "reach_accepted":
+                trimmed.pop()
+            return tuple(trimmed)
         return events
 
     def step(self, actor: int, action_spec: ActionSpec) -> StepResult:
@@ -1165,6 +1199,18 @@ def _default_battle_config() -> BattleConfig:
             for seat in range(4)
         ],
     )
+
+
+def _action_debug_payload(action: ActionSpec, *, actor: int) -> dict[str, object]:
+    return {
+        "canonical_key": action.canonical_key,
+        "action_type": action.action_type.name,
+        "actor": int(actor),
+        "tile": action.tile,
+        "consumed": list(action.consumed),
+        "from_who": action.from_who,
+        "flags": int(action.flags),
+    }
 
 
 def _mahjong_spec_from_payload(item: dict[str, object]) -> MahjongActionSpec:

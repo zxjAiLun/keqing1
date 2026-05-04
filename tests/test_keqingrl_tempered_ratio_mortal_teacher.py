@@ -13,15 +13,21 @@ from keqingrl.mortal_teacher import (
     MORTAL_ACTION_SPACE,
     MORTAL_ACTION_TEACHER_CONTRACT_VERSION,
     MORTAL_DISCARD_TEACHER_CONTRACT_VERSION,
+    MORTAL_KAN_ACTION_ID,
+    MORTAL_PASS_ACTION_ID,
     MORTAL_Q_VALUES_EXTRA_KEY,
     MortalTeacherMappingError,
 )
 from mahjong_env.action_space import TILE_NAME_TO_IDX
 from scripts.run_keqingrl_tempered_ratio_pilot import (
     _TEACHER_SOURCES,
+    _contract_scoreboard_markdown,
+    _contract_scoreboard_row,
     _delta_support_mask,
     _full_action_probe_stats,
     _load_mortal_teacher_runtime_for_args,
+    _mortal_action_mapping_audit_for_batch,
+    _mortal_action_mapping_empty_summary,
     _mortal_runtime_for_teacher,
     _reach_probe_stats,
     _requires_mortal_teacher_runtime,
@@ -204,6 +210,177 @@ def test_tempered_ratio_pilot_mortal_action_q_teacher_scores_non_discard_actions
     assert teacher["teacher_topk_scores"].tolist() == [[0.0, 37.0, 45.0]]
     assert teacher["teacher_argmax"].tolist() == [2]
     assert _teacher_version("mortal-action-q") == MORTAL_ACTION_TEACHER_CONTRACT_VERSION
+
+
+def test_contract_scoreboard_marks_mortal_action_q_primary() -> None:
+    args = SimpleNamespace(
+        terminal_coverage_gate=True,
+        terminal_coverage_outcome_gate=False,
+        mortal_teacher_checkpoint=Path("artifacts/mortal_training/mortal.pth"),
+    )
+    summary_row = {
+        "terminal_coverage_gate_pass": True,
+        "qualified_for_eval": True,
+        "final_terminal_coverage_legal_terminal_row_count": 2,
+        "final_terminal_coverage_legal_agari_row_count": 1,
+        "final_terminal_coverage_prepared_legal_terminal_row_count": 2,
+        "final_terminal_coverage_prepared_legal_agari_row_count": 1,
+        "final_terminal_coverage_score_changed_episode_count": 0,
+        "final_terminal_coverage_selected_agari_count": 0,
+        "final_terminal_coverage_selected_ron_count": 0,
+        "final_terminal_coverage_selected_tsumo_count": 0,
+    }
+    mapping = {
+        "mortal_action_q_mapping_row_count": 4,
+        "mortal_action_q_mapping_available_count": 4,
+        "mortal_action_q_mapping_available_rate": 1.0,
+        "mortal_action_q_missing_legal_count": 0,
+        "mortal_action_q_extra_mortal_count": 0,
+        "mortal_action_q_fail_closed_count": 0,
+    }
+
+    row = _contract_scoreboard_row(
+        args,
+        summary_row=summary_row,
+        pilot_config_id=7,
+        teacher_source="mortal-action-q",
+        mapping_summary=mapping,
+        qualified_for_eval_reason="qualified_for_eval",
+    )
+
+    assert row["teacher_contract_role"] == "primary_action_q_teacher"
+    assert row["legal_owner"] == "keqing_core.enumerate_public_legal_action_specs"
+    assert row["mortal_teacher_checkpoint_present"] is True
+    assert row["opportunity_gate_pass"] is True
+    assert row["qualified_for_eval"] is True
+
+
+def test_contract_scoreboard_marks_discard_teacher_deprecated() -> None:
+    args = SimpleNamespace(
+        terminal_coverage_gate=False,
+        terminal_coverage_outcome_gate=False,
+        mortal_teacher_checkpoint=Path("artifacts/mortal_training/mortal.pth"),
+    )
+
+    row = _contract_scoreboard_row(
+        args,
+        summary_row={"qualified_for_eval": False},
+        pilot_config_id=1,
+        teacher_source="mortal-discard-q",
+        mapping_summary=_mortal_action_mapping_empty_summary(),
+        qualified_for_eval_reason="not_qualified",
+    )
+
+    assert row["teacher_contract_role"] == "deprecated_discard_diagnostic"
+    assert "deprecated diagnostic only" in _contract_scoreboard_markdown((row,))
+
+
+def test_contract_scoreboard_does_not_gate_on_score_changed_by_default() -> None:
+    args = SimpleNamespace(
+        terminal_coverage_gate=True,
+        terminal_coverage_outcome_gate=False,
+        mortal_teacher_checkpoint=Path("artifacts/mortal_training/mortal.pth"),
+    )
+    summary_row = {
+        "terminal_coverage_gate_pass": True,
+        "qualified_for_eval": True,
+        "final_terminal_coverage_legal_terminal_row_count": 1,
+        "final_terminal_coverage_legal_agari_row_count": 1,
+        "final_terminal_coverage_prepared_legal_terminal_row_count": 0,
+        "final_terminal_coverage_prepared_legal_agari_row_count": 0,
+        "final_terminal_coverage_score_changed_episode_count": 0,
+        "final_terminal_coverage_selected_agari_count": 0,
+        "final_terminal_coverage_selected_ron_count": 0,
+        "final_terminal_coverage_selected_tsumo_count": 0,
+    }
+
+    row = _contract_scoreboard_row(
+        args,
+        summary_row=summary_row,
+        pilot_config_id=2,
+        teacher_source="mortal-action-q",
+        mapping_summary={
+            "mortal_action_q_mapping_row_count": 1,
+            "mortal_action_q_mapping_available_count": 1,
+            "mortal_action_q_mapping_available_rate": 1.0,
+            "mortal_action_q_missing_legal_count": 0,
+            "mortal_action_q_extra_mortal_count": 0,
+            "mortal_action_q_fail_closed_count": 0,
+        },
+        qualified_for_eval_reason="qualified_for_eval",
+    )
+
+    assert row["opportunity_gate_pass"] is True
+    assert row["score_changed_episode_count"] == 0
+    assert "outcome counters do not gate" in row["diagnostic_only_outcome_note"]
+
+
+def test_mortal_action_mapping_audit_for_batch_reports_missing_without_fallback() -> None:
+    q_values = _q_values()
+    mask = _mortal_mask(0, 37)
+    batch = _mortal_action_batch(
+        extras={
+            MORTAL_Q_VALUES_EXTRA_KEY: q_values,
+            MORTAL_ACTION_MASK_EXTRA_KEY: mask,
+        }
+    )
+    args = SimpleNamespace(
+        candidate_summary=Path("artifacts/candidates/summary.csv"),
+        source_config_ids=(93,),
+        output_dir=Path("reports/probe"),
+    )
+
+    summary, rows = _mortal_action_mapping_audit_for_batch(
+        args,
+        pilot_config_id=3,
+        teacher_source="mortal-action-q",
+        batch=batch,
+        prepared_steps=(SimpleNamespace(episode_id="ep0", step_id=5, actor=0, control_action_types=("PASS",)),),
+        rollout_seed=123,
+        torch_seed=456,
+    )
+
+    assert summary["mortal_action_q_mapping_row_count"] == 1
+    assert summary["mortal_action_q_mapping_available_count"] == 0
+    assert summary["mortal_action_q_fail_closed_count"] == 1
+    assert rows[0]["mismatch_kind"] == "missing_legal"
+    assert "PASS" in rows[0]["missing_legal_types_json"]
+    assert "export_keqingrl_mjai_replay.py" in rows[0]["replay_hint"]
+
+
+def test_mortal_action_mapping_audit_treats_scope_extra_as_diagnostic() -> None:
+    q_values = _q_values()
+    mask = _mortal_mask(0, 37, MORTAL_PASS_ACTION_ID, MORTAL_KAN_ACTION_ID)
+    batch = _mortal_action_batch(
+        extras={
+            MORTAL_Q_VALUES_EXTRA_KEY: q_values,
+            MORTAL_ACTION_MASK_EXTRA_KEY: mask,
+        }
+    )
+    args = SimpleNamespace(
+        candidate_summary=Path("artifacts/candidates/summary.csv"),
+        source_config_ids=(93,),
+        output_dir=Path("reports/probe"),
+        mortal_teacher_strict_extra_mask=False,
+    )
+
+    summary, rows = _mortal_action_mapping_audit_for_batch(
+        args,
+        pilot_config_id=3,
+        teacher_source="mortal-action-q",
+        batch=batch,
+        prepared_steps=(SimpleNamespace(episode_id="ep0", step_id=5, actor=0, control_action_types=("PASS",)),),
+        rollout_seed=123,
+        torch_seed=456,
+    )
+
+    assert summary["mortal_action_q_mapping_row_count"] == 1
+    assert summary["mortal_action_q_mapping_available_count"] == 1
+    assert summary["mortal_action_q_mapping_available_rate"] == 1.0
+    assert summary["mortal_action_q_extra_mortal_count"] == 1
+    assert summary["mortal_action_q_fail_closed_count"] == 0
+    assert rows[0]["mismatch_kind"] == "extra_mortal"
+    assert rows[0]["extra_mortal_action_ids_json"] == f"[{MORTAL_KAN_ACTION_ID}]"
 
 
 def test_tempered_ratio_pilot_mortal_action_q_teacher_keeps_fixed_topk_with_short_rows() -> None:

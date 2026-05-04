@@ -1,10 +1,42 @@
 # Mortal Training Runbook
 
-Updated: 2026-04-28
+Updated: 2026-05-04 (status note; original runbook 2026-04-28)
 
 This runbook follows the local `third_party/Mortal` Git repository. Do not use
 `xmodel`, `xmodel1`, or `keqingv4` checkpoints, logits, scores, or rollout
 outputs as teacher sources.
+
+## 2026-05-04 Status Note
+
+This runbook remains the operational Mortal training reference, but its
+KeqingRL teacher-probe sections are now historical diagnostics. The active
+KeqingRL student handoff is:
+
+```text
+docs/keqingrl/keqingrl_mortal_action_q_handoff_2026_05_04.md
+```
+
+The current KeqingRL growth path is direct Mortal Action-Q imitation with:
+
+```text
+scripts/run_keqingrl_mortal_imitation.py
+teacher_source=mortal-action-q
+Mortal checkpoint=artifacts/mortal_training/mortal.pth
+```
+
+Current best student checkpoint:
+
+```text
+reports/keqingrl_mortal_action_q_imitation_train_20260430_source93_step20000_allseats_lr003_cont1/checkpoint_config_000/policy_iter_0004.pt
+teacher_kl=0.401925
+teacher_agreement=0.686201
+mapping=5422/5422
+fail_closed=0
+```
+
+Do not read older discard-only, terminal-poor, or paired-proxy notes as the
+current training gate. They explain how the project got here; they do not
+override the 2026-05-04 handoff.
 
 ## Repository Contract
 
@@ -331,7 +363,7 @@ opportunity-based terminal coverage gate:
 uv run python scripts/run_keqingrl_tempered_ratio_pilot.py \
   --candidate-summary artifacts/.../summary.csv \
   --source-config-ids 93 \
-  --output-dir reports/.../mortal_action_q_probe \
+  --output-dir reports/.../mortal_action_q_contract_probe \
   --topk-ranking-aux-mode teacher-ce \
   --topk-ranking-aux-coef 1.0 \
   --topk-ranking-k 3 \
@@ -346,12 +378,39 @@ uv run python scripts/run_keqingrl_tempered_ratio_pilot.py \
   --actor-update-topk 3 \
   --rule-score-scales 0.25 \
   --self-turn-action-types DISCARD REACH_DISCARD TSUMO RYUKYOKU \
-  --response-action-types \
+  --response-action-types PASS RON PON CHI \
   --forced-autopilot-action-types TSUMO RON RYUKYOKU \
+  --no-mortal-teacher-strict-extra-mask \
   --terminal-coverage-gate \
   --terminal-coverage-min-legal-terminal-rows 1 \
   --terminal-coverage-min-legal-agari-rows 1
 ```
+
+The pilot now writes the main contract artifacts:
+
+```text
+contract_scoreboard.csv
+contract_scoreboard.md
+mortal_action_mapping_audit.csv
+mortal_action_mapping_examples.jsonl
+```
+
+`contract_scoreboard.*` is the go/no-go surface for Mortal action-Q probes. It
+records legal ownership, action identity status, Mortal mapping coverage,
+opportunity gate status, and diagnostic-only outcome counters. A config is not
+qualified for paired eval if `mortal_action_q_fail_closed_count > 0`.
+
+Because KAN family decisions are deliberately outside this response-stage
+learner scope, Mortal id `42` can appear as an extra masked id when KeqingRL is
+controlling only `PASS/RON/PON/CHI`. With
+`--no-mortal-teacher-strict-extra-mask`, that out-of-scope extra is recorded in
+the audit artifacts but does not fail the contract. Missing controlled legal
+actions, unsupported actions, and ambiguous KAN mappings still fail closed.
+
+`mortal_action_mapping_audit.*` captures response-window mask parity gaps such
+as missing `PASS`, `RON`, `PON`, or `CHI` source ids. These rows are diagnostic
+artifacts only; they do not provide fallback teacher probabilities and do not
+relax fail-closed training behavior.
 
 The terminal coverage gate is opportunity-based by default:
 
@@ -429,6 +488,11 @@ scope can fail closed when KeqingCore legal actions include response choices
 such as `PON + PASS` but Mortal's mask does not mark the corresponding source
 ids. This is a contract gap to investigate, not evidence that Mortal is weak.
 Do not paper over missing legal keys with silent fallback.
+
+When this happens, inspect `mortal_action_mapping_examples.jsonl` first. Each
+row includes legal action keys/types, Mortal mask ids, missing/extra ids,
+event tail, hand/last-discard context when available, and a replay hint for
+`scripts/export_keqingrl_mjai_replay.py`.
 
 ## Local Artifact Status
 
@@ -537,17 +601,31 @@ The useful diagnostic facts are:
   overmoving/high-margin failure (`fresh_top1=0.3548`, `t_clip=0.3810`).
 
 These are now marked as **discard-teacher consumption diagnostics**, not
-teacher-strength results. The current conclusion is:
+teacher-strength results. The 2026-04-29 conclusion was:
 
 ```text
 Mortal checkpoint: trained and usable as a teacher artifact.
 Mortal as strength teacher: not yet validated.
 Discard-only no-pass: unqualified as strength evidence.
-Full response-window teacher: blocked by fail-closed mask parity gaps.
-Next valid probe: opportunity-qualified mortal-action-q over KeqingRL legal rows.
+Full response-window teacher: contract path now passes for the scoped
+PASS/RON/PON/CHI response stage.
+Next valid probe: learning-signal work that produces nonzero top1 movement
+without leaving the now-passing Mortal action-Q contract.
 ```
 
-Do not treat the current Mortal checkpoint as validated strength. The next
-productive branch is to fix/understand full response-window mask parity, then
-rerun `mortal-action-q` with opportunity-based terminal/action coverage and
-paired replay review.
+At that stage, the Mortal checkpoint was trained and usable as a teacher
+artifact but not yet validated as a strength source. The 2026-04-29
+`bridge_fix` probe passed the contract and opportunity gates, but the paired
+seat-rotation proxy remained rule-prior equivalent:
+
+```text
+reports/keqingrl_mortal_action_q_contract_probe_20260429_source93_step20000_bridge_fix_ckpt
+reports/keqingrl_mortal_action_q_paired_eval_20260429_source93_step20000_bridge_fix
+
+contract: mapping_available_rate=1.0, fail_closed=0, opportunity_gate=true
+paired proxy: delta_vs_zero=0, top1_changed=0
+```
+
+The useful conclusion is narrow: the Mortal action-Q plumbing is now
+interpretable for the staged response scope, but one conservative PPO update did
+not change top-1 behavior in paired eval.

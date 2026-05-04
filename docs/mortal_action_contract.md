@@ -1,6 +1,6 @@
 # Mortal Action Contract
 
-Updated: 2026-04-28
+Updated: 2026-05-04
 
 This document follows the local `third_party/Mortal` repository. Mortal may be
 used as a teacher only through trained Mortal checkpoints. Do not use `xmodel`,
@@ -222,6 +222,12 @@ sequential response handling; the Mortal observation bridge drops those events
 and keeps only the actorless all-pass `{"type":"none"}` event expected by
 Mortal.
 
+For sequential responses after a riichi discard, the bridge also trims trailing
+actor-scoped `none` events before deciding whether to hide `reach_accepted`.
+Mortal must see the riichi declaration discard as still open for the remaining
+responders; otherwise it returns an empty response mask while KeqingCore still
+offers `PON/PASS`.
+
 Calls are not legal on the final discard when `remaining_wall == 0`. The Rust
 legal owner filters `CHI` / `PON` / `DAIMINKAN` in that houtei response window
 to match Mortal's mask; ron remains governed by the hora truth check and
@@ -248,16 +254,65 @@ assert_mortal_action_mask_compatible(...)
 controlled turns when the full-action mask is compatible with the current
 KeqingRL legal `ActionSpec` row.
 
-The tempered-ratio pilot exposes this as:
+The tempered-ratio pilot exposes this as a contract/probe path:
 
 ```text
 teacher_source=mortal-action-q
 --self-turn-action-types DISCARD REACH_DISCARD TSUMO RYUKYOKU
+--response-action-types PASS RON PON CHI
 --no-mortal-teacher-strict-extra-mask
 ```
 
+The current model-growth path is the dedicated imitation script:
+
+```text
+scripts/run_keqingrl_mortal_imitation.py
+```
+
+It trains KeqingRL to imitate Mortal action-Q over the same KeqingCore-owned
+legal rows. The current best student checkpoint is:
+
+```text
+reports/keqingrl_mortal_action_q_imitation_train_20260430_source93_step20000_allseats_lr003_cont1/checkpoint_config_000/policy_iter_0004.pt
+teacher_kl=0.401925
+teacher_agreement=0.686201
+mapping=5422/5422
+fail_closed=0
+```
+
+The imitation path includes deferred Mortal runtime evaluation, batched teacher
+Q evaluation, incremental MortalObservationBridge caching, optional post-rollout
+bridge materialization, all-seat learner collection, and iteration-specific
+checkpoints. These are performance/operational changes only; they do not
+change Mortal's legal ownership role. KeqingCore still owns legal actions.
+
 `teacher_source=mortal-discard-q` remains available for historical discard-only
 diagnostics.
+
+For the current response-stage probe, KAN family actions stay out of learner
+scope. If Mortal marks id `42` legal while KeqingRL is controlling only
+`PASS/RON/PON/CHI`, the pilot records that as an out-of-scope extra Mortal id in
+`mortal_action_mapping_audit.*`. It does not block this scoped contract when
+`--no-mortal-teacher-strict-extra-mask` is set. Missing controlled legal actions
+and ambiguous or unsupported mappings still fail closed.
+
+The pilot writes a main contract scoreboard:
+
+```text
+contract_scoreboard.csv
+contract_scoreboard.md
+```
+
+It also writes response-window mask diagnostics:
+
+```text
+mortal_action_mapping_audit.csv
+mortal_action_mapping_examples.jsonl
+```
+
+The audit rows are not fallback teacher data. Training and teacher CE still fail
+closed on mask/key mismatch; the audit only makes the mismatch countable and
+replayable.
 
 ## Known Limits
 
@@ -271,8 +326,8 @@ REACH_DISCARD uses only Mortal id 37 and does not bind the follow-up discard.
 KAN uses only Mortal id 42 and fails on multiple kan tile choices.
 Call ids do not encode red-five selection; Mortal reconstructs consumed red use from state.
 from_who is validated for presence but not independently inferred from Mortal mask.
-Full response-window teacher is still fail-closed on mask parity; do not silently
-  ignore missing PON/PASS/RON mappings.
+Response-window PASS/RON/PON/CHI is in the current imitation scope, but still
+  fails closed on missing controlled legal mappings.
 ```
 
 Those limits are acceptable for the next probe order:

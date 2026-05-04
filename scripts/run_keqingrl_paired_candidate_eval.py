@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run paired checkpoint evaluation for controlled discard-only KeqingRL candidates."""
+# ruff: noqa: E402
 
 from __future__ import annotations
 
@@ -26,12 +27,15 @@ from keqingrl import (
     RulePriorPolicy,
     run_fixed_seed_evaluation_smoke,
 )
+from keqingrl.actions import ActionType
 from keqingrl.selfplay import collect_selfplay_episodes
 from keqingrl.rollout import rollout_step_policy_input
 from keqingrl.metadata import resolve_rule_score_scale_metadata
 from keqingrl.training import _initialize_policy_from_env_observation
 from scripts.run_keqingrl_discard_research_sweep import RulebaseGreedyPolicy
 from scripts.run_keqingrl_tempered_ratio_pilot import DeltaSupportProjectionPolicy
+
+_ACTION_TYPE_CHOICES = tuple(action_type.name for action_type in ActionType)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -53,6 +57,24 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=512)
     parser.add_argument("--device", default=None)
     parser.add_argument("--diagnostic-episodes", type=int, default=4)
+    parser.add_argument(
+        "--forced-autopilot-action-types",
+        choices=_ACTION_TYPE_CHOICES,
+        nargs="*",
+        default=("TSUMO", "RON", "RYUKYOKU"),
+    )
+    parser.add_argument(
+        "--self-turn-action-types",
+        choices=_ACTION_TYPE_CHOICES,
+        nargs="+",
+        default=("DISCARD",),
+    )
+    parser.add_argument(
+        "--response-action-types",
+        choices=_ACTION_TYPE_CHOICES,
+        nargs="*",
+        default=(),
+    )
     return parser.parse_args()
 
 
@@ -345,7 +367,7 @@ def _build_baselines(candidates: list[dict[str, Any]], args: argparse.Namespace,
         dropout=float(first_checkpoint_config["model"].get("dropout", 0.0)),
     ).to(device)
     _initialize_policy_from_env_observation(
-        DiscardOnlyMahjongEnv(max_kyokus=args.max_kyokus),
+        _eval_env(args),
         untrained,
         seed=args.eval_seed_base,
         device=device,
@@ -421,7 +443,7 @@ def _evaluate_record(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     opponent_pool = _opponent_pool(opponent_name)
     metrics = run_fixed_seed_evaluation_smoke(
-        DiscardOnlyMahjongEnv(max_kyokus=args.max_kyokus),
+        _eval_env(args),
         record["policy"],
         num_games=args.eval_episodes,
         seed=args.eval_seed_base,
@@ -538,7 +560,7 @@ def _policy_diagnostics(
     total = 0
     for seat in tuple(int(seat) for seat in args.eval_seat_rotation):
         episodes = collect_selfplay_episodes(
-            DiscardOnlyMahjongEnv(max_kyokus=args.max_kyokus),
+            _eval_env(args),
             policy,
             num_episodes=episode_count,
             opponent_pool=opponent_pool,
@@ -666,6 +688,38 @@ def _opponent_pool(name: str) -> OpponentPool:
     return OpponentPool((OpponentPoolEntry(policy=policy, policy_version=-1, greedy=True, name=name),))
 
 
+def _eval_env(args: argparse.Namespace) -> DiscardOnlyMahjongEnv:
+    return DiscardOnlyMahjongEnv(
+        max_kyokus=args.max_kyokus,
+        self_turn_action_types=_action_type_tuple(args.self_turn_action_types),
+        response_action_types=_action_type_tuple(args.response_action_types),
+        forced_autopilot_action_types=_action_type_tuple(args.forced_autopilot_action_types),
+    )
+
+
+def _action_type_tuple(values: list[str] | tuple[str, ...]) -> tuple[ActionType, ...]:
+    return tuple(ActionType[str(value)] for value in values)
+
+
+def _action_scope_payload(args: argparse.Namespace) -> dict[str, list[str]]:
+    return {
+        "self_turn_action_types": [action_type.name for action_type in _action_type_tuple(args.self_turn_action_types)],
+        "response_action_types": [action_type.name for action_type in _action_type_tuple(args.response_action_types)],
+        "forced_autopilot_action_types": [
+            action_type.name for action_type in _action_type_tuple(args.forced_autopilot_action_types)
+        ],
+    }
+
+
+def _action_scope_label(args: argparse.Namespace) -> str:
+    payload = _action_scope_payload(args)
+    return (
+        f"self={','.join(payload['self_turn_action_types'])}; "
+        f"response={','.join(payload['response_action_types'])}; "
+        f"forced={','.join(payload['forced_autopilot_action_types'])}"
+    )
+
+
 def _top2_margin(legal_prior: torch.Tensor) -> float:
     if int(legal_prior.numel()) <= 1:
         return 0.0
@@ -760,6 +814,7 @@ def _payload(args: argparse.Namespace, rows: list[dict[str, Any]]) -> dict[str, 
         "eval_seed_hash": _eval_seed_hash(_eval_seed_registry(args)),
         "eval_seed_count": args.eval_episodes,
         "seat_rotation": [int(seat) for seat in args.eval_seat_rotation],
+        "action_scope": _action_scope_payload(args),
         "policy_mode": "greedy",
         "training_rollout_reuse": False,
         "opponents": list(args.opponents),
@@ -784,7 +839,7 @@ def _summary_markdown(args: argparse.Namespace, rows: list[dict[str, Any]]) -> s
         "# KeqingRL Paired Candidate Evaluation",
         "",
         f"mode: `{args.mode}`",
-        f"source_type: `checkpoint`",
+        "source_type: `checkpoint`",
         f"candidate_summary: `{args.candidate_summary}`",
         f"checkpoint_path: `{args.checkpoint_path}`",
         f"config_path: `{args.config_path}`",
@@ -795,6 +850,7 @@ def _summary_markdown(args: argparse.Namespace, rows: list[dict[str, Any]]) -> s
         f"eval_seed_count: `{args.eval_episodes}`",
         f"diagnostic_episode_count: `{args.diagnostic_episodes}`",
         f"seat_rotation: `{_seat_rotation_label(args)}`",
+        f"action_scope: `{_action_scope_label(args)}`",
         "policy_mode: `greedy`",
         "training_rollout_reuse: `false`",
         "strength_proxy_note: `paired seat-rotation sanity/strength-proxy only; this is not proof of model strength.`",

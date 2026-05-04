@@ -1,0 +1,20 @@
+# KeqingRL Mortal Action-Q Imitation
+
+candidate_summary: `reports/keqingrl_mortal_action_q_imitation_train_20260430_source93_step20000_allseats_lr003_cont1/checkpoint_summary.csv`
+teacher_source: `mortal-action-q`
+teacher_checkpoint: `artifacts/mortal_training/mortal.pth`
+teacher_support: `topk`
+teacher_topk: `3`
+episodes: `64`
+iterations: `4`
+
+## Results
+
+- cfg=0 source=93 mapping=5459/5459 fail_closed=0 teacher_ce=0.792342 teacher_kl=0.412269 teacher_agree=0.698801 top1_parent=0.0399341 top1_source=0.20828 changed_rank=2.24883 rank_ge5=0.00469484 checkpoint=reports/keqingrl_mortal_action_q_imitation_train_20260430_source93_step20000_allseats_lr003_cont2/checkpoint_config_000/policy_iter_0004.pt
+
+## Checkpoints
+
+- `reports/keqingrl_mortal_action_q_imitation_train_20260430_source93_step20000_allseats_lr003_cont2/checkpoint_config_000/policy_iter_0001.pt` sha256=`ebb83a1f9a42bee79ecf7443e7ba801d507e6650ba26c2ebd6ce09c6aa181af6`
+- `reports/keqingrl_mortal_action_q_imitation_train_20260430_source93_step20000_allseats_lr003_cont2/checkpoint_config_000/policy_iter_0002.pt` sha256=`97e53c43d6e13d5917d47f0f0fc21cd95cad4f613cadbd3be9252dbab9564491`
+- `reports/keqingrl_mortal_action_q_imitation_train_20260430_source93_step20000_allseats_lr003_cont2/checkpoint_config_000/policy_iter_0003.pt` sha256=`f87a3488d80e98e54d5ff83501c616d1457b712b4e7abf66647d23248b31ffd3`
+- `reports/keqingrl_mortal_action_q_imitation_train_20260430_source93_step20000_allseats_lr003_cont2/checkpoint_config_000/policy_iter_0004.pt` sha256=`fc27e69e1d891ebb82f99df6ae677e3daa45f1a3f29a366845843680b0e1a7e2`

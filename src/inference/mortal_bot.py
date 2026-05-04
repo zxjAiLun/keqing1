@@ -76,6 +76,13 @@ class MortalReviewBot:
             enumerate_legal_actions_fn=lambda snap, seat: enumerate_legal_actions(snap, seat),
         )
 
+    def set_player_id(self, player_id: int) -> None:
+        player_id = int(player_id)
+        if self.player_id == player_id:
+            return
+        self.player_id = player_id
+        self.reset()
+
     @torch.no_grad()
     def react(self, event: dict[str, Any], gt_action: Optional[dict] = None) -> Optional[dict]:
         line = json.dumps(event, ensure_ascii=False)

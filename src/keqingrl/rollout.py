@@ -61,6 +61,7 @@ class RolloutStep:
     legal_actions: tuple[ActionSpec, ...] | None = None
     game_id: str | None = None
     step_id: int | None = None
+    mortal_teacher_events: tuple[dict[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         if self.chosen_action_canonical_key is None:

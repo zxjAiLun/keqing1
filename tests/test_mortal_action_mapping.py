@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 import torch
 
@@ -17,6 +19,7 @@ from keqingrl.mortal_teacher import (
     MORTAL_ACTION_SPACE,
     MortalTeacherMappingError,
     assert_mortal_action_mask_compatible,
+    mortal_action_mapping_audit_row,
     mortal_action_ids_for_action_spec,
     mortal_scores_for_legal_actions,
 )
@@ -123,6 +126,31 @@ def test_mortal_scores_can_report_missing_without_strict_failure() -> None:
     assert mapped.score_mask.tolist() == [False]
     assert mapped.missing_legal_keys == (legal_actions[0].canonical_key,)
     assert mapped.extra_mortal_action_ids == (MORTAL_PON_ACTION_ID,)
+
+
+def test_mortal_action_audit_reports_missing_pass() -> None:
+    legal_actions = (ActionSpec(ActionType.PASS),)
+
+    row = mortal_action_mapping_audit_row(_q_values(), _mask(MORTAL_PON_ACTION_ID), legal_actions)
+
+    assert row is not None
+    assert row["mismatch_kind"] == "missing_and_extra"
+    assert json.loads(str(row["missing_legal_keys_json"])) == [legal_actions[0].canonical_key]
+    assert json.loads(str(row["missing_legal_types_json"])) == ["PASS"]
+    assert json.loads(str(row["extra_mortal_action_ids_json"])) == [MORTAL_PON_ACTION_ID]
+
+
+def test_mortal_action_audit_reports_missing_pon_and_extra_ids() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.PON, tile=_tile("E"), consumed=(_tile("E"), _tile("E")), from_who=2),
+    )
+
+    row = mortal_action_mapping_audit_row(_q_values(), _mask(MORTAL_PASS_ACTION_ID), legal_actions)
+
+    assert row is not None
+    assert row["mismatch_kind"] == "missing_and_extra"
+    assert json.loads(str(row["missing_legal_types_json"])) == ["PON"]
+    assert json.loads(str(row["extra_mortal_action_ids_json"])) == [MORTAL_PASS_ACTION_ID]
 
 
 def test_mortal_action_mapping_fails_closed_on_ambiguous_or_unsupported_specs() -> None:

@@ -9,7 +9,7 @@ import copy
 import json
 from pathlib import Path
 import sys
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -31,6 +31,8 @@ from keqingrl.metadata import (
 from keqingrl.mortal_teacher import (
     MORTAL_ACTION_TEACHER_CONTRACT_VERSION,
     MORTAL_DISCARD_TEACHER_CONTRACT_VERSION,
+    MortalTeacherMappingError,
+    mortal_action_mapping_audit_row,
     mortal_action_topk_teacher_context,
     mortal_discard_teacher_tensors_from_extras,
     mortal_discard_topk_teacher_context,
@@ -234,6 +236,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--mortal-root", type=Path, default=Path("third_party/Mortal"))
     parser.add_argument("--mortal-teacher-device", default=None)
     parser.add_argument("--mortal-teacher-strict-extra-mask", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--mortal-action-audit-max-examples", type=int, default=20)
     parser.add_argument(
         "--forced-autopilot-action-types",
         choices=_ACTION_TYPE_CHOICES,
@@ -386,6 +389,8 @@ def main() -> None:
     step_rows: list[dict[str, Any]] = []
     advantage_rows: list[dict[str, Any]] = []
     checkpoint_rows: list[dict[str, Any]] = []
+    contract_scoreboard_rows: list[dict[str, Any]] = []
+    mortal_action_mapping_audit_rows: list[dict[str, Any]] = []
     config_id = 0
     update_epochs_values = _update_epochs_values(args)
     rule_score_scales = _rule_score_scales(args)
@@ -523,6 +528,8 @@ def main() -> None:
                                                                             step_rows=step_rows,
                                                                             advantage_rows=advantage_rows,
                                                                             checkpoint_rows=checkpoint_rows,
+                                                                            contract_scoreboard_rows=contract_scoreboard_rows,
+                                                                            mortal_action_mapping_audit_rows=mortal_action_mapping_audit_rows,
                                                                         )
 
     payload = {
@@ -570,6 +577,8 @@ def main() -> None:
         "eval_strength_note": "sanity check only; not duplicate strength evidence",
         "summaries": summary_rows,
         "checkpoints": checkpoint_rows,
+        "contract_scoreboard": contract_scoreboard_rows,
+        "mortal_action_mapping_audit": mortal_action_mapping_audit_rows,
         "iteration_rows": iteration_rows,
         "advantage_audit": advantage_rows,
     }
@@ -579,8 +588,25 @@ def main() -> None:
     _write_csv(args.output_dir / "batch_steps.csv", step_rows)
     _write_csv(args.output_dir / "advantage_audit.csv", advantage_rows)
     _write_csv(args.output_dir / "checkpoint_summary.csv", checkpoint_rows)
-    (args.output_dir / "summary.md").write_text(_summary_markdown(args, summary_rows), encoding="utf-8")
+    _write_csv(args.output_dir / "contract_scoreboard.csv", contract_scoreboard_rows)
+    _write_csv(args.output_dir / "mortal_action_mapping_audit.csv", mortal_action_mapping_audit_rows)
+    _write_jsonl(args.output_dir / "mortal_action_mapping_examples.jsonl", mortal_action_mapping_audit_rows)
+    (args.output_dir / "contract_scoreboard.md").write_text(
+        _contract_scoreboard_markdown(contract_scoreboard_rows),
+        encoding="utf-8",
+    )
+    (args.output_dir / "summary.md").write_text(
+        _summary_markdown(args, summary_rows, contract_scoreboard_rows=contract_scoreboard_rows),
+        encoding="utf-8",
+    )
     print((args.output_dir / "summary.md").read_text(encoding="utf-8"))
+
+
+def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    path.write_text(
+        "".join(json.dumps(_to_jsonable(row), ensure_ascii=True, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
 
 
 def _load_mortal_teacher_runtime_for_args(
@@ -711,6 +737,8 @@ def _run_tempered_ratio_config(
     step_rows: list[dict[str, Any]],
     advantage_rows: list[dict[str, Any]],
     checkpoint_rows: list[dict[str, Any]],
+    contract_scoreboard_rows: list[dict[str, Any]],
+    mortal_action_mapping_audit_rows: list[dict[str, Any]],
 ) -> int:
     base_policy = copy.deepcopy(source_policy).to(device)
     base_policy.rule_score_scale = float(rule_score_scale)
@@ -730,24 +758,49 @@ def _run_tempered_ratio_config(
         torch_seed = _iteration_torch_seed(args, config_id, iteration)
         _seed_torch_sampling(torch_seed)
         behavior_policy = TemperaturePolicy(policy, temperature=float(temperature)).to(device)
-        episodes = collect_selfplay_episodes(
-            _rollout_env(
-                args,
-                mortal_teacher_runtime=_mortal_runtime_for_teacher(
-                    mortal_teacher_runtime,
-                    teacher_source=str(teacher_source),
+        try:
+            episodes = collect_selfplay_episodes(
+                _rollout_env(
+                    args,
+                    mortal_teacher_runtime=_mortal_runtime_for_teacher(
+                        mortal_teacher_runtime,
+                        teacher_source=str(teacher_source),
+                    ),
                 ),
-            ),
-            behavior_policy,
-            num_episodes=int(args.episodes),
-            opponent_pool=opponent_pool,
-            learner_seats=tuple(int(seat) for seat in args.learner_seats),
-            seed=rollout_seed,
-            seed_stride=int(args.seed_stride),
-            greedy=False,
-            max_steps=int(args.max_steps),
-            device=device,
-        )
+                behavior_policy,
+                num_episodes=int(args.episodes),
+                opponent_pool=opponent_pool,
+                learner_seats=tuple(int(seat) for seat in args.learner_seats),
+                seed=rollout_seed,
+                seed_stride=int(args.seed_stride),
+                greedy=False,
+                max_steps=int(args.max_steps),
+                device=device,
+            )
+        except MortalTeacherMappingError as exc:
+            audit_row = _mortal_action_mapping_error_audit_row(
+                args,
+                pilot_config_id=config_id,
+                rollout_seed=rollout_seed,
+                torch_seed=torch_seed,
+                error=exc,
+            )
+            _append_limited_audit_row(
+                mortal_action_mapping_audit_rows,
+                audit_row,
+                max_examples=int(args.mortal_action_audit_max_examples),
+            )
+            contract_scoreboard_rows.append(
+                _contract_scoreboard_row(
+                    args,
+                    summary_row=None,
+                    pilot_config_id=config_id,
+                    teacher_source=str(teacher_source),
+                    mapping_summary=_mortal_action_mapping_summary_from_audit_rows((audit_row,)),
+                    qualified_for_eval_reason="blocked_by_mask_parity_gap",
+                )
+            )
+            return config_id + 1
         _advantages, _returns, prepared_steps, batch = build_episodes_ppo_batch(
             episodes,
             gamma=float(args.gamma),
@@ -756,6 +809,33 @@ def _run_tempered_ratio_config(
             strict_metadata=True,
         )
         batch = batch.to(device)
+        mapping_summary, mapping_audit_rows = _mortal_action_mapping_audit_for_batch(
+            args,
+            pilot_config_id=config_id,
+            teacher_source=str(teacher_source),
+            batch=batch,
+            prepared_steps=prepared_steps,
+            rollout_seed=rollout_seed,
+            torch_seed=torch_seed,
+        )
+        for audit_row in mapping_audit_rows:
+            _append_limited_audit_row(
+                mortal_action_mapping_audit_rows,
+                audit_row,
+                max_examples=int(args.mortal_action_audit_max_examples),
+            )
+        if int(mapping_summary["mortal_action_q_fail_closed_count"]) > 0:
+            contract_scoreboard_rows.append(
+                _contract_scoreboard_row(
+                    args,
+                    summary_row=None,
+                    pilot_config_id=config_id,
+                    teacher_source=str(teacher_source),
+                    mapping_summary=mapping_summary,
+                    qualified_for_eval_reason="blocked_by_mask_parity_gap",
+                )
+            )
+            return config_id + 1
         diagnostic_rows, diagnostic_summary = batch_diagnostic_rows(policy, batch, prepared_steps, episodes)
         terminal_coverage = _terminal_coverage_gate_fields(
             _terminal_coverage_stats(episodes, batch=batch, prepared_steps=prepared_steps),
@@ -985,6 +1065,7 @@ def _run_tempered_ratio_config(
             "quality_max_prior_margin_p50": float(args.quality_max_prior_margin_p50),
             "train_movement_quality_pass": _train_movement_quality_gate_pass(post_stats, post_quality_stats, args),
             **terminal_coverage,
+            **mapping_summary,
             **diagnostic_summary,
             **sampling_summary,
             **actor_update_stats,
@@ -1346,6 +1427,16 @@ def _run_tempered_ratio_config(
         }
     )
     _annotate_step38a_status(summary_rows[-1], args)
+    contract_scoreboard_rows.append(
+        _contract_scoreboard_row(
+            args,
+            summary_row=summary_rows[-1],
+            pilot_config_id=config_id,
+            teacher_source=str(teacher_source),
+            mapping_summary=_mapping_summary_from_summary_row(summary_rows[-1]),
+            qualified_for_eval_reason=_qualified_for_eval_reason(summary_rows[-1]),
+        )
+    )
     if bool(args.save_final_checkpoint) and bool(summary_rows[-1]["qualified_for_eval"]):
         checkpoint_rows.append(
             _save_tempered_ratio_checkpoint(
@@ -2846,6 +2937,229 @@ def _terminal_coverage_gate_fields(stats: dict[str, Any], args: argparse.Namespa
 
 def _empty_terminal_coverage_stats() -> dict[str, float]:
     return _terminal_coverage_stats(())
+
+
+def _mortal_action_mapping_empty_summary() -> dict[str, float]:
+    return {
+        "mortal_action_q_mapping_row_count": 0,
+        "mortal_action_q_mapping_available_count": 0,
+        "mortal_action_q_mapping_available_rate": 0.0,
+        "mortal_action_q_missing_legal_count": 0,
+        "mortal_action_q_extra_mortal_count": 0,
+        "mortal_action_q_fail_closed_count": 0,
+    }
+
+
+def _mortal_action_mapping_audit_for_batch(
+    args: argparse.Namespace,
+    *,
+    pilot_config_id: int,
+    teacher_source: str,
+    batch,
+    prepared_steps: Sequence[Any],
+    rollout_seed: int,
+    torch_seed: int,
+) -> tuple[dict[str, float], list[dict[str, Any]]]:
+    if _canonical_teacher_source(str(teacher_source)) != "mortal-action-q":
+        return _mortal_action_mapping_empty_summary(), []
+    legal_actions = batch.policy_input.legal_actions
+    if legal_actions is None:
+        return _mortal_action_mapping_empty_summary(), []
+    q_values, mortal_masks = mortal_discard_teacher_tensors_from_extras(batch.policy_input.obs.extras)
+    q_values = q_values.detach().cpu()
+    mortal_masks = mortal_masks.detach().cpu()
+    row_count = int(len(legal_actions))
+    available_count = 0
+    missing_count = 0
+    extra_count = 0
+    fail_closed_count = 0
+    audit_rows: list[dict[str, Any]] = []
+    for row_idx, row_actions in enumerate(legal_actions):
+        step = prepared_steps[row_idx] if row_idx < len(prepared_steps) else None
+        context = _mapping_audit_context(
+            args,
+            pilot_config_id=pilot_config_id,
+            rollout_seed=rollout_seed,
+            torch_seed=torch_seed,
+            row_idx=row_idx,
+            step=step,
+        )
+        audit_row = mortal_action_mapping_audit_row(
+            q_values[row_idx],
+            mortal_masks[row_idx],
+            row_actions,
+            context=context,
+        )
+        if audit_row is None:
+            available_count += 1
+            continue
+        audit_row["pilot_config_id"] = int(pilot_config_id)
+        audit_rows.append(audit_row)
+        missing_count += len(_json_list_field(audit_row, "missing_legal_keys_json"))
+        extra_count += len(_json_list_field(audit_row, "extra_mortal_action_ids_json"))
+        if _mortal_action_audit_row_fail_closed(args, audit_row):
+            fail_closed_count += 1
+        else:
+            available_count += 1
+    return {
+        "mortal_action_q_mapping_row_count": int(row_count),
+        "mortal_action_q_mapping_available_count": int(available_count),
+        "mortal_action_q_mapping_available_rate": float(available_count / max(1, row_count)),
+        "mortal_action_q_missing_legal_count": int(missing_count),
+        "mortal_action_q_extra_mortal_count": int(extra_count),
+        "mortal_action_q_fail_closed_count": int(fail_closed_count),
+    }, audit_rows
+
+
+def _mortal_action_audit_row_fail_closed(args: argparse.Namespace, row: dict[str, Any]) -> bool:
+    missing_keys = _json_list_field(row, "missing_legal_keys_json")
+    if missing_keys:
+        return True
+    mismatch_kind = str(row.get("mismatch_kind", ""))
+    if mismatch_kind in {"ambiguous_kan", "unsupported_action"}:
+        return True
+    extra_ids = _json_list_field(row, "extra_mortal_action_ids_json")
+    return bool(extra_ids) and bool(getattr(args, "mortal_teacher_strict_extra_mask", True))
+
+
+def _mapping_audit_context(
+    args: argparse.Namespace,
+    *,
+    pilot_config_id: int,
+    rollout_seed: int,
+    torch_seed: int,
+    row_idx: int,
+    step: Any | None,
+) -> dict[str, object]:
+    return {
+        "episode_id": "" if step is None else getattr(step, "episode_id", ""),
+        "step_index": row_idx if step is None else getattr(step, "step_id", row_idx),
+        "actor": "" if step is None else getattr(step, "actor", ""),
+        "control_action_types": () if step is None else getattr(step, "control_action_types", ()),
+        "replay_hint": _replay_hint(args, pilot_config_id=pilot_config_id, rollout_seed=rollout_seed, torch_seed=torch_seed),
+    }
+
+
+def _mortal_action_mapping_error_audit_row(
+    args: argparse.Namespace,
+    *,
+    pilot_config_id: int,
+    rollout_seed: int,
+    torch_seed: int,
+    error: MortalTeacherMappingError,
+) -> dict[str, Any]:
+    context = dict(error.context)
+    missing_keys = list(error.missing_legal_keys)
+    extra_ids = list(error.extra_mortal_action_ids)
+    legal_types = list(context.get("legal_action_types", ()))
+    legal_keys = list(context.get("legal_actions", ()))
+    missing_set = set(missing_keys)
+    missing_types = [
+        str(action_type)
+        for action_type, key in zip(legal_types, legal_keys)
+        if str(key) in missing_set
+    ]
+    return {
+        "pilot_config_id": int(pilot_config_id),
+        "episode_id": context.get("episode_id", ""),
+        "step_index": context.get("step_index", context.get("step_id", "")),
+        "actor": context.get("actor", ""),
+        "control_action_types": ",".join(str(value) for value in context.get("control_action_types", ())),
+        "legal_action_count": len(legal_keys),
+        "legal_action_keys_json": _json_dumps(legal_keys),
+        "legal_action_types_json": _json_dumps(legal_types),
+        "source_action_ids_json": _json_dumps([]),
+        "mortal_mask_true_ids_json": _json_dumps(context.get("mortal_mask_true_ids", ())),
+        "missing_legal_keys_json": _json_dumps(missing_keys),
+        "missing_legal_types_json": _json_dumps(missing_types),
+        "extra_mortal_action_ids_json": _json_dumps(extra_ids),
+        "events_tail_json": _json_dumps(context.get("mortal_events_tail", context.get("events_tail", ()))),
+        "hand_json": _json_dumps(context.get("hand", "")),
+        "last_discard_json": _json_dumps(context.get("last_discard", "")),
+        "mismatch_kind": error.mismatch_kind or _mapping_mismatch_kind(missing_keys, extra_ids),
+        "replay_hint": _replay_hint(
+            args,
+            pilot_config_id=pilot_config_id,
+            rollout_seed=rollout_seed,
+            torch_seed=torch_seed,
+        ),
+    }
+
+
+def _mortal_action_mapping_summary_from_audit_rows(rows: Sequence[dict[str, Any]]) -> dict[str, float]:
+    row_count = len(rows)
+    missing_count = sum(len(_json_list_field(row, "missing_legal_keys_json")) for row in rows)
+    extra_count = sum(len(_json_list_field(row, "extra_mortal_action_ids_json")) for row in rows)
+    return {
+        "mortal_action_q_mapping_row_count": int(row_count),
+        "mortal_action_q_mapping_available_count": 0,
+        "mortal_action_q_mapping_available_rate": 0.0,
+        "mortal_action_q_missing_legal_count": int(missing_count),
+        "mortal_action_q_extra_mortal_count": int(extra_count),
+        "mortal_action_q_fail_closed_count": int(row_count),
+    }
+
+
+def _mapping_summary_from_summary_row(row: dict[str, Any]) -> dict[str, float]:
+    summary = _mortal_action_mapping_empty_summary()
+    for key in tuple(summary):
+        summary[key] = float(row.get(f"final_{key}", row.get(key, summary[key])))
+    return summary
+
+
+def _append_limited_audit_row(
+    rows: list[dict[str, Any]],
+    row: dict[str, Any],
+    *,
+    max_examples: int,
+) -> None:
+    if int(max_examples) <= 0:
+        return
+    kind = str(row.get("mismatch_kind", ""))
+    existing = sum(1 for item in rows if str(item.get("mismatch_kind", "")) == kind)
+    if existing < int(max_examples):
+        rows.append(row)
+
+
+def _mapping_mismatch_kind(missing: Sequence[object], extra: Sequence[object]) -> str:
+    if missing and extra:
+        return "missing_and_extra"
+    if missing:
+        return "missing_legal"
+    if extra:
+        return "extra_mortal"
+    return "unsupported_action"
+
+
+def _json_list_field(row: dict[str, Any], key: str) -> list[Any]:
+    value = row.get(key, "[]")
+    if isinstance(value, str):
+        decoded = json.loads(value or "[]")
+        return decoded if isinstance(decoded, list) else []
+    return list(value) if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)) else []
+
+
+def _json_dumps(value: object) -> str:
+    return json.dumps(_to_jsonable(value), ensure_ascii=True, separators=(",", ":"), default=str)
+
+
+def _replay_hint(
+    args: argparse.Namespace,
+    *,
+    pilot_config_id: int,
+    rollout_seed: int,
+    torch_seed: int,
+) -> str:
+    return (
+        "uv run python scripts/export_keqingrl_mjai_replay.py "
+        f"--candidate-summary {args.candidate_summary} "
+        f"--source-config-ids {' '.join(str(int(value)) for value in args.source_config_ids)} "
+        f"--output-dir {args.output_dir / 'replays'} "
+        "--episode-index 0 "
+        f"--seed-base {int(rollout_seed)} "
+        f"--torch-seed {int(torch_seed)} "
+        f"# pilot_config_id={int(pilot_config_id)}"
+    )
 
 
 def _mean_float(values: Sequence[float]) -> float:
@@ -4606,6 +4920,7 @@ def _fresh_validation_gate_pass(
 
 
 def _qualified_for_eval(final_row: dict[str, Any], fresh_validation: dict[str, Any], args: argparse.Namespace) -> bool:
+    mapping_pass = int(final_row.get("mortal_action_q_fail_closed_count", 0)) == 0
     movement_pass = (
         True
         if not bool(args.movement_quality_gate)
@@ -4617,11 +4932,13 @@ def _qualified_for_eval(final_row: dict[str, Any], fresh_validation: dict[str, A
         args,
         prefix="fresh_validation_",
     )
-    return bool(movement_pass and terminal_pass)
+    return bool(mapping_pass and movement_pass and terminal_pass)
 
 
 def _eval_skip_reason(final_row: dict[str, Any], fresh_validation: dict[str, Any], args: argparse.Namespace) -> str:
     reasons: list[str] = []
+    if int(final_row.get("mortal_action_q_fail_closed_count", 0)) > 0:
+        reasons.append("mortal_action_q_mask_parity_failed")
     if bool(args.movement_quality_gate) and not bool(final_row.get("train_movement_quality_pass", False)):
         reasons.append("train_movement_quality_gate_failed")
     if bool(args.movement_quality_gate) and not bool(fresh_validation.get("fresh_validation_gate_pass", False)):
@@ -4735,7 +5052,14 @@ def _annotate_step38a_status(row: dict[str, Any], args: argparse.Namespace) -> N
 
 def _summary_metric_key(key: str) -> bool:
     return key.startswith(
-        ("reach_pre_", "reach_post_", "full_action_pre_", "full_action_post_", "terminal_coverage_")
+        (
+            "reach_pre_",
+            "reach_post_",
+            "full_action_pre_",
+            "full_action_post_",
+            "terminal_coverage_",
+            "mortal_action_q_",
+        )
     ) or key in {
         "batch_size",
         "advantage_mean",
@@ -4823,7 +5147,162 @@ def _summary_metric_key(key: str) -> bool:
     }
 
 
-def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) -> str:
+_DIAGNOSTIC_OUTCOME_NOTE = (
+    "outcome counters do not gate unless --terminal-coverage-outcome-gate is enabled"
+)
+
+
+def _contract_scoreboard_row(
+    args: argparse.Namespace,
+    *,
+    summary_row: dict[str, Any] | None,
+    pilot_config_id: int,
+    teacher_source: str,
+    mapping_summary: dict[str, float],
+    qualified_for_eval_reason: str,
+) -> dict[str, Any]:
+    row = summary_row or {}
+    return {
+        "pilot_config_id": int(pilot_config_id),
+        "teacher_source": str(teacher_source),
+        "teacher_contract_role": _teacher_contract_role(str(teacher_source)),
+        "legal_owner": "keqing_core.enumerate_public_legal_action_specs",
+        "legal_owner_pass": True,
+        "action_identity_contract_pass": True,
+        "mortal_teacher_checkpoint_present": _mortal_teacher_checkpoint_present(args, str(teacher_source)),
+        "mortal_action_q_mapping_row_count": int(mapping_summary["mortal_action_q_mapping_row_count"]),
+        "mortal_action_q_mapping_available_count": int(
+            mapping_summary["mortal_action_q_mapping_available_count"]
+        ),
+        "mortal_action_q_mapping_available_rate": float(
+            mapping_summary["mortal_action_q_mapping_available_rate"]
+        ),
+        "mortal_action_q_missing_legal_count": int(mapping_summary["mortal_action_q_missing_legal_count"]),
+        "mortal_action_q_extra_mortal_count": int(mapping_summary["mortal_action_q_extra_mortal_count"]),
+        "mortal_action_q_fail_closed_count": int(mapping_summary["mortal_action_q_fail_closed_count"]),
+        "opportunity_gate_enabled": bool(args.terminal_coverage_gate),
+        "opportunity_gate_pass": _scoreboard_opportunity_gate_pass(args, row),
+        "legal_terminal_row_count": int(row.get("final_terminal_coverage_legal_terminal_row_count", 0)),
+        "legal_agari_row_count": int(row.get("final_terminal_coverage_legal_agari_row_count", 0)),
+        "prepared_legal_terminal_row_count": int(
+            row.get("final_terminal_coverage_prepared_legal_terminal_row_count", 0)
+        ),
+        "prepared_legal_agari_row_count": int(
+            row.get("final_terminal_coverage_prepared_legal_agari_row_count", 0)
+        ),
+        "outcome_gate_enabled": bool(args.terminal_coverage_outcome_gate),
+        "score_changed_episode_count": int(
+            row.get("final_terminal_coverage_score_changed_episode_count", 0)
+        ),
+        "selected_agari_count": int(row.get("final_terminal_coverage_selected_agari_count", 0)),
+        "selected_ron_count": int(row.get("final_terminal_coverage_selected_ron_count", 0)),
+        "selected_tsumo_count": int(row.get("final_terminal_coverage_selected_tsumo_count", 0)),
+        "diagnostic_only_outcome_note": _DIAGNOSTIC_OUTCOME_NOTE,
+        "qualified_for_eval": bool(row.get("qualified_for_eval", False)),
+        "qualified_for_eval_reason": str(qualified_for_eval_reason),
+    }
+
+
+def _teacher_contract_role(teacher_source: str) -> str:
+    canonical = _canonical_teacher_source(str(teacher_source))
+    if canonical == "mortal-action-q":
+        return "primary_action_q_teacher"
+    if canonical == "mortal-discard-q":
+        return "deprecated_discard_diagnostic"
+    if canonical in {"rule-prior-topk", "rule-component-v1"}:
+        return "diagnostic_control"
+    if canonical == "none":
+        return "no_teacher_control"
+    return "unsupported_or_unimplemented"
+
+
+def _mortal_teacher_checkpoint_present(args: argparse.Namespace, teacher_source: str) -> bool:
+    canonical = _canonical_teacher_source(str(teacher_source))
+    if canonical not in {"mortal-discard-q", "mortal-action-q"}:
+        return False
+    return args.mortal_teacher_checkpoint is not None
+
+
+def _scoreboard_opportunity_gate_pass(args: argparse.Namespace, row: dict[str, Any]) -> bool:
+    if not bool(args.terminal_coverage_gate):
+        return True
+    if not row:
+        return False
+    return bool(row.get("terminal_coverage_gate_pass", False))
+
+
+def _qualified_for_eval_reason(row: dict[str, Any]) -> str:
+    if bool(row.get("qualified_for_eval", False)):
+        return "qualified_for_eval"
+    if int(row.get("final_mortal_action_q_fail_closed_count", 0)) > 0:
+        return "blocked_by_mask_parity_gap"
+    reason = str(row.get("eval_skipped_reason", ""))
+    if reason:
+        return reason
+    if not bool(row.get("terminal_coverage_gate_pass", True)):
+        return "unqualified_opportunity_coverage"
+    return "not_qualified"
+
+
+def _contract_scoreboard_markdown(rows: Sequence[dict[str, Any]]) -> str:
+    lines = [
+        "# KeqingRL Mortal Action-Q Contract Scoreboard",
+        "",
+        f"diagnostic_only_outcome_note: `{_DIAGNOSTIC_OUTCOME_NOTE}`",
+        "",
+    ]
+    if not rows:
+        lines.append("_No contract rows were produced._")
+        return "\n".join(lines) + "\n"
+    for row in rows:
+        notes: list[str] = []
+        if row["teacher_contract_role"] == "deprecated_discard_diagnostic":
+            notes.append("deprecated diagnostic only")
+        if (
+            row["teacher_source"] == "mortal-action-q"
+            and int(row["mortal_action_q_fail_closed_count"]) > 0
+        ):
+            notes.append("blocked by mask parity gap")
+        if (
+            row["teacher_source"] == "mortal-action-q"
+            and int(row["mortal_action_q_extra_mortal_count"]) > 0
+            and int(row["mortal_action_q_fail_closed_count"]) == 0
+        ):
+            notes.append("scope-extra mortal ids diagnostic only")
+        if bool(row["opportunity_gate_enabled"]) and not bool(row["opportunity_gate_pass"]):
+            notes.append("unqualified opportunity coverage")
+        if bool(row["qualified_for_eval"]):
+            notes.append("qualified for paired eval")
+        lines.append(
+            "- "
+            f"cfg={row['pilot_config_id']} "
+            f"teacher={row['teacher_source']} "
+            f"role={row['teacher_contract_role']} "
+            f"legal_owner_pass={row['legal_owner_pass']} "
+            f"action_identity_pass={row['action_identity_contract_pass']} "
+            f"mapping={row['mortal_action_q_mapping_available_count']}/"
+            f"{row['mortal_action_q_mapping_row_count']} "
+            f"missing={row['mortal_action_q_missing_legal_count']} "
+            f"extra={row['mortal_action_q_extra_mortal_count']} "
+            f"fail_closed={row['mortal_action_q_fail_closed_count']} "
+            f"opportunity_gate={row['opportunity_gate_pass']} "
+            f"legal_agari_rows={row['legal_agari_row_count']} "
+            f"selected_agari={row['selected_agari_count']} "
+            f"qualified={row['qualified_for_eval']} "
+            f"reason={row['qualified_for_eval_reason']} "
+            f"notes={'|'.join(notes) if notes else 'none'}"
+        )
+        if not bool(row["qualified_for_eval"]):
+            lines.append("  replay: `scripts/export_keqingrl_mjai_replay.py`")
+    return "\n".join(lines) + "\n"
+
+
+def _summary_markdown(
+    args: argparse.Namespace,
+    rows: Sequence[dict[str, Any]],
+    *,
+    contract_scoreboard_rows: Sequence[dict[str, Any]] = (),
+) -> str:
     lines = [
         "# KeqingRL Tempered-Ratio PPO Diagnostic",
         "",
@@ -4967,6 +5446,44 @@ def _summary_markdown(args: argparse.Namespace, rows: Sequence[dict[str, Any]]) 
             f"recovery_stop={row.get('final_recovery_stop_reason', '')} "
             f"eval_fourth={row['eval_fourth_rate']:.6g} "
             f"deal_in={row['eval_learner_deal_in_rate']:.6g}"
+        )
+    lines.extend(
+        [
+            "",
+            "## Contract Scoreboard",
+            "",
+            f"- diagnostic_only_outcome_note: `{_DIAGNOSTIC_OUTCOME_NOTE}`",
+        ]
+    )
+    for row in contract_scoreboard_rows:
+        notes: list[str] = []
+        if row["teacher_contract_role"] == "deprecated_discard_diagnostic":
+            notes.append("deprecated diagnostic only")
+        if (
+            row["teacher_source"] == "mortal-action-q"
+            and int(row["mortal_action_q_fail_closed_count"]) > 0
+        ):
+            notes.append("blocked by mask parity gap")
+        if bool(row["opportunity_gate_enabled"]) and not bool(row["opportunity_gate_pass"]):
+            notes.append("unqualified opportunity coverage")
+        if bool(row["qualified_for_eval"]):
+            notes.append("qualified for paired eval")
+        lines.append(
+            "- "
+            f"cfg={row['pilot_config_id']} "
+            f"teacher={row['teacher_source']} "
+            f"role={row['teacher_contract_role']} "
+            f"legal_owner_pass={row['legal_owner_pass']} "
+            f"action_identity_pass={row['action_identity_contract_pass']} "
+            f"mapping={row['mortal_action_q_mapping_available_count']}/"
+            f"{row['mortal_action_q_mapping_row_count']} "
+            f"opportunity_gate={row['opportunity_gate_pass']} "
+            f"outcome_gate={row['outcome_gate_enabled']} "
+            f"score_changed={row['score_changed_episode_count']} "
+            f"selected_agari={row['selected_agari_count']} "
+            f"qualified={row['qualified_for_eval']} "
+            f"reason={row['qualified_for_eval_reason']} "
+            f"notes={'|'.join(notes) if notes else 'none'}"
         )
     lines.extend(
         [

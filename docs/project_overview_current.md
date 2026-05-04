@@ -1,22 +1,37 @@
 # Keqing1 当前项目总览
 
-更新时间：2026-04-28
+更新时间：2026-05-04
 
 ## 一句话判断
 
-`keqing1` 当前主线已经切到 `KeqingRL-Lite`，并且 teacher source 分析已经提前到主线：
+`keqing1` 当前模型成长主线已经从 KeqingRL-Lite 的 PPO/paired-eval 诊断，
+切到 **Mortal Action-Q imitation**：
 
 ```text
-rulebase prior
-+ neural_delta
-+ rollout-native actor-critic
-+ KeqingCore/Rust legal-action ownership
-+ fixed-seed review/eval
-+ Mortal action-Q teacher over KeqingRL legal ActionSpec rows
-+ opportunity-qualified terminal/action coverage gates
+KeqingCore/Rust legal-action ownership
++ KeqingRL ActionSpec canonical identity
++ Mortal action-Q teacher over those legal rows
++ CE/KL imitation toward Mortal decisions
++ readable replay / audit diagnostics
 ```
 
 `xmodel1` / `keqingv4` 不再作为成长主线返工，也不能作为 teacher source；它们只保留为 frozen assets、baselines、runtime/Rust 资产库。
+
+当前 handoff：
+
+```text
+docs/keqingrl/keqingrl_mortal_action_q_handoff_2026_05_04.md
+```
+
+当前最佳 KeqingRL imitation checkpoint：
+
+```text
+reports/keqingrl_mortal_action_q_imitation_train_20260430_source93_step20000_allseats_lr003_cont1/checkpoint_config_000/policy_iter_0004.pt
+teacher_kl=0.401925
+teacher_agreement=0.686201
+mapping=5422/5422
+fail_closed=0
+```
 
 ## 2026-04-28 理解修正
 
@@ -39,9 +54,10 @@ rulebase prior
 
 1. KeqingCore/Rust 继续作为 legal action owner；KeqingRL 只消费有稳定 `ActionSpec` 身份的合法动作。
 2. Mortal 只用训练出来的 Mortal checkpoint 作为 Q/ranking teacher，不使用 `xmodel` / `xmodel1` / `keqingv4`。
-3. 从 `mortal-discard-q` 诊断升级到 `mortal-action-q`：在 KeqingRL legal actions 上打分，仍然 fail closed。
-4. teacher probe 先过 opportunity-based terminal/action coverage，再解释 topK movement、fresh gate、paired eval。
-5. response-window 的 PASS/RON/PON/CHI mask parity 缺口先调查清楚，再开放训练。
+3. 当前训练默认走 `scripts/run_keqingrl_mortal_imitation.py`，目标是学 Mortal 在 KeqingRL legal rows 上的决策分布。
+4. `mortal-discard-q`、paired diag、小样本 `hora/score_changed` 都只保留为诊断，不作为当前默认 gate。
+5. response-window 的 PASS/RON/PON/CHI 已进入 imitation scope；KAN family 继续 out-of-scope，直到单独完成 id42/kan-select 合同。
+6. 新实验优先围绕当前最佳 checkpoint 做小假设，例如 `teacher_topk=4`，不要盲目继续 `lr=0.003/0.0025` 链。
 
 不要默认继续推进：
 
@@ -52,8 +68,10 @@ rulebase prior
 - 继续只在 KeqingRL 内部调 PPO / gate / penalty 而不引入新的 topK 排序 teacher
 - 把 discard-only no-pass 当成 Mortal teacher 强弱证据
 - 用实际和牌数或 `score_changed` 单独判定 teacher gate
+- 把 paired eval 重新设为当前 imitation 训练的默认 blocker
+- 训练 KAN family，除非先补完 Mortal id42 / `at_kan_select` 合同
 
-## KeqingRL-Lite Contract
+## KeqingRL Contract
 
 核心策略：
 
@@ -80,27 +98,30 @@ logits = rule_score_scale * prior_logits + neural_delta
 
 ## Development Plan
 
-The live implementation plan is:
+The live implementation/handoff surface is:
 
-- `plans/keqingrl_lite_mainline_2026_04_24.md`
-- `plans/mortal_training_runbook_2026_04_28.md`
+- `docs/keqingrl/keqingrl_mortal_action_q_handoff_2026_05_04.md`
+- `scripts/run_keqingrl_mortal_imitation.py`
 
-The live design doc is:
+The live design/reference docs are:
 
 - `docs/keqingrl/keqingrl_model_design_v1.md`
 - `docs/mortal_action_contract.md`
 - `docs/keqingrl/mortal_training_workflow.md`
+- `plans/mortal_training_runbook_2026_04_28.md`
 
 ## Read First
 
 1. `docs/project_progress.md`
 2. `docs/agent_sync.md`
-3. `docs/mortal_action_contract.md`
-4. `docs/keqingrl/mortal_training_workflow.md`
-5. `plans/mortal_training_runbook_2026_04_28.md`
-6. `docs/keqingrl/keqingrl_model_design_v1.md`
-7. `plans/keqingrl_lite_mainline_2026_04_24.md`
-8. latest `docs/todo_*.md`
+3. `docs/keqingrl/keqingrl_mortal_action_q_handoff_2026_05_04.md`
+4. `docs/mortal_action_contract.md`
+5. `docs/keqingrl/mortal_training_workflow.md`
+6. `docs/riichi_dev_mortal_handoff.md`
+7. `plans/mortal_training_runbook_2026_04_28.md`
+8. `docs/keqingrl/keqingrl_model_design_v1.md`
+9. `plans/keqingrl_lite_mainline_2026_04_24.md`
+10. latest `docs/todo_*.md`
 
 `plans/mortal_teacher_contract_2026_04_28.md` is now historical discard-only
 diagnostic context. It must not override the active Mortal action contract.

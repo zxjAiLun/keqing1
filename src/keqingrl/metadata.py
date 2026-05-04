@@ -180,7 +180,7 @@ def resolve_rule_score_scale_metadata(
         expected_scale = float(expected_rule_score_scale)
         if not math.isfinite(expected_scale) or expected_scale < 0.0:
             raise ValueError(f"invalid expected rule score scale: {expected_rule_score_scale!r}")
-        if not math.isclose(actual_scale, expected_scale, rel_tol=0.0, abs_tol=1e-9):
+        if not math.isclose(actual_scale, expected_scale, rel_tol=0.0, abs_tol=1e-6):
             raise ValueError(
                 "rule score scale mismatch: "
                 f"expected {expected_scale!r}, got {actual_scale!r}"

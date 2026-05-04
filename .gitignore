@@ -123,7 +123,9 @@ archive/
 docs/**
 !docs/project_overview_current.md
 !docs/mortal_action_contract.md
+!docs/riichi_dev_mortal_handoff.md
 !docs/keqingrl/
+!docs/keqingrl/keqingrl_mortal_action_q_handoff_2026_05_04.md
 !docs/keqingrl/mortal_training_workflow.md
 deploy/
 tmp/

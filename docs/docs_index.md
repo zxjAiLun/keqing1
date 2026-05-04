@@ -1,6 +1,6 @@
 # Keqing1 Docs Index
 
-Updated: 2026-04-28
+Updated: 2026-05-04
 
 ## Active Control Surfaces
 
@@ -11,13 +11,16 @@ Updated: 2026-04-28
 
 ## Active Mainline
 
-### KeqingRL-Lite
+### KeqingRL / Mortal Action-Q
 
+- `docs/keqingrl/keqingrl_mortal_action_q_handoff_2026_05_04.md`: current
+  KeqingRL/Mortal Action-Q imitation handoff and latest checkpoint status
 - `docs/keqingrl/keqingrl_model_design_v1.md`: active model design
 - `docs/keqingrl/mortal_training_workflow.md`: Mortal data packaging, no-ds3 training workflow, and runtime promotion
 - `docs/mortal_action_contract.md`: active Mortal Q/mask/action mapping and teacher-gate correction notes
 - `plans/mortal_training_runbook_2026_04_28.md`: operational Mortal training and KeqingRL teacher probe runbook
-- `plans/keqingrl_lite_mainline_2026_04_24.md`: active implementation plan
+- `plans/keqingrl_lite_mainline_2026_04_24.md`: historical contract/mainline
+  plan; current training status is superseded by the 2026-05-04 handoff
 
 Deprecated Mortal context:
 

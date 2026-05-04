@@ -76,6 +76,8 @@ def test_checkpoint_metadata_rejects_rule_score_scale_mismatch() -> None:
     metadata = default_checkpoint_metadata(rule_score_scale=0.25)
 
     validate_checkpoint_metadata(metadata, expected_rule_score_scale=0.25)
+    float32_metadata = default_checkpoint_metadata(rule_score_scale=float(torch.tensor(0.1).item()))
+    validate_checkpoint_metadata(float32_metadata, expected_rule_score_scale=0.1)
     try:
         validate_checkpoint_metadata(metadata, expected_rule_score_scale=1.0)
     except ValueError as exc:
