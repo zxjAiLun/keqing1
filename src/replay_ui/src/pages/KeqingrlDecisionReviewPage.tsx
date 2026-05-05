@@ -63,14 +63,22 @@ type ReviewCase = {
     bakaze?: string;
     kyoku?: number;
     honba?: number;
+    oya?: number;
     riichi_sticks?: number;
+    kyotaku?: number;
     dora_indicators?: unknown[];
     scores?: number[];
     wall_remaining?: number;
     last_discard?: unknown;
+    seat_winds?: unknown[];
   };
   players?: ReviewPlayer[];
   legal_actions?: ReviewActionRow[];
+  visibility?: {
+    actor_hand_visible?: boolean;
+    opponent_hands_visible?: boolean;
+    oracle_fields_available?: boolean;
+  };
 };
 
 const REVIEW_FILTERS = [
@@ -93,7 +101,7 @@ export function KeqingrlDecisionReviewPage() {
   const [cases, setCases] = useState<ReviewCase[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [filter, setFilter] = useState<(typeof REVIEW_FILTERS)[number][0]>('all');
-  const [showOpponentHands, setShowOpponentHands] = useState(true);
+  const [showOpponentHands, setShowOpponentHands] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const visibleCases = useMemo(() => {
@@ -179,8 +187,11 @@ export function KeqingrlDecisionReviewPage() {
             onClick={() => setShowOpponentHands((value) => !value)}
             style={{ height: 38, padding: '0 16px', background: showOpponentHands ? 'var(--success)' : 'var(--accent)' }}
           >
-            {showOpponentHands ? '隐藏他家手牌' : '显示他家手牌'}
+            {showOpponentHands ? '隐藏他家手牌（实际可见视角）' : '显示他家手牌（Oracle Debug）'}
           </button>
+          <span style={{ color: showOpponentHands ? 'var(--warning)' : 'var(--text-secondary)', fontSize: 13 }}>
+            当前视角：{showOpponentHands ? 'Oracle debug' : '实际可见'}
+          </span>
           <span style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
             {cases.length ? `${visibleCases.length} / ${cases.length} cases` : '未加载'}
           </span>
@@ -365,8 +376,8 @@ function reviewCaseToBattleState(item: ReviewCase): BattleState {
     bakaze: String(round.bakaze ?? 'E'),
     kyoku: Number(round.kyoku ?? 1),
     honba: Number(round.honba ?? 0),
-    kyotaku: Number(round.riichi_sticks ?? 0),
-    oya: 0,
+    kyotaku: Number(round.kyotaku ?? round.riichi_sticks ?? 0),
+    oya: Number(round.oya ?? 0),
     scores,
     dora_markers: toTiles(round.dora_indicators),
     actor_to_move: actor,
@@ -384,7 +395,7 @@ function reviewCaseToBattleState(item: ReviewCase): BattleState {
     human_player_id: actor,
     player_info: seatArray((seat) => ({
       player_id: seat,
-      name: seat === actor ? `Actor ${seat}` : `P${seat}`,
+      name: seat === actor ? `Actor ${seat}` : `P${seat}${seatWindLabel(round.seat_winds, seat)}`,
       type: seat === actor ? 'human' : 'bot',
     })),
     replay_draw_actor: actor,
@@ -425,8 +436,13 @@ function reviewCaseLogitData(item: ReviewCase): LogitTileData[] {
 function toLegalActions(rows: ReviewActionRow[] | undefined, actor: number): Action[] {
   const result = (rows ?? [])
     .map((row) => row.mjai_events?.[0] ?? actionFromRow(row, actor))
+    .map((action) => action ? normalizeActionActor(action, actor) : null)
     .filter((action): action is Action => Boolean(action));
   return result.length ? result : [{ type: 'none', actor }];
+}
+
+function normalizeActionActor(action: Action, actor: number): Action {
+  return { ...action, actor };
 }
 
 function actionFromRow(row: ReviewActionRow, actor: number): Action | null {
@@ -543,6 +559,11 @@ function consumedFromCanonical(key: string | undefined): string[] {
 
 function seatArray<T>(factory: (seat: number) => T): [T, T, T, T] {
   return [factory(0), factory(1), factory(2), factory(3)];
+}
+
+function seatWindLabel(value: unknown[] | undefined, seat: number): string {
+  const wind = toTile(value?.[seat]);
+  return wind ? ` ${wind}` : '';
 }
 
 function riskScore(item: ReviewCase): number {

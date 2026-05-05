@@ -184,6 +184,7 @@ def test_mortal_imitation_defaults_to_rule_free_full_legal_support(monkeypatch: 
     assert args.rule_score_scale == 0.0
     assert args.delta_support_mode == "all"
     assert args.support_policy_mode == "unrestricted"
+    assert args.decision_review_case_streaming is True
     assert _student_logit_source(args) == "neural_delta_only"
 
 
@@ -379,7 +380,7 @@ def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> No
         policy_input,
         parent_output=_output([3.0, 0.0, -100.0]),
         source_output=_output([3.0, 0.0, -100.0]),
-        prepared_steps=(SimpleNamespace(episode_id="ep", step_id=7, actor=0, mortal_teacher_events=()),),
+        prepared_steps=(SimpleNamespace(episode_id="ep", step_id=7, actor=2, mortal_teacher_events=()),),
         teacher_support="topk",
         teacher_topk=2,
         teacher_temperature=1.0,
@@ -398,7 +399,11 @@ def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> No
     assert teacher_disagreement_rows == []
     assert review_rows[0]["review_reason"] == "selected_changed"
     assert review_case_rows[0]["review_reason"] == "selected_changed"
+    assert review_case_rows[0]["actor"] == 2
+    assert review_case_rows[0]["visibility"]["opponent_hands_visible"] is False
     assert len(review_case_rows[0]["legal_actions"]) == 2
+    assert review_case_rows[0]["legal_actions"][0]["mjai_events"][0]["actor"] == 2
+    assert review_case_rows[0]["legal_actions"][1]["mjai_events"][0]["actor"] == 2
     assert review_case_rows[0]["legal_actions"][1]["is_mortal_top1"] is True
     assert review_case_rows[0]["legal_actions"][1]["teacher_prob"] is not None
     assert breakdown_rows == [

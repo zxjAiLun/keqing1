@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 import sys
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import keqing_core
 import torch
@@ -169,6 +169,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--export-decision-review-cases", action="store_true")
     parser.add_argument("--decision-review-case-limit", type=int, default=500)
+    parser.add_argument("--decision-review-case-streaming", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
 
@@ -176,6 +177,8 @@ def main() -> None:
     args = _parse_args()
     _validate_args(args)
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    if bool(args.export_decision_review_cases):
+        (args.output_dir / "decision_review_cases.jsonl").write_text("", encoding="utf-8")
     device = torch.device(args.device) if args.device is not None else torch.device("cpu")
     candidates = _load_imitation_candidates(args)
     teacher_runtime = _load_teacher_runtime(args, device=device)
@@ -188,6 +191,7 @@ def main() -> None:
     teacher_disagreement_rows: list[dict[str, Any]] = []
     decision_review_rows: list[dict[str, Any]] = []
     decision_review_case_rows: list[dict[str, Any]] = []
+    decision_review_case_count = 0
     checkpoint_rows: list[dict[str, Any]] = []
 
     config_id = 0
@@ -380,19 +384,24 @@ def main() -> None:
                 for row in new_decision_review_rows
             )
             if bool(args.export_decision_review_cases):
-                remaining_case_slots = max(0, int(args.decision_review_case_limit) - len(decision_review_case_rows))
-                decision_review_case_rows.extend(
-                    {
-                        **row,
-                        "pilot_config_id": int(config_id),
-                        "iteration": int(iteration),
-                        "case_id": f"cfg{int(config_id)}_iter{int(iteration)}_{row.get('case_id', '')}",
-                        "run_id": args.output_dir.name,
-                        "rollout_seed": int(rollout_seed),
-                        "torch_seed": int(torch_seed),
-                    }
-                    for row in new_decision_review_case_rows[:remaining_case_slots]
-                )
+                remaining_case_slots = max(0, int(args.decision_review_case_limit) - int(decision_review_case_count))
+                case_rows = [
+                    _with_review_case_run_context(
+                        row,
+                        config_id=config_id,
+                        iteration=iteration,
+                        output_dir=args.output_dir,
+                        rollout_seed=rollout_seed,
+                        torch_seed=torch_seed,
+                    )
+                    for row in sorted(new_decision_review_case_rows, key=_review_case_risk_score, reverse=True)[
+                        :remaining_case_slots
+                    ]
+                ]
+                decision_review_case_count += len(case_rows)
+                if bool(args.decision_review_case_streaming):
+                    _append_jsonl(args.output_dir / "decision_review_cases.jsonl", case_rows)
+                decision_review_case_rows.extend(case_rows)
             action_type_breakdown_rows.extend(
                 {
                     "pilot_config_id": int(config_id),
@@ -540,6 +549,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--episodes and --iterations must be positive")
     if int(args.update_epochs) <= 0:
         raise ValueError("--update-epochs must be positive")
+    if int(getattr(args, "decision_review_case_limit", 0)) < 0:
+        raise ValueError("--decision-review-case-limit must be non-negative")
 
 
 def _load_teacher_runtime(args: argparse.Namespace, *, device: torch.device):
@@ -1557,6 +1568,7 @@ def _changed_decision_row(
     prior_idx = int(prior_top1[row_idx].item())
     teacher_idx = _teacher_top1_legal_index(teacher_batch, row_idx)
     state = _review_state_context(step)
+    actor = int(getattr(step, "actor", 0)) if step is not None else 0
     before_type = _action_type_name(legal_actions, parent_idx)
     after_type = _action_type_name(legal_actions, student_idx)
     teacher_type = _action_type_name(legal_actions, teacher_idx)
@@ -1566,7 +1578,7 @@ def _changed_decision_row(
         "step_id": "" if step is None else int(step.step_id),
         "kyoku": state.get("kyoku", ""),
         "honba": state.get("honba", ""),
-        "actor": "" if step is None else int(step.actor),
+        "actor": "" if step is None else actor,
         "action_scope": _action_scope_for_legal_actions(legal_actions),
         "hand": state.get("hand_json", ""),
         "draw": state.get("draw", ""),
@@ -1575,7 +1587,7 @@ def _changed_decision_row(
         "riichi_sticks": state.get("riichi_sticks", ""),
         "kyotaku": state.get("riichi_sticks", ""),
         "last_discard": state.get("last_discard_json", ""),
-        "legal_actions": _json_dumps([_action_display(action) for action in legal_actions]),
+        "legal_actions": _json_dumps([_action_display(action, actor=actor) for action in legal_actions]),
         "rule_prior_topk": _topk_action_labels(legal_actions, prior_logits[row_idx], k=5),
         "mortal_q_topk": _teacher_topk_action_labels(legal_actions, teacher_batch, row_idx, k=5),
         "student_before_topk": _topk_action_labels(legal_actions, parent_logits[row_idx], k=5),
@@ -1650,6 +1662,11 @@ def _decision_review_case_row(
         "rulebase_top1": _action_label(legal_actions, prior_idx),
         "round_state": _review_round_state(snapshot, events),
         "players": _review_players(snapshot, actor),
+        "visibility": {
+            "actor_hand_visible": True,
+            "opponent_hands_visible": False,
+            "oracle_fields_available": bool(snapshot.get("hands")),
+        },
         "legal_actions": _review_legal_action_table(
             legal_actions,
             row_idx=row_idx,
@@ -2092,14 +2109,18 @@ def _review_snapshot_and_events(step: Any | None, actor: int) -> tuple[dict[str,
 
 
 def _review_round_state(snapshot: Mapping[str, Any], events: Sequence[Any]) -> dict[str, Any]:
+    winds = snapshot.get("winds", snapshot.get("jikaze", ()))
     return {
         "bakaze": snapshot.get("bakaze", snapshot.get("bakaze_pai", "")),
         "kyoku": snapshot.get("kyoku", ""),
         "honba": snapshot.get("honba", ""),
+        "oya": snapshot.get("oya", snapshot.get("dealer", "")),
         "riichi_sticks": snapshot.get("kyotaku", snapshot.get("riichi_sticks", "")),
+        "kyotaku": snapshot.get("kyotaku", snapshot.get("riichi_sticks", "")),
         "dora_indicators": _tile_list_labels(snapshot.get("dora_markers", snapshot.get("dora_indicators", ()))),
         "scores": snapshot.get("scores", ()),
         "wall_remaining": snapshot.get("wall_remaining", snapshot.get("remaining_wall", "")),
+        "seat_winds": [_tile_label_value(_indexed_or_empty(winds, seat)) for seat in range(4)],
         "turn_index": max(0, len(events) - 1),
         "last_discard": _discard_entry(snapshot.get("last_discard")),
     }
@@ -2120,11 +2141,11 @@ def _review_players(snapshot: Mapping[str, Any], actor: int) -> list[dict[str, A
                 "seat": seat,
                 "is_actor": seat == int(actor),
                 "hand": _tile_list_labels(_indexed_or_empty(hands, seat) or (actor_hand if seat == int(actor) else ())),
-                "draw": snapshot.get("tsumo_pai") or snapshot.get("drawn_tile") or "",
+                "draw": (snapshot.get("tsumo_pai") or snapshot.get("drawn_tile") or "") if seat == int(actor) else "",
                 "discards": [_discard_entry(discard) for discard in _list_or_empty(_indexed_or_empty(discards, seat))],
                 "melds": [_meld_entry(meld) for meld in _list_or_empty(_indexed_or_empty(melds, seat))],
                 "riichi": bool(_indexed_or_empty(riichi, seat)),
-                "wind": _indexed_or_empty(winds, seat),
+                "wind": _tile_label_value(_indexed_or_empty(winds, seat)),
                 "score": _indexed_or_empty(scores, seat),
             }
         )
@@ -2179,6 +2200,10 @@ def _tile_label_value(value: Any) -> str:
         return ""
     if isinstance(value, Mapping):
         return _tile_label_value(value.get("pai", value.get("tile", value.get("name", ""))))
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        if not value:
+            return ""
+        return _tile_label_value(value[0])
     if isinstance(value, int):
         return str(IDX_TO_TILE_NAME.get(int(value), value))
     text = str(value)
@@ -2250,16 +2275,54 @@ def _review_reason(
     return ",".join(dict.fromkeys(reasons))
 
 
-def _action_display(action: ActionSpec) -> dict[str, Any]:
+def _with_review_case_run_context(
+    row: Mapping[str, Any],
+    *,
+    config_id: int,
+    iteration: int,
+    output_dir: Path,
+    rollout_seed: int,
+    torch_seed: int,
+) -> dict[str, Any]:
+    return {
+        **dict(row),
+        "pilot_config_id": int(config_id),
+        "iteration": int(iteration),
+        "case_id": f"cfg{int(config_id)}_iter{int(iteration)}_{row.get('case_id', '')}",
+        "run_id": output_dir.name,
+        "rollout_seed": int(rollout_seed),
+        "torch_seed": int(torch_seed),
+    }
+
+
+def _review_case_risk_score(row: Mapping[str, Any]) -> int:
+    reason = str(row.get("review_reason", ""))
+    score = 0
+    if bool(row.get("selected_changed")) and bool(row.get("teacher_disagreed")):
+        score += 100
+    elif bool(row.get("selected_changed")):
+        score += 80
+    elif bool(row.get("teacher_disagreed")):
+        score += 60
+    if "kan_related" in reason:
+        score += 30
+    if "call_related" in reason:
+        score += 25
+    if "reach_related" in reason:
+        score += 20
+    return score
+
+
+def _action_display(action: ActionSpec, *, actor: int = 0) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "type": action.action_type.name,
         "canonical_key": action.canonical_key,
     }
     try:
-        payload["mjai_events"] = action.to_mjai_events(actor=0)
+        payload["mjai_events"] = _normalize_mjai_event_actors(action.to_mjai_events(actor=int(actor)), actor)
     except Exception:
         try:
-            payload["mjai"] = action.to_mjai_action(actor=0)
+            payload["mjai"] = _normalize_mjai_event_actors((action.to_mjai_action(actor=int(actor)),), actor)[0]
         except Exception as exc:  # pragma: no cover - diagnostic best effort.
             payload["error"] = str(exc)
     return payload
@@ -2267,12 +2330,24 @@ def _action_display(action: ActionSpec) -> dict[str, Any]:
 
 def _action_mjai_events(action: ActionSpec, actor: int) -> list[dict[str, Any]]:
     try:
-        return list(action.to_mjai_events(actor=int(actor)))
+        return _normalize_mjai_event_actors(action.to_mjai_events(actor=int(actor)), actor)
     except Exception:
         try:
-            return [action.to_mjai_action(actor=int(actor))]
+            return _normalize_mjai_event_actors((action.to_mjai_action(actor=int(actor)),), actor)
         except Exception:
             return []
+
+
+def _normalize_mjai_event_actors(events: Iterable[Any], actor: int) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for event in events:
+        if isinstance(event, Mapping):
+            row = dict(event)
+        else:
+            continue
+        row["actor"] = int(actor)
+        normalized.append(row)
+    return normalized
 
 
 def _action_tile_label(action: ActionSpec) -> str:
@@ -2573,7 +2648,7 @@ def _write_outputs(
     _write_csv(args.output_dir / "changed_decisions.csv", changed_rows)
     _write_csv(args.output_dir / "teacher_disagreements.csv", teacher_disagreement_rows)
     _write_csv(args.output_dir / "decision_review_candidates.csv", decision_review_rows)
-    if bool(getattr(args, "export_decision_review_cases", False)):
+    if bool(getattr(args, "export_decision_review_cases", False)) and decision_review_case_rows:
         _write_jsonl(args.output_dir / "decision_review_cases.jsonl", decision_review_case_rows)
     _write_csv(args.output_dir / "checkpoint_iterations.csv", checkpoint_rows)
     _write_csv(args.output_dir / "checkpoint_summary.csv", _latest_checkpoint_rows(checkpoint_rows))
@@ -2593,7 +2668,7 @@ def _write_outputs(
             "changed_decisions": changed_rows,
             "teacher_disagreements": teacher_disagreement_rows,
             "decision_review_candidates": decision_review_rows,
-            "decision_review_cases": decision_review_case_rows,
+            "decision_review_case_count": len(decision_review_case_rows),
             "checkpoints": checkpoint_rows,
         },
     )
@@ -2627,7 +2702,7 @@ def _write_incremental_outputs(
     _write_csv(args.output_dir / "changed_decisions.csv", changed_rows)
     _write_csv(args.output_dir / "teacher_disagreements.csv", teacher_disagreement_rows)
     _write_csv(args.output_dir / "decision_review_candidates.csv", decision_review_rows)
-    if bool(getattr(args, "export_decision_review_cases", False)):
+    if bool(getattr(args, "export_decision_review_cases", False)) and decision_review_case_rows:
         _write_jsonl(args.output_dir / "decision_review_cases.jsonl", decision_review_case_rows)
     _write_csv(args.output_dir / "checkpoint_iterations.csv", checkpoint_rows)
     _write_csv(args.output_dir / "checkpoint_summary.csv", _latest_checkpoint_rows(checkpoint_rows))
@@ -2646,7 +2721,7 @@ def _write_incremental_outputs(
             "changed_decisions": changed_rows,
             "teacher_disagreements": teacher_disagreement_rows,
             "decision_review_candidates": decision_review_rows,
-            "decision_review_cases": decision_review_case_rows,
+            "decision_review_case_count": len(decision_review_case_rows),
             "checkpoints": checkpoint_rows,
         },
     )
@@ -2837,6 +2912,13 @@ def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         "".join(json.dumps(_to_jsonable(row), ensure_ascii=True, sort_keys=True) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def _append_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    if not rows:
+        return
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("".join(json.dumps(_to_jsonable(row), ensure_ascii=True, sort_keys=True) + "\n" for row in rows))
 
 
 def _write_csv(path: Path, rows: Sequence[dict[str, Any]]) -> None:
