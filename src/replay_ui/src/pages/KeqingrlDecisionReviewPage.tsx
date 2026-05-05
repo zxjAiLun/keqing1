@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import { Upload, ListFilter } from 'lucide-react';
 import { MahjongTable } from '../components/BattleBoard/MahjongTable';
@@ -17,6 +18,12 @@ type ReviewActionRow = {
   teacher_prob?: number | null;
   student_before_score?: number | null;
   student_after_score?: number | null;
+  rulebase_relative?: number | null;
+  mortal_q_relative?: number | null;
+  student_before_relative?: number | null;
+  student_after_relative?: number | null;
+  student_before_prob?: number | null;
+  student_after_prob?: number | null;
   teacher_rank?: number | null;
   rulebase_rank?: number | null;
   student_before_rank?: number | null;
@@ -245,13 +252,13 @@ export function KeqingrlDecisionReviewPage() {
 
 function ReviewDetail({ caseItem }: { caseItem: ReviewCase }) {
   const rows = [...(caseItem.legal_actions ?? [])].sort(
-    (a, b) => Number(b.student_after_score ?? Number.NEGATIVE_INFINITY) - Number(a.student_after_score ?? Number.NEGATIVE_INFINITY),
+    (a, b) => Number(displayScore(b, 'after') ?? Number.NEGATIVE_INFINITY) - Number(displayScore(a, 'after') ?? Number.NEGATIVE_INFINITY),
   );
   return (
     <div className="card">
       <SectionTitle
         title="Action Scores"
-        description="按 student after 分数从高到低排序。Teacher P 是 Mortal action-Q 在当前 teacher support 上 softmax 后的监督概率，不是另一个模型。"
+        description="按 student after 相对分数从高到低排序。Rel 分数是同一列减去本行最高值，0 表示该来源 top1；Teacher P 是 Mortal action-Q 在当前 support 上 softmax 后的监督概率。"
       />
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12, fontSize: 13 }}>
         <div><strong>before:</strong> {labelAction(caseItem.selected_before)}</div>
@@ -280,11 +287,11 @@ function ReviewDetail({ caseItem }: { caseItem: ReviewCase }) {
                   <ActionTiles row={row} />
                   <div style={{ color: 'var(--text-secondary)', marginTop: 4 }}>{actionText(row)}</div>
                 </td>
-                <td style={tdStyle}>{fmt(row.rulebase_score)}</td>
-                <td style={tdStyle}>{fmt(row.mortal_q)}</td>
+                <td style={tdStyle}>{scoreCell(displayScore(row, 'rule'), row.rulebase_score)}</td>
+                <td style={tdStyle}>{scoreCell(displayScore(row, 'mortal'), row.mortal_q)}</td>
                 <td style={tdStyle}>{fmt(row.teacher_prob)}</td>
-                <td style={tdStyle}>{fmt(row.student_before_score)}</td>
-                <td style={tdStyle}>{fmt(row.student_after_score)}</td>
+                <td style={tdStyle}>{scoreCell(displayScore(row, 'before'), row.student_before_score, row.student_before_prob)}</td>
+                <td style={tdStyle}>{scoreCell(displayScore(row, 'after'), row.student_after_score, row.student_after_prob)}</td>
                 <td style={tdStyle}>{row.rulebase_rank ?? '-'}</td>
                 <td style={tdStyle}>{row.teacher_rank ?? '-'}</td>
                 <td style={tdStyle}>{row.student_before_rank ?? '-'}</td>
@@ -316,6 +323,27 @@ function ActionTiles({ row }: { row: ReviewActionRow }) {
           <Tile tile={tile} size="small" />
         </span>
       ))}
+    </div>
+  );
+}
+
+function displayScore(row: ReviewActionRow, source: 'rule' | 'mortal' | 'before' | 'after'): number | null | undefined {
+  if (source === 'rule') return row.rulebase_relative ?? row.rulebase_score;
+  if (source === 'mortal') return row.mortal_q_relative ?? row.mortal_q;
+  if (source === 'before') return row.student_before_relative ?? row.student_before_score;
+  return row.student_after_relative ?? row.student_after_score;
+}
+
+function scoreCell(relative: number | null | undefined, raw: number | null | undefined, prob?: number | null): ReactNode {
+  return (
+    <div>
+      <div>{fmt(relative)}</div>
+      {typeof prob === 'number' && Number.isFinite(prob) && (
+        <div style={{ color: 'var(--text-secondary)', fontSize: 11 }}>p {fmt(prob)}</div>
+      )}
+      {typeof raw === 'number' && Number.isFinite(raw) && (
+        <div style={{ color: 'var(--text-secondary)', fontSize: 11 }}>raw {fmt(raw)}</div>
+      )}
     </div>
   );
 }

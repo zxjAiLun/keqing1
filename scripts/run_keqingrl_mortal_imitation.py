@@ -121,7 +121,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--update-epochs", type=int, default=3)
     parser.add_argument("--teacher-source", choices=ALLOWED_IMITATION_TEACHER_SOURCES, default="mortal-action-q")
     parser.add_argument("--teacher-temperature", type=float, default=1.0)
-    parser.add_argument("--teacher-support", choices=TEACHER_SUPPORT_MODES, default="topk")
+    parser.add_argument("--teacher-support", choices=TEACHER_SUPPORT_MODES, default="full-legal")
     parser.add_argument("--teacher-topk", type=int, default=3)
     parser.add_argument("--mortal-teacher-checkpoint", type=Path, required=True)
     parser.add_argument("--mortal-root", type=Path, default=Path("third_party/Mortal"))
@@ -1892,6 +1892,12 @@ def _review_legal_action_table(
     parent_ranks = _rank_map(parent_logits[row_idx], legal_mask, width)
     student_ranks = _rank_map(final_logits[row_idx], legal_mask, width)
     teacher_ranks = _rank_map(teacher_scores, legal_mask, width)
+    prior_relative = _relative_score_row(prior_logits[row_idx], legal_mask, width)
+    parent_relative = _relative_score_row(parent_logits[row_idx], legal_mask, width)
+    student_relative = _relative_score_row(final_logits[row_idx], legal_mask, width)
+    teacher_relative = _relative_score_row(teacher_scores, legal_mask, width)
+    parent_probs = _softmax_prob_map(parent_logits[row_idx], legal_mask, width)
+    student_probs = _softmax_prob_map(final_logits[row_idx], legal_mask, width)
     rows: list[dict[str, Any]] = []
     for index, action in enumerate(legal_actions[:width]):
         rows.append(
@@ -1905,7 +1911,13 @@ def _review_legal_action_table(
                 "mortal_q": _finite_float(teacher_scores[index]) if index < int(teacher_scores.shape[0]) else None,
                 "student_before_score": _finite_float(parent_logits[row_idx, index]),
                 "student_after_score": _finite_float(final_logits[row_idx, index]),
+                "rulebase_relative": _finite_float(prior_relative[index]),
+                "mortal_q_relative": _finite_float(teacher_relative[index]) if index < int(teacher_relative.shape[0]) else None,
+                "student_before_relative": _finite_float(parent_relative[index]),
+                "student_after_relative": _finite_float(student_relative[index]),
                 "teacher_prob": teacher_probs.get(index),
+                "student_before_prob": parent_probs.get(index),
+                "student_after_prob": student_probs.get(index),
                 "teacher_rank": teacher_ranks.get(index),
                 "rulebase_rank": rule_ranks.get(index),
                 "student_before_rank": parent_ranks.get(index),
@@ -1917,6 +1929,33 @@ def _review_legal_action_table(
             }
         )
     return rows
+
+
+def _relative_score_row(scores: torch.Tensor, legal_mask: torch.Tensor, width: int) -> torch.Tensor:
+    row = scores.detach().cpu().float()[:width].clone()
+    mask = legal_mask.detach().cpu().bool()[:width]
+    if not bool(mask.any().item()):
+        return torch.full((int(width),), float("-inf"), dtype=torch.float32)
+    finite_mask = mask & torch.isfinite(row)
+    if not bool(finite_mask.any().item()):
+        return torch.full((int(width),), float("-inf"), dtype=torch.float32)
+    max_value = row[finite_mask].max()
+    return row - max_value
+
+
+def _softmax_prob_map(scores: torch.Tensor, legal_mask: torch.Tensor, width: int) -> dict[int, float]:
+    row = scores.detach().cpu().float()[:width].clone()
+    mask = legal_mask.detach().cpu().bool()[:width]
+    finite_mask = mask & torch.isfinite(row)
+    if not bool(finite_mask.any().item()):
+        return {}
+    masked = row.masked_fill(~finite_mask, torch.finfo(torch.float32).min)
+    probs = torch.softmax(masked, dim=-1)
+    return {
+        int(index): float(probs[index].item())
+        for index in range(int(width))
+        if bool(finite_mask[index].item())
+    }
 
 
 def _teacher_legal_score_row(teacher_batch: MortalImitationTeacherBatch, row_idx: int, width: int) -> torch.Tensor:
