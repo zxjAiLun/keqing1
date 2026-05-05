@@ -389,6 +389,9 @@ def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> No
     )
 
     assert metrics["top1_changed_vs_parent_rate"] == 1.0
+    assert metrics["teacher_parent_agreement"] == 0.0
+    assert metrics["improved_to_teacher_top1_count"] == 1
+    assert metrics["regressed_from_teacher_top1_count"] == 0
     assert changed_rows[0]["changed_kind"] == "discard_to_pass"
     assert changed_rows[0]["changed_to_pass"] is True
     assert changed_rows[0]["selected_changed"] is True
@@ -466,6 +469,48 @@ def test_imitation_metrics_separates_teacher_disagreements_from_changes() -> Non
     assert teacher_disagreement_rows[0]["teacher_disagreed"] is True
     assert teacher_disagreement_rows[0]["review_reason"] == "teacher_disagreement"
     assert review_rows == teacher_disagreement_rows
+
+
+def test_imitation_metrics_tracks_regressed_teacher_top1() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.DISCARD, tile=_tile("2m")),
+        ActionSpec(ActionType.PASS),
+    )
+    policy_input = _policy_input(
+        legal_actions,
+        mask_ids=(1, MORTAL_PASS_ACTION_ID),
+        prior_logits=torch.tensor([[2.0, 1.0, -100.0]], dtype=torch.float32),
+    )
+    teacher_data = prepare_mortal_imitation_teacher_data(
+        policy_input,
+        prepared_steps=(),
+        teacher_support="topk",
+        teacher_topk=2,
+        strict_extra=False,
+    )
+
+    metrics, changed_rows, teacher_disagreement_rows, review_rows, _review_cases, _breakdown = imitation_metrics(
+        _output([3.0, 0.0, -100.0]),
+        policy_input,
+        parent_output=_output([0.0, 3.0, -100.0]),
+        source_output=_output([0.0, 3.0, -100.0]),
+        prepared_steps=(SimpleNamespace(episode_id="ep", step_id=7, actor=0, mortal_teacher_events=()),),
+        teacher_support="topk",
+        teacher_topk=2,
+        teacher_temperature=1.0,
+        teacher_batch=teacher_data.teacher_batch,
+        mapping_summary=teacher_data.summary,
+    )
+
+    assert metrics["teacher_parent_agreement"] == 1.0
+    assert metrics["teacher_top1_preserved_count"] == 0
+    assert metrics["teacher_top1_preserved_rate"] == 0.0
+    assert metrics["regressed_from_teacher_top1_count"] == 1
+    assert metrics["regressed_from_teacher_top1_rate"] == 1.0
+    assert metrics["improved_to_teacher_top1_count"] == 0
+    assert len(changed_rows) == 1
+    assert len(teacher_disagreement_rows) == 1
+    assert review_rows[0]["review_reason"] == "selected_changed,teacher_disagreement"
 
 
 def test_adaptive_topk_keeps_low_candidate_response_rows_valid() -> None:

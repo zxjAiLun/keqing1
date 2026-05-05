@@ -1416,9 +1416,18 @@ def imitation_metrics(
     parent_top1 = parent_logits.argmax(dim=-1)
     source_top1 = source_logits.argmax(dim=-1)
     prior_top1 = prior_logits.argmax(dim=-1)
+    teacher_top1 = torch.tensor(
+        [_teacher_top1_legal_index(teacher_batch, row_idx) for row_idx in range(int(final_logits.shape[0]))],
+        dtype=torch.long,
+        device=final_top1.device,
+    )
     changed_vs_parent = final_top1 != parent_top1
     changed_vs_source = final_top1 != source_top1
     changed_vs_prior = final_top1 != prior_top1
+    parent_matches_teacher = parent_top1 == teacher_top1
+    final_matches_teacher = final_top1 == teacher_top1
+    regressed_from_teacher = parent_matches_teacher & ~final_matches_teacher
+    improved_to_teacher = ~parent_matches_teacher & final_matches_teacher
     ranks: list[float] = []
     rank_ge5 = 0
     changed_rows: list[dict[str, Any]] = []
@@ -1427,7 +1436,7 @@ def imitation_metrics(
     review_case_rows: list[dict[str, Any]] = []
     for row_idx in range(int(final_logits.shape[0])):
         selected_changed = bool(changed_vs_parent[row_idx].item())
-        teacher_idx = _teacher_top1_legal_index(teacher_batch, row_idx)
+        teacher_idx = int(teacher_top1[row_idx].item())
         teacher_disagreed = int(final_top1[row_idx].item()) != int(teacher_idx)
         if not selected_changed and not teacher_disagreed:
             continue
@@ -1503,6 +1512,13 @@ def imitation_metrics(
             "top1_changed_vs_parent_rate": _mean_bool(changed_vs_parent),
             "top1_changed_vs_source_rate": _mean_bool(changed_vs_source),
             "policy_top1_vs_rule_top1_rate": 1.0 - _mean_bool(changed_vs_prior),
+            "teacher_parent_agreement": _mean_bool(parent_matches_teacher),
+            "teacher_top1_preserved_count": int((parent_matches_teacher & final_matches_teacher).sum().detach().cpu().item()),
+            "teacher_top1_preserved_rate": _masked_bool_mean(final_matches_teacher, parent_matches_teacher),
+            "regressed_from_teacher_top1_count": int(regressed_from_teacher.sum().detach().cpu().item()),
+            "regressed_from_teacher_top1_rate": _mean_bool(regressed_from_teacher),
+            "improved_to_teacher_top1_count": int(improved_to_teacher.sum().detach().cpu().item()),
+            "improved_to_teacher_top1_rate": _mean_bool(improved_to_teacher),
             "changed_rank_mean": _mean_float(ranks),
             "rank_ge5_rate": rank_ge5 / max(1, len(ranks)),
             "clip_like_logit_delta_max": float(legal_delta.max().detach().cpu().item()),
@@ -2780,6 +2796,13 @@ def _weighted_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
 
 def _mean_bool(values: torch.Tensor) -> float:
     return float(values.float().mean().detach().cpu().item()) if values.numel() else 0.0
+
+
+def _masked_bool_mean(values: torch.Tensor, mask: torch.Tensor) -> float:
+    mask_bool = mask.bool()
+    if not bool(mask_bool.any().detach().cpu().item()):
+        return 0.0
+    return float(values.bool().masked_select(mask_bool).float().mean().detach().cpu().item())
 
 
 def _mean_float(values: Sequence[float]) -> float:
