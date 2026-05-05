@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Sequence
 
 import keqing_core
 import torch
+from mahjong_env.legal_actions import _reach_discard_candidates
+from mahjong_env.tiles import normalize_tile
 
 from gateway.battle import BattleConfig, BattleManager, BattleRoom
 from keqingrl.actions import (
@@ -1106,11 +1109,65 @@ class DiscardOnlyMahjongEnv:
         actor: int,
     ) -> list[tuple[str, bool]]:
         try:
-            return list(keqing_core.enumerate_keqingv4_reach_discards(snapshot, actor))
+            rust_candidates = list(keqing_core.enumerate_keqingv4_reach_discards(snapshot, actor))
         except RuntimeError as exc:
             if keqing_core.is_missing_rust_capability_error(exc):
                 raise RuntimeError("KeqingRL runtime requires Rust reach-discard enumeration") from exc
             raise
+        return self._filter_reach_discard_candidates_against_snapshot(
+            snapshot,
+            actor,
+            rust_candidates,
+        )
+
+    def _filter_reach_discard_candidates_against_snapshot(
+        self,
+        snapshot: dict[str, object],
+        actor: int,
+        candidates: Sequence[tuple[str, bool]],
+    ) -> list[tuple[str, bool]]:
+        hand_values = snapshot.get("hand")
+        if not isinstance(hand_values, Sequence) or isinstance(hand_values, (str, bytes)):
+            return list(candidates)
+        hand = Counter(
+            normalize_tile(str(tile))
+            for tile in hand_values
+            if str(tile)
+        )
+        last_tsumo, last_tsumo_raw = self._reach_tsumo_values(snapshot, actor)
+        safe_candidates = set(_reach_discard_candidates(hand, last_tsumo, last_tsumo_raw))
+        if not safe_candidates:
+            return []
+        return [
+            (str(pai), bool(tsumogiri))
+            for pai, tsumogiri in candidates
+            if (str(pai), bool(tsumogiri)) in safe_candidates
+        ]
+
+    def _reach_tsumo_values(
+        self,
+        snapshot: dict[str, object],
+        actor: int,
+    ) -> tuple[str | None, str | None]:
+        last_tsumo = self._actor_sequence_value(snapshot.get("last_tsumo"), actor)
+        last_tsumo_raw = self._actor_sequence_value(snapshot.get("last_tsumo_raw"), actor)
+        tsumo_pai = snapshot.get("tsumo_pai")
+        if last_tsumo is None and isinstance(tsumo_pai, str) and tsumo_pai:
+            last_tsumo = normalize_tile(tsumo_pai)
+        if last_tsumo_raw is None and isinstance(tsumo_pai, str) and tsumo_pai:
+            last_tsumo_raw = tsumo_pai
+        return last_tsumo, last_tsumo_raw
+
+    def _actor_sequence_value(self, value: object, actor: int) -> str | None:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            return None
+        if actor >= len(value):
+            return None
+        item = value[actor]
+        if item is None:
+            return None
+        text = str(item)
+        return text if text else None
 
     def _is_self_turn_hora(self, raw_spec: MahjongActionSpec) -> bool:
         return raw_spec.type == "hora" and (

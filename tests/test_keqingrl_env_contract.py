@@ -355,6 +355,69 @@ def test_collect_controlled_self_turn_actions_expanded_scope_preserves_order() -
     assert [dispatch[-1].get("pai") for _spec, dispatch in controlled_pairs[:4]] == ["4m", "7m", "4m", "7m"]
 
 
+def test_reach_discard_candidates_do_not_double_count_tsumo_in_full_hand_snapshot() -> None:
+    env = DiscardOnlyMahjongEnv(
+        self_turn_action_types=(
+            ActionType.DISCARD,
+            ActionType.REACH_DISCARD,
+        )
+    )
+    snapshot = {
+        "actor": 2,
+        "hand": ["2s", "2s", "2s", "5s", "5sr", "6s", "7m", "7p", "7s", "7s", "8m", "8s", "8s", "9m"],
+        "tsumo_pai": "2s",
+        "last_tsumo": [None, None, "2s", None],
+        "last_tsumo_raw": [None, None, "2s", None],
+    }
+
+    filtered = env._filter_reach_discard_candidates_against_snapshot(
+        snapshot,
+        2,
+        [("2s", True), ("7p", False)],
+    )
+
+    assert filtered == [("7p", False)]
+
+
+def test_collect_reach_discard_actions_filters_overwide_rust_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = DiscardOnlyMahjongEnv(
+        self_turn_action_types=(
+            ActionType.DISCARD,
+            ActionType.REACH_DISCARD,
+        )
+    )
+    monkeypatch.setattr(
+        keqing_core,
+        "enumerate_keqingv4_reach_discards",
+        lambda *_args: [("2s", True), ("7p", False)],
+    )
+    snapshot = {
+        "actor": 2,
+        "hand": ["2s", "2s", "2s", "5s", "5sr", "6s", "7m", "7p", "7s", "7s", "8m", "8s", "8s", "9m"],
+        "tsumo_pai": "2s",
+        "last_tsumo": [None, None, "2s", None],
+        "last_tsumo_raw": [None, None, "2s", None],
+        "remaining_wall": 23,
+        "scores": [25000, 25000, 25000, 25000],
+        "reached": [False, False, False, False],
+        "pending_reach": [False, False, False, False],
+        "melds": [[], [], [], []],
+    }
+    raw_legal_actions = (
+        MahjongActionSpec(type="dahai", actor=2, pai="2s", tsumogiri=True),
+        MahjongActionSpec(type="dahai", actor=2, pai="7p", tsumogiri=False),
+        MahjongActionSpec(type="reach", actor=2),
+    )
+
+    controlled_pairs = env._collect_controlled_self_turn_actions(snapshot, raw_legal_actions)
+
+    assert [
+        (spec.action_type, spec.tile)
+        for spec, _dispatch in controlled_pairs
+        if spec.action_type == ActionType.REACH_DISCARD
+    ] == [(ActionType.REACH_DISCARD, action_from_mahjong_spec(MahjongActionSpec(type="dahai", actor=2, pai="7p")).tile)]
+
+
 def test_collect_controlled_self_turn_actions_filters_late_reach() -> None:
     env = DiscardOnlyMahjongEnv(
         self_turn_action_types=(
