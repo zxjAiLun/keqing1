@@ -314,7 +314,7 @@ def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> No
         strict_extra=False,
     )
 
-    metrics, changed_rows, teacher_disagreement_rows, review_rows, breakdown_rows = imitation_metrics(
+    metrics, changed_rows, teacher_disagreement_rows, review_rows, review_case_rows, breakdown_rows = imitation_metrics(
         _output([0.0, 3.0, -100.0]),
         policy_input,
         parent_output=_output([3.0, 0.0, -100.0]),
@@ -325,6 +325,7 @@ def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> No
         teacher_temperature=1.0,
         teacher_batch=teacher_data.teacher_batch,
         mapping_summary=teacher_data.summary,
+        export_decision_review_cases=True,
     )
 
     assert metrics["top1_changed_vs_parent_rate"] == 1.0
@@ -333,6 +334,10 @@ def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> No
     assert changed_rows[0]["selected_changed"] is True
     assert teacher_disagreement_rows == []
     assert review_rows[0]["review_reason"] == "selected_changed"
+    assert review_case_rows[0]["review_reason"] == "selected_changed"
+    assert len(review_case_rows[0]["legal_actions"]) == 2
+    assert review_case_rows[0]["legal_actions"][1]["is_mortal_top1"] is True
+    assert review_case_rows[0]["legal_actions"][1]["teacher_prob"] is not None
     assert breakdown_rows == [
         {
             "action_type": "PASS",
@@ -382,7 +387,7 @@ def test_imitation_metrics_separates_teacher_disagreements_from_changes() -> Non
         strict_extra=False,
     )
 
-    _metrics, changed_rows, teacher_disagreement_rows, review_rows, _breakdown = imitation_metrics(
+    _metrics, changed_rows, teacher_disagreement_rows, review_rows, _review_cases, _breakdown = imitation_metrics(
         _output([3.0, 0.0, -100.0]),
         policy_input,
         parent_output=_output([3.0, 0.0, -100.0]),
@@ -452,6 +457,7 @@ def test_incremental_outputs_include_action_type_breakdown(tmp_path: Path) -> No
         mortal_teacher_checkpoint=Path("mortal.pth"),
         teacher_support="topk",
         teacher_topk=3,
+        export_decision_review_cases=False,
     )
 
     _write_incremental_outputs(
@@ -462,6 +468,7 @@ def test_incremental_outputs_include_action_type_breakdown(tmp_path: Path) -> No
         changed_rows=(),
         teacher_disagreement_rows=(),
         decision_review_rows=(),
+        decision_review_case_rows=(),
         checkpoint_rows=(),
     )
 
@@ -469,6 +476,34 @@ def test_incremental_outputs_include_action_type_breakdown(tmp_path: Path) -> No
     assert rows == [{"action_type": "RON", "row_count": "2"}]
     assert (tmp_path / "teacher_disagreements.csv").exists()
     assert (tmp_path / "decision_review_candidates.csv").exists()
+
+
+def test_incremental_outputs_write_decision_review_cases_jsonl_when_enabled(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        output_dir=tmp_path,
+        candidate_summary=Path("summary.csv"),
+        source_config_ids=(93,),
+        teacher_source="mortal-action-q",
+        mortal_teacher_checkpoint=Path("mortal.pth"),
+        teacher_support="adaptive-topk",
+        teacher_topk=3,
+        export_decision_review_cases=True,
+    )
+
+    _write_incremental_outputs(
+        args,
+        iteration_rows=(),
+        action_type_breakdown_rows=(),
+        audit_rows=(),
+        changed_rows=(),
+        teacher_disagreement_rows=(),
+        decision_review_rows=(),
+        decision_review_case_rows=({"case_id": "case-a", "legal_actions": [{"type": "PASS"}]},),
+        checkpoint_rows=(),
+    )
+
+    rows = [json.loads(line) for line in (tmp_path / "decision_review_cases.jsonl").read_text().splitlines()]
+    assert rows == [{"case_id": "case-a", "legal_actions": [{"type": "PASS"}]}]
 
 
 def test_deferred_mortal_observation_extras_are_materialized_after_rollout() -> None:
