@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 import { Upload, ListFilter } from 'lucide-react';
 import { MahjongTable } from '../components/BattleBoard/MahjongTable';
@@ -263,28 +262,27 @@ export function KeqingrlDecisionReviewPage() {
 
 function ReviewDetail({ caseItem }: { caseItem: ReviewCase }) {
   const rows = [...(caseItem.legal_actions ?? [])].sort(
-    (a, b) => Number(displayScore(b, 'after') ?? Number.NEGATIVE_INFINITY) - Number(displayScore(a, 'after') ?? Number.NEGATIVE_INFINITY),
+    (a, b) => Number(b.student_after_score ?? Number.NEGATIVE_INFINITY) - Number(a.student_after_score ?? Number.NEGATIVE_INFINITY),
   );
   return (
     <div className="card">
       <SectionTitle
         title="Action Scores"
-        description="按 student after 相对分数从高到低排序。Rel 分数是同一列减去本行最高值，0 表示该来源 top1；Teacher P 是 Mortal action-Q 在当前 support 上 softmax 后的监督概率。"
+        description="按 student after raw logit 从高到低排序。Teacher P 是 Mortal action-Q 在 full-legal support 上 softmax 后的监督概率。"
       />
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12, fontSize: 13 }}>
         <div><strong>before:</strong> {labelAction(caseItem.selected_before)}</div>
         <div><strong>after:</strong> {labelAction(caseItem.selected_after)}</div>
         <div><strong>Mortal:</strong> {labelAction(caseItem.teacher_top1)}</div>
-        <div><strong>rulebase:</strong> {labelAction(caseItem.rulebase_top1)}</div>
       </div>
       <div style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 10 }}>
-        Rank 列中 1 表示该打分源的最高分；Rule Rank=rulebase 排名，Mortal Rank=Mortal Q 排名，Before/After Rank=学生更新前/后的排名。
+        Rank 列中 1 表示该打分源的最高分；Mortal Rank=Mortal Q 排名，Before/After Rank=学生更新前/后的排名。
       </div>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
           <thead>
             <tr>
-              {['#', 'Action', 'Rule', 'Mortal Q', 'Teacher P', 'Before', 'After', 'Rule Rank', 'Mortal Rank', 'Before Rank', 'After Rank', 'Flags'].map((head) => (
+              {['#', 'Action', 'Mortal Q', 'Teacher P', 'Before', 'After', 'Mortal Rank', 'Before Rank', 'After Rank', 'Flags'].map((head) => (
                 <th key={head} style={thStyle}>{head}</th>
               ))}
             </tr>
@@ -298,17 +296,14 @@ function ReviewDetail({ caseItem }: { caseItem: ReviewCase }) {
                   <ActionTiles row={row} />
                   <div style={{ color: 'var(--text-secondary)', marginTop: 4 }}>{actionText(row)}</div>
                 </td>
-                <td style={tdStyle}>{scoreCell(displayScore(row, 'rule'), row.rulebase_score)}</td>
-                <td style={tdStyle}>{scoreCell(displayScore(row, 'mortal'), row.mortal_q)}</td>
+                <td style={tdStyle}>{fmt(row.mortal_q)}</td>
                 <td style={tdStyle}>{fmt(row.teacher_prob)}</td>
-                <td style={tdStyle}>{scoreCell(displayScore(row, 'before'), row.student_before_score, row.student_before_prob)}</td>
-                <td style={tdStyle}>{scoreCell(displayScore(row, 'after'), row.student_after_score, row.student_after_prob)}</td>
-                <td style={tdStyle}>{row.rulebase_rank ?? '-'}</td>
+                <td style={tdStyle}>{scoreWithProb(row.student_before_score, row.student_before_prob)}</td>
+                <td style={tdStyle}>{scoreWithProb(row.student_after_score, row.student_after_prob)}</td>
                 <td style={tdStyle}>{row.teacher_rank ?? '-'}</td>
                 <td style={tdStyle}>{row.student_before_rank ?? '-'}</td>
                 <td style={tdStyle}>{row.student_after_rank ?? '-'}</td>
                 <td style={tdStyle}>{[
-                  row.is_rulebase_top1 ? 'rule' : '',
                   row.is_mortal_top1 ? 'Mortal' : '',
                   row.is_student_before_top1 ? 'before' : '',
                   row.is_student_after_top1 ? 'after' : '',
@@ -338,22 +333,12 @@ function ActionTiles({ row }: { row: ReviewActionRow }) {
   );
 }
 
-function displayScore(row: ReviewActionRow, source: 'rule' | 'mortal' | 'before' | 'after'): number | null | undefined {
-  if (source === 'rule') return row.rulebase_relative ?? row.rulebase_score;
-  if (source === 'mortal') return row.mortal_q_relative ?? row.mortal_q;
-  if (source === 'before') return row.student_before_relative ?? row.student_before_score;
-  return row.student_after_relative ?? row.student_after_score;
-}
-
-function scoreCell(relative: number | null | undefined, raw: number | null | undefined, prob?: number | null): ReactNode {
+function scoreWithProb(score: number | null | undefined, prob?: number | null) {
   return (
     <div>
-      <div>{fmt(relative)}</div>
+      <div>{fmt(score)}</div>
       {typeof prob === 'number' && Number.isFinite(prob) && (
         <div style={{ color: 'var(--text-secondary)', fontSize: 11 }}>p {fmt(prob)}</div>
-      )}
-      {typeof raw === 'number' && Number.isFinite(raw) && (
-        <div style={{ color: 'var(--text-secondary)', fontSize: 11 }}>raw {fmt(raw)}</div>
       )}
     </div>
   );
