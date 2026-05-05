@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KeqingRL Decision Review</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --line: #d8dde6;
+      --text: #17202a;
+      --muted: #667085;
+      --accent: #0f766e;
+      --warn: #b45309;
+      --bad: #b91c1c;
+      --good: #047857;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+    }
+    header {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    h1 {
+      font-size: 16px;
+      margin: 0;
+      white-space: nowrap;
+    }
+    input, select, button {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--text);
+      border-radius: 6px;
+      padding: 7px 9px;
+      font: inherit;
+    }
+    button {
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    main {
+      display: grid;
+      grid-template-columns: 340px minmax(380px, 1fr) minmax(520px, 1.35fr);
+      min-height: calc(100vh - 58px);
+    }
+    aside, section {
+      border-right: 1px solid var(--line);
+      min-width: 0;
+    }
+    .list {
+      height: calc(100vh - 58px);
+      overflow: auto;
+      background: var(--panel);
+    }
+    .case {
+      width: 100%;
+      text-align: left;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+      color: var(--text);
+      border-radius: 0;
+      padding: 10px 12px;
+    }
+    .case.active {
+      background: #e6fffb;
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+    .case-title {
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .case-meta {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 4px;
+    }
+    .content {
+      padding: 14px;
+      overflow: auto;
+      height: calc(100vh - 86px);
+    }
+    .bar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 8px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .pill.good { color: var(--good); border-color: #a7f3d0; background: #ecfdf5; }
+    .pill.warn { color: var(--warn); border-color: #fed7aa; background: #fff7ed; }
+    .pill.bad { color: var(--bad); border-color: #fecaca; background: #fef2f2; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .panel h2 {
+      margin: 0 0 10px;
+      font-size: 14px;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 130px 1fr;
+      gap: 6px 10px;
+      font-size: 13px;
+    }
+    .kv span:nth-child(odd) {
+      color: var(--muted);
+    }
+    .players {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .player {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+      background: #fbfcfe;
+    }
+    .player.actor {
+      border-color: var(--accent);
+      background: #f0fdfa;
+    }
+    .tiles {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      margin-top: 6px;
+    }
+    .tile {
+      min-width: 22px;
+      height: 28px;
+      border: 1px solid #cbd5e1;
+      border-radius: 4px;
+      background: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 3px;
+      font-size: 12px;
+      font-weight: 650;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 7px 8px;
+      text-align: left;
+      font-size: 12px;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      background: #f8fafc;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    tr.top-mortal { background: #ecfdf5; }
+    tr.top-after { box-shadow: inset 3px 0 0 var(--accent); }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      word-break: break-all;
+    }
+    .empty {
+      color: var(--muted);
+      padding: 24px;
+    }
+    @media (max-width: 1100px) {
+      main { grid-template-columns: 1fr; }
+      .list, .content { height: auto; max-height: none; }
+      aside, section { border-right: 0; border-bottom: 1px solid var(--line); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>KeqingRL Review</h1>
+    <input id="fileInput" type="file" accept=".jsonl,.json">
+    <select id="filter">
+      <option value="all">All cases</option>
+      <option value="selected_changed">Selected changed</option>
+      <option value="teacher_disagreement">Teacher disagreement</option>
+      <option value="reach_related">Reach</option>
+      <option value="kan_related">Kan</option>
+      <option value="call_related">Call</option>
+    </select>
+    <select id="sort">
+      <option value="risk">Risk order</option>
+      <option value="teacher_margin">Teacher margin</option>
+      <option value="case_id">Case id</option>
+    </select>
+    <button id="loadSample">Load SeedB</button>
+    <span id="status" class="pill">No file loaded</span>
+  </header>
+  <main>
+    <aside class="list" id="caseList"></aside>
+    <section class="content" id="statePane"><div class="empty">Load a decision_review_cases.jsonl file.</div></section>
+    <section class="content" id="actionPane"></section>
+  </main>
+  <script>
+    const state = { cases: [], filtered: [], selected: 0 };
+    const samplePath = "../reports/keqingrl_mortal_action_q_imitation_fullscope_adaptive_topk_v2_iter4_seedB_ep32_memmon_review_cases/decision_review_cases.jsonl";
+    const $ = (id) => document.getElementById(id);
+    const safe = (value) => value === undefined || value === null || value === "" ? "-" : String(value);
+    const fixed = (value) => typeof value === "number" && Number.isFinite(value) ? value.toFixed(3) : "-";
+    const html = (value) => safe(value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[ch]));
+
+    $("fileInput").addEventListener("change", async (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      loadText(await file.text(), file.name);
+    });
+    $("filter").addEventListener("change", render);
+    $("sort").addEventListener("change", render);
+    $("loadSample").addEventListener("click", async () => {
+      try {
+        const response = await fetch(samplePath);
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        loadText(await response.text(), samplePath);
+      } catch (error) {
+        $("status").textContent = "Sample fetch failed; use file picker";
+        console.error(error);
+      }
+    });
+
+    function loadText(text, label) {
+      state.cases = text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+      state.selected = 0;
+      $("status").textContent = `${state.cases.length} cases: ${label}`;
+      render();
+    }
+
+    function render() {
+      const filter = $("filter").value;
+      state.filtered = state.cases.filter((item) => filter === "all" || String(item.review_reason || "").includes(filter));
+      state.filtered.sort(sorter($("sort").value));
+      if (state.selected >= state.filtered.length) state.selected = 0;
+      renderList();
+      renderCase(state.filtered[state.selected]);
+    }
+
+    function sorter(mode) {
+      if (mode === "case_id") return (a, b) => String(a.case_id).localeCompare(String(b.case_id));
+      if (mode === "teacher_margin") return (a, b) => teacherMargin(b) - teacherMargin(a);
+      return (a, b) => riskScore(b) - riskScore(a);
+    }
+
+    function riskScore(item) {
+      const reason = String(item.review_reason || "");
+      return (item.selected_changed && item.teacher_disagreed ? 100 : 0)
+        + (reason.includes("kan_related") ? 40 : 0)
+        + (reason.includes("call_related") ? 30 : 0)
+        + (reason.includes("reach_related") ? 25 : 0)
+        + (reason.includes("teacher_disagreement") ? 10 : 0)
+        + teacherMargin(item);
+    }
+
+    function teacherMargin(item) {
+      const scores = (item.legal_actions || [])
+        .map((action) => action.mortal_q)
+        .filter((value) => typeof value === "number")
+        .sort((a, b) => b - a);
+      return scores.length >= 2 ? scores[0] - scores[1] : 0;
+    }
+
+    function renderList() {
+      const list = $("caseList");
+      if (!state.filtered.length) {
+        list.innerHTML = "<div class='empty'>No cases match this filter.</div>";
+        return;
+      }
+      list.innerHTML = state.filtered.map((item, index) => `
+        <button class="case ${index === state.selected ? "active" : ""}" data-index="${index}">
+          <div class="case-title">${html(item.case_id)}</div>
+          <div class="case-meta">${html(item.review_reason)} | ${html(item.row_scope)} | step ${html(item.step_id)}</div>
+          <div class="case-meta">before ${actionName(item, "is_student_before_top1")} -> after ${actionName(item, "is_student_after_top1")} | Mortal ${actionName(item, "is_mortal_top1")}</div>
+        </button>`).join("");
+      list.querySelectorAll(".case").forEach((button) => {
+        button.addEventListener("click", () => {
+          state.selected = Number(button.dataset.index);
+          render();
+        });
+      });
+    }
+
+    function renderCase(item) {
+      if (!item) {
+        $("statePane").innerHTML = "<div class='empty'>No case selected.</div>";
+        $("actionPane").innerHTML = "";
+        return;
+      }
+      $("statePane").innerHTML = `
+        <div class="bar">
+          ${pill(item.selected_changed, "selected changed")}
+          ${pill(item.teacher_disagreed, "teacher disagreed")}
+          ${reasonPills(item.review_reason)}
+        </div>
+        <div class="panel">
+          <h2>Decision</h2>
+          <div class="kv">
+            <span>case</span><code>${html(item.case_id)}</code>
+            <span>run</span><span>${html(item.run_id)}</span>
+            <span>actor</span><span>${html(item.actor)}</span>
+            <span>scope</span><span>${html(item.row_scope)}</span>
+            <span>before</span><code>${html(item.selected_before)}</code>
+            <span>after</span><code>${html(item.selected_after)}</code>
+            <span>Mortal</span><code>${html(item.teacher_top1)}</code>
+            <span>rulebase</span><code>${html(item.rulebase_top1)}</code>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Round</h2>
+          ${kv(item.round_state || {})}
+        </div>
+        <div class="panel">
+          <h2>Players</h2>
+          <div class="players">${(item.players || []).map(playerCard).join("")}</div>
+        </div>
+        <div class="panel">
+          <h2>Replay Hint</h2>
+          ${kv(item.replay_hint || {})}
+        </div>`;
+      $("actionPane").innerHTML = actionTable(item);
+    }
+
+    function pill(on, label) {
+      return `<span class="pill ${on ? "warn" : "good"}">${on ? "" : "not "}${html(label)}</span>`;
+    }
+
+    function reasonPills(reason) {
+      return String(reason || "").split(",").filter(Boolean).map((part) => `<span class="pill">${html(part)}</span>`).join("");
+    }
+
+    function kv(obj) {
+      return `<div class="kv">${Object.entries(obj).map(([key, value]) => `<span>${html(key)}</span><span>${html(formatValue(value))}</span>`).join("")}</div>`;
+    }
+
+    function formatValue(value) {
+      if (Array.isArray(value) || typeof value === "object") return JSON.stringify(value);
+      return value;
+    }
+
+    function playerCard(player) {
+      return `<div class="player ${player.is_actor ? "actor" : ""}">
+        <strong>Seat ${html(player.seat)} ${player.is_actor ? "(actor)" : ""}</strong>
+        <div class="case-meta">wind ${html(player.wind)} | score ${html(player.score)} | riichi ${html(player.riichi)}</div>
+        <div class="case-meta">hand</div>${tiles(player.hand)}
+        <div class="case-meta">discards</div>${tiles(player.discards)}
+        <div class="case-meta">melds ${html(JSON.stringify(player.melds || []))}</div>
+      </div>`;
+    }
+
+    function tiles(values) {
+      const list = Array.isArray(values) ? values : [];
+      if (!list.length) return "<div class='tiles'><span class='pill'>empty</span></div>";
+      return `<div class="tiles">${list.map((tile) => `<span class="tile">${html(tile)}</span>`).join("")}</div>`;
+    }
+
+    function actionTable(item) {
+      const rows = item.legal_actions || [];
+      return `<table>
+        <thead><tr>
+          <th>#</th><th>Action</th><th>Rule</th><th>Mortal Q</th><th>Teacher P</th><th>Before</th><th>After</th><th>Ranks</th><th>Flags</th>
+        </tr></thead>
+        <tbody>${rows.map((action) => `
+          <tr class="${action.is_mortal_top1 ? "top-mortal" : ""} ${action.is_student_after_top1 ? "top-after" : ""}">
+            <td>${html(action.index)}</td>
+            <td><strong>${html(action.type)}</strong><br><code>${html(action.canonical_key)}</code><br>${html(action.pai)}</td>
+            <td>${fixed(action.rulebase_score)}</td>
+            <td>${fixed(action.mortal_q)}</td>
+            <td>${fixed(action.teacher_prob)}</td>
+            <td>${fixed(action.student_before_score)}</td>
+            <td>${fixed(action.student_after_score)}</td>
+            <td>R ${html(action.rulebase_rank)} / M ${html(action.teacher_rank)} / B ${html(action.student_before_rank)} / A ${html(action.student_after_rank)}</td>
+            <td>${flags(action)}</td>
+          </tr>`).join("")}</tbody>
+      </table>`;
+    }
+
+    function actionName(item, flag) {
+      const action = (item.legal_actions || []).find((entry) => entry[flag]);
+      return action ? action.type + (action.pai ? ` ${action.pai}` : "") : "-";
+    }
+
+    function flags(action) {
+      const names = [];
+      if (action.is_rulebase_top1) names.push("rule");
+      if (action.is_mortal_top1) names.push("Mortal");
+      if (action.is_student_before_top1) names.push("before");
+      if (action.is_student_after_top1) names.push("after");
+      return names.map((name) => `<span class="pill">${html(name)}</span>`).join(" ");
+    }
+  </script>
+</body>
+</html>
