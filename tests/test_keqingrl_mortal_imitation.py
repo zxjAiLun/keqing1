@@ -184,6 +184,7 @@ def test_mortal_imitation_defaults_to_rule_free_full_legal_support(monkeypatch: 
     assert args.rule_score_scale == 0.0
     assert args.delta_support_mode == "all"
     assert args.support_policy_mode == "unrestricted"
+    assert args.max_kyokus == 0
     assert args.decision_review_case_streaming is True
     assert _student_logit_source(args) == "neural_delta_only"
 
@@ -861,6 +862,7 @@ def test_mortal_imitation_checkpoint_summary_contains_teacher_metadata(tmp_path:
         teacher_support="topk",
         teacher_topk=3,
         teacher_temperature=1.0,
+        max_kyokus=1,
         mortal_teacher_checkpoint=Path("artifacts/mortal_training/mortal.pth"),
         mortal_teacher_strict_extra_mask=False,
         support_policy_mode="support-only-topk",
@@ -903,6 +905,7 @@ def test_mortal_imitation_checkpoint_summary_contains_teacher_metadata(tmp_path:
     assert checkpoint["contract_metadata"]["teacher_source"] == "mortal-action-q"
     assert checkpoint["contract_metadata"]["teacher_target_type"] == "topk_distribution"
     assert checkpoint["contract_metadata"]["student_logit_source"] == "rule_prior_plus_neural_delta"
+    assert checkpoint["contract_metadata"]["episode_scope"] == "max_kyokus_1"
     assert row["checkpoint_sha256"]
     assert Path(row["checkpoint_path"]).name == "policy_iter_0001.pt"
 
@@ -947,6 +950,7 @@ def test_imitation_checkpoints_do_not_overwrite_previous_iterations(tmp_path: Pa
         teacher_support="topk",
         teacher_topk=3,
         teacher_temperature=1.0,
+        max_kyokus=1,
         mortal_teacher_checkpoint=Path("artifacts/mortal_training/mortal.pth"),
         mortal_teacher_strict_extra_mask=False,
         support_policy_mode="support-only-topk",

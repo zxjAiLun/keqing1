@@ -143,7 +143,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed-stride", type=int, default=1)
     parser.add_argument("--torch-seed-base", type=int, default=202604330000)
     parser.add_argument("--learner-seats", type=int, nargs="+", default=(0,))
-    parser.add_argument("--max-kyokus", type=int, default=1)
+    parser.add_argument(
+        "--max-kyokus",
+        type=int,
+        default=0,
+        help="Maximum completed kyokus per episode. Use 0 for natural hanchan termination.",
+    )
     parser.add_argument("--max-steps", type=int, default=512)
     parser.add_argument("--gamma", type=float, default=1.0)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
@@ -423,6 +428,8 @@ def main() -> None:
                 "iteration": int(iteration),
                 "episode_count": int(args.episodes),
                 "batch_row_count": batch_row_count,
+                "max_kyokus": int(args.max_kyokus),
+                "episode_scope": _episode_scope(args),
                 "rollout_seed": int(rollout_seed),
                 "torch_seed": int(torch_seed),
                 "teacher_source": str(args.teacher_source),
@@ -549,6 +556,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--episodes and --iterations must be positive")
     if int(args.update_epochs) <= 0:
         raise ValueError("--update-epochs must be positive")
+    if int(getattr(args, "max_kyokus", 0)) < 0:
+        raise ValueError("--max-kyokus must be non-negative; use 0 for natural hanchan termination")
     if int(getattr(args, "decision_review_case_limit", 0)) < 0:
         raise ValueError("--decision-review-case-limit must be non-negative")
 
@@ -589,7 +598,7 @@ def _rollout_env(args: argparse.Namespace, teacher_runtime):
     defer_runtime = bool(args.defer_mortal_teacher_runtime)
     bridge = None if bool(args.defer_mortal_observation_bridge) else MortalObservationBridge(mortal_root=Path(args.mortal_root))
     return DiscardOnlyMahjongEnv(
-        max_kyokus=int(args.max_kyokus),
+        max_kyokus=_resolved_max_kyokus(args),
         self_turn_action_types=_action_type_tuple(args.self_turn_action_types),
         response_action_types=_action_type_tuple(args.response_action_types),
         forced_autopilot_action_types=_action_type_tuple(args.forced_autopilot_action_types),
@@ -598,6 +607,15 @@ def _rollout_env(args: argparse.Namespace, teacher_runtime):
         mortal_teacher_strict_extra_mask=bool(args.mortal_teacher_strict_extra_mask),
         mortal_teacher_defer_runtime=defer_runtime,
     )
+
+
+def _resolved_max_kyokus(args: argparse.Namespace) -> int | None:
+    value = int(args.max_kyokus)
+    return None if value == 0 else value
+
+
+def _episode_scope(args: argparse.Namespace) -> str:
+    return "hanchan" if _resolved_max_kyokus(args) is None else f"max_kyokus_{int(args.max_kyokus)}"
 
 
 def _ensure_mortal_encoded_observation_extras(
@@ -2506,6 +2524,8 @@ def _save_imitation_checkpoint(
             "teacher_topk": int(args.teacher_topk),
             "teacher_temperature": float(args.teacher_temperature),
             "student_logit_source": _student_logit_source(args),
+            "max_kyokus": int(args.max_kyokus),
+            "episode_scope": _episode_scope(args),
             "rule_score_scale": float(args.rule_score_scale),
         }
     )
@@ -2529,6 +2549,8 @@ def _save_imitation_checkpoint(
             "teacher_topk": int(args.teacher_topk),
             "teacher_temperature": float(args.teacher_temperature),
             "student_logit_source": _student_logit_source(args),
+            "max_kyokus": int(args.max_kyokus),
+            "episode_scope": _episode_scope(args),
             "support_policy_mode": str(args.support_policy_mode),
             "support_topk": int(args.delta_support_topk),
             "delta_support_mode": str(args.delta_support_mode),
@@ -2557,6 +2579,8 @@ def _save_imitation_checkpoint(
             "teacher_topk": int(args.teacher_topk),
             "teacher_temperature": float(args.teacher_temperature),
             "student_logit_source": _student_logit_source(args),
+            "max_kyokus": int(args.max_kyokus),
+            "episode_scope": _episode_scope(args),
             "mortal_teacher_checkpoint": str(args.mortal_teacher_checkpoint),
             "mortal_teacher_strict_extra_mask": bool(args.mortal_teacher_strict_extra_mask),
             "action_scope": _action_scope_fields(args),
@@ -2607,6 +2631,8 @@ def _save_imitation_checkpoint(
         "teacher_topk": int(args.teacher_topk),
         "teacher_temperature": float(args.teacher_temperature),
         "student_logit_source": _student_logit_source(args),
+        "max_kyokus": int(args.max_kyokus),
+        "episode_scope": _episode_scope(args),
         "top1_changed_vs_parent_rate": float(summary_row["top1_changed_vs_parent_rate"]),
         "teacher_ce": float(summary_row["teacher_ce"]),
         "teacher_kl": float(summary_row["teacher_kl"]),
