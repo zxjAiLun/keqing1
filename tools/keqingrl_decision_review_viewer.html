@@ -56,7 +56,7 @@
     }
     main {
       display: grid;
-      grid-template-columns: 340px minmax(380px, 1fr) minmax(520px, 1.35fr);
+      grid-template-columns: 320px minmax(620px, 1.2fr) minmax(420px, 0.8fr);
       min-height: calc(100vh - 58px);
     }
     aside, section {
@@ -135,20 +135,63 @@
     .kv span:nth-child(odd) {
       color: var(--muted);
     }
-    .players {
+    .table-board {
+      min-height: 520px;
+      border-radius: 10px;
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.05), rgba(0,0,0,0.14)),
+        #0f6b57;
+      border: 1px solid #0a4e41;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08), inset 0 0 36px rgba(0,0,0,0.28);
       display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
+      grid-template-columns: minmax(118px, 0.65fr) minmax(260px, 1.5fr) minmax(118px, 0.65fr);
+      grid-template-rows: auto 1fr auto;
+      gap: 10px;
+      padding: 10px;
     }
-    .player {
-      border: 1px solid var(--line);
+    .center-info {
+      align-self: center;
+      justify-self: center;
+      width: 150px;
+      min-height: 104px;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.88);
+      color: #e5e7eb;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      padding: 10px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.32);
+      z-index: 1;
+    }
+    .seat {
+      background: rgba(255,255,255,0.9);
+      border: 1px solid rgba(255,255,255,0.45);
       border-radius: 8px;
       padding: 8px;
-      background: #fbfcfe;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.16);
     }
-    .player.actor {
-      border-color: var(--accent);
-      background: #f0fdfa;
+    .seat.actor {
+      outline: 3px solid rgba(20,184,166,0.65);
+    }
+    .seat0 { grid-column: 2; grid-row: 3; }
+    .seat2 { grid-column: 2; grid-row: 1; }
+    .seat1 { grid-column: 3; grid-row: 2; align-self: center; }
+    .seat3 { grid-column: 1; grid-row: 2; align-self: center; }
+    .center-info { grid-column: 2; grid-row: 2; }
+    .seat-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: #0f172a;
+      font-weight: 700;
+      margin-bottom: 5px;
+      font-size: 12px;
+    }
+    .seat-label {
+      color: #475569;
+      font-size: 11px;
+      margin-top: 5px;
     }
     .tiles {
       display: flex;
@@ -157,17 +200,42 @@
       margin-top: 6px;
     }
     .tile {
-      min-width: 22px;
-      height: 28px;
-      border: 1px solid #cbd5e1;
+      width: 28px;
+      height: 40px;
+      border: 1px solid #b8afa0;
       border-radius: 4px;
-      background: #fff;
+      background: #fdfaf1;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      padding: 0 3px;
-      font-size: 12px;
-      font-weight: 650;
+      box-shadow: 0 3px 0 #aaa090, 0 5px 5px rgba(0,0,0,0.25);
+      overflow: hidden;
+      flex: 0 0 auto;
+    }
+    .tile.small {
+      width: 22px;
+      height: 31px;
+    }
+    .tile.back {
+      background:
+        repeating-linear-gradient(45deg, rgba(255,255,255,0.08) 0 1px, transparent 1px 7px),
+        #16324f;
+      border-color: #0f2134;
+    }
+    .tile img {
+      width: calc(100% - 4px);
+      height: calc(100% - 4px);
+      object-fit: contain;
+      display: block;
+    }
+    .meld {
+      display: inline-flex;
+      gap: 3px;
+      align-items: center;
+      padding: 3px;
+      border-radius: 5px;
+      background: rgba(15,23,42,0.08);
+      margin-right: 4px;
     }
     table {
       width: 100%;
@@ -197,6 +265,8 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
       word-break: break-all;
+      overflow-wrap: anywhere;
+      min-width: 0;
     }
     .empty {
       color: var(--muted);
@@ -237,6 +307,15 @@
   <script>
     const state = { cases: [], filtered: [], selected: 0 };
     const samplePath = "../reports/keqingrl_mortal_action_q_imitation_fullscope_adaptive_topk_v2_iter4_seedB_ep32_memmon_review_cases/decision_review_cases.jsonl";
+    const tileBase = "../tiles/riichi-mahjong-tiles/Regular";
+    const tileSvg = {
+      "1m": "Man1", "2m": "Man2", "3m": "Man3", "4m": "Man4", "5m": "Man5", "6m": "Man6", "7m": "Man7", "8m": "Man8", "9m": "Man9",
+      "1p": "Pin1", "2p": "Pin2", "3p": "Pin3", "4p": "Pin4", "5p": "Pin5", "6p": "Pin6", "7p": "Pin7", "8p": "Pin8", "9p": "Pin9",
+      "1s": "Sou1", "2s": "Sou2", "3s": "Sou3", "4s": "Sou4", "5s": "Sou5", "6s": "Sou6", "7s": "Sou7", "8s": "Sou8", "9s": "Sou9",
+      "5mr": "Man5-Dora", "5pr": "Pin5-Dora", "5sr": "Sou5-Dora",
+      "E": "Ton", "S": "Nan", "W": "Shaa", "N": "Pei", "P": "Haku", "F": "Hatsu", "C": "Chun"
+    };
+    const tileIdToName = ["1m","2m","3m","4m","5m","6m","7m","8m","9m","1p","2p","3p","4p","5p","6p","7p","8p","9p","1s","2s","3s","4s","5s","6s","7s","8s","9s","E","S","W","N","P","F","C"];
     const $ = (id) => document.getElementById(id);
     const safe = (value) => value === undefined || value === null || value === "" ? "-" : String(value);
     const fixed = (value) => typeof value === "number" && Number.isFinite(value) ? value.toFixed(3) : "-";
@@ -250,6 +329,13 @@
     $("filter").addEventListener("change", render);
     $("sort").addEventListener("change", render);
     $("loadSample").addEventListener("click", async () => {
+      await loadSample();
+    });
+    if (new URLSearchParams(window.location.search).get("sample") === "1") {
+      loadSample();
+    }
+
+    async function loadSample() {
       try {
         const response = await fetch(samplePath);
         if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
@@ -258,7 +344,7 @@
         $("status").textContent = "Sample fetch failed; use file picker";
         console.error(error);
       }
-    });
+    }
 
     function loadText(text, label) {
       state.cases = text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
@@ -350,8 +436,8 @@
           ${kv(item.round_state || {})}
         </div>
         <div class="panel">
-          <h2>Players</h2>
-          <div class="players">${(item.players || []).map(playerCard).join("")}</div>
+          <h2>Table</h2>
+          ${mahjongTable(item)}
         </div>
         <div class="panel">
           <h2>Replay Hint</h2>
@@ -377,20 +463,82 @@
       return value;
     }
 
-    function playerCard(player) {
-      return `<div class="player ${player.is_actor ? "actor" : ""}">
-        <strong>Seat ${html(player.seat)} ${player.is_actor ? "(actor)" : ""}</strong>
-        <div class="case-meta">wind ${html(player.wind)} | score ${html(player.score)} | riichi ${html(player.riichi)}</div>
-        <div class="case-meta">hand</div>${tiles(player.hand)}
-        <div class="case-meta">discards</div>${tiles(player.discards)}
-        <div class="case-meta">melds ${html(JSON.stringify(player.melds || []))}</div>
+    function mahjongTable(item) {
+      const players = item.players || [];
+      const bySeat = new Map(players.map((player) => [Number(player.seat), player]));
+      const round = item.round_state || {};
+      return `<div class="table-board">
+        <div class="center-info">
+          <div>
+            <strong>${html(round.bakaze)}${html(round.kyoku)}局 ${html(round.honba)}本场</strong>
+            <div class="case-meta">立直棒 ${html(round.riichi_sticks)} | 余 ${html(round.wall_remaining)}</div>
+            <div class="case-meta">宝牌</div>
+            ${tiles(round.dora_indicators, { small: true })}
+          </div>
+        </div>
+        ${[0, 1, 2, 3].map((seat) => tableSeat(bySeat.get(seat) || { seat }, seat)).join("")}
       </div>`;
     }
 
-    function tiles(values) {
+    function tableSeat(player, seat) {
+      return `<div class="seat seat${seat} ${player.is_actor ? "actor" : ""}">
+        <div class="seat-head">
+          <span>Seat ${html(seat)} ${player.is_actor ? "(actor)" : ""}</span>
+          <span>${html(player.score)} ${player.riichi ? "立直" : ""}</span>
+        </div>
+        <div class="seat-label">手牌</div>
+        ${player.is_actor || (player.hand || []).length ? tiles(player.hand) : tileBacks(13)}
+        <div class="seat-label">河</div>
+        ${tiles(player.discards, { small: true })}
+        <div class="seat-label">副露</div>
+        ${melds(player.melds)}
+      </div>`;
+    }
+
+    function tiles(values, options = {}) {
       const list = Array.isArray(values) ? values : [];
       if (!list.length) return "<div class='tiles'><span class='pill'>empty</span></div>";
-      return `<div class="tiles">${list.map((tile) => `<span class="tile">${html(tile)}</span>`).join("")}</div>`;
+      return `<div class="tiles">${list.map((tile) => tileImage(tileValue(tile), options)).join("")}</div>`;
+    }
+
+    function tileBacks(count) {
+      return `<div class="tiles">${Array.from({ length: count }, () => `<span class="tile back"></span>`).join("")}</div>`;
+    }
+
+    function melds(values) {
+      const list = Array.isArray(values) ? values : [];
+      if (!list.length) return "<div class='tiles'><span class='pill'>empty</span></div>";
+      return `<div class="tiles">${list.map((meld) => {
+        const tilesInMeld = [
+          ...(Array.isArray(meld.consumed) ? meld.consumed : []),
+          meld.pai,
+        ].map(tileValue).filter(Boolean);
+        return `<span class="meld">${tilesInMeld.map((tile) => tileImage(tile, { small: true })).join("")}</span>`;
+      }).join("")}</div>`;
+    }
+
+    function tileValue(value) {
+      if (value === undefined || value === null) return "";
+      if (typeof value === "string" || typeof value === "number") return String(value);
+      if (typeof value === "object") return tileValue(value.pai ?? value.tile ?? value.name ?? "");
+      return String(value);
+    }
+
+    function tileImage(tile, options = {}) {
+      const code = normalizeTile(tile);
+      const name = tileSvg[code];
+      const sizeClass = options.small ? " small" : "";
+      if (!name) return `<span class="tile${sizeClass}">${html(code || "?")}</span>`;
+      return `<span class="tile${sizeClass}" title="${html(code)}"><img src="${tileBase}/${name}.svg" alt="${html(code)}"></span>`;
+    }
+
+    function normalizeTile(tile) {
+      const text = String(tile || "");
+      if (/^\d+$/.test(text) && Number(text) >= 0 && Number(text) < tileIdToName.length) return tileIdToName[Number(text)];
+      if (text === "5M" || text === "5mr") return "5mr";
+      if (text === "5P" || text === "5pr") return "5pr";
+      if (text === "5S" || text === "5sr") return "5sr";
+      return text;
     }
 
     function actionTable(item) {
@@ -402,7 +550,7 @@
         <tbody>${rows.map((action) => `
           <tr class="${action.is_mortal_top1 ? "top-mortal" : ""} ${action.is_student_after_top1 ? "top-after" : ""}">
             <td>${html(action.index)}</td>
-            <td><strong>${html(action.type)}</strong><br><code>${html(action.canonical_key)}</code><br>${html(action.pai)}</td>
+            <td><strong>${html(action.type)}</strong><br>${tileImage(action.pai || tileFromCanonical(action.canonical_key), { small: true })}<br><code title="${html(action.canonical_key)}">${html(shortKey(action.canonical_key))}</code></td>
             <td>${fixed(action.rulebase_score)}</td>
             <td>${fixed(action.mortal_q)}</td>
             <td>${fixed(action.teacher_prob)}</td>
@@ -417,6 +565,17 @@
     function actionName(item, flag) {
       const action = (item.legal_actions || []).find((entry) => entry[flag]);
       return action ? action.type + (action.pai ? ` ${action.pai}` : "") : "-";
+    }
+
+    function shortKey(key) {
+      const text = String(key || "");
+      return text.length > 34 ? text.slice(0, 34) + "..." : text;
+    }
+
+    function tileFromCanonical(key) {
+      const match = String(key || "").match(/tile=([^|]+)/);
+      if (!match || match[1] === "-1") return "";
+      return match[1];
     }
 
     function flags(action) {

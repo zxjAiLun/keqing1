@@ -2029,11 +2029,11 @@ def _review_round_state(snapshot: Mapping[str, Any], events: Sequence[Any]) -> d
         "kyoku": snapshot.get("kyoku", ""),
         "honba": snapshot.get("honba", ""),
         "riichi_sticks": snapshot.get("kyotaku", snapshot.get("riichi_sticks", "")),
-        "dora_indicators": snapshot.get("dora_markers", snapshot.get("dora_indicators", ())),
+        "dora_indicators": _tile_list_labels(snapshot.get("dora_markers", snapshot.get("dora_indicators", ()))),
         "scores": snapshot.get("scores", ()),
         "wall_remaining": snapshot.get("wall_remaining", snapshot.get("remaining_wall", "")),
         "turn_index": max(0, len(events) - 1),
-        "last_discard": snapshot.get("last_discard"),
+        "last_discard": _discard_entry(snapshot.get("last_discard")),
     }
 
 
@@ -2051,10 +2051,10 @@ def _review_players(snapshot: Mapping[str, Any], actor: int) -> list[dict[str, A
             {
                 "seat": seat,
                 "is_actor": seat == int(actor),
-                "hand": _indexed_or_empty(hands, seat) or (actor_hand if seat == int(actor) else ()),
+                "hand": _tile_list_labels(_indexed_or_empty(hands, seat) or (actor_hand if seat == int(actor) else ())),
                 "draw": snapshot.get("tsumo_pai") or snapshot.get("drawn_tile") or "",
-                "discards": _indexed_or_empty(discards, seat),
-                "melds": _indexed_or_empty(melds, seat),
+                "discards": [_discard_entry(discard) for discard in _list_or_empty(_indexed_or_empty(discards, seat))],
+                "melds": [_meld_entry(meld) for meld in _list_or_empty(_indexed_or_empty(melds, seat))],
                 "riichi": bool(_indexed_or_empty(riichi, seat)),
                 "wind": _indexed_or_empty(winds, seat),
                 "score": _indexed_or_empty(scores, seat),
@@ -2069,6 +2069,52 @@ def _indexed_or_empty(values: Any, index: int) -> Any:
     if isinstance(values, Sequence) and not isinstance(values, (str, bytes)) and 0 <= int(index) < len(values):
         return values[int(index)]
     return ()
+
+
+def _list_or_empty(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return []
+
+
+def _tile_list_labels(values: Any) -> list[str]:
+    return [_tile_label_value(value) for value in _list_or_empty(values)]
+
+
+def _discard_entry(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        return {
+            "pai": _tile_label_value(value.get("pai", value.get("tile", ""))),
+            "tsumogiri": bool(value.get("tsumogiri", False)),
+            "reach_declared": bool(value.get("reach_declared", value.get("reach", False))),
+        }
+    return {"pai": _tile_label_value(value), "tsumogiri": False, "reach_declared": False}
+
+
+def _meld_entry(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return {
+            "type": value.get("type", value.get("kind", "")),
+            "pai": _tile_label_value(value.get("pai", value.get("tile", ""))),
+            "consumed": _tile_list_labels(value.get("consumed", ())),
+            "from": value.get("from", value.get("target", "")),
+        }
+    return {"type": "", "pai": "", "consumed": _tile_list_labels(value), "from": ""}
+
+
+def _tile_label_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, Mapping):
+        return _tile_label_value(value.get("pai", value.get("tile", value.get("name", ""))))
+    if isinstance(value, int):
+        return str(IDX_TO_TILE_NAME.get(int(value), value))
+    text = str(value)
+    return text if text != "None" else ""
 
 
 def _action_scope_for_legal_actions(legal_actions: Sequence[ActionSpec]) -> str:
