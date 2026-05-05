@@ -38,6 +38,7 @@ from scripts.run_keqingrl_mortal_imitation import (
     _write_incremental_outputs,
     audit_mortal_action_mapping,
     imitation_metrics,
+    MortalTeacherBehaviorPolicy,
     mortal_imitation_loss,
     prepare_mortal_imitation_teacher_data,
 )
@@ -185,8 +186,33 @@ def test_mortal_imitation_defaults_to_rule_free_full_legal_support(monkeypatch: 
     assert args.delta_support_mode == "all"
     assert args.support_policy_mode == "unrestricted"
     assert args.max_kyokus == 0
+    assert args.rollout_behavior == "mortal-teacher"
     assert args.decision_review_case_streaming is True
     assert _student_logit_source(args) == "neural_delta_only"
+
+
+def test_mortal_teacher_behavior_policy_selects_mortal_top1() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.PASS),
+        ActionSpec(ActionType.DISCARD, tile=_tile("2m")),
+    )
+    policy_input = _policy_input(
+        legal_actions,
+        mask_ids=(MORTAL_PASS_ACTION_ID, _tile("2m")),
+        prior_logits=torch.tensor([[100.0, -100.0, -100.0]], dtype=torch.float32),
+    )
+    q_values = torch.full((1, MORTAL_ACTION_SPACE), -10.0, dtype=torch.float32)
+    q_values[0, MORTAL_PASS_ACTION_ID] = -2.0
+    q_values[0, _tile("2m")] = 3.0
+    policy_input.obs.extras[MORTAL_Q_VALUES_EXTRA_KEY] = q_values
+
+    sample = MortalTeacherBehaviorPolicy(temperature=1.0, strict_extra=False).sample_action(
+        policy_input,
+        greedy=True,
+    )
+
+    assert int(sample.action_index[0]) == 1
+    assert sample.action_spec[0] == legal_actions[1]
 
 
 def test_mortal_imitation_audit_fails_closed_on_missing_controlled_legal_action() -> None:

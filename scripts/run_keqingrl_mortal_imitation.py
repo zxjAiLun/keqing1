@@ -22,7 +22,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from keqingrl.actions import ActionSpec, ActionType
-from keqingrl.contracts import PolicyInput, PolicyOutput
+from keqingrl.contracts import ActionSample, PolicyInput, PolicyOutput
+from keqingrl.distribution import MaskedCategorical
 from keqingrl.metadata import (
     RULE_SCORE_SCALE_VERSION,
     default_checkpoint_metadata,
@@ -47,6 +48,7 @@ from keqingrl.mortal_teacher import (
     mortal_scores_for_legal_actions,
 )
 from keqingrl.selfplay import build_episodes_ppo_batch, collect_selfplay_episodes
+from keqingrl.policy import InteractivePolicy
 from mahjong_env.action_space import IDX_TO_TILE_NAME
 from scripts.probe_keqingrl_sampling_diversity import (
     TemperaturePolicy,
@@ -109,6 +111,91 @@ class MortalImitationTeacherData:
     teacher_batch: MortalImitationTeacherBatch
 
 
+class MortalTeacherBehaviorPolicy(InteractivePolicy):
+    """Rollout policy that acts directly from Mortal action-Q over current legal actions."""
+
+    def __init__(
+        self,
+        *,
+        temperature: float = 1.0,
+        strict_extra: bool = True,
+    ) -> None:
+        super().__init__()
+        self.temperature = float(temperature)
+        self.strict_extra = bool(strict_extra)
+
+    def forward(self, policy_input: PolicyInput) -> PolicyOutput:
+        if self.temperature <= 0.0:
+            raise ValueError("Mortal teacher rollout temperature must be positive")
+        if policy_input.legal_actions is None:
+            raise MortalTeacherMappingError("Mortal teacher rollout requires policy_input.legal_actions")
+        q_values, mortal_masks = mortal_discard_teacher_tensors_from_extras(policy_input.obs.extras)
+        kan_q_values, kan_masks = _optional_kan_select_teacher_tensors_from_extras(policy_input.obs.extras)
+        mask = policy_input.legal_action_mask.bool()
+        teacher_scores = torch.full(
+            tuple(mask.shape),
+            torch.finfo(torch.float32).min,
+            dtype=torch.float32,
+            device=mask.device,
+        )
+        for row_idx, legal_actions in enumerate(policy_input.legal_actions):
+            mapped = mortal_scores_for_legal_actions(
+                q_values[row_idx],
+                mortal_masks[row_idx],
+                legal_actions,
+                strict_mask=self.strict_extra,
+                kan_select_q_values=None if kan_q_values is None else kan_q_values[row_idx],
+                kan_select_mask=None if kan_masks is None else kan_masks[row_idx],
+            )
+            if mapped.missing_legal_keys:
+                raise MortalTeacherMappingError(
+                    "Mortal teacher rollout has missing legal actions",
+                    missing_legal_keys=mapped.missing_legal_keys,
+                    mismatch_kind="missing_legal",
+                )
+            width = int(mapped.scores.shape[0])
+            teacher_scores[row_idx, :width] = mapped.scores.to(device=teacher_scores.device)
+        logits = (teacher_scores / self.temperature).masked_fill(~mask, torch.finfo(torch.float32).min)
+        batch_size = int(mask.shape[0])
+        value = torch.zeros((batch_size,), dtype=logits.dtype, device=logits.device)
+        rank_logits = torch.zeros((batch_size, 4), dtype=logits.dtype, device=logits.device)
+        entropy = MaskedCategorical(logits, mask).entropy()
+        return PolicyOutput(
+            action_logits=logits,
+            value=value,
+            rank_logits=rank_logits,
+            entropy=entropy,
+            aux={
+                "mortal_teacher_rollout_scores": teacher_scores,
+                "final_logits": logits,
+            },
+        )
+
+    def sample_action(self, policy_input: PolicyInput, *, greedy: bool = False) -> ActionSample:
+        output = self.forward(policy_input)
+        dist = MaskedCategorical(output.action_logits, policy_input.legal_action_mask)
+        action_index = dist.greedy() if greedy else dist.sample()
+        rank_probs = torch.softmax(output.rank_logits, dim=-1)
+        return ActionSample(
+            action_index=action_index,
+            action_spec=_resolve_action_specs(policy_input, action_index),
+            log_prob=dist.log_prob(action_index),
+            entropy=output.entropy if output.entropy is not None else dist.entropy(),
+            value=output.value,
+            rank_probs=rank_probs,
+            aux=output.aux,
+        )
+
+
+def _resolve_action_specs(policy_input: PolicyInput, action_index: torch.Tensor) -> list[ActionSpec]:
+    if policy_input.legal_actions is None:
+        raise ValueError("policy_input.legal_actions is required to resolve sampled ActionSpec objects")
+    return [
+        policy_input.legal_actions[row_idx][int(col_idx)]
+        for row_idx, col_idx in enumerate(action_index.detach().cpu().tolist())
+    ]
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run KeqingRL Mortal action-Q imitation training")
     parser.add_argument("--candidate-summary", type=Path, required=True)
@@ -133,6 +220,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--mortal-action-audit-max-examples", type=int, default=20)
     parser.add_argument("--rule-score-scale", type=float, default=0.0)
     parser.add_argument("--behavior-temperature", type=float, default=1.25)
+    parser.add_argument(
+        "--rollout-behavior",
+        choices=("mortal-teacher", "student"),
+        default="mortal-teacher",
+        help="Policy used to generate rollout states. mortal-teacher avoids early random calls while the student is weak.",
+    )
     parser.add_argument("--support-policy-mode", choices=("support-only-topk", "unrestricted"), default="unrestricted")
     parser.add_argument("--delta-support-mode", choices=("topk", "all"), default="all")
     parser.add_argument("--delta-support-topk", type=int, default=3)
@@ -222,7 +315,7 @@ def main() -> None:
             torch_seed = _iteration_torch_seed(args, config_id, iteration)
             _seed_torch_sampling(torch_seed)
             parent_policy = copy.deepcopy(policy).to(device).eval()
-            behavior_policy = TemperaturePolicy(policy, temperature=float(args.behavior_temperature)).to(device)
+            behavior_policy = _rollout_behavior_policy(args, policy, device=device)
             rollout_start = time.perf_counter()
             episodes = collect_selfplay_episodes(
                 _rollout_env(args, teacher_runtime),
@@ -235,8 +328,10 @@ def main() -> None:
                 greedy=False,
                 max_steps=int(args.max_steps),
                 device=device,
-                include_mortal_teacher_extras=not bool(args.defer_mortal_observation_bridge),
-                collect_mortal_teacher_events=bool(args.defer_mortal_observation_bridge),
+                include_mortal_teacher_extras=_rollout_requires_mortal_teacher(args)
+                or not bool(args.defer_mortal_observation_bridge),
+                collect_mortal_teacher_events=bool(args.defer_mortal_observation_bridge)
+                or bool(args.export_decision_review_cases),
             )
             rollout_sec = time.perf_counter() - rollout_start
             build_batch_start = time.perf_counter()
@@ -437,6 +532,8 @@ def main() -> None:
                 "teacher_temperature": float(args.teacher_temperature),
                 "teacher_support": str(args.teacher_support),
                 "teacher_topk": int(args.teacher_topk),
+                "rollout_behavior": str(args.rollout_behavior),
+                "behavior_temperature": float(args.behavior_temperature),
                 "lr": float(args.lr),
                 "update_epochs": int(args.update_epochs),
                 "student_logit_source": _student_logit_source(args),
@@ -560,6 +657,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-kyokus must be non-negative; use 0 for natural hanchan termination")
     if int(getattr(args, "decision_review_case_limit", 0)) < 0:
         raise ValueError("--decision-review-case-limit must be non-negative")
+    if str(getattr(args, "rollout_behavior", "")) == "mortal-teacher" and float(args.teacher_temperature) <= 0.0:
+        raise ValueError("--teacher-temperature must be positive for mortal-teacher rollout")
 
 
 def _load_teacher_runtime(args: argparse.Namespace, *, device: torch.device):
@@ -595,8 +694,13 @@ def _load_imitation_candidates(args: argparse.Namespace) -> list[dict[str, Any]]
 def _rollout_env(args: argparse.Namespace, teacher_runtime):
     from keqingrl import DiscardOnlyMahjongEnv
 
-    defer_runtime = bool(args.defer_mortal_teacher_runtime)
-    bridge = None if bool(args.defer_mortal_observation_bridge) else MortalObservationBridge(mortal_root=Path(args.mortal_root))
+    require_teacher = _rollout_requires_mortal_teacher(args)
+    defer_runtime = bool(args.defer_mortal_teacher_runtime) and not require_teacher
+    bridge = (
+        None
+        if bool(args.defer_mortal_observation_bridge) and not require_teacher
+        else MortalObservationBridge(mortal_root=Path(args.mortal_root))
+    )
     return DiscardOnlyMahjongEnv(
         max_kyokus=_resolved_max_kyokus(args),
         self_turn_action_types=_action_type_tuple(args.self_turn_action_types),
@@ -607,6 +711,26 @@ def _rollout_env(args: argparse.Namespace, teacher_runtime):
         mortal_teacher_strict_extra_mask=bool(args.mortal_teacher_strict_extra_mask),
         mortal_teacher_defer_runtime=defer_runtime,
     )
+
+
+def _rollout_requires_mortal_teacher(args: argparse.Namespace) -> bool:
+    return str(args.rollout_behavior) == "mortal-teacher"
+
+
+def _rollout_behavior_policy(
+    args: argparse.Namespace,
+    policy,
+    *,
+    device: torch.device,
+) -> InteractivePolicy:
+    if str(args.rollout_behavior) == "student":
+        return TemperaturePolicy(policy, temperature=float(args.behavior_temperature)).to(device)
+    if str(args.rollout_behavior) == "mortal-teacher":
+        return MortalTeacherBehaviorPolicy(
+            temperature=float(args.teacher_temperature),
+            strict_extra=bool(args.mortal_teacher_strict_extra_mask),
+        ).to(device)
+    raise ValueError(f"unsupported rollout behavior: {args.rollout_behavior}")
 
 
 def _resolved_max_kyokus(args: argparse.Namespace) -> int | None:
