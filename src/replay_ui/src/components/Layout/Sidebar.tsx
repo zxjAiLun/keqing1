@@ -5,6 +5,7 @@ import {
   Users,
   BarChart2,
   AlertTriangle,
+  BrainCircuit,
   Menu,
   X,
   Bot,
@@ -28,6 +29,7 @@ const NAV_ITEMS: Array<{
   { path: '/battle', icon: Users, label: '人机对战' },
   { path: '/bot-battle', icon: Bot, label: '4 Bot 对战' },
   { path: '/review', icon: BarChart2, label: '牌谱分析' },
+  { path: '/keqingrl-review', icon: BrainCircuit, label: 'RL审阅' },
   { path: '/selfplay-anomalies', icon: AlertTriangle, label: '对局回放' },
 ];
 
