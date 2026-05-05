@@ -481,6 +481,44 @@ def test_adaptive_topk_keeps_low_candidate_response_rows_valid() -> None:
     assert float(loss.teacher_margin.item()) == 0.0
 
 
+def test_cached_mortal_imitation_loss_uses_unprojected_logits_for_teacher_support() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.DISCARD, tile=_tile("1m")),
+        ActionSpec(ActionType.PASS),
+    )
+    policy_input = _policy_input(
+        legal_actions,
+        mask_ids=(0, MORTAL_PASS_ACTION_ID),
+        prior_logits=torch.tensor([[2.0, 1.0, -100.0]], dtype=torch.float32),
+    )
+    teacher_data = prepare_mortal_imitation_teacher_data(
+        policy_input,
+        strict_extra=False,
+        teacher_support="topk",
+        teacher_topk=2,
+    )
+    projected_output = PolicyOutput(
+        action_logits=torch.tensor([[0.0, torch.finfo(torch.float32).min, torch.finfo(torch.float32).min]]),
+        value=torch.zeros((1,), dtype=torch.float32),
+        rank_logits=torch.zeros((1, 4), dtype=torch.float32),
+        aux={
+            "unprojected_final_logits": torch.tensor([[0.0, 1.0, torch.finfo(torch.float32).min]]),
+        },
+    )
+
+    loss = mortal_imitation_loss(
+        projected_output,
+        policy_input,
+        teacher_support="topk",
+        teacher_topk=2,
+        teacher_temperature=1.0,
+        strict_extra=False,
+        teacher_batch=teacher_data.teacher_batch,
+    )
+
+    assert torch.isfinite(loss.teacher_ce)
+
+
 def test_incremental_outputs_include_action_type_breakdown(tmp_path: Path) -> None:
     args = SimpleNamespace(
         output_dir=tmp_path,

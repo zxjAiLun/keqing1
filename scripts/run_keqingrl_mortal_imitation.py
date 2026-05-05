@@ -133,7 +133,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--mortal-action-audit-max-examples", type=int, default=20)
     parser.add_argument("--rule-score-scale", type=float, default=0.25)
     parser.add_argument("--behavior-temperature", type=float, default=1.25)
-    parser.add_argument("--support-policy-mode", choices=("support-only-topk", "unrestricted"), default="support-only-topk")
+    parser.add_argument("--support-policy-mode", choices=("support-only-topk", "unrestricted"), default="unrestricted")
     parser.add_argument("--delta-support-mode", choices=("topk", "all"), default="topk")
     parser.add_argument("--delta-support-topk", type=int, default=3)
     parser.add_argument("--delta-support-margin-threshold", type=float, default=0.75)
@@ -1180,12 +1180,13 @@ def _mortal_cached_imitation_loss(
     *,
     teacher_temperature: float,
 ) -> MortalImitationLossResult:
+    student_logits = _student_imitation_logits(output)
     if teacher_batch.teacher_support in {"topk", "adaptive-topk"}:
         if teacher_batch.topk_indices is None:
             raise MortalTeacherMappingError("cached topK teacher batch is missing topk_indices")
-        policy_logits = output.action_logits.gather(
+        policy_logits = student_logits.gather(
             1,
-            teacher_batch.topk_indices.to(device=output.action_logits.device),
+            teacher_batch.topk_indices.to(device=student_logits.device),
         )
         return _imitation_loss_from_scores(
             policy_logits=policy_logits,
@@ -1200,13 +1201,13 @@ def _mortal_cached_imitation_loss(
     if teacher_batch.teacher_support == "full-legal":
         if teacher_batch.legal_action_mask is None:
             raise MortalTeacherMappingError("cached full-legal teacher batch is missing legal_action_mask")
-        mask = teacher_batch.legal_action_mask.to(device=output.action_logits.device)
-        policy_logits = output.action_logits.float().masked_fill(~mask, torch.finfo(torch.float32).min)
+        mask = teacher_batch.legal_action_mask.to(device=student_logits.device)
+        policy_logits = student_logits.masked_fill(~mask, torch.finfo(torch.float32).min)
         return _imitation_loss_from_scores(
             policy_logits=policy_logits,
-            prior_logits=teacher_batch.prior_logits.to(device=output.action_logits.device),
-            teacher_scores=teacher_batch.teacher_scores.to(device=output.action_logits.device),
-            row_valid_mask=teacher_batch.row_valid_mask.to(device=output.action_logits.device),
+            prior_logits=teacher_batch.prior_logits.to(device=student_logits.device),
+            teacher_scores=teacher_batch.teacher_scores.to(device=student_logits.device),
+            row_valid_mask=teacher_batch.row_valid_mask.to(device=student_logits.device),
             teacher_temperature=float(teacher_temperature),
             support_mask=mask,
         )
@@ -1253,7 +1254,8 @@ def _mortal_topk_imitation_loss(
     finite_rows = torch.isfinite(teacher_scores).all(dim=-1)
     valid_rows = valid_rows.to(device=finite_rows.device) & finite_rows
     teacher_scores = torch.where(torch.isfinite(teacher_scores), teacher_scores, torch.zeros_like(teacher_scores))
-    policy_logits = output.action_logits.gather(1, topk_indices.to(device=output.action_logits.device))
+    student_logits = _student_imitation_logits(output)
+    policy_logits = student_logits.gather(1, topk_indices.to(device=student_logits.device))
     prior_topk = prior_logits.gather(1, topk_indices.to(device=prior_logits.device))
     return _imitation_loss_from_scores(
         policy_logits=policy_logits,
@@ -1288,9 +1290,10 @@ def _mortal_full_legal_imitation_loss(
             )
         width = int(mapped.scores.shape[0])
         teacher_scores[row_idx, :width] = mapped.scores.to(device=teacher_scores.device)
-    mask = policy_input.legal_action_mask.bool().to(device=output.action_logits.device)
+    student_logits = _student_imitation_logits(output)
+    mask = policy_input.legal_action_mask.bool().to(device=student_logits.device)
     teacher_scores = teacher_scores.masked_fill(~mask, torch.finfo(teacher_scores.dtype).min)
-    policy_logits = output.action_logits.float().masked_fill(~mask, torch.finfo(output.action_logits.dtype).min)
+    policy_logits = student_logits.masked_fill(~mask, torch.finfo(student_logits.dtype).min)
     prior_logits = policy_input.prior_logits.float().to(device=policy_logits.device).masked_fill(
         ~mask,
         torch.finfo(policy_logits.dtype).min,
@@ -1302,6 +1305,11 @@ def _mortal_full_legal_imitation_loss(
         row_valid_mask=mask.any(dim=-1),
         teacher_temperature=float(teacher_temperature),
     )
+
+
+def _student_imitation_logits(output: PolicyOutput) -> torch.Tensor:
+    logits = output.aux.get("unprojected_final_logits", output.action_logits)
+    return logits.float()
 
 
 def _imitation_loss_from_scores(
@@ -1392,10 +1400,13 @@ def imitation_metrics(
     list[dict[str, Any]],
 ]:
     del teacher_support, teacher_topk
-    mask = policy_input.legal_action_mask.bool().to(device=output.action_logits.device)
-    final_logits = output.action_logits.float().masked_fill(~mask, torch.finfo(torch.float32).min)
-    parent_logits = parent_output.action_logits.float().masked_fill(~mask, torch.finfo(torch.float32).min)
-    source_logits = source_output.action_logits.float().masked_fill(~mask, torch.finfo(torch.float32).min)
+    student_logits = _student_imitation_logits(output)
+    parent_student_logits = _student_imitation_logits(parent_output)
+    source_student_logits = _student_imitation_logits(source_output)
+    mask = policy_input.legal_action_mask.bool().to(device=student_logits.device)
+    final_logits = student_logits.masked_fill(~mask, torch.finfo(torch.float32).min)
+    parent_logits = parent_student_logits.to(device=student_logits.device).masked_fill(~mask, torch.finfo(torch.float32).min)
+    source_logits = source_student_logits.to(device=student_logits.device).masked_fill(~mask, torch.finfo(torch.float32).min)
     prior_logits = policy_input.prior_logits.float().to(device=final_logits.device).masked_fill(
         ~mask,
         torch.finfo(torch.float32).min,
@@ -1663,7 +1674,7 @@ def _imitation_action_type_breakdown(
         policy_input,
         teacher_batch,
     )
-    parent_support_logits = parent_output.action_logits.float().to(device=support_logits.device).gather(
+    parent_support_logits = _student_imitation_logits(parent_output).to(device=support_logits.device).gather(
         1,
         support_indices.to(device=support_logits.device),
     )
@@ -1768,12 +1779,13 @@ def _teacher_support_tensors(
     policy_input: PolicyInput,
     teacher_batch: MortalImitationTeacherBatch,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.BoolTensor, torch.LongTensor]:
-    device = output.action_logits.device
+    student_logits = _student_imitation_logits(output)
+    device = student_logits.device
     if teacher_batch.teacher_support in {"topk", "adaptive-topk"}:
         if teacher_batch.topk_indices is None:
             raise MortalTeacherMappingError("cached topK teacher batch is missing topk_indices")
         indices = teacher_batch.topk_indices.to(device=device)
-        support_logits = output.action_logits.float().gather(1, indices)
+        support_logits = student_logits.gather(1, indices)
         support_prior = teacher_batch.prior_logits.to(device=device).float()
         support_teacher = teacher_batch.teacher_scores.to(device=device).float()
         support_mask = (
@@ -1789,10 +1801,10 @@ def _teacher_support_tensors(
     if teacher_batch.teacher_support == "full-legal":
         if teacher_batch.legal_action_mask is None:
             raise MortalTeacherMappingError("cached full-legal teacher batch is missing legal_action_mask")
-        width = int(output.action_logits.shape[1])
-        indices = torch.arange(width, dtype=torch.long, device=device).unsqueeze(0).repeat(output.action_logits.shape[0], 1)
+        width = int(student_logits.shape[1])
+        indices = torch.arange(width, dtype=torch.long, device=device).unsqueeze(0).repeat(student_logits.shape[0], 1)
         support_mask = teacher_batch.legal_action_mask.to(device=device).bool()
-        support_logits = output.action_logits.float().masked_fill(~support_mask, torch.finfo(torch.float32).min)
+        support_logits = student_logits.masked_fill(~support_mask, torch.finfo(torch.float32).min)
         support_prior = teacher_batch.prior_logits.to(device=device).float()
         support_teacher = teacher_batch.teacher_scores.to(device=device).float()
         return support_logits, support_prior, support_teacher, support_mask, indices
