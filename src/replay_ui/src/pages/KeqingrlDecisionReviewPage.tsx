@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Upload, ListFilter } from 'lucide-react';
 import { MahjongTable } from '../components/BattleBoard/MahjongTable';
+import { Tile } from '../components/BattleBoard/Tile';
 import type { Action, BattleState, DiscardEntry, MeldEntry } from '../types/battle';
 import type { LogitTileData } from '../utils/replayAdapter';
 import { PageHeader, PageShell, SectionTitle } from '../components/Layout/PageScaffold';
@@ -243,21 +244,29 @@ export function KeqingrlDecisionReviewPage() {
 }
 
 function ReviewDetail({ caseItem }: { caseItem: ReviewCase }) {
-  const rows = caseItem.legal_actions ?? [];
+  const rows = [...(caseItem.legal_actions ?? [])].sort(
+    (a, b) => Number(b.student_after_score ?? Number.NEGATIVE_INFINITY) - Number(a.student_after_score ?? Number.NEGATIVE_INFINITY),
+  );
   return (
     <div className="card">
-      <SectionTitle title="Action Scores" description="同一 legal ActionSpec 下的 rulebase / Mortal Q / student before / student after 对照。" />
+      <SectionTitle
+        title="Action Scores"
+        description="按 student after 分数从高到低排序。Teacher P 是 Mortal action-Q 在当前 teacher support 上 softmax 后的监督概率，不是另一个模型。"
+      />
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12, fontSize: 13 }}>
-        <div><strong>before:</strong> <code>{caseItem.selected_before}</code></div>
-        <div><strong>after:</strong> <code>{caseItem.selected_after}</code></div>
-        <div><strong>Mortal:</strong> <code>{caseItem.teacher_top1}</code></div>
-        <div><strong>rulebase:</strong> <code>{caseItem.rulebase_top1}</code></div>
+        <div><strong>before:</strong> {labelAction(caseItem.selected_before)}</div>
+        <div><strong>after:</strong> {labelAction(caseItem.selected_after)}</div>
+        <div><strong>Mortal:</strong> {labelAction(caseItem.teacher_top1)}</div>
+        <div><strong>rulebase:</strong> {labelAction(caseItem.rulebase_top1)}</div>
+      </div>
+      <div style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 10 }}>
+        Rank 列中 1 表示该打分源的最高分；Rule Rank=rulebase 排名，Mortal Rank=Mortal Q 排名，Before/After Rank=学生更新前/后的排名。
       </div>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
           <thead>
             <tr>
-              {['#', 'Action', 'Rule', 'Mortal Q', 'Teacher P', 'Before', 'After', 'Ranks', 'Flags'].map((head) => (
+              {['#', 'Action', 'Rule', 'Mortal Q', 'Teacher P', 'Before', 'After', 'Rule Rank', 'Mortal Rank', 'Before Rank', 'After Rank', 'Flags'].map((head) => (
                 <th key={head} style={thStyle}>{head}</th>
               ))}
             </tr>
@@ -266,13 +275,20 @@ function ReviewDetail({ caseItem }: { caseItem: ReviewCase }) {
             {rows.map((row) => (
               <tr key={row.index} style={{ background: row.is_mortal_top1 ? 'rgba(34,197,94,0.08)' : undefined }}>
                 <td style={tdStyle}>{row.index}</td>
-                <td style={tdStyle}><strong>{row.type}</strong><br /><code>{shortKey(row.canonical_key)}</code></td>
+                <td style={tdStyle}>
+                  <strong>{row.type}</strong>
+                  <ActionTiles row={row} />
+                  <div style={{ color: 'var(--text-secondary)', marginTop: 4 }}>{actionText(row)}</div>
+                </td>
                 <td style={tdStyle}>{fmt(row.rulebase_score)}</td>
                 <td style={tdStyle}>{fmt(row.mortal_q)}</td>
                 <td style={tdStyle}>{fmt(row.teacher_prob)}</td>
                 <td style={tdStyle}>{fmt(row.student_before_score)}</td>
                 <td style={tdStyle}>{fmt(row.student_after_score)}</td>
-                <td style={tdStyle}>R {row.rulebase_rank ?? '-'} / M {row.teacher_rank ?? '-'} / B {row.student_before_rank ?? '-'} / A {row.student_after_rank ?? '-'}</td>
+                <td style={tdStyle}>{row.rulebase_rank ?? '-'}</td>
+                <td style={tdStyle}>{row.teacher_rank ?? '-'}</td>
+                <td style={tdStyle}>{row.student_before_rank ?? '-'}</td>
+                <td style={tdStyle}>{row.student_after_rank ?? '-'}</td>
                 <td style={tdStyle}>{[
                   row.is_rulebase_top1 ? 'rule' : '',
                   row.is_mortal_top1 ? 'Mortal' : '',
@@ -284,6 +300,22 @@ function ReviewDetail({ caseItem }: { caseItem: ReviewCase }) {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+function ActionTiles({ row }: { row: ReviewActionRow }) {
+  const tiles = actionTiles(row);
+  if (!tiles.length) {
+    return <div style={{ color: 'var(--text-secondary)', marginTop: 5 }}>no tile</div>;
+  }
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minHeight: 34, marginTop: 7 }}>
+      {tiles.map((tile, index) => (
+        <span key={`${tile}-${index}`} style={{ width: 24, height: 32, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Tile tile={tile} size="small" />
+        </span>
+      ))}
     </div>
   );
 }
@@ -398,6 +430,25 @@ function actionFromRow(row: ReviewActionRow, actor: number): Action | null {
   }
 }
 
+function actionTiles(row: ReviewActionRow): string[] {
+  const event = row.mjai_events?.[0];
+  const consumed = Array.isArray(event?.consumed) ? event.consumed.map(toTile).filter((tile): tile is string => Boolean(tile)) : consumedFromCanonical(row.canonical_key);
+  const pai = toTile(event?.pai ?? row.pai) || tileFromCanonical(row.canonical_key);
+  if (row.type === 'PASS' || row.type === 'RYUKYOKU') return [];
+  if (consumed.length && pai) return [...consumed, pai];
+  if (consumed.length) return consumed;
+  return pai ? [pai] : [];
+}
+
+function actionText(row: ReviewActionRow): string {
+  const tiles = actionTiles(row);
+  if (!tiles.length) return row.type;
+  if (['PON', 'CHI', 'DAIMINKAN', 'ANKAN', 'KAKAN'].includes(row.type)) {
+    return `${row.type} ${tiles.join(' ')}`;
+  }
+  return `${row.type} ${tiles[tiles.length - 1]}`;
+}
+
 function toDiscards(value: unknown): DiscardEntry[] {
   return (Array.isArray(value) ? value : []).map((entry) => {
     if (typeof entry === 'object' && entry !== null) {
@@ -480,11 +531,6 @@ function labelAction(value: string | undefined): string {
   const type = value.split('|', 1)[0];
   const tile = tileFromCanonical(value);
   return tile ? `${type} ${tile}` : type;
-}
-
-function shortKey(value: string | undefined): string {
-  const text = value ?? '';
-  return text.length > 48 ? `${text.slice(0, 48)}...` : text;
 }
 
 function fmt(value: number | null | undefined): string {

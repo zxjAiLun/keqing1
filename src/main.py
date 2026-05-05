@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -64,6 +65,31 @@ def run_replay_server(port: int, logger: logging.Logger) -> None:
     logger.info(f"启动牌谱 Review 服务 (端口 {port})")
     # 配置 uvicorn 日志使用 replay logger
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+
+
+def ensure_replay_ui_built(logger: logging.Logger) -> None:
+    """Build ReplayUI before importing the FastAPI app.
+
+    `replay.server` serves the React SPA from `src/replay_ui/dist`.  That
+    directory is a generated artifact and is intentionally not committed, so a
+    plain `uv run python src/main.py` must make sure it exists and reflects the
+    current source tree.
+    """
+    ui_dir = _SRC_DIR / "replay_ui"
+    package_json = ui_dir / "package.json"
+    dist_index = ui_dir / "dist" / "index.html"
+    if not package_json.exists():
+        logger.warning("ReplayUI package.json 不存在，跳过前端构建")
+        return
+    source_files = list((ui_dir / "src").rglob("*"))
+    newest_source_mtime = max(
+        (path.stat().st_mtime for path in source_files if path.is_file()),
+        default=0.0,
+    )
+    if dist_index.exists() and dist_index.stat().st_mtime >= newest_source_mtime:
+        return
+    logger.info("构建 ReplayUI 前端: npm run build")
+    subprocess.run(["npm", "run", "build"], cwd=ui_dir, check=True)
 
 
 def run_gateway_server(logger: logging.Logger) -> None:
@@ -124,6 +150,7 @@ def main() -> None:
     parser.add_argument("--gateway-port", type=int, default=11600, help="天凤 Gateway TCP 端口 (默认 11600)")
     parser.add_argument("--debug", "-d", action="store_true", help="Gateway 调试模式")
     parser.add_argument("--replay-only", action="store_true", help="serve 命令下仅启动牌谱服务")
+    parser.add_argument("--no-ui-build", action="store_true", help="跳过启动前 ReplayUI 自动构建")
 
     args = parser.parse_args()
     if args.command is None:
@@ -136,8 +163,12 @@ def main() -> None:
     gateway_settings.PORT = args.gateway_port
 
     if args.command == "serve":
+        if not args.no_ui_build:
+            ensure_replay_ui_built(main_logger)
         run_merged(args.port, args.debug, args.replay_only, main_logger)
     elif args.command in {"local", "replay"}:
+        if not args.no_ui_build:
+            ensure_replay_ui_built(main_logger)
         replay_logger = setup_logging("replay")
         run_replay_server(args.port, replay_logger)
     elif args.command in {"tenhou", "gateway"}:
