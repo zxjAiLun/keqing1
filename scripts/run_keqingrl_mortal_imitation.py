@@ -131,10 +131,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--mortal-teacher-eval-batch-size", type=int, default=256)
     parser.add_argument("--mortal-teacher-strict-extra-mask", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--mortal-action-audit-max-examples", type=int, default=20)
-    parser.add_argument("--rule-score-scale", type=float, default=0.25)
+    parser.add_argument("--rule-score-scale", type=float, default=0.0)
     parser.add_argument("--behavior-temperature", type=float, default=1.25)
     parser.add_argument("--support-policy-mode", choices=("support-only-topk", "unrestricted"), default="unrestricted")
-    parser.add_argument("--delta-support-mode", choices=("topk", "all"), default="topk")
+    parser.add_argument("--delta-support-mode", choices=("topk", "all"), default="all")
     parser.add_argument("--delta-support-topk", type=int, default=3)
     parser.add_argument("--delta-support-margin-threshold", type=float, default=0.75)
     parser.add_argument("--outside-support-delta-mode", choices=("zero", "negative-clip"), default="zero")
@@ -423,6 +423,7 @@ def main() -> None:
                 "teacher_topk": int(args.teacher_topk),
                 "lr": float(args.lr),
                 "update_epochs": int(args.update_epochs),
+                "student_logit_source": _student_logit_source(args),
                 "rule_score_scale": float(args.rule_score_scale),
                 "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
                 "support_policy_mode": str(args.support_policy_mode),
@@ -2413,6 +2414,7 @@ def _save_imitation_checkpoint(
             "teacher_support": str(args.teacher_support),
             "teacher_topk": int(args.teacher_topk),
             "teacher_temperature": float(args.teacher_temperature),
+            "student_logit_source": _student_logit_source(args),
             "rule_score_scale": float(args.rule_score_scale),
         }
     )
@@ -2435,6 +2437,7 @@ def _save_imitation_checkpoint(
             ),
             "teacher_topk": int(args.teacher_topk),
             "teacher_temperature": float(args.teacher_temperature),
+            "student_logit_source": _student_logit_source(args),
             "support_policy_mode": str(args.support_policy_mode),
             "support_topk": int(args.delta_support_topk),
             "delta_support_mode": str(args.delta_support_mode),
@@ -2449,6 +2452,7 @@ def _save_imitation_checkpoint(
         "rerun_config_id": int(candidate["rerun_config_id"]),
         "parent_checkpoint_path": candidate.get("checkpoint_path"),
         "parent_checkpoint_sha256": candidate.get("checkpoint_sha256") or _file_sha256(Path(candidate["checkpoint_path"])),
+        "student_logit_source": _student_logit_source(args),
         "rule_score_scale": float(args.rule_score_scale),
         "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
         "mortal_imitation_config": {
@@ -2461,6 +2465,7 @@ def _save_imitation_checkpoint(
             "teacher_support": str(args.teacher_support),
             "teacher_topk": int(args.teacher_topk),
             "teacher_temperature": float(args.teacher_temperature),
+            "student_logit_source": _student_logit_source(args),
             "mortal_teacher_checkpoint": str(args.mortal_teacher_checkpoint),
             "mortal_teacher_strict_extra_mask": bool(args.mortal_teacher_strict_extra_mask),
             "action_scope": _action_scope_fields(args),
@@ -2510,6 +2515,7 @@ def _save_imitation_checkpoint(
         "teacher_support": str(args.teacher_support),
         "teacher_topk": int(args.teacher_topk),
         "teacher_temperature": float(args.teacher_temperature),
+        "student_logit_source": _student_logit_source(args),
         "top1_changed_vs_parent_rate": float(summary_row["top1_changed_vs_parent_rate"]),
         "teacher_ce": float(summary_row["teacher_ce"]),
         "teacher_kl": float(summary_row["teacher_kl"]),
@@ -2523,6 +2529,12 @@ def _save_imitation_checkpoint(
         "rule_score_scale": float(args.rule_score_scale),
         "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
     }
+
+
+def _student_logit_source(args: argparse.Namespace) -> str:
+    if float(args.rule_score_scale) == 0.0:
+        return "neural_delta_only"
+    return "rule_prior_plus_neural_delta"
 
 
 def _write_outputs(

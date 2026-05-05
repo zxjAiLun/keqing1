@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
 import csv
+import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,7 +31,9 @@ from scripts.run_keqingrl_mortal_imitation import (
     _ensure_mortal_teacher_q_extras,
     _latest_checkpoint_rows,
     _load_imitation_candidates,
+    _parse_args,
     _save_imitation_checkpoint,
+    _student_logit_source,
     _validate_args,
     _write_incremental_outputs,
     audit_mortal_action_mapping,
@@ -158,6 +161,30 @@ def test_mortal_imitation_requires_teacher_checkpoint() -> None:
 
     with pytest.raises(ValueError, match="mortal-teacher-checkpoint"):
         _validate_args(args)
+
+
+def test_mortal_imitation_defaults_to_rule_free_full_legal_support(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_keqingrl_mortal_imitation.py",
+            "--candidate-summary",
+            str(tmp_path / "summary.csv"),
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--mortal-teacher-checkpoint",
+            str(tmp_path / "mortal.pth"),
+        ],
+    )
+
+    args = _parse_args()
+
+    assert args.teacher_support == "full-legal"
+    assert args.rule_score_scale == 0.0
+    assert args.delta_support_mode == "all"
+    assert args.support_policy_mode == "unrestricted"
+    assert _student_logit_source(args) == "neural_delta_only"
 
 
 def test_mortal_imitation_audit_fails_closed_on_missing_controlled_legal_action() -> None:
@@ -825,6 +852,7 @@ def test_mortal_imitation_checkpoint_summary_contains_teacher_metadata(tmp_path:
     checkpoint = torch.load(row["checkpoint_path"], map_location="cpu")
     assert checkpoint["contract_metadata"]["teacher_source"] == "mortal-action-q"
     assert checkpoint["contract_metadata"]["teacher_target_type"] == "topk_distribution"
+    assert checkpoint["contract_metadata"]["student_logit_source"] == "rule_prior_plus_neural_delta"
     assert row["checkpoint_sha256"]
     assert Path(row["checkpoint_path"]).name == "policy_iter_0001.pt"
 
