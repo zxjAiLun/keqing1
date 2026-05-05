@@ -287,13 +287,46 @@ def test_mortal_imitation_topk_keeps_reach_discard_tiles_distinct() -> None:
     )
 
     assert teacher_data.teacher_batch.topk_indices is not None
-    assert teacher_data.teacher_batch.topk_indices.tolist() == [[0, 1]]
+    assert teacher_data.teacher_batch.topk_indices.tolist() == [[1, 0]]
     assert teacher_data.teacher_batch.teacher_scores.tolist() == [
         [
-            float(MORTAL_RIICHI_ACTION_ID + _tile("2m")),
             float(MORTAL_RIICHI_ACTION_ID + _tile("7p")),
+            float(MORTAL_RIICHI_ACTION_ID + _tile("2m")),
         ]
     ]
+
+
+def test_mortal_imitation_topk_uses_mortal_scores_not_rule_prior_for_reach_vs_discard() -> None:
+    legal_actions = (
+        ActionSpec(ActionType.DISCARD, tile=_tile("7m")),
+        ActionSpec(ActionType.DISCARD, tile=_tile("C")),
+        ActionSpec(ActionType.REACH_DISCARD, tile=_tile("7m")),
+        ActionSpec(ActionType.REACH_DISCARD, tile=_tile("C")),
+    )
+    policy_input = _policy_input(
+        legal_actions,
+        mask_ids=(MORTAL_RIICHI_ACTION_ID, _tile("7m"), _tile("C")),
+        prior_logits=torch.tensor([[0.0, -3.0, 3.0, 2.0]], dtype=torch.float32),
+    )
+    q_values = torch.full((1, MORTAL_ACTION_SPACE), -100.0, dtype=torch.float32)
+    q_values[0, _tile("C")] = -0.036
+    q_values[0, _tile("7m")] = -2.983
+    q_values[0, MORTAL_RIICHI_ACTION_ID] = -0.195
+    policy_input.obs.extras[MORTAL_Q_VALUES_EXTRA_KEY] = q_values
+
+    teacher_data = prepare_mortal_imitation_teacher_data(
+        policy_input,
+        prepared_steps=(),
+        teacher_support="topk",
+        teacher_topk=3,
+        strict_extra=False,
+    )
+
+    assert teacher_data.teacher_batch.topk_indices is not None
+    assert teacher_data.teacher_batch.topk_indices.tolist() == [[1, 3, 0]]
+    assert teacher_data.teacher_batch.teacher_scores.tolist()[0] == pytest.approx(
+        [-0.036, -0.231, -2.983],
+    )
 
 
 def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> None:

@@ -911,15 +911,6 @@ def _prepare_mortal_topk_teacher_batch(
     assert policy_input.prior_logits is not None
     prior_logits = policy_input.prior_logits.float()
     legal_mask = policy_input.legal_action_mask.bool()
-    topk_indices, valid_rows, support_mask, distinct_counts = _source_topk_indices(
-        prior_logits,
-        legal_mask,
-        policy_input.legal_actions,
-        k=int(teacher_topk),
-        adaptive=bool(adaptive),
-    )
-    masked_prior = prior_logits.masked_fill(~legal_mask, torch.finfo(torch.float32).min)
-    topk_prior = masked_prior.gather(1, topk_indices.to(device=masked_prior.device))
     mapped_score_rows: list[torch.Tensor] = []
     summary, audit_rows = _collect_mortal_mapping_summary_and_audit(
         q_values=q_values,
@@ -939,6 +930,15 @@ def _prepare_mortal_topk_teacher_batch(
     for row_idx, row_scores in enumerate(mapped_score_rows):
         width = min(int(row_scores.shape[0]), int(mapped_scores.shape[1]))
         mapped_scores[row_idx, :width] = row_scores[:width]
+    topk_indices, valid_rows, support_mask, distinct_counts = _source_topk_indices(
+        mapped_scores,
+        legal_mask,
+        policy_input.legal_actions,
+        k=int(teacher_topk),
+        adaptive=bool(adaptive),
+    )
+    masked_prior = prior_logits.masked_fill(~legal_mask, torch.finfo(torch.float32).min)
+    topk_prior = masked_prior.gather(1, topk_indices.to(device=masked_prior.device))
     teacher_scores = mapped_scores.gather(1, topk_indices.to(device=mapped_scores.device))
     support_mask = support_mask.to(device=teacher_scores.device)
     finite_supported = torch.isfinite(teacher_scores) | ~support_mask
@@ -1224,12 +1224,6 @@ def _mortal_topk_imitation_loss(
     prior_logits = policy_input.prior_logits.float()
     assert policy_input.legal_actions is not None
     legal_mask = policy_input.legal_action_mask.bool()
-    topk_indices, valid_rows = _unique_source_topk_indices(
-        prior_logits,
-        legal_mask,
-        policy_input.legal_actions,
-        k=int(teacher_topk),
-    )
     mapped_scores = torch.full_like(prior_logits, float("-inf"))
     for row_idx, legal_actions in enumerate(policy_input.legal_actions):
         mapped = mortal_scores_for_legal_actions(
@@ -1243,9 +1237,15 @@ def _mortal_topk_imitation_loss(
                 "Mortal imitation topK row has missing legal actions",
                 missing_legal_keys=mapped.missing_legal_keys,
                 mismatch_kind="missing_legal",
-            )
+        )
         width = min(int(mapped.scores.shape[0]), int(mapped_scores.shape[1]))
         mapped_scores[row_idx, :width] = mapped.scores[:width].to(device=mapped_scores.device)
+    topk_indices, valid_rows = _unique_source_topk_indices(
+        mapped_scores,
+        legal_mask,
+        policy_input.legal_actions,
+        k=int(teacher_topk),
+    )
     teacher_scores = mapped_scores.gather(1, topk_indices.to(device=mapped_scores.device)).to(
         device=output.action_logits.device,
         dtype=output.action_logits.dtype,
