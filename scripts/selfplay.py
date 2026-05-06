@@ -17,13 +17,13 @@ import time
 import traceback
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, DefaultDict, Dict, List, Optional, Tuple
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from gateway.battle import BattleConfig, BattleManager, BattleRoom, _shuffle_wall
+from gateway.battle import BattleConfig, BattleManager, BattleRoom
 from inference.bot_registry import create_runtime_bot
 from mahjong_env.legal_actions import enumerate_legal_actions
 from mahjong_env.state import GameState
@@ -222,20 +222,84 @@ def _bot_decide(bot: object, event: dict) -> Optional[dict]:
     return bot.react(event)
 
 
+def _append_decision_trace_entries(
+    bot: object,
+    *,
+    actor_id: int,
+    event_index: int,
+    before_log_len: int,
+    decision_traces_by_actor: DefaultDict[str, list[dict[str, Any]]] | None,
+) -> None:
+    if decision_traces_by_actor is None:
+        return
+    log = getattr(bot, "decision_log", None)
+    if not isinstance(log, list) or len(log) <= before_log_len:
+        return
+    for entry in log[before_log_len:]:
+        mortal_meta = dict(entry.get("mortal_meta", {}) or {})
+        q_values = mortal_meta.get("expanded_q_values")
+        action_mask = mortal_meta.get("action_mask")
+        if q_values is None or action_mask is None:
+            continue
+        decision_traces_by_actor[str(actor_id)].append(
+            {
+                "event_index": int(event_index),
+                "actor": int(actor_id),
+                "event_type": str(entry.get("trigger", {}).get("type", "")),
+                "chosen_action": entry.get("chosen_action"),
+                "mortal_meta": {
+                    "expanded_q_values": [float(value) for value in q_values],
+                    "action_mask": [bool(value) for value in action_mask],
+                    "q_values": [float(value) for value in (mortal_meta.get("q_values") or [])],
+                    "mask_bits": mortal_meta.get("mask_bits"),
+                    "eval_time_ns": mortal_meta.get("eval_time_ns"),
+                },
+            }
+        )
+
+
+def _react_with_optional_trace(
+    bot: object,
+    event: dict,
+    *,
+    actor_id: int,
+    event_index: int,
+    decision_traces_by_actor: DefaultDict[str, list[dict[str, Any]]] | None = None,
+) -> Tuple[Optional[dict], float]:
+    before_log_len = len(getattr(bot, "decision_log", ()) or ())
+    action, elapsed = _timed_react(bot, event)
+    _append_decision_trace_entries(
+        bot,
+        actor_id=int(actor_id),
+        event_index=int(event_index),
+        before_log_len=int(before_log_len),
+        decision_traces_by_actor=decision_traces_by_actor,
+    )
+    return action, elapsed
+
+
 def _broadcast_event(
     bots: List[object],
     event: dict,
     *,
     skip: Optional[int] = None,
+    event_index: Optional[int] = None,
     decision_time_by_actor: Optional[Dict[str, float]] = None,
     decision_count_by_actor: Optional[Counter] = None,
+    decision_traces_by_actor: DefaultDict[str, list[dict[str, Any]]] | None = None,
 ) -> Dict[int, Optional[dict]]:
     """向 bots 广播一条事件，并返回各 bot 的单次 react 结果。"""
     responses: Dict[int, Optional[dict]] = {}
     for pid, bot in enumerate(bots):
         if pid == skip:
             continue
-        action, elapsed = _timed_react(bot, event)
+        action, elapsed = _react_with_optional_trace(
+            bot,
+            event,
+            actor_id=pid,
+            event_index=-1 if event_index is None else int(event_index),
+            decision_traces_by_actor=decision_traces_by_actor,
+        )
         if decision_time_by_actor is not None:
             decision_time_by_actor[str(pid)] += elapsed
         if decision_count_by_actor is not None:
@@ -303,7 +367,7 @@ def _canonicalize_action_for_server(
         return action
 
     atype = action.get("type", "none")
-    if atype in ("none", "reach", "hora", "ryukyoku"):
+    if atype in ("none", "reach", "ryukyoku"):
         return action
 
     try:
@@ -337,6 +401,33 @@ def _canonicalize_action_for_server(
                 "actor": actor,
                 "pai": normalized.pai,
                 "tsumogiri": normalized.tsumogiri,
+            }
+        return action
+
+    if atype == "hora":
+        chosen_target = action.get("target", actor)
+        chosen_pai = action.get("pai", "")
+        is_tsumo = chosen_target == actor
+        exact = next(
+            (
+                a
+                for a in legal
+                if a.type == "hora"
+                and a.target == chosen_target
+                and (
+                    not chosen_pai
+                    or normalize_tile(a.pai or "") == normalize_tile(chosen_pai)
+                )
+            ),
+            None,
+        )
+        if exact is not None:
+            return {
+                "type": "hora",
+                "actor": actor,
+                "target": exact.target,
+                "pai": exact.pai,
+                "is_tsumo": is_tsumo,
             }
         return action
 
@@ -386,18 +477,22 @@ def _broadcast_events(
     events: List[dict],
     *,
     skip: Optional[int] = None,
+    event_start_index: Optional[int] = None,
     decision_time_by_actor: Optional[Dict[str, float]] = None,
     decision_count_by_actor: Optional[Counter] = None,
+    decision_traces_by_actor: DefaultDict[str, list[dict[str, Any]]] | None = None,
 ) -> Dict[int, Optional[dict]]:
     """按顺序广播多条事件，返回最后一条事件的 react 结果。"""
     responses: Dict[int, Optional[dict]] = {}
-    for ev in events:
+    for offset, ev in enumerate(events):
         responses = _broadcast_event(
             bots,
             ev,
             skip=skip,
+            event_index=None if event_start_index is None else int(event_start_index) + offset,
             decision_time_by_actor=decision_time_by_actor,
             decision_count_by_actor=decision_count_by_actor,
+            decision_traces_by_actor=decision_traces_by_actor,
         )
     return responses
 
@@ -541,15 +636,26 @@ def _resolve_seat_bots(
     if seat_bots:
         if len(seat_bots) != 4:
             raise ValueError("--seat-bots 必须提供 4 个 bot 类型")
+        resolved_seat_models: Optional[List[str]] = None
+        if seat_models is not None:
+            if len(seat_models) != 4:
+                raise ValueError("--seat-models 必须提供 4 个路径")
+            resolved_seat_models = [_resolve_model_path(path) for path in seat_models]
         sources: List[str] = []
         labels: List[str] = []
         kinds: List[str] = []
-        for bot_spec in seat_bots:
+        for seat_idx, bot_spec in enumerate(seat_bots):
             if bot_spec not in {"xmodel1", "keqingv4", "mortal", "rulebase"}:
                 raise ValueError(
                     "--seat-bots 仅支持 xmodel1/keqingv4/mortal/rulebase"
                 )
-            source, default_label = _resolve_bot_source(bot_spec)
+            if bot_spec == "rulebase":
+                source, default_label = _resolve_bot_source(bot_spec)
+            elif resolved_seat_models is not None:
+                source = resolved_seat_models[seat_idx]
+                default_label = _default_model_label(source)
+            else:
+                source, default_label = _resolve_bot_source(bot_spec)
             sources.append(source)
             labels.append(default_label)
             kinds.append(bot_spec)
@@ -640,6 +746,7 @@ def run_one_kyoku(
     fallback_counts: Counter = Counter()
     decision_time_by_actor: Dict[str, float] = defaultdict(float)
     decision_count_by_actor: Counter = Counter()
+    decision_traces_by_actor: DefaultDict[str, list[dict[str, Any]]] = defaultdict(list)
 
     # 重置所有 bot 状态，replay start_kyoku 事件
     for bot in bots:
@@ -650,13 +757,15 @@ def run_one_kyoku(
             bot.decision_log = []
 
     # 广播 start_game / start_kyoku 给所有 bot
-    for ev in room.events:
+    for event_index, ev in enumerate(room.events):
         event_type_counts[ev.get("type", "unknown")] += 1
         _broadcast_event(
             bots,
             ev,
+            event_index=int(event_index),
             decision_time_by_actor=decision_time_by_actor,
             decision_count_by_actor=decision_count_by_actor,
+            decision_traces_by_actor=decision_traces_by_actor,
         )
 
     oya = room.state.oya
@@ -689,14 +798,25 @@ def run_one_kyoku(
                 manager.ryukyoku(room, tenpai=tenpai)
                 new_events = _events_since(room, prev_events_len)
             event_type_counts.update(ev.get("type", "unknown") for ev in new_events)
-            _broadcast_events(bots, new_events)
+            _broadcast_events(
+                bots,
+                new_events,
+                event_start_index=len(room.events) - len(new_events),
+                decision_traces_by_actor=decision_traces_by_actor,
+            )
             break
 
         tsumo_ev = room.events[-1]
         event_type_counts["tsumo"] += 1
 
         # actor bot 响应摸牌
-        action, elapsed = _timed_react(bots[actor], tsumo_ev)
+        action, elapsed = _react_with_optional_trace(
+            bots[actor],
+            tsumo_ev,
+            actor_id=actor,
+            event_index=len(room.events) - 1,
+            decision_traces_by_actor=decision_traces_by_actor,
+        )
         decision_time_by_actor[str(actor)] += elapsed
         decision_count_by_actor[str(actor)] += 1
 
@@ -705,8 +825,10 @@ def run_one_kyoku(
             bots,
             tsumo_ev,
             skip=actor,
+            event_index=len(room.events) - 1,
             decision_time_by_actor=decision_time_by_actor,
             decision_count_by_actor=decision_count_by_actor,
+            decision_traces_by_actor=decision_traces_by_actor,
         )
 
         if action is None:
@@ -725,8 +847,10 @@ def run_one_kyoku(
             _broadcast_events(
                 bots,
                 new_events,
+                event_start_index=len(room.events) - len(new_events),
                 decision_time_by_actor=decision_time_by_actor,
                 decision_count_by_actor=decision_count_by_actor,
+                decision_traces_by_actor=decision_traces_by_actor,
             )
             break
 
@@ -737,8 +861,10 @@ def run_one_kyoku(
             kakan_responses = _broadcast_events(
                 bots,
                 new_events,
+                event_start_index=len(room.events) - len(new_events),
                 decision_time_by_actor=decision_time_by_actor,
                 decision_count_by_actor=decision_count_by_actor,
+                decision_traces_by_actor=decision_traces_by_actor,
             )
 
             if atype == "kakan":
@@ -765,8 +891,10 @@ def run_one_kyoku(
                     _broadcast_events(
                         bots,
                         new_resp_events,
+                        event_start_index=len(room.events) - len(new_resp_events),
                         decision_time_by_actor=decision_time_by_actor,
                         decision_count_by_actor=decision_count_by_actor,
+                        decision_traces_by_actor=decision_traces_by_actor,
                     )
                     break
 
@@ -775,8 +903,10 @@ def run_one_kyoku(
                 _broadcast_events(
                     bots,
                     accepted_events,
+                    event_start_index=len(room.events) - len(accepted_events),
                     decision_time_by_actor=decision_time_by_actor,
                     decision_count_by_actor=decision_count_by_actor,
+                    decision_traces_by_actor=decision_traces_by_actor,
                 )
             continue
 
@@ -787,8 +917,10 @@ def run_one_kyoku(
             _broadcast_events(
                 bots,
                 new_events,
+                event_start_index=len(room.events) - len(new_events),
                 decision_time_by_actor=decision_time_by_actor,
                 decision_count_by_actor=decision_count_by_actor,
+                decision_traces_by_actor=decision_traces_by_actor,
             )
             break
 
@@ -800,8 +932,10 @@ def run_one_kyoku(
             reach_responses = _broadcast_events(
                 bots,
                 [reach_ev] if reach_ev is not None else [],
+                event_start_index=None if reach_ev is None else len(room.events) - len(new_events),
                 decision_time_by_actor=decision_time_by_actor,
                 decision_count_by_actor=decision_count_by_actor,
+                decision_traces_by_actor=decision_traces_by_actor,
             )
             # reach 后继续打牌
             action = reach_responses.get(actor)
@@ -831,8 +965,10 @@ def run_one_kyoku(
             responses = _broadcast_event(
                 bots,
                 dahai_ev,
+                event_index=len(room.events) - 1,
                 decision_time_by_actor=decision_time_by_actor,
                 decision_count_by_actor=decision_count_by_actor,
+                decision_traces_by_actor=decision_traces_by_actor,
             )
 
             # 其他玩家响应（副露/荣和）
@@ -866,8 +1002,10 @@ def run_one_kyoku(
                     _broadcast_events(
                         bots,
                         new_resp_events,
+                        event_start_index=len(room.events) - len(new_resp_events),
                         decision_time_by_actor=decision_time_by_actor,
                         decision_count_by_actor=decision_count_by_actor,
+                        decision_traces_by_actor=decision_traces_by_actor,
                     )
                     responded = True
                 elif rtype in ("chi", "pon", "daiminkan", "ankan", "kakan"):
@@ -880,8 +1018,10 @@ def run_one_kyoku(
                     meld_responses = _broadcast_events(
                         bots,
                         new_resp_events,
+                        event_start_index=len(room.events) - len(new_resp_events),
                         decision_time_by_actor=decision_time_by_actor,
                         decision_count_by_actor=decision_count_by_actor,
+                        decision_traces_by_actor=decision_traces_by_actor,
                     )
 
                     if rtype in ("chi", "pon"):
@@ -910,8 +1050,10 @@ def run_one_kyoku(
                         _broadcast_events(
                             bots,
                             meld_follow_events,
+                            event_start_index=len(room.events) - len(meld_follow_events),
                             decision_time_by_actor=decision_time_by_actor,
                             decision_count_by_actor=decision_count_by_actor,
+                            decision_traces_by_actor=decision_traces_by_actor,
                         )
 
                     actor = _next_actor_after_meld_response(room, responder_id, rtype)
@@ -924,8 +1066,10 @@ def run_one_kyoku(
                 _broadcast_events(
                     bots,
                     meta_events,
+                    event_start_index=len(room.events) - len(new_events),
                     decision_time_by_actor=decision_time_by_actor,
                     decision_count_by_actor=decision_count_by_actor,
+                    decision_traces_by_actor=decision_traces_by_actor,
                 )
             if not responded:
                 actor = (actor + 1) % 4
@@ -961,6 +1105,9 @@ def run_one_kyoku(
                 for actor_id in sorted(decision_count_by_actor)
             },
         },
+        "decision_traces_by_actor": {
+            actor_id: list(entries) for actor_id, entries in decision_traces_by_actor.items()
+        },
     }
 
 
@@ -986,6 +1133,7 @@ def run_one_game(
     aggregate_fallback_counts: Counter = Counter()
     aggregate_decision_seconds_by_actor: Dict[str, float] = defaultdict(float)
     aggregate_decision_counts_by_actor: Counter = Counter()
+    aggregate_decision_traces_by_actor: DefaultDict[str, list[dict[str, Any]]] = defaultdict(list)
     total_turns = 0
     round_idx = 0
 
@@ -1009,6 +1157,8 @@ def run_one_game(
             aggregate_decision_counts_by_actor[str(actor_id)] += int(
                 info.get("decision_count", 0)
             )
+        for actor_id, entries in result.get("decision_traces_by_actor", {}).items():
+            aggregate_decision_traces_by_actor[str(actor_id)].extend(list(entries))
 
         events = list(result.get("events", []))
         start_idx = 0
@@ -1076,6 +1226,9 @@ def run_one_game(
                 }
                 for actor_id in sorted(aggregate_decision_counts_by_actor)
             },
+        },
+        "decision_traces_by_actor": {
+            actor_id: list(entries) for actor_id, entries in aggregate_decision_traces_by_actor.items()
         },
     }
 
@@ -1327,7 +1480,15 @@ def _save_anomaly_samples(
     for item in selected:
         mjson_path = export_dir / f"game_{item['game_id']:05d}.mjson"
         meta_path = export_dir / f"game_{item['game_id']:05d}.json"
+        decisions_path = export_dir / f"game_{item['game_id']:05d}.decisions.json"
         _save_mjson(mjson_path, item["events"])
+        with open(decisions_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"by_actor": item.get("decision_traces_by_actor", {})},
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
         replay_ui = None
         replay_ui_error = None
         if replay_model_path:
@@ -1397,7 +1558,15 @@ def _save_replay_samples(
     for item in selected:
         mjson_path = export_dir / f"game_{item['game_id']:05d}.mjson"
         meta_path = export_dir / f"game_{item['game_id']:05d}.json"
+        decisions_path = export_dir / f"game_{item['game_id']:05d}.decisions.json"
         _save_mjson(mjson_path, item["events"])
+        with open(decisions_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"by_actor": item.get("decision_traces_by_actor", {})},
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
 
         replay_ui = None
         replay_ui_error = None
@@ -1421,6 +1590,7 @@ def _save_replay_samples(
                     "ranks": item.get("ranks"),
                     "turns": item.get("turns", 0),
                     "rounds": item.get("rounds", 1),
+                    "decision_traces": str(decisions_path),
                     "replay_ui": replay_ui,
                     "replay_ui_error": replay_ui_error,
                 },
@@ -1438,6 +1608,7 @@ def _save_replay_samples(
             "rounds": item.get("rounds", 1),
             "mjson": str(mjson_path),
             "meta": str(meta_path),
+            "decision_traces": str(decisions_path),
         }
         if replay_ui is not None:
             manifest_item.update(replay_ui)
@@ -2085,6 +2256,7 @@ def main():
                 "rounds": rounds_played,
                 "chosen_action_counts": result.get("chosen_action_counts", {}),
                 "fallback_counts": result.get("fallback_counts", {}),
+                "decision_traces_by_actor": result.get("decision_traces_by_actor", {}),
             }
         )
 

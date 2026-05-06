@@ -74,7 +74,7 @@ class DefaultDecisionContextBuilder:
             pre_apply_hand = pre_snap.get("hand", [])
             pre_apply_melds = (pre_snap.get("melds") or [[], [], [], []])[actor]
             apply_event(state, event)
-        elif etype in ("chi", "pon", "daiminkan") and event.get("actor") == actor:
+        elif etype in ("chi", "pon") and event.get("actor") == actor:
             pre_snap = self._snapshot_for_actor(state, actor)
             pre_apply_hand = pre_snap.get("hand", [])
             pre_apply_melds = (pre_snap.get("melds") or [[], [], [], []])[actor]

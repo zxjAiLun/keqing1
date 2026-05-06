@@ -12,6 +12,7 @@ import torch
 
 from keqingrl.actions import ActionSpec, ActionType
 from keqingrl.contracts import ObsTensorBatch, PolicyInput, PolicyOutput
+from keqingrl.rollout import RolloutStep
 from keqingrl.mortal_teacher import (
     MORTAL_ACTION_MASK_EXTRA_KEY,
     MORTAL_ACTION_SPACE,
@@ -27,11 +28,17 @@ from keqingrl.mortal_teacher import (
 from mahjong_env.action_space import TILE_NAME_TO_IDX
 from scripts.run_keqingrl_mortal_imitation import (
     ALLOWED_IMITATION_TEACHER_SOURCES,
+    _build_replay_imitation_batch,
     _ensure_mortal_encoded_observation_extras,
     _ensure_mortal_teacher_q_extras,
+    _load_native_mortal_replay_decisions_sidecar,
+    _native_mortal_decision_event_index,
+    _replay_raw_legal_actions,
     _latest_checkpoint_rows,
     _load_imitation_candidates,
     _parse_args,
+    _replay_events_prefix,
+    _resolve_replay_label_action_index,
     _save_imitation_checkpoint,
     _student_logit_source,
     _validate_args,
@@ -186,6 +193,7 @@ def test_mortal_imitation_defaults_to_rule_free_full_legal_support(monkeypatch: 
     assert args.delta_support_mode == "all"
     assert args.support_policy_mode == "unrestricted"
     assert args.max_kyokus == 0
+    assert args.rollout_source == "mortal-selfplay-replay"
     assert args.rollout_behavior == "mortal-teacher"
     assert args.decision_review_case_streaming is True
     assert _student_logit_source(args) == "neural_delta_only"
@@ -382,6 +390,305 @@ def test_mortal_imitation_topk_uses_mortal_scores_not_rule_prior_for_reach_vs_di
     assert teacher_data.teacher_batch.teacher_scores.tolist()[0] == pytest.approx(
         [-0.036, -0.231, -2.983],
     )
+
+
+def test_resolve_replay_label_action_index_binds_reach_to_followup_discard() -> None:
+    reach_c = ActionSpec(ActionType.REACH_DISCARD, tile=_tile("C"))
+    discard_c = ActionSpec(ActionType.DISCARD, tile=_tile("C"))
+    sample = SimpleNamespace(
+        label_action={"type": "reach", "actor": 0},
+        events=[
+            {"type": "start_game"},
+            {"type": "reach", "actor": 0},
+            {"type": "dahai", "actor": 0, "pai": "C", "tsumogiri": False},
+        ],
+        event_index=1,
+    )
+
+    action_index = _resolve_replay_label_action_index(
+        sample,
+        [
+            (discard_c, ({"type": "dahai", "actor": 0, "pai": "C", "tsumogiri": False},)),
+            (reach_c, ({"type": "reach", "actor": 0}, {"type": "dahai", "actor": 0, "pai": "C", "tsumogiri": False})),
+        ],
+    )
+
+    assert action_index == 1
+
+
+def test_replay_events_prefix_keeps_triggering_discard_for_response_windows() -> None:
+    sample = SimpleNamespace(
+        actor=2,
+        state={"last_discard": {"actor": 1, "pai": "6m"}},
+        label_action={"type": "none", "actor": 2},
+        event_index=7,
+        events=[{"type": "start_game"}] * 12,
+    )
+
+    prefix = _replay_events_prefix(sample)
+
+    assert len(prefix) == 8
+
+
+def test_replay_events_prefix_strips_post_discard_meta_before_response_label() -> None:
+    sample = SimpleNamespace(
+        actor=3,
+        state={"last_discard": {"actor": 2, "pai": "3p", "pai_raw": "3p"}},
+        label_action={"type": "hora", "actor": 3, "target": 2, "pai": "3p"},
+        event_index=4,
+        events=[
+            {"type": "start_game"},
+            {"type": "reach", "actor": 2},
+            {"type": "dahai", "actor": 2, "pai": "3p", "tsumogiri": False},
+            {"type": "reach_accepted", "actor": 2, "scores": [25000, 25000, 24000, 25000], "kyotaku": 1},
+            {"type": "hora", "actor": 3, "target": 2, "pai": "3p"},
+        ],
+    )
+
+    prefix = _replay_events_prefix(sample)
+
+    assert prefix == tuple(sample.events[:3])
+
+
+def test_replay_raw_legal_actions_prefers_replay_sample_legal_set() -> None:
+    sample = SimpleNamespace(
+        actor=0,
+        state={"actor_to_move": 0},
+        legal_actions=[
+            {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
+            {"type": "kakan", "actor": 0, "pai": "S", "consumed": ["S", "S", "S"]},
+        ],
+    )
+
+    class _Env:
+        def _enumerate_runtime_legal_actions(self, snapshot, actor):
+            raise AssertionError("replay legal set should be authoritative")
+
+    raw_legal_actions = _replay_raw_legal_actions(sample, env=_Env())
+
+    assert [action.type for action in raw_legal_actions] == ["dahai", "kakan"]
+
+
+def test_native_mortal_decision_event_index_uses_triggering_discard_for_response() -> None:
+    sample = SimpleNamespace(
+        actor=3,
+        state={"last_discard": {"actor": 2, "pai": "3p", "pai_raw": "3p"}},
+        label_action={"type": "hora", "actor": 3, "target": 2, "pai": "3p"},
+        event_index=4,
+    )
+    events = [
+        {"type": "start_game"},
+        {"type": "reach", "actor": 2},
+        {"type": "dahai", "actor": 2, "pai": "3p", "tsumogiri": False},
+        {"type": "reach_accepted", "actor": 2},
+        {"type": "hora", "actor": 3, "target": 2, "pai": "3p"},
+    ]
+
+    assert _native_mortal_decision_event_index(sample, events=events) == 2
+
+
+def test_native_mortal_decision_event_index_keeps_current_discard_for_none_response() -> None:
+    sample = SimpleNamespace(
+        actor=3,
+        state={"last_discard": {"actor": 2, "pai": "9m", "pai_raw": "9m"}},
+        label_action={"type": "none", "actor": 3},
+        event_index=4,
+    )
+    events = [
+        {"type": "dahai", "actor": 2, "pai": "9m", "tsumogiri": False},
+        {"type": "tsumo", "actor": 3, "pai": "1p", "rinshan": False},
+        {"type": "dahai", "actor": 3, "pai": "1p", "tsumogiri": True},
+        {"type": "tsumo", "actor": 2, "pai": "9m", "rinshan": False},
+        {"type": "dahai", "actor": 2, "pai": "9m", "tsumogiri": True},
+    ]
+
+    assert _native_mortal_decision_event_index(sample, events=events) == 4
+
+
+def test_native_mortal_decision_event_index_uses_tsumo_for_reach_declaration() -> None:
+    sample = SimpleNamespace(
+        actor=3,
+        state={"last_discard": None, "last_kakan": None},
+        label_action={"type": "reach", "actor": 3},
+        event_index=3,
+    )
+    events = [
+        {"type": "start_game"},
+        {"type": "tsumo", "actor": 3, "pai": "5mr", "rinshan": False},
+        {"type": "reach", "actor": 3},
+        {"type": "dahai", "actor": 3, "pai": "7s", "tsumogiri": False},
+    ]
+
+    assert _native_mortal_decision_event_index(sample, events=events) == 1
+
+
+def test_native_mortal_decision_event_index_uses_tsumo_for_self_turn_discard() -> None:
+    sample = SimpleNamespace(
+        actor=2,
+        state={"last_discard": None, "last_kakan": None},
+        label_action={"type": "dahai", "actor": 2, "pai": "4p", "tsumogiri": True},
+        event_index=11,
+    )
+    events = [
+        {"type": "start_game"},
+        {"type": "tsumo", "actor": 2, "pai": "4p", "rinshan": False},
+        {"type": "dahai", "actor": 2, "pai": "4p", "tsumogiri": True},
+    ]
+
+    assert _native_mortal_decision_event_index(sample, events=events) == 1
+
+
+def test_native_mortal_decision_event_index_uses_meld_for_followup_discard() -> None:
+    sample = SimpleNamespace(
+        actor=2,
+        state={"last_discard": None, "last_kakan": None},
+        label_action={"type": "dahai", "actor": 2, "pai": "9p", "tsumogiri": False},
+        event_index=5,
+    )
+    events = [
+        {"type": "start_game"},
+        {"type": "tsumo", "actor": 0, "pai": "1m", "rinshan": False},
+        {"type": "dahai", "actor": 0, "pai": "W", "tsumogiri": False},
+        {"type": "pon", "actor": 2, "pai": "W", "consumed": ["W", "W"], "target": 0},
+        {"type": "dahai", "actor": 2, "pai": "9p", "tsumogiri": False},
+    ]
+
+    assert _native_mortal_decision_event_index(sample, events=events) == 3
+
+
+def test_load_native_mortal_replay_decisions_sidecar_reads_saved_q_and_mask(tmp_path: Path) -> None:
+    replay_path = tmp_path / "game_00000.mjson"
+    replay_path.write_text('{"type":"start_game"}\n', encoding="utf-8")
+    replay_path.with_suffix(".decisions.json").write_text(
+        json.dumps(
+            {
+                "by_actor": {
+                    "0": [
+                        {
+                            "event_index": 7,
+                            "mortal_meta": {
+                                "expanded_q_values": [0.1, 0.2, 0.3],
+                                "action_mask": [True, False, True],
+                            },
+                        }
+                    ],
+                    "1": [
+                        {
+                            "event_index": 8,
+                            "mortal_meta": {
+                                "expanded_q_values": [1.0, 2.0],
+                                "action_mask": [False, True],
+                            },
+                        }
+                    ],
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    decisions = _load_native_mortal_replay_decisions_sidecar(replay_path, actor_filter={0})
+
+    assert decisions is not None
+    assert sorted(decisions) == [(0, 7)]
+    assert torch.allclose(decisions[(0, 7)].q_values, torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32))
+    assert torch.equal(decisions[(0, 7)].action_mask, torch.tensor([True, False, True], dtype=torch.bool))
+
+
+def test_build_replay_imitation_batch_summarizes_controlled_and_mismatch_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    replay_paths = [Path("game_00001.mjson"), Path("game_00002.mjson")]
+    samples_by_path = {
+        "game_00001.mjson": [
+            SimpleNamespace(actor=0, state={}, event_index=3, actor_name="p0", final_rank_target=1, label_action={"type": "dahai"}),
+            SimpleNamespace(actor=0, state={}, event_index=4, actor_name="p0", final_rank_target=2, label_action={"type": "dahai"}),
+        ],
+        "game_00002.mjson": [
+            SimpleNamespace(actor=1, state={}, event_index=5, actor_name="p1", final_rank_target=3, label_action={"type": "dahai"}),
+        ],
+    }
+
+    monkeypatch.setattr(
+        "scripts.run_keqingrl_mortal_imitation.read_mjai_jsonl",
+        lambda path: [{"type": "start_game", "path": Path(path).name}],
+    )
+    monkeypatch.setattr(
+        "scripts.run_keqingrl_mortal_imitation.build_replay_samples_mc_return",
+        lambda events, strict_legal_labels=True: samples_by_path[events[0]["path"]],
+    )
+    monkeypatch.setattr(
+        "scripts.run_keqingrl_mortal_imitation._replay_conversion_env",
+        lambda args: object(),
+    )
+    monkeypatch.setattr(
+        "scripts.run_keqingrl_mortal_imitation._sample_has_controlled_scope",
+        lambda env, sample: int(sample.event_index) == 4,
+    )
+    monkeypatch.setattr(
+        "scripts.run_keqingrl_mortal_imitation._collect_native_mortal_replay_decisions",
+        lambda args, replay_path, events, actor_filter, expected_keys=None: {},
+    )
+
+    def fake_step(sample, *, env, rollout_seed, replay_id, native_decisions):
+        del replay_id, native_decisions
+        if int(sample.event_index) == 3:
+            return RolloutStep(
+                obs=ObsTensorBatch(tile_obs=torch.zeros((1,)), scalar_obs=torch.zeros((1,))),
+                legal_action_ids=torch.tensor([1], dtype=torch.long),
+                legal_action_features=torch.zeros((1, 8), dtype=torch.float32),
+                legal_action_mask=torch.tensor([True]),
+                action_index=0,
+                action_spec=ActionSpec(ActionType.PASS),
+                log_prob=0.0,
+                value=0.0,
+                entropy=0.0,
+                reward=0.0,
+                done=False,
+                actor=int(sample.actor),
+                policy_version=0,
+                rule_context=torch.zeros((1,), dtype=torch.float32),
+                raw_rule_scores=torch.zeros((1,), dtype=torch.float32),
+                prior_logits=torch.zeros((1,), dtype=torch.float32),
+                style_context=torch.zeros((1,), dtype=torch.float32),
+                chosen_action_canonical_key=ActionSpec(ActionType.PASS).canonical_key,
+                observation_contract_version="keqingrl_observation_v1",
+                action_feature_contract_version="keqingrl_action_feature_v1",
+                env_contract_version="keqingrl_env_v2",
+                native_schema_name="keqingrl_native_boundary",
+                native_schema_version=1,
+                native_action_identity_version=1,
+                native_legal_enumeration_version=1,
+                native_terminal_resolver_version=1,
+                rule_score_version="keqingrl_rule_score_v1",
+                rule_score_scale=0.0,
+                rule_score_scale_version="keqingrl_rule_score_scale_v1",
+                reward_spec_version="keqingrl_reward_spec_v1",
+                style_context_version="keqingrl_style_context_v1",
+                legal_actions=(ActionSpec(ActionType.PASS),),
+            ), int(sample.final_rank_target)
+        return None
+
+    monkeypatch.setattr("scripts.run_keqingrl_mortal_imitation._replay_sample_to_rollout_step", fake_step)
+
+    args = SimpleNamespace(
+        learner_seats=(0, 1),
+    )
+    prepared_steps, batch, summary = _build_replay_imitation_batch(
+        args,
+        replay_paths=replay_paths,
+        rollout_seed=123,
+    )
+
+    assert len(prepared_steps) == 1
+    assert int(batch.policy_input.legal_action_mask.shape[0]) == 1
+    assert summary == {
+        "replay_total_samples": 3,
+        "replay_actor_filtered_samples": 3,
+        "replay_controlled_row_count": 1,
+        "replay_skipped_uncontrolled_count": 1,
+        "replay_skipped_label_mismatch_count": 1,
+        "replay_file_count": 2,
+    }
 
 
 def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> None:

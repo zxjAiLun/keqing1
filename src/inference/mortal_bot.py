@@ -11,6 +11,7 @@ import torch
 from inference import DefaultDecisionContextBuilder, DefaultRuntimeReviewExporter
 from inference.contracts import DecisionResult, ModelAuxOutputs, ScoredCandidate
 from inference.runtime_bot import enumerate_legal_actions, inject_shanten_waits
+from keqingrl.mortal_observation import sanitize_event_for_mortal
 from keqingrl.mortal_teacher import MORTAL_ACTION_SPACE, MORTAL_DISCARD_ID_TO_TILE
 from mahjong_env.state import GameState
 from mahjong_env.tiles import normalize_tile
@@ -85,14 +86,19 @@ class MortalReviewBot:
 
     @torch.no_grad()
     def react(self, event: dict[str, Any], gt_action: Optional[dict] = None) -> Optional[dict]:
-        line = json.dumps(event, ensure_ascii=False)
+        sanitized_event = sanitize_event_for_mortal(event)
+        line = json.dumps(sanitized_event, ensure_ascii=False) if sanitized_event is not None else None
         if not self._enable_review_log:
+            if line is None:
+                return None
             reaction_line = self._mortal_bot.react(line)
             if reaction_line is None:
                 return None
             return json.loads(reaction_line)
 
         ctx = self._context_builder.build(self.game_state, self.player_id, event)
+        if line is None:
+            return None
         reaction_line = self._mortal_bot.react(line)
         if ctx is None:
             return None
@@ -124,6 +130,9 @@ class MortalReviewBot:
         )
         entry["mortal_meta"] = {
             "mask_bits": meta.get("mask_bits"),
+            "q_values": [float(value) for value in (meta.get("q_values") or [])],
+            "expanded_q_values": list(q_values),
+            "action_mask": list(action_mask),
             "is_greedy": meta.get("is_greedy"),
             "shanten": meta.get("shanten"),
             "at_furiten": meta.get("at_furiten"),
