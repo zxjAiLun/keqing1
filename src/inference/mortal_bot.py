@@ -111,7 +111,7 @@ class MortalReviewBot:
         if reaction_line is None and not non_none:
             return {"type": "none", "actor": self.player_id}
         if reaction_line is None:
-            raise RuntimeError(f"Mortal did not return a reaction for review decision event: {event}")
+            return None
 
         reaction = json.loads(reaction_line)
         meta = dict(reaction.pop("meta", {}) or {})

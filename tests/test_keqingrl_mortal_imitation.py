@@ -46,6 +46,7 @@ from scripts.run_keqingrl_mortal_imitation import (
     _replay_events_prefix,
     _resolve_replay_label_action_index,
     _save_imitation_checkpoint,
+    _select_replay_pool_paths,
     _student_logit_source,
     _validate_args,
     _write_incremental_outputs,
@@ -473,6 +474,23 @@ def test_replay_reach_followup_discard_sample_is_skipped() -> None:
     assert _is_reach_followup_discard_sample(sample, events) is True
 
 
+def test_replay_reach_followup_discard_sample_is_skipped_when_event_index_is_late() -> None:
+    events = [
+        {"type": "tsumo", "actor": 0, "pai": "7s"},
+        {"type": "reach", "actor": 0},
+        {"type": "dahai", "actor": 0, "pai": "8s", "tsumogiri": False},
+        {"type": "reach_accepted", "actor": 0},
+        {"type": "tsumo", "actor": 1, "pai": "7p"},
+    ]
+    sample = SimpleNamespace(
+        actor=0,
+        event_index=4,
+        label_action={"type": "dahai", "actor": 0, "pai": "8s", "tsumogiri": False},
+    )
+
+    assert _is_reach_followup_discard_sample(sample, events) is True
+
+
 def test_replay_raw_legal_actions_merges_runtime_legal_extras() -> None:
     sample = SimpleNamespace(
         actor=0,
@@ -530,6 +548,44 @@ def test_replay_raw_legal_actions_uses_runtime_when_sample_legal_set_missing() -
     raw_legal_actions = _replay_raw_legal_actions(sample, env=_Env())
 
     assert [action.type for action in raw_legal_actions] == ["dahai"]
+
+
+def test_select_replay_pool_paths_uses_replays_subdir_and_episode_default(tmp_path: Path) -> None:
+    replays_dir = tmp_path / "pool" / "replays"
+    replays_dir.mkdir(parents=True)
+    for index in range(5):
+        (replays_dir / f"game_{index:05d}.mjson").write_text("{}", encoding="utf-8")
+    args = SimpleNamespace(
+        replay_pool_dir=tmp_path / "pool",
+        replay_pool_files_per_iteration=None,
+        episodes=3,
+        replay_pool_shuffle=False,
+        seed_stride=1,
+        seed_base=100,
+    )
+
+    selected = _select_replay_pool_paths(args, rollout_seed=101)
+
+    assert [path.name for path in selected] == ["game_00003.mjson", "game_00004.mjson", "game_00000.mjson"]
+
+
+def test_select_replay_pool_paths_can_take_all_files(tmp_path: Path) -> None:
+    replays_dir = tmp_path / "replays"
+    replays_dir.mkdir()
+    for index in range(2):
+        (replays_dir / f"game_{index:05d}.mjson").write_text("{}", encoding="utf-8")
+    args = SimpleNamespace(
+        replay_pool_dir=tmp_path,
+        replay_pool_files_per_iteration=0,
+        episodes=1,
+        replay_pool_shuffle=True,
+        seed_stride=1,
+        seed_base=100,
+    )
+
+    selected = _select_replay_pool_paths(args, rollout_seed=100)
+
+    assert [path.name for path in selected] == ["game_00000.mjson", "game_00001.mjson"]
 
 
 def test_native_mortal_decision_event_index_uses_triggering_discard_for_response() -> None:
@@ -776,6 +832,55 @@ def test_collect_native_mortal_replay_decisions_preserves_sidecar_when_fallback_
     assert torch.equal(decisions[(1, 185)].action_mask, sidecar_decision.action_mask)
 
 
+def test_collect_native_mortal_replay_decisions_writes_missing_sidecar_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    replay_path = tmp_path / "game_00000.mjson"
+    replay_path.write_text('{"type":"tsumo","actor":0,"pai":"1m"}\n', encoding="utf-8")
+
+    class FakeBot:
+        def __init__(self, *args, **kwargs):
+            self.decision_log = []
+
+        def react(self, event):
+            self.decision_log.append(
+                {
+                    "mortal_meta": {
+                        "expanded_q_values": [0.1, 0.2, 0.3],
+                        "action_mask": [True, False, True],
+                    }
+                }
+            )
+            return {"type": "dahai", "actor": 0, "pai": "1m"}
+
+    monkeypatch.setattr("scripts.run_keqingrl_mortal_imitation.MortalReviewBot", FakeBot)
+    args = SimpleNamespace(
+        mortal_teacher_device=None,
+        device="cpu",
+        mortal_teacher_checkpoint=tmp_path / "mortal.pth",
+        mortal_root=tmp_path / "mortal_root",
+        replay_decision_sidecar_cache=True,
+    )
+
+    decisions = _collect_native_mortal_replay_decisions(
+        args,
+        replay_path=replay_path,
+        events=[{"type": "tsumo", "actor": 0, "pai": "1m"}],
+        actor_filter={0},
+        expected_keys={(0, 0)},
+    )
+
+    sidecar_path = replay_path.with_suffix(".decisions.json")
+    assert (0, 0) in decisions
+    assert sidecar_path.exists()
+    payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert payload["format"] == "keqingrl_native_mortal_decisions_v1"
+    meta = payload["by_actor"]["0"][0]["mortal_meta"]
+    assert meta["mask_bits"] == 0b101
+    assert meta["q_values"] == pytest.approx([0.1, 0.3])
+
+
 def test_build_replay_imitation_batch_summarizes_controlled_and_mismatch_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     replay_paths = [Path("game_00001.mjson"), Path("game_00002.mjson")]
     samples_by_path = {
@@ -810,6 +915,26 @@ def test_build_replay_imitation_batch_summarizes_controlled_and_mismatch_rows(mo
     )
     monkeypatch.setattr(
         "scripts.run_keqingrl_mortal_imitation._replay_sample_known_mortal_native_limitation_case",
+        lambda sample, env, events, replay_id, native_decisions, rollout_seed: None,
+    )
+    monkeypatch.setattr(
+        "scripts.run_keqingrl_mortal_imitation._replay_sample_known_mortal_native_ambiguous_kan_case",
+        lambda sample, env, events, replay_id, native_decisions, rollout_seed: None,
+    )
+    monkeypatch.setattr(
+        "scripts.run_keqingrl_mortal_imitation._replay_sample_known_mortal_native_kan_mask_mismatch_case",
+        lambda sample, env, events, replay_id, native_decisions, rollout_seed: None,
+    )
+    monkeypatch.setattr(
+        "scripts.run_keqingrl_mortal_imitation._replay_sample_known_mortal_native_missing_ron_case",
+        lambda sample, env, events, replay_id, native_decisions, rollout_seed: None,
+    )
+    monkeypatch.setattr(
+        "scripts.run_keqingrl_mortal_imitation._replay_sample_known_mortal_native_extra_riichi_case",
+        lambda sample, env, events, replay_id, native_decisions, rollout_seed: None,
+    )
+    monkeypatch.setattr(
+        "scripts.run_keqingrl_mortal_imitation._replay_sample_known_mortal_native_extra_ryukyoku_case",
         lambda sample, env, events, replay_id, native_decisions, rollout_seed: None,
     )
 
@@ -871,9 +996,15 @@ def test_build_replay_imitation_batch_summarizes_controlled_and_mismatch_rows(mo
         "replay_actor_filtered_samples": 3,
         "replay_controlled_row_count": 1,
         "replay_skipped_uncontrolled_count": 1,
-        "replay_skipped_label_mismatch_count": 1,
+        "replay_skipped_label_mismatch_count": 0,
+        "replay_skipped_missing_native_decision_count": 1,
         "replay_file_count": 2,
         "replay_skipped_mortal_native_limitation_count": 0,
+        "replay_skipped_mortal_native_extra_riichi_count": 0,
+        "replay_skipped_mortal_native_extra_ryukyoku_count": 0,
+        "replay_skipped_mortal_native_missing_ron_count": 0,
+        "replay_skipped_mortal_native_ambiguous_kan_count": 0,
+        "replay_skipped_mortal_native_kan_mask_mismatch_count": 0,
         "review_case_rows": [],
     }
 
@@ -945,6 +1076,24 @@ def test_native_limitation_review_case_uses_decision_prefix_and_marks_missing_q(
     assert chi_row["mortal_source_action_ids"] == [MORTAL_CHI_HIGH_ACTION_ID]
     assert chi_row["mortal_available_action_ids"] == []
     assert chi_row["native_limitation_missing_q"] is True
+
+
+def test_native_mortal_decision_event_index_uses_pre_kan_tsumo_for_kakan_sample() -> None:
+    sample = SimpleNamespace(
+        actor=0,
+        event_index=4,
+        state={},
+        label_action={"type": "kakan", "actor": 0, "pai": "W", "consumed": ["W", "W", "W"]},
+    )
+    events = [
+        {"type": "tsumo", "actor": 0, "pai": "W"},
+        {"type": "kakan", "actor": 0, "pai": "W", "consumed": ["W", "W", "W"]},
+        {"type": "dora", "dora_marker": "6m"},
+        {"type": "tsumo", "actor": 0, "pai": "3p"},
+        {"type": "dora", "dora_marker": "1s"},
+    ]
+
+    assert imitation_script._native_mortal_decision_event_index(sample, events=events) == 0
 
 
 def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> None:
@@ -1497,6 +1646,84 @@ def test_mortal_imitation_checkpoint_summary_contains_teacher_metadata(tmp_path:
     assert checkpoint["contract_metadata"]["episode_scope"] == "max_kyokus_1"
     assert row["checkpoint_sha256"]
     assert Path(row["checkpoint_path"]).name == "policy_iter_0001.pt"
+    assert Path(row["checkpoint_path"]).is_relative_to(args.output_dir / "checkpoints")
+    assert Path(row["manifest_path"]).exists()
+
+
+def test_mortal_imitation_checkpoint_can_save_to_stable_artifact_dir(tmp_path: Path) -> None:
+    source_config = {
+        "model": {"hidden_dim": 8, "num_res_blocks": 1, "dropout": 0.0},
+        "config_key": {"opponent_mode": "rulebase"},
+    }
+    config_path = tmp_path / "source_config.json"
+    config_path.write_text(json.dumps(source_config), encoding="utf-8")
+    source_checkpoint = tmp_path / "source_policy.pt"
+    torch.save({"policy_state_dict": {}, "rule_score_scale": 0.0}, source_checkpoint)
+    args = SimpleNamespace(
+        output_dir=tmp_path / "reports" / "run_a",
+        artifact_dir=tmp_path / "artifacts" / "keqingrl" / "checkpoints",
+        self_turn_action_types=("DISCARD", "REACH_DISCARD", "TSUMO", "RYUKYOKU"),
+        response_action_types=("PASS", "RON", "PON", "CHI"),
+        forced_autopilot_action_types=("TSUMO", "RON", "RYUKYOKU"),
+        rule_score_scale=0.0,
+        gamma=1.0,
+        gae_lambda=0.95,
+        episodes=1,
+        iterations=1,
+        lr=0.001,
+        update_epochs=1,
+        teacher_source="mortal-action-q",
+        teacher_support="full-legal",
+        teacher_topk=3,
+        teacher_temperature=1.0,
+        max_kyokus=0,
+        mortal_teacher_checkpoint=Path("artifacts/mortal_training/mortal.pth"),
+        mortal_teacher_strict_extra_mask=False,
+        support_policy_mode="unrestricted",
+        delta_support_mode="all",
+        delta_support_topk=3,
+        delta_support_margin_threshold=0.75,
+        outside_support_delta_mode="zero",
+        rollout_source="replay-pool",
+        replay_pool_dir=tmp_path / "pool",
+        replay_pool_files_per_iteration=10,
+    )
+    candidate = {
+        "source_config_id": 93,
+        "rerun_config_id": 0,
+        "checkpoint_path": str(source_checkpoint),
+        "checkpoint_sha256": "source-sha",
+        "config_path": str(config_path),
+    }
+    model = torch.nn.Linear(1, 1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    summary_row = {
+        "top1_changed_vs_parent_rate": 0.1,
+        "teacher_ce": 0.2,
+        "teacher_kl": 0.3,
+        "teacher_policy_agreement": 0.4,
+        "mapping_row_count": 1,
+        "mapping_available_count": 1,
+        "fail_closed_count": 0,
+    }
+
+    row = _save_imitation_checkpoint(
+        args,
+        candidate,
+        model,
+        optimizer,
+        config_id=0,
+        iteration=0,
+        summary_row=summary_row,
+    )
+
+    checkpoint_path = Path(row["checkpoint_path"])
+    assert checkpoint_path.exists()
+    assert checkpoint_path.is_relative_to(args.artifact_dir / args.output_dir.name)
+    assert not checkpoint_path.is_relative_to(args.output_dir)
+    manifest = json.loads(Path(row["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["report_dir"] == str(args.output_dir)
+    assert manifest["replay_pool_files_per_iteration"] == 10
 
 
 def test_latest_checkpoint_rows_keeps_only_latest_per_config() -> None:

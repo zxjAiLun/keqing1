@@ -10,6 +10,7 @@ import csv
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
+import random
 import subprocess
 import sys
 import time
@@ -49,6 +50,7 @@ from keqingrl.mortal_teacher import (
     MORTAL_ACTION_MASK_EXTRA_KEY,
     MORTAL_ACTION_SPACE,
     MORTAL_ACTION_TEACHER_CONTRACT_VERSION,
+    MORTAL_AGARI_ACTION_ID,
     MORTAL_CHI_HIGH_ACTION_ID,
     MORTAL_CHI_LOW_ACTION_ID,
     MORTAL_CHI_MID_ACTION_ID,
@@ -58,7 +60,10 @@ from keqingrl.mortal_teacher import (
     MORTAL_KAN_SELECT_ENCODED_ACTION_MASK_EXTRA_KEY,
     MORTAL_KAN_SELECT_ENCODED_OBS_EXTRA_KEY,
     MORTAL_KAN_SELECT_Q_VALUES_EXTRA_KEY,
+    MORTAL_KAN_ACTION_ID,
     MORTAL_Q_VALUES_EXTRA_KEY,
+    MORTAL_RIICHI_ACTION_ID,
+    MORTAL_RYUKYOKU_ACTION_ID,
     MortalTeacherMappingError,
     mortal_action_mapping_audit_row,
     mortal_action_ids_for_action_spec,
@@ -93,7 +98,7 @@ from training.state_features import encode as encode_state_features
 
 ALLOWED_IMITATION_TEACHER_SOURCES = ("mortal-action-q",)
 TEACHER_SUPPORT_MODES = ("topk", "adaptive-topk", "full-legal")
-ROLLOUT_SOURCES = ("env", "mortal-selfplay-replay", "riichienv-mortal-selfplay-replay")
+ROLLOUT_SOURCES = ("env", "mortal-selfplay-replay", "riichienv-mortal-selfplay-replay", "replay-pool")
 _ACTION_TYPE_CHOICES = tuple(action_type.name for action_type in ActionType)
 
 
@@ -243,6 +248,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--source-config-ids", type=int, nargs="+", default=(93,))
     parser.add_argument("--rerun-config-ids", type=int, nargs="+", default=None)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--artifact-dir",
+        type=Path,
+        default=Path("artifacts/keqingrl/checkpoints"),
+        help=(
+            "Stable checkpoint artifact root. Policy/optimizer weights are saved under "
+            "<artifact-dir>/<output-dir-name>/; reports only reference these paths."
+        ),
+    )
     parser.add_argument("--episodes", type=int, default=128)
     parser.add_argument("--iterations", type=int, default=8)
     parser.add_argument("--lr", type=float, default=0.004)
@@ -268,7 +282,35 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Training data source. riichienv-mortal-selfplay-replay generates 4-Mortal RiichiEnv "
             "replays and converts them into imitation batches; mortal-selfplay-replay keeps the "
-            "legacy BattleManager path for compatibility."
+            "legacy BattleManager path for compatibility; replay-pool reuses existing .mjson + "
+            ".decisions.json files."
+        ),
+    )
+    parser.add_argument(
+        "--replay-pool-dir",
+        type=Path,
+        default=None,
+        help="Directory containing .mjson replays for --rollout-source replay-pool. Accepts either a replays/ directory or a generator output directory.",
+    )
+    parser.add_argument(
+        "--replay-pool-files-per-iteration",
+        type=int,
+        default=None,
+        help="Number of replay files to train on each iteration for replay-pool. Defaults to --episodes; use 0 for all files.",
+    )
+    parser.add_argument(
+        "--replay-pool-shuffle",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Deterministically shuffle replay-pool files by rollout seed before chunking.",
+    )
+    parser.add_argument(
+        "--replay-decision-sidecar-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "For replay sources, reuse .decisions.json Mortal Q sidecars and write missing native "
+            "Mortal decisions back to the sidecar so later runs do not re-run Mortal."
         ),
     )
     parser.add_argument(
@@ -717,6 +759,22 @@ def _validate_args(args: argparse.Namespace) -> None:
         max_kyokus = int(getattr(args, "max_kyokus", 0))
         if max_kyokus != 0:
             raise ValueError("riichienv-mortal-selfplay-replay currently supports --max-kyokus 0 (hanchan)")
+    if str(getattr(args, "rollout_source", "")) == "replay-pool":
+        if args.replay_pool_dir is None:
+            raise ValueError("--replay-pool-dir is required for --rollout-source replay-pool")
+        if args.replay_pool_files_per_iteration is not None and int(args.replay_pool_files_per_iteration) < 0:
+            raise ValueError("--replay-pool-files-per-iteration must be non-negative")
+        files_per_iteration = (
+            int(args.episodes)
+            if args.replay_pool_files_per_iteration is None
+            else int(args.replay_pool_files_per_iteration)
+        )
+        if files_per_iteration == 0:
+            print(
+                "warning: --replay-pool-files-per-iteration=0 loads the whole replay pool into one batch; "
+                "prefer a small chunk such as 10-20 to keep memory bounded.",
+                flush=True,
+            )
 
 
 def _load_teacher_runtime(args: argparse.Namespace, *, device: torch.device):
@@ -852,6 +910,11 @@ def _collect_imitation_rollout_context(
             args,
             rollout_seed=rollout_seed,
         )
+    if str(args.rollout_source) == "replay-pool":
+        return _collect_replay_pool_context(
+            args,
+            rollout_seed=rollout_seed,
+        )
     raise ValueError(f"unsupported rollout_source: {args.rollout_source}")
 
 
@@ -901,6 +964,75 @@ def _collect_riichienv_mortal_selfplay_replay_context(
         summary=replay_summary,
         review_case_rows=list(replay_summary.pop("review_case_rows", [])),
     )
+
+
+def _collect_replay_pool_context(
+    args: argparse.Namespace,
+    *,
+    rollout_seed: int,
+) -> ImitationRolloutContext:
+    replay_paths = _select_replay_pool_paths(args, rollout_seed=rollout_seed)
+    build_batch_start = time.perf_counter()
+    prepared_steps, batch, replay_summary = _build_replay_imitation_batch(
+        args,
+        replay_paths=replay_paths,
+        rollout_seed=rollout_seed,
+    )
+    replay_summary["replay_pool_dir"] = str(args.replay_pool_dir)
+    replay_summary["replay_pool_selected_file_count"] = int(len(replay_paths))
+    return ImitationRolloutContext(
+        prepared_steps=prepared_steps,
+        batch=batch,
+        build_batch_sec=time.perf_counter() - build_batch_start,
+        summary=replay_summary,
+        review_case_rows=list(replay_summary.pop("review_case_rows", [])),
+    )
+
+
+def _select_replay_pool_paths(args: argparse.Namespace, *, rollout_seed: int) -> list[Path]:
+    pool_dir = Path(args.replay_pool_dir)
+    candidate_dirs = [pool_dir]
+    if (pool_dir / "replays").is_dir():
+        candidate_dirs.insert(0, pool_dir / "replays")
+    replay_paths: list[Path] = []
+    seen: set[Path] = set()
+    for candidate_dir in candidate_dirs:
+        if not candidate_dir.exists():
+            continue
+        for path in sorted(candidate_dir.glob("*.mjson")):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            replay_paths.append(path)
+            seen.add(resolved)
+    if not replay_paths:
+        replay_paths = sorted(pool_dir.rglob("*.mjson"))
+    if not replay_paths:
+        raise RuntimeError(f"replay-pool found no .mjson files under {pool_dir}")
+
+    files_per_iteration = args.replay_pool_files_per_iteration
+    if files_per_iteration is None:
+        files_per_iteration = int(args.episodes)
+    files_per_iteration = int(files_per_iteration)
+    if files_per_iteration == 0 or files_per_iteration >= len(replay_paths):
+        return replay_paths
+
+    ordered = list(replay_paths)
+    if bool(args.replay_pool_shuffle):
+        rng = random.Random(int(rollout_seed))
+        rng.shuffle(ordered)
+        return ordered[:files_per_iteration]
+
+    iteration_offset = 0
+    seed_stride = max(1, int(getattr(args, "seed_stride", 1)))
+    seed_base = int(getattr(args, "seed_base", 0))
+    if int(rollout_seed) >= seed_base:
+        iteration_offset = (int(rollout_seed) - seed_base) // seed_stride
+    start = (iteration_offset * files_per_iteration) % len(ordered)
+    selected: list[Path] = []
+    for index in range(files_per_iteration):
+        selected.append(ordered[(start + index) % len(ordered)])
+    return selected
 
 
 def _generate_mortal_selfplay_replays(
@@ -1007,7 +1139,13 @@ def _build_replay_imitation_batch(
     filtered_actor_samples = 0
     skipped_uncontrolled = 0
     skipped_label_mismatch = 0
+    skipped_missing_native_decision = 0
     skipped_mortal_native_limitation = 0
+    skipped_mortal_native_extra_riichi = 0
+    skipped_mortal_native_extra_ryukyoku = 0
+    skipped_mortal_native_missing_ron = 0
+    skipped_mortal_native_ambiguous_kan = 0
+    skipped_mortal_native_kan_mask_mismatch = 0
     native_limitation_review_cases: list[dict[str, Any]] = []
     actor_filter = {int(seat) for seat in args.learner_seats}
     for replay_path in replay_paths:
@@ -1042,6 +1180,66 @@ def _build_replay_imitation_batch(
                 skipped_mortal_native_limitation += 1
                 native_limitation_review_cases.append(native_limitation_case)
                 continue
+            native_ambiguous_kan_case = _replay_sample_known_mortal_native_ambiguous_kan_case(
+                sample,
+                env=env,
+                events=events,
+                replay_id=replay_path.stem,
+                native_decisions=native_decisions,
+                rollout_seed=rollout_seed,
+            )
+            if native_ambiguous_kan_case is not None:
+                skipped_mortal_native_ambiguous_kan += 1
+                native_limitation_review_cases.append(native_ambiguous_kan_case)
+                continue
+            native_kan_mismatch_case = _replay_sample_known_mortal_native_kan_mask_mismatch_case(
+                sample,
+                env=env,
+                events=events,
+                replay_id=replay_path.stem,
+                native_decisions=native_decisions,
+                rollout_seed=rollout_seed,
+            )
+            if native_kan_mismatch_case is not None:
+                skipped_mortal_native_kan_mask_mismatch += 1
+                native_limitation_review_cases.append(native_kan_mismatch_case)
+                continue
+            native_missing_ron_case = _replay_sample_known_mortal_native_missing_ron_case(
+                sample,
+                env=env,
+                events=events,
+                replay_id=replay_path.stem,
+                native_decisions=native_decisions,
+                rollout_seed=rollout_seed,
+            )
+            if native_missing_ron_case is not None:
+                skipped_mortal_native_missing_ron += 1
+                native_limitation_review_cases.append(native_missing_ron_case)
+                continue
+            native_extra_riichi_case = _replay_sample_known_mortal_native_extra_riichi_case(
+                sample,
+                env=env,
+                events=events,
+                replay_id=replay_path.stem,
+                native_decisions=native_decisions,
+                rollout_seed=rollout_seed,
+            )
+            if native_extra_riichi_case is not None:
+                skipped_mortal_native_extra_riichi += 1
+                native_limitation_review_cases.append(native_extra_riichi_case)
+                continue
+            native_extra_ryukyoku_case = _replay_sample_known_mortal_native_extra_ryukyoku_case(
+                sample,
+                env=env,
+                events=events,
+                replay_id=replay_path.stem,
+                native_decisions=native_decisions,
+                rollout_seed=rollout_seed,
+            )
+            if native_extra_ryukyoku_case is not None:
+                skipped_mortal_native_extra_ryukyoku += 1
+                native_limitation_review_cases.append(native_extra_ryukyoku_case)
+                continue
             step_and_rank = _replay_sample_to_rollout_step(
                 sample,
                 env=env,
@@ -1051,7 +1249,11 @@ def _build_replay_imitation_batch(
                 native_decisions=native_decisions,
             )
             if step_and_rank is None:
-                if _sample_has_controlled_scope(env, sample):
+                if _sample_needs_native_decision(sample, env=env, events=events) and _native_mortal_decision_event_index(sample, events=events) not in {
+                    event_index for decision_actor, event_index in native_decisions if decision_actor == int(sample.actor)
+                }:
+                    skipped_missing_native_decision += 1
+                elif _sample_has_controlled_scope(env, sample):
                     skipped_label_mismatch += 1
                 else:
                     skipped_uncontrolled += 1
@@ -1079,10 +1281,27 @@ def _build_replay_imitation_batch(
         "replay_controlled_row_count": int(len(steps)),
         "replay_skipped_uncontrolled_count": int(skipped_uncontrolled),
         "replay_skipped_label_mismatch_count": int(skipped_label_mismatch),
+        "replay_skipped_missing_native_decision_count": int(skipped_missing_native_decision),
         "replay_file_count": int(len(replay_paths)),
         "replay_skipped_mortal_native_limitation_count": int(skipped_mortal_native_limitation),
+        "replay_skipped_mortal_native_extra_riichi_count": int(skipped_mortal_native_extra_riichi),
+        "replay_skipped_mortal_native_extra_ryukyoku_count": int(skipped_mortal_native_extra_ryukyoku),
+        "replay_skipped_mortal_native_missing_ron_count": int(skipped_mortal_native_missing_ron),
+        "replay_skipped_mortal_native_ambiguous_kan_count": int(skipped_mortal_native_ambiguous_kan),
+        "replay_skipped_mortal_native_kan_mask_mismatch_count": int(skipped_mortal_native_kan_mask_mismatch),
         "review_case_rows": native_limitation_review_cases,
     }
+
+
+def _sample_needs_native_decision(
+    sample: ReplaySample,
+    *,
+    env: DiscardOnlyMahjongEnv,
+    events: Sequence[Mapping[str, Any]],
+) -> bool:
+    if _is_reach_followup_discard_sample(sample, events):
+        return False
+    return _sample_has_controlled_scope(env, sample)
 
 
 def _sample_has_controlled_scope(env: DiscardOnlyMahjongEnv, sample: ReplaySample) -> bool:
@@ -1139,6 +1358,242 @@ def _replay_sample_known_mortal_native_limitation_case(
     )
 
 
+def _replay_sample_known_mortal_native_extra_riichi_case(
+    sample: ReplaySample,
+    *,
+    env: DiscardOnlyMahjongEnv,
+    events: Sequence[Mapping[str, Any]],
+    replay_id: str,
+    native_decisions: Mapping[tuple[int, int], NativeMortalReplayDecision],
+    rollout_seed: int,
+) -> dict[str, Any] | None:
+    actor = int(sample.actor)
+    snapshot = dict(sample.state)
+    snapshot["actor"] = actor
+    raw_legal_actions = _replay_raw_legal_actions(sample, env=env)
+    controlled_pairs = _controlled_action_pairs_for_replay_sample(env, snapshot, actor, raw_legal_actions)
+    legal_actions = tuple(action for action, _events in controlled_pairs)
+    if not legal_actions or any(action.action_type == ActionType.REACH_DISCARD for action in legal_actions):
+        return None
+    native_key = (actor, _native_mortal_decision_event_index(sample, events=events))
+    native_teacher = native_decisions.get(native_key)
+    if native_teacher is None:
+        return None
+    mask = native_teacher.action_mask.bool()
+    source_ids = {
+        int(action_id)
+        for action in legal_actions
+        for action_id in mortal_action_ids_for_action_spec(action)
+    }
+    mask_ids = {
+        int(index)
+        for index in torch.nonzero(mask, as_tuple=False).flatten().tolist()
+    }
+    extra_ids = tuple(sorted(mask_ids - source_ids))
+    if extra_ids != (MORTAL_RIICHI_ACTION_ID,):
+        return None
+    return _native_limitation_review_case_row(
+        sample,
+        legal_actions=legal_actions,
+        events=events,
+        replay_id=replay_id,
+        actor=actor,
+        rollout_seed=rollout_seed,
+        native_teacher=native_teacher,
+        native_key=native_key,
+        reason="native_limitation:no_reach_legal_with_extra_riichi_q",
+        row_scope="self-turn",
+        native_extra_action_ids=extra_ids,
+        missing_action_types=("REACH_DISCARD",),
+    )
+
+
+def _replay_sample_known_mortal_native_ambiguous_kan_case(
+    sample: ReplaySample,
+    *,
+    env: DiscardOnlyMahjongEnv,
+    events: Sequence[Mapping[str, Any]],
+    replay_id: str,
+    native_decisions: Mapping[tuple[int, int], NativeMortalReplayDecision],
+    rollout_seed: int,
+) -> dict[str, Any] | None:
+    actor = int(sample.actor)
+    snapshot = dict(sample.state)
+    snapshot["actor"] = actor
+    raw_legal_actions = _replay_raw_legal_actions(sample, env=env)
+    controlled_pairs = _controlled_action_pairs_for_replay_sample(env, snapshot, actor, raw_legal_actions)
+    legal_actions = tuple(action for action, _events in controlled_pairs)
+    kan_actions = tuple(
+        action
+        for action in legal_actions
+        if action.action_type in {ActionType.ANKAN, ActionType.KAKAN, ActionType.DAIMINKAN}
+    )
+    if len(kan_actions) < 2:
+        return None
+    native_key = (actor, _native_mortal_decision_event_index(sample, events=events))
+    native_teacher = native_decisions.get(native_key)
+    if native_teacher is None:
+        return None
+    mask = native_teacher.action_mask.bool()
+    if int(mask.shape[0]) <= MORTAL_KAN_ACTION_ID or not bool(mask[MORTAL_KAN_ACTION_ID].item()):
+        return None
+    return _native_limitation_review_case_row(
+        sample,
+        legal_actions=legal_actions,
+        events=events,
+        replay_id=replay_id,
+        actor=actor,
+        rollout_seed=rollout_seed,
+        native_teacher=native_teacher,
+        native_key=native_key,
+        reason="native_limitation:ambiguous_multi_kan_without_kan_select_q",
+        row_scope="self-turn",
+        missing_action_types=("KAN_SELECT",),
+    )
+
+
+def _replay_sample_known_mortal_native_missing_ron_case(
+    sample: ReplaySample,
+    *,
+    env: DiscardOnlyMahjongEnv,
+    events: Sequence[Mapping[str, Any]],
+    replay_id: str,
+    native_decisions: Mapping[tuple[int, int], NativeMortalReplayDecision],
+    rollout_seed: int,
+) -> dict[str, Any] | None:
+    actor = int(sample.actor)
+    snapshot = dict(sample.state)
+    snapshot["actor"] = actor
+    raw_legal_actions = _replay_raw_legal_actions(sample, env=env)
+    controlled_pairs = _controlled_action_pairs_for_replay_sample(env, snapshot, actor, raw_legal_actions)
+    legal_actions = tuple(action for action, _events in controlled_pairs)
+    if not any(action.action_type == ActionType.RON for action in legal_actions):
+        return None
+    native_key = (actor, _native_mortal_decision_event_index(sample, events=events))
+    native_teacher = native_decisions.get(native_key)
+    if native_teacher is None:
+        return None
+    mask = native_teacher.action_mask.bool()
+    if int(mask.shape[0]) > MORTAL_AGARI_ACTION_ID and bool(mask[MORTAL_AGARI_ACTION_ID].item()):
+        return None
+    return _native_limitation_review_case_row(
+        sample,
+        legal_actions=legal_actions,
+        events=events,
+        replay_id=replay_id,
+        actor=actor,
+        rollout_seed=rollout_seed,
+        native_teacher=native_teacher,
+        native_key=native_key,
+        reason="native_limitation:ron_legal_without_mortal_agari_q",
+        row_scope="response",
+        missing_action_types=("RON",),
+    )
+
+
+def _replay_sample_known_mortal_native_kan_mask_mismatch_case(
+    sample: ReplaySample,
+    *,
+    env: DiscardOnlyMahjongEnv,
+    events: Sequence[Mapping[str, Any]],
+    replay_id: str,
+    native_decisions: Mapping[tuple[int, int], NativeMortalReplayDecision],
+    rollout_seed: int,
+) -> dict[str, Any] | None:
+    actor = int(sample.actor)
+    snapshot = dict(sample.state)
+    snapshot["actor"] = actor
+    raw_legal_actions = _replay_raw_legal_actions(sample, env=env)
+    controlled_pairs = _controlled_action_pairs_for_replay_sample(env, snapshot, actor, raw_legal_actions)
+    legal_actions = tuple(action for action, _events in controlled_pairs)
+    if not any(action.action_type in {ActionType.ANKAN, ActionType.KAKAN, ActionType.DAIMINKAN} for action in legal_actions):
+        return None
+    native_key = (actor, _native_mortal_decision_event_index(sample, events=events))
+    native_teacher = native_decisions.get(native_key)
+    if native_teacher is None:
+        return None
+    mask = native_teacher.action_mask.bool()
+    if int(mask.shape[0]) <= MORTAL_KAN_ACTION_ID or not bool(mask[MORTAL_KAN_ACTION_ID].item()):
+        return None
+    source_ids = {
+        int(action_id)
+        for action in legal_actions
+        for action_id in mortal_action_ids_for_action_spec(action)
+    }
+    mask_ids = {
+        int(index)
+        for index in torch.nonzero(mask, as_tuple=False).flatten().tolist()
+    }
+    missing_ids = source_ids - mask_ids
+    extra_ids = mask_ids - source_ids
+    if not missing_ids and not extra_ids:
+        return None
+    return _native_limitation_review_case_row(
+        sample,
+        legal_actions=legal_actions,
+        events=events,
+        replay_id=replay_id,
+        actor=actor,
+        rollout_seed=rollout_seed,
+        native_teacher=native_teacher,
+        native_key=native_key,
+        reason="native_limitation:kan_row_mask_mismatch_without_reliable_kan_select_q",
+        row_scope="self-turn",
+        native_extra_action_ids=tuple(sorted(extra_ids)),
+        missing_action_types=("KAN_MASK_PARITY",),
+    )
+
+
+def _replay_sample_known_mortal_native_extra_ryukyoku_case(
+    sample: ReplaySample,
+    *,
+    env: DiscardOnlyMahjongEnv,
+    events: Sequence[Mapping[str, Any]],
+    replay_id: str,
+    native_decisions: Mapping[tuple[int, int], NativeMortalReplayDecision],
+    rollout_seed: int,
+) -> dict[str, Any] | None:
+    actor = int(sample.actor)
+    snapshot = dict(sample.state)
+    snapshot["actor"] = actor
+    raw_legal_actions = _replay_raw_legal_actions(sample, env=env)
+    controlled_pairs = _controlled_action_pairs_for_replay_sample(env, snapshot, actor, raw_legal_actions)
+    legal_actions = tuple(action for action, _events in controlled_pairs)
+    if not legal_actions or any(action.action_type == ActionType.RYUKYOKU for action in legal_actions):
+        return None
+    native_key = (actor, _native_mortal_decision_event_index(sample, events=events))
+    native_teacher = native_decisions.get(native_key)
+    if native_teacher is None:
+        return None
+    mask = native_teacher.action_mask.bool()
+    source_ids = {
+        int(action_id)
+        for action in legal_actions
+        for action_id in mortal_action_ids_for_action_spec(action)
+    }
+    mask_ids = {
+        int(index)
+        for index in torch.nonzero(mask, as_tuple=False).flatten().tolist()
+    }
+    extra_ids = tuple(sorted(mask_ids - source_ids))
+    if extra_ids != (MORTAL_RYUKYOKU_ACTION_ID,):
+        return None
+    return _native_limitation_review_case_row(
+        sample,
+        legal_actions=legal_actions,
+        events=events,
+        replay_id=replay_id,
+        actor=actor,
+        rollout_seed=rollout_seed,
+        native_teacher=native_teacher,
+        native_key=native_key,
+        reason="native_limitation:no_ryukyoku_legal_with_extra_ryukyoku_q",
+        row_scope="self-turn",
+        native_extra_action_ids=extra_ids,
+        missing_action_types=("RYUKYOKU",),
+    )
+
+
 def _response_window_trigger_event_index(
     events: Sequence[Mapping[str, Any]],
     snapshot: Mapping[str, Any],
@@ -1175,6 +1630,9 @@ def _native_limitation_review_case_row(
     native_teacher: NativeMortalReplayDecision,
     native_key: tuple[int, int],
     reason: str,
+    row_scope: str = "response",
+    native_extra_action_ids: Sequence[int] = (),
+    missing_action_types: Sequence[str] = ("CHI",),
 ) -> dict[str, Any]:
     snapshot = dict(sample.state)
     snapshot["actor"] = int(actor)
@@ -1202,7 +1660,7 @@ def _native_limitation_review_case_row(
         "actor": int(actor),
         "kyoku": visible_snapshot.get("kyoku", snapshot.get("kyoku", "")),
         "honba": visible_snapshot.get("honba", snapshot.get("honba", "")),
-        "row_scope": "response",
+        "row_scope": str(row_scope),
         "review_reason": reason,
         "selected_changed": False,
         "teacher_disagreed": False,
@@ -1226,7 +1684,8 @@ def _native_limitation_review_case_row(
             "decision_actor": int(native_key[0]),
             "decision_event_index": int(native_key[1]),
             "mask_true_ids": [int(index) for index in torch.nonzero(native_mask, as_tuple=False).flatten().tolist()],
-            "missing_action_types": ["CHI"],
+            "extra_action_ids": [int(action_id) for action_id in native_extra_action_ids],
+            "missing_action_types": [str(action_type) for action_type in missing_action_types],
         },
         "replay_hint": {
             "episode_id": replay_id,
@@ -1338,9 +1797,7 @@ def _replay_sample_to_rollout_step(
     native_key = (actor, _native_mortal_decision_event_index(sample, events=events))
     native_teacher = native_decisions.get(native_key)
     if native_teacher is None:
-        raise MortalTeacherMappingError(
-            f"missing native Mortal replay decision for replay={replay_id} actor={actor} event_index={sample.event_index}"
-        )
+        return None
     legal_action_ids = torch.tensor([encode_action_id(spec) for spec in legal_actions], dtype=torch.long)
     legal_action_features = torch.tensor(
         _replay_action_features(snapshot, legal_actions, remaining_wall=int(snapshot.get("remaining_wall", 0))),
@@ -1456,13 +1913,15 @@ def _collect_native_mortal_replay_decisions(
         replay_path,
         actor_filter=actor_filter,
     )
-    if sidecar_decisions is not None and (
-        expected_keys is None or expected_keys.issubset(sidecar_decisions.keys())
-    ):
+    if sidecar_decisions is not None and _native_sidecar_covers_expected(sidecar_decisions, expected_keys):
         return sidecar_decisions
     device = str(getattr(args, "mortal_teacher_device", None) or getattr(args, "device", None) or "cpu")
     decisions: dict[tuple[int, int], NativeMortalReplayDecision] = dict(sidecar_decisions or {})
+    missing_expected = _missing_native_expected_keys(decisions, expected_keys)
+    actors_to_scan = sorted({actor for actor, _event_index in missing_expected} or set(actor_filter))
     for actor in sorted(actor_filter):
+        if actor not in actors_to_scan:
+            continue
         bot = MortalReviewBot(
             player_id=int(actor),
             model_path=Path(args.mortal_teacher_checkpoint),
@@ -1490,7 +1949,31 @@ def _collect_native_mortal_replay_decisions(
                     q_values=torch.tensor(q_values, dtype=torch.float32),
                     action_mask=torch.tensor(action_mask, dtype=torch.bool),
                 )
+            if expected_keys is not None and key in missing_expected:
+                missing_expected.discard(key)
+                if not any(missing_actor == int(actor) for missing_actor, _ in missing_expected):
+                    break
+    if bool(getattr(args, "replay_decision_sidecar_cache", True)):
+        _write_native_mortal_replay_decisions_sidecar(replay_path, decisions)
     return decisions
+
+
+def _native_sidecar_covers_expected(
+    decisions: Mapping[tuple[int, int], NativeMortalReplayDecision],
+    expected_keys: set[tuple[int, int]] | None,
+) -> bool:
+    if expected_keys is None:
+        return bool(decisions)
+    return expected_keys.issubset(set(decisions))
+
+
+def _missing_native_expected_keys(
+    decisions: Mapping[tuple[int, int], NativeMortalReplayDecision],
+    expected_keys: set[tuple[int, int]] | None,
+) -> set[tuple[int, int]]:
+    if expected_keys is None:
+        return set()
+    return set(expected_keys).difference(decisions)
 
 
 def _load_native_mortal_replay_decisions_sidecar(
@@ -1525,6 +2008,46 @@ def _load_native_mortal_replay_decisions_sidecar(
                 action_mask=torch.tensor(action_mask, dtype=torch.bool),
             )
     return decisions
+
+
+def _write_native_mortal_replay_decisions_sidecar(
+    replay_path: Path,
+    decisions: Mapping[tuple[int, int], NativeMortalReplayDecision],
+) -> None:
+    by_actor: dict[str, list[dict[str, Any]]] = {}
+    for actor, event_index in sorted(decisions):
+        decision = decisions[(actor, event_index)]
+        by_actor.setdefault(str(int(actor)), []).append(
+            {
+                "event_index": int(event_index),
+                "actor": int(actor),
+                "mortal_meta": _compact_native_mortal_decision_meta(decision),
+            }
+        )
+    payload = {
+        "format": "keqingrl_native_mortal_decisions_v1",
+        "by_actor": by_actor,
+    }
+    replay_path.with_suffix(".decisions.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _compact_native_mortal_decision_meta(decision: NativeMortalReplayDecision) -> dict[str, Any]:
+    mask_tensor = decision.action_mask.detach().cpu().bool()
+    q_tensor = decision.q_values.detach().cpu().float()
+    mask_bits = 0
+    compact_q: list[float] = []
+    for action_id, enabled in enumerate(mask_tensor.tolist()):
+        if not bool(enabled):
+            continue
+        mask_bits |= 1 << int(action_id)
+        compact_q.append(float(q_tensor[action_id].item()))
+    return {
+        "mask_bits": int(mask_bits),
+        "q_values": compact_q,
+    }
 
 
 def _native_mortal_meta_q_and_mask(meta: Mapping[str, Any]) -> tuple[list[float] | None, list[bool] | None]:
@@ -1566,6 +2089,17 @@ def _native_mortal_decision_event_index(
             return int(trigger_end - 1)
         return int(sample.event_index)
     label_type = str(sample.label_action.get("type", ""))
+    if label_type in {"ankan", "kakan"}:
+        start_index = min(int(sample.event_index) - 1, len(events) - 1)
+        for idx in range(start_index, -1, -1):
+            event = events[idx]
+            if int(event.get("actor", -1)) != actor or str(event.get("type")) != label_type:
+                continue
+            for previous_idx in range(idx - 1, -1, -1):
+                previous = events[previous_idx]
+                if int(previous.get("actor", -1)) == actor and str(previous.get("type")) == "tsumo":
+                    return int(previous_idx)
+            return int(idx)
     if label_type == "dahai":
         previous_index = int(sample.event_index) - 1
         if 0 <= previous_index < len(events):
@@ -1654,9 +2188,14 @@ def _is_reach_followup_discard_sample(sample: ReplaySample, events: Sequence[Map
         return False
     actor = int(sample.actor)
     event_index = int(sample.event_index)
-    candidate_pairs = ((event_index - 2, event_index - 1), (event_index - 1, event_index))
-    for reach_index, discard_index in candidate_pairs:
-        if reach_index < 0 or discard_index < 0 or discard_index >= len(events):
+    # Native replay samples can point at the discard, reach_accepted, or the
+    # next event after reach acceptance. Match the concrete discard payload in a
+    # small local window instead of trusting event_index to be exact.
+    start = max(0, event_index - 6)
+    end = min(len(events), event_index + 2)
+    for discard_index in range(start, end):
+        reach_index = discard_index - 1
+        if reach_index < 0:
             continue
         reach_event = events[reach_index]
         discard_event = normalize_replay_label_for_legal_compare(dict(events[discard_index]))
@@ -3631,7 +4170,7 @@ def _save_imitation_checkpoint(
     iteration: int,
     summary_row: Mapping[str, Any],
 ) -> dict[str, Any]:
-    checkpoint_dir = args.output_dir / f"checkpoint_config_{config_id:03d}"
+    checkpoint_dir = _checkpoint_artifact_run_dir(args) / f"checkpoint_config_{config_id:03d}"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     source_config = json.loads(Path(candidate["config_path"]).read_text(encoding="utf-8"))
     config_hash = _stable_json_hash(
@@ -3728,6 +4267,7 @@ def _save_imitation_checkpoint(
     config_path = checkpoint_dir / f"config_{suffix}.json"
     policy_path = checkpoint_dir / f"policy_{suffix}.pt"
     optimizer_path = checkpoint_dir / f"optimizer_{suffix}.pt"
+    manifest_path = checkpoint_dir / f"manifest_{suffix}.json"
     _write_json(config_path, config_payload)
     torch.save(
         {
@@ -3741,15 +4281,49 @@ def _save_imitation_checkpoint(
         policy_path,
     )
     torch.save({"optimizer_state_dict": optimizer.state_dict(), "config": config_payload}, optimizer_path)
+    policy_sha = _file_sha256(policy_path)
+    optimizer_sha = _file_sha256(optimizer_path)
+    manifest_payload = {
+        "mode": "mortal_action_q_imitation_checkpoint",
+        "created_by": "scripts/run_keqingrl_mortal_imitation.py",
+        "artifact_dir": str(_checkpoint_artifact_run_dir(args)),
+        "report_dir": str(args.output_dir),
+        "config_id": int(config_id),
+        "iteration": int(iteration),
+        "policy_path": str(policy_path),
+        "policy_sha256": policy_sha,
+        "optimizer_path": str(optimizer_path),
+        "optimizer_sha256": optimizer_sha,
+        "config_path": str(config_path),
+        "parent_checkpoint_path": candidate.get("checkpoint_path"),
+        "parent_checkpoint_sha256": candidate.get("checkpoint_sha256") or _file_sha256(Path(candidate["checkpoint_path"])),
+        "mortal_teacher_checkpoint": str(args.mortal_teacher_checkpoint),
+        "teacher_source": str(args.teacher_source),
+        "teacher_support": str(args.teacher_support),
+        "teacher_topk": int(args.teacher_topk),
+        "teacher_temperature": float(args.teacher_temperature),
+        "student_logit_source": _student_logit_source(args),
+        "rollout_source": str(getattr(args, "rollout_source", "")),
+        "replay_pool_dir": str(getattr(args, "replay_pool_dir", "") or ""),
+        "replay_pool_files_per_iteration": (
+            None
+            if getattr(args, "replay_pool_files_per_iteration", None) is None
+            else int(args.replay_pool_files_per_iteration)
+        ),
+        "summary": _to_jsonable(dict(summary_row)),
+    }
+    _write_json(manifest_path, manifest_payload)
     return {
         "config_id": int(config_id),
         "rerun_config_id": int(candidate["rerun_config_id"]),
         "source_config_id": int(candidate["source_config_id"]),
         "checkpoint_path": str(policy_path),
-        "checkpoint_sha256": _file_sha256(policy_path),
+        "checkpoint_sha256": policy_sha,
         "config_path": str(config_path),
         "optimizer_path": str(optimizer_path),
-        "optimizer_sha256": _file_sha256(optimizer_path),
+        "optimizer_sha256": optimizer_sha,
+        "artifact_dir": str(_checkpoint_artifact_run_dir(args)),
+        "manifest_path": str(manifest_path),
         "teacher_source": str(args.teacher_source),
         "teacher_support": str(args.teacher_support),
         "teacher_topk": int(args.teacher_topk),
@@ -3770,6 +4344,13 @@ def _save_imitation_checkpoint(
         "rule_score_scale": float(args.rule_score_scale),
         "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,
     }
+
+
+def _checkpoint_artifact_run_dir(args: argparse.Namespace) -> Path:
+    artifact_root = getattr(args, "artifact_dir", None)
+    if artifact_root is None:
+        return Path(args.output_dir) / "checkpoints"
+    return Path(artifact_root) / Path(args.output_dir).name
 
 
 def _student_logit_source(args: argparse.Namespace) -> str:
