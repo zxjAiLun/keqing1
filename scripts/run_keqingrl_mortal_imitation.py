@@ -61,6 +61,7 @@ from keqingrl.mortal_teacher import (
     MORTAL_Q_VALUES_EXTRA_KEY,
     MortalTeacherMappingError,
     mortal_action_mapping_audit_row,
+    mortal_action_ids_for_action_spec,
     mortal_discard_teacher_tensors_from_extras,
     mortal_scores_for_legal_actions,
 )
@@ -148,6 +149,7 @@ class ImitationRolloutContext:
     batch: Any
     build_batch_sec: float
     summary: dict[str, Any]
+    review_case_rows: list[dict[str, Any]] | None = None
 
 
 class MortalTeacherBehaviorPolicy(InteractivePolicy):
@@ -502,6 +504,8 @@ def main() -> None:
                     mapping_summary=teacher_data.summary,
                     export_decision_review_cases=bool(args.export_decision_review_cases),
                 )
+                if bool(args.export_decision_review_cases) and rollout_context.review_case_rows:
+                    new_decision_review_case_rows.extend(rollout_context.review_case_rows)
             metrics_sec = time.perf_counter() - metrics_start
             changed_rows.extend(
                 {
@@ -836,6 +840,7 @@ def _collect_imitation_rollout_context(
             batch=batch,
             build_batch_sec=time.perf_counter() - build_batch_start,
             summary={},
+            review_case_rows=[],
         )
     if str(args.rollout_source) == "mortal-selfplay-replay":
         return _collect_mortal_selfplay_replay_context(
@@ -868,6 +873,7 @@ def _collect_mortal_selfplay_replay_context(
         batch=batch,
         build_batch_sec=time.perf_counter() - build_batch_start,
         summary=replay_summary,
+        review_case_rows=list(replay_summary.pop("review_case_rows", [])),
     )
 
 
@@ -893,6 +899,7 @@ def _collect_riichienv_mortal_selfplay_replay_context(
         batch=batch,
         build_batch_sec=time.perf_counter() - build_batch_start,
         summary=replay_summary,
+        review_case_rows=list(replay_summary.pop("review_case_rows", [])),
     )
 
 
@@ -1001,6 +1008,7 @@ def _build_replay_imitation_batch(
     skipped_uncontrolled = 0
     skipped_label_mismatch = 0
     skipped_mortal_native_limitation = 0
+    native_limitation_review_cases: list[dict[str, Any]] = []
     actor_filter = {int(seat) for seat in args.learner_seats}
     for replay_path in replay_paths:
         events = read_mjai_jsonl(replay_path)
@@ -1022,13 +1030,17 @@ def _build_replay_imitation_batch(
             if actor_filter and int(sample.actor) not in actor_filter:
                 continue
             filtered_actor_samples += 1
-            if _replay_sample_is_known_mortal_native_limitation(
+            native_limitation_case = _replay_sample_known_mortal_native_limitation_case(
                 sample,
                 env=env,
                 events=events,
+                replay_id=replay_path.stem,
                 native_decisions=native_decisions,
-            ):
+                rollout_seed=rollout_seed,
+            )
+            if native_limitation_case is not None:
                 skipped_mortal_native_limitation += 1
+                native_limitation_review_cases.append(native_limitation_case)
                 continue
             step_and_rank = _replay_sample_to_rollout_step(
                 sample,
@@ -1069,6 +1081,7 @@ def _build_replay_imitation_batch(
         "replay_skipped_label_mismatch_count": int(skipped_label_mismatch),
         "replay_file_count": int(len(replay_paths)),
         "replay_skipped_mortal_native_limitation_count": int(skipped_mortal_native_limitation),
+        "review_case_rows": native_limitation_review_cases,
     }
 
 
@@ -1080,34 +1093,49 @@ def _sample_has_controlled_scope(env: DiscardOnlyMahjongEnv, sample: ReplaySampl
     return bool(_controlled_action_pairs_for_replay_sample(env, snapshot, actor, raw_legal_actions))
 
 
-def _replay_sample_is_known_mortal_native_limitation(
+def _replay_sample_known_mortal_native_limitation_case(
     sample: ReplaySample,
     *,
     env: DiscardOnlyMahjongEnv,
     events: Sequence[Mapping[str, Any]],
+    replay_id: str,
     native_decisions: Mapping[tuple[int, int], NativeMortalReplayDecision],
-) -> bool:
+    rollout_seed: int,
+) -> dict[str, Any] | None:
     actor = int(sample.actor)
     snapshot = dict(sample.state)
     snapshot["actor"] = actor
     if not _snapshot_is_response_window(snapshot, actor):
-        return False
+        return None
     trigger_index = _response_window_trigger_event_index(events, snapshot, event_index=int(sample.event_index))
     if trigger_index is None or not _is_riichi_declaration_discard(events, trigger_index):
-        return False
+        return None
     raw_legal_actions = _replay_raw_legal_actions(sample, env=env)
     controlled_pairs = _controlled_action_pairs_for_replay_sample(env, snapshot, actor, raw_legal_actions)
     legal_actions = tuple(action for action, _events in controlled_pairs)
     if not any(action.action_type == ActionType.CHI for action in legal_actions):
-        return False
+        return None
     native_key = (actor, _native_mortal_decision_event_index(sample, events=events))
     native_teacher = native_decisions.get(native_key)
     if native_teacher is None:
-        return False
+        return None
     mask = native_teacher.action_mask.bool()
-    return not any(
+    has_chi_q = any(
         bool(mask[action_id].item())
         for action_id in (MORTAL_CHI_LOW_ACTION_ID, MORTAL_CHI_MID_ACTION_ID, MORTAL_CHI_HIGH_ACTION_ID)
+    )
+    if has_chi_q:
+        return None
+    return _native_limitation_review_case_row(
+        sample,
+        legal_actions=legal_actions,
+        events=events,
+        replay_id=replay_id,
+        actor=actor,
+        rollout_seed=rollout_seed,
+        native_teacher=native_teacher,
+        native_key=native_key,
+        reason="native_limitation:riichi_discard_chi_without_mortal_q",
     )
 
 
@@ -1134,6 +1162,143 @@ def _is_riichi_declaration_discard(events: Sequence[Mapping[str, Any]], event_in
         return False
     previous = events[previous_index]
     return str(previous.get("type")) == "reach" and int(previous.get("actor", -1)) == int(discard.get("actor", -2))
+
+
+def _native_limitation_review_case_row(
+    sample: ReplaySample,
+    *,
+    legal_actions: Sequence[ActionSpec],
+    events: Sequence[Mapping[str, Any]],
+    replay_id: str,
+    actor: int,
+    rollout_seed: int,
+    native_teacher: NativeMortalReplayDecision,
+    native_key: tuple[int, int],
+    reason: str,
+) -> dict[str, Any]:
+    snapshot = dict(sample.state)
+    snapshot["actor"] = int(actor)
+    prefix_end = _response_window_trigger_event_index(events, snapshot, event_index=int(sample.event_index))
+    if prefix_end is None:
+        prefix_end = int(sample.event_index) - 1
+    visible_events_input = tuple(events[: max(0, int(prefix_end) + 1)])
+    visible_snapshot, visible_events = _review_snapshot_for_events(visible_events_input, actor)
+    if not visible_snapshot:
+        visible_snapshot = snapshot
+        visible_events = visible_events_input
+    native_mask = native_teacher.action_mask.bool()
+    native_q = native_teacher.q_values.float()
+    legal_table = _native_limitation_legal_action_table(
+        legal_actions,
+        actor=actor,
+        q_values=native_q,
+        action_mask=native_mask,
+    )
+    return {
+        "case_id": f"native_limit_{reason}_ep{replay_id}_step{int(sample.event_index)}_actor{int(actor)}",
+        "episode_id": f"{replay_id}:{getattr(sample, 'actor_name', f'p{actor}')}",
+        "step_id": int(sample.event_index),
+        "row_id": int(sample.event_index),
+        "actor": int(actor),
+        "kyoku": visible_snapshot.get("kyoku", snapshot.get("kyoku", "")),
+        "honba": visible_snapshot.get("honba", snapshot.get("honba", "")),
+        "row_scope": "response",
+        "review_reason": reason,
+        "selected_changed": False,
+        "teacher_disagreed": False,
+        "is_native_limitation": True,
+        "native_limitation_kind": reason,
+        "selected_before": "",
+        "selected_after": "",
+        "teacher_top1": _native_limitation_top1_label(legal_actions, legal_table),
+        "rulebase_top1": "",
+        "round_state": _review_round_state(visible_snapshot, visible_events),
+        "players": _review_players(visible_snapshot, actor),
+        "visibility": {
+            "actor_hand_visible": True,
+            "opponent_hands_visible": False,
+            "oracle_fields_available": bool(visible_snapshot.get("hands")),
+        },
+        "legal_actions": legal_table,
+        "events_prefix": list(visible_events),
+        "events_tail": list(visible_events[-12:]),
+        "native_mortal": {
+            "decision_actor": int(native_key[0]),
+            "decision_event_index": int(native_key[1]),
+            "mask_true_ids": [int(index) for index in torch.nonzero(native_mask, as_tuple=False).flatten().tolist()],
+            "missing_action_types": ["CHI"],
+        },
+        "replay_hint": {
+            "episode_id": replay_id,
+            "step_id": int(sample.event_index),
+            "actor": int(actor),
+            "rollout_seed": int(rollout_seed),
+        },
+    }
+
+
+def _review_snapshot_for_events(events: Sequence[Mapping[str, Any]], actor: int) -> tuple[dict[str, Any], tuple[Any, ...]]:
+    event_tuple = tuple(dict(event) for event in events)
+    try:
+        return dict(keqing_core.replay_state_snapshot(event_tuple, int(actor))), event_tuple
+    except Exception:
+        return {}, event_tuple
+
+
+def _native_limitation_legal_action_table(
+    legal_actions: Sequence[ActionSpec],
+    *,
+    actor: int,
+    q_values: torch.Tensor,
+    action_mask: torch.Tensor,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, action in enumerate(legal_actions):
+        source_ids = mortal_action_ids_for_action_spec(action)
+        available_ids = [action_id for action_id in source_ids if 0 <= action_id < int(action_mask.shape[0]) and bool(action_mask[action_id].item())]
+        available_scores = [float(q_values[action_id].item()) for action_id in available_ids if torch.isfinite(q_values[action_id])]
+        score = max(available_scores) if available_scores else None
+        rows.append(
+            {
+                "index": int(index),
+                "type": action.action_type.name,
+                "pai": _action_tile_label(action),
+                "canonical_key": action.canonical_key,
+                "mjai_events": _action_mjai_events(action, actor),
+                "mortal_q": score,
+                "teacher_prob": None,
+                "student_before_score": None,
+                "student_after_score": None,
+                "teacher_rank": None,
+                "student_before_rank": None,
+                "student_after_rank": None,
+                "is_mortal_top1": False,
+                "is_student_before_top1": False,
+                "is_student_after_top1": False,
+                "mortal_source_action_ids": list(source_ids),
+                "mortal_available_action_ids": available_ids,
+                "mortal_mask_available": bool(available_ids),
+                "native_limitation_missing_q": not bool(available_ids),
+            }
+        )
+    scored_rows = [row for row in rows if row["mortal_q"] is not None]
+    if scored_rows:
+        best = max(scored_rows, key=lambda row: float(row["mortal_q"]))
+        best["is_mortal_top1"] = True
+    return rows
+
+
+def _native_limitation_top1_label(legal_actions: Sequence[ActionSpec], legal_table: Sequence[Mapping[str, Any]]) -> str:
+    best_index = None
+    best_score = None
+    for row in legal_table:
+        score = row.get("mortal_q")
+        if score is None:
+            continue
+        if best_score is None or float(score) > float(best_score):
+            best_score = float(score)
+            best_index = int(row.get("index", -1))
+    return _action_label(legal_actions, -1 if best_index is None else best_index)
 
 
 def _replay_conversion_env(args: argparse.Namespace) -> DiscardOnlyMahjongEnv:
@@ -1409,7 +1574,11 @@ def _controlled_action_pairs_for_replay_sample(
 ) -> list[tuple[ActionSpec, tuple[dict[str, object], ...]]]:
     response_window = _snapshot_is_response_window(snapshot, actor)
     if response_window:
-        return env._collect_controlled_response_actions(raw_legal_actions)
+        return env._collect_controlled_response_actions(
+            raw_legal_actions,
+            snapshot=dict(snapshot),
+            actor=actor,
+        )
     return env._collect_controlled_self_turn_actions(dict(snapshot), raw_legal_actions)
 
 

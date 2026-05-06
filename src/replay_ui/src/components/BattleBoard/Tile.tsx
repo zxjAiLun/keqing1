@@ -64,10 +64,27 @@ export function Tile({ tile, size = "normal", selected, highlighted, onClick, cl
         <img
           src={`/tiles/${tileSvgName}.svg`}
           alt={tile}
+          title={tile}
           style={{ width: dim.w - 6, height: dim.h - 6, display: "block" }}
         />
       ) : (
-        <div style={{ width: dim.w - 6, height: dim.h - 6, background: "#ddd8cc", borderRadius: 3 }} />
+        <div
+          title={tile}
+          style={{
+            width: dim.w - 6,
+            height: dim.h - 6,
+            background: "#ddd8cc",
+            borderRadius: 3,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#202020",
+            fontSize: Math.max(10, Math.floor(dim.w * 0.28)),
+            fontWeight: 700,
+          }}
+        >
+          {tile}
+        </div>
       )}
     </div>
   );

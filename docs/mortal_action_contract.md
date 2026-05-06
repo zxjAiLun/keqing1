@@ -1,6 +1,6 @@
 # Mortal Action Contract
 
-Updated: 2026-05-04
+Updated: 2026-05-06
 
 This document follows the local `third_party/Mortal` repository. Mortal may be
 used as a teacher only through trained Mortal checkpoints. Do not use `xmodel`,
@@ -240,6 +240,24 @@ Calls are not legal on the final discard when `remaining_wall == 0`. The Rust
 legal owner filters `CHI` / `PON` / `DAIMINKAN` in that houtei response window
 to match Mortal's mask; ron remains governed by the hora truth check and
 furiten state.
+
+CHI legality must also account for the required discard after a call. Mortal's
+`libriichi` marks kuikae forbidden tiles during `chi(...)` and excludes them
+from `discard_candidates_aka(...)`. KeqingRL therefore filters a CHI response
+out before teacher scoring if eating leaves no legal post-call discard. The
+observed regression case was:
+
+```text
+hand: 2p 3p 4p 5p
+discard to respond to: 5p
+candidate CHI: consume 3p 4p
+remaining hand after CHI: 2p 5p
+5p = same-tile kuikae forbidden
+2p = suji kuikae forbidden
+result: CHI is not a controlled legal action
+```
+
+This is not a Mortal native Q limitation. It is a legal-collection requirement.
 
 ## Current Implementation
 

@@ -31,6 +31,10 @@ type ReviewActionRow = {
   is_mortal_top1?: boolean;
   is_student_before_top1?: boolean;
   is_student_after_top1?: boolean;
+  mortal_source_action_ids?: number[];
+  mortal_available_action_ids?: number[];
+  mortal_mask_available?: boolean;
+  native_limitation_missing_q?: boolean;
 };
 
 type ReviewPlayer = {
@@ -58,6 +62,14 @@ type ReviewCase = {
   rulebase_top1?: string;
   selected_changed?: boolean;
   teacher_disagreed?: boolean;
+  is_native_limitation?: boolean;
+  native_limitation_kind?: string;
+  native_mortal?: {
+    decision_actor?: number;
+    decision_event_index?: number;
+    mask_true_ids?: number[];
+    missing_action_types?: string[];
+  };
   round_state?: {
     bakaze?: string;
     kyoku?: number;
@@ -87,6 +99,7 @@ const REVIEW_FILTERS = [
   ['reach_related', '立直'],
   ['kan_related', '杠'],
   ['call_related', '副露'],
+  ['native_limitation', 'Native 限制'],
 ] as const;
 
 const TILE_ID_TO_NAME = [
@@ -104,7 +117,11 @@ export function KeqingrlDecisionReviewPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const visibleCases = useMemo(() => {
-    const filtered = cases.filter((item) => filter === 'all' || String(item.review_reason ?? '').includes(filter));
+    const filtered = cases.filter((item) => {
+      if (filter === 'all') return true;
+      if (filter === 'native_limitation') return Boolean(item.is_native_limitation) || String(item.review_reason ?? '').includes('native_limitation');
+      return String(item.review_reason ?? '').includes(filter);
+    });
     return [...filtered].sort((a, b) => riskScore(b) - riskScore(a));
   }, [cases, filter]);
 
@@ -262,14 +279,26 @@ export function KeqingrlDecisionReviewPage() {
 
 function ReviewDetail({ caseItem }: { caseItem: ReviewCase }) {
   const rows = [...(caseItem.legal_actions ?? [])].sort(
-    (a, b) => Number(b.student_after_score ?? Number.NEGATIVE_INFINITY) - Number(a.student_after_score ?? Number.NEGATIVE_INFINITY),
+    (a, b) => scoreSortValue(b, caseItem) - scoreSortValue(a, caseItem),
   );
   return (
     <div className="card">
       <SectionTitle
         title="Action Scores"
-        description="按 student after raw logit 从高到低排序。Teacher P 是 Mortal action-Q 在 full-legal support 上 softmax 后的监督概率。"
+        description={caseItem.is_native_limitation
+          ? 'Native limitation case：这行未进入训练，只用于牌桌审阅。没有 Mortal Q 的 legal action 会标为 missing Mortal Q。'
+          : '按 student after raw logit 从高到低排序。Teacher P 是 Mortal action-Q 在 full-legal support 上 softmax 后的监督概率。'}
       />
+      {caseItem.is_native_limitation && (
+        <div style={{ padding: 10, marginBottom: 12, border: '1px solid var(--warning)', borderRadius: 8, color: 'var(--warning)', fontSize: 12 }}>
+          <strong>{caseItem.native_limitation_kind ?? caseItem.review_reason}</strong>
+          <div style={{ color: 'var(--text-secondary)', marginTop: 4 }}>
+            Mortal native decision actor={caseItem.native_mortal?.decision_actor ?? '-'} event={caseItem.native_mortal?.decision_event_index ?? '-'}；
+            missing={caseItem.native_mortal?.missing_action_types?.join(', ') || '-'}；
+            mask ids={caseItem.native_mortal?.mask_true_ids?.join(', ') || '-'}
+          </div>
+        </div>
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12, fontSize: 13 }}>
         <div><strong>before:</strong> {labelAction(caseItem.selected_before)}</div>
         <div><strong>after:</strong> {labelAction(caseItem.selected_after)}</div>
@@ -307,6 +336,7 @@ function ReviewDetail({ caseItem }: { caseItem: ReviewCase }) {
                   row.is_mortal_top1 ? 'Mortal' : '',
                   row.is_student_before_top1 ? 'before' : '',
                   row.is_student_after_top1 ? 'after' : '',
+                  row.native_limitation_missing_q ? 'missing Mortal Q' : '',
                 ].filter(Boolean).join(', ')}</td>
               </tr>
             ))}
@@ -315,6 +345,11 @@ function ReviewDetail({ caseItem }: { caseItem: ReviewCase }) {
       </div>
     </div>
   );
+}
+
+function scoreSortValue(row: ReviewActionRow, caseItem: ReviewCase): number {
+  const value = caseItem.is_native_limitation ? row.mortal_q : row.student_after_score;
+  return Number(value ?? Number.NEGATIVE_INFINITY);
 }
 
 function ActionTiles({ row }: { row: ReviewActionRow }) {
@@ -553,7 +588,8 @@ function seatWindLabel(value: unknown[] | undefined, seat: number): string {
 
 function riskScore(item: ReviewCase): number {
   const reason = String(item.review_reason ?? '');
-  return (item.selected_changed && item.teacher_disagreed ? 100 : 0)
+  return (item.is_native_limitation ? 120 : 0)
+    + (item.selected_changed && item.teacher_disagreed ? 100 : 0)
     + (reason.includes('kan_related') ? 40 : 0)
     + (reason.includes('call_related') ? 30 : 0)
     + (reason.includes('reach_related') ? 25 : 0)

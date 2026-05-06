@@ -8,6 +8,7 @@ from typing import Any, Sequence
 
 import keqing_core
 import torch
+from mahjong_env.action_space import TILE_NAME_TO_IDX
 from mahjong_env.legal_actions import _reach_discard_candidates
 from mahjong_env.tiles import normalize_tile
 
@@ -560,7 +561,11 @@ class DiscardOnlyMahjongEnv:
                     self._record_autopilot_event(snapshot, actor, rulebase_response, rulebase_action=rulebase_response)
                     self._dispatch_manager_action(room, actor, rulebase_response.to_mjai())
                     continue
-                controlled_response_pairs = self._collect_controlled_response_actions(raw_legal_actions)
+                controlled_response_pairs = self._collect_controlled_response_actions(
+                    raw_legal_actions,
+                    snapshot=snapshot,
+                    actor=actor,
+                )
                 auto_response = self._auto_response_action(
                     raw_legal_actions,
                     has_controlled_actions=bool(controlled_response_pairs),
@@ -1025,10 +1030,21 @@ class DiscardOnlyMahjongEnv:
     def _collect_controlled_response_actions(
         self,
         raw_legal_actions: Sequence[MahjongActionSpec],
+        *,
+        snapshot: dict[str, object] | None = None,
+        actor: int | None = None,
     ) -> list[tuple[ActionSpec, tuple[dict[str, object], ...]]]:
         controlled_pairs: list[tuple[ActionSpec, tuple[dict[str, object], ...]]] = []
         for raw_spec in raw_legal_actions:
             action_spec = self._convert_supported_response_raw_action(raw_spec)
+            if (
+                action_spec is not None
+                and action_spec.action_type == ActionType.CHI
+                and snapshot is not None
+                and actor is not None
+                and not _chi_has_post_call_discard(snapshot, int(actor), action_spec)
+            ):
+                continue
             if action_spec is not None:
                 controlled_pairs.append((action_spec, (raw_spec.to_mjai(),)))
         if controlled_pairs and all(action.action_type == ActionType.PASS for action, _ in controlled_pairs):
@@ -1324,6 +1340,60 @@ def _action_debug_payload(action: ActionSpec, *, actor: int) -> dict[str, object
         "from_who": action.from_who,
         "flags": int(action.flags),
     }
+
+
+def _chi_has_post_call_discard(snapshot: dict[str, object], actor: int, action: ActionSpec) -> bool:
+    """Return whether CHI leaves at least one discard after kuikae filtering."""
+    if action.action_type != ActionType.CHI or action.tile is None or len(action.consumed) != 2:
+        return True
+    counts = Counter(_snapshot_hand_tile_ids(snapshot, actor))
+    for tile_id in action.consumed:
+        base = _deaka_tile_id(tile_id)
+        if counts[base] <= 0:
+            return False
+        counts[base] -= 1
+
+    forbidden: set[int] = set()
+    called = _deaka_tile_id(action.tile)
+    consumed = sorted(_deaka_tile_id(tile_id) for tile_id in action.consumed)
+    if counts[called] > 0:
+        forbidden.add(called)
+    low, high = consumed
+    if called < low:
+        bigger = high + 1
+        if high % 9 < 8 and counts[bigger] > 0:
+            forbidden.add(bigger)
+    elif called > high:
+        smaller = low - 1
+        if low % 9 > 0 and counts[smaller] > 0:
+            forbidden.add(smaller)
+    return any(count > 0 and tile_id not in forbidden for tile_id, count in counts.items())
+
+
+def _snapshot_hand_tile_ids(snapshot: dict[str, object], actor: int) -> list[int]:
+    hands = snapshot.get("hands")
+    if isinstance(hands, Sequence) and not isinstance(hands, (str, bytes)) and 0 <= int(actor) < len(hands):
+        hand_values = hands[int(actor)]
+    else:
+        hand_values = snapshot.get("hand", ())
+    return [_tile_name_to_deaka_id(value) for value in _sequence_or_empty(hand_values)]
+
+
+def _tile_name_to_deaka_id(value: object) -> int:
+    normalized = normalize_tile(str(value))
+    if normalized not in TILE_NAME_TO_IDX:
+        raise ValueError(f"unknown tile in snapshot hand: {value!r}")
+    return _deaka_tile_id(int(TILE_NAME_TO_IDX[normalized]))
+
+
+def _deaka_tile_id(tile_id: int) -> int:
+    return int(tile_id)
+
+
+def _sequence_or_empty(values: object) -> list[object]:
+    if isinstance(values, Sequence) and not isinstance(values, (str, bytes)):
+        return list(values)
+    return []
 
 
 def _mahjong_spec_from_payload(item: dict[str, object]) -> MahjongActionSpec:

@@ -2,6 +2,12 @@
 
 Updated: 2026-05-04
 
+> 2026-05-06 update: this document is no longer the freshest operational
+> handoff. Read
+> `docs/keqingrl/keqingrl_riichienv_mortal_imitation_2026_05_06.md` first for
+> the current RiichiEnv-native Mortal replay route, rule-free defaults,
+> all-seat correction, GUI review workflow, and CHI kuikae legality fix.
+
 This is the current handoff for the KeqingRL model line. It records the route
 from early KeqingRL development to the current Mortal Action-Q imitation
 mainline, including wrong turns, fixes, unresolved limits, and the artifacts a
@@ -26,6 +32,75 @@ checkpoint=artifacts/mortal_training/mortal.pth
 
 Do not use `xmodel`, `xmodel1`, or `keqingv4` as teacher sources. They are
 frozen references/baselines only.
+
+## 2026-05-06 RiichiEnv Native Update
+
+The current operational route has moved from the legacy BattleManager bridge
+rollout to RiichiEnv-native Mortal replay generation:
+
+```text
+RiichiEnv 4-Mortal selfplay
+-> game_*.mjson + game_*.decisions.json compact sidecar
+-> replay-to-KeqingRL ActionSpec batch
+-> full-legal Mortal Q imitation
+```
+
+Mortal plays first and writes replay/sidecar artifacts; KeqingRL learns from the
+materialized replay batch afterward. This is not online RL.
+
+Current training defaults:
+
+```text
+rollout_source=riichienv-mortal-selfplay-replay
+rollout_behavior=mortal-teacher
+teacher_support=full-legal
+rule_score_scale=0.0
+support_policy_mode=unrestricted
+delta_support_mode=all
+student_logit_source=neural_delta_only
+```
+
+Rulebase is diagnostic only. Do not use Rule Rank as a meaningful target or
+review signal.
+
+Because all four Mortal seats use the same checkpoint, collecting all seats is
+not strategically independent. The next short probes should prefer:
+
+```text
+learner_seats=0
+episodes=8 or 16
+multiple independent seeds
+```
+
+The latest RiichiEnv-native continuation checkpoint is:
+
+```text
+reports/keqingrl_mortal_action_q_imitation_riichienv_train_20260506_seedE_ep8_iter4_shared_cont_from_iter2/checkpoint_config_000/policy_iter_0002.pt
+sha256=8010cc8c218b8aad6ca36ef5ac48caa4d68b83430e430d4f165c5d701235a8d6
+rows=5108
+mapping=5108/5108
+fail_closed=0
+teacher_ce=1.53985
+teacher_kl=0.74140
+teacher_agree=0.53681
+```
+
+This is a functional native-route candidate, not a promoted best.
+
+Important correction: a reviewed `RON / CHI / PASS` row after a riichi
+declaration discard was initially treated as a Mortal native CHI-Q limitation.
+That was wrong. The actual issue was CHI legality: after eating `5p` with
+`3p 4p` from hand `2p 3p 4p 5p`, the remaining `2p 5p` are both kuikae-forbidden
+discard candidates, so CHI leaves no legal post-call discard and must not enter
+KeqingRL controlled legal actions. `src/keqingrl/env.py` now filters CHI rows
+with no legal post-call discard before teacher scoring, matching Mortal/libriichi
+`forbidden_tiles` behavior.
+
+Current detailed handoff:
+
+```text
+docs/keqingrl/keqingrl_riichienv_mortal_imitation_2026_05_06.md
+```
 
 ## Current Best Student Checkpoint
 
@@ -56,11 +131,12 @@ hypothesis.
 1. `docs/project_progress.md`
 2. `docs/agent_sync.md`
 3. `docs/project_overview_current.md`
-4. `docs/keqingrl/keqingrl_mortal_action_q_handoff_2026_05_04.md`
-5. `docs/mortal_action_contract.md`
-6. `docs/keqingrl/mortal_training_workflow.md`
-7. `scripts/run_keqingrl_mortal_imitation.py`
-8. `tests/test_keqingrl_mortal_imitation.py`
+4. `docs/keqingrl/keqingrl_riichienv_mortal_imitation_2026_05_06.md`
+5. `docs/keqingrl/keqingrl_mortal_action_q_handoff_2026_05_04.md`
+6. `docs/mortal_action_contract.md`
+7. `docs/keqingrl/mortal_training_workflow.md`
+8. `scripts/run_keqingrl_mortal_imitation.py`
+9. `tests/test_keqingrl_mortal_imitation.py`
 
 ## Development History
 

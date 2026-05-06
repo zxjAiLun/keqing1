@@ -585,6 +585,37 @@ def test_collect_controlled_response_actions_preserves_raw_order() -> None:
     ]
 
 
+def test_collect_controlled_response_actions_filters_chi_without_post_call_discard() -> None:
+    env = DiscardOnlyMahjongEnv(
+        response_action_types=(
+            ActionType.RON,
+            ActionType.CHI,
+            ActionType.PASS,
+        )
+    )
+    raw_actions = (
+        MahjongActionSpec(type="hora", actor=0, target=3, pai="5p"),
+        MahjongActionSpec(type="chi", actor=0, target=3, pai="5p", consumed=("3p", "4p")),
+        MahjongActionSpec(type="none"),
+    )
+    snapshot = {
+        "actor": 0,
+        "hand": ["2p", "3p", "4p", "5p"],
+        "last_discard": {"actor": 3, "pai": "5p"},
+    }
+
+    controlled_pairs = env._collect_controlled_response_actions(
+        raw_actions,
+        snapshot=snapshot,
+        actor=0,
+    )
+
+    assert [spec.action_type for spec, _dispatch in controlled_pairs] == [
+        ActionType.RON,
+        ActionType.PASS,
+    ]
+
+
 def test_collect_controlled_response_actions_default_scope_keeps_auto_response() -> None:
     env = DiscardOnlyMahjongEnv()
 

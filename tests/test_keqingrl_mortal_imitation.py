@@ -10,12 +10,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import scripts.run_keqingrl_mortal_imitation as imitation_script
 from keqingrl.actions import ActionSpec, ActionType
 from keqingrl.contracts import ObsTensorBatch, PolicyInput, PolicyOutput
 from keqingrl.rollout import RolloutStep
 from keqingrl.mortal_teacher import (
     MORTAL_ACTION_MASK_EXTRA_KEY,
     MORTAL_ACTION_SPACE,
+    MORTAL_CHI_HIGH_ACTION_ID,
     MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY,
     MORTAL_ENCODED_OBS_EXTRA_KEY,
     MORTAL_KAN_ACTION_ID,
@@ -34,6 +36,7 @@ from scripts.run_keqingrl_mortal_imitation import (
     _ensure_mortal_teacher_q_extras,
     _generate_riichienv_mortal_selfplay_replays,
     _load_native_mortal_replay_decisions_sidecar,
+    _native_limitation_review_case_row,
     _native_mortal_decision_event_index,
     _replay_raw_legal_actions,
     _latest_checkpoint_rows,
@@ -749,8 +752,8 @@ def test_build_replay_imitation_batch_summarizes_controlled_and_mismatch_rows(mo
         lambda args, replay_path, events, actor_filter, expected_keys=None: {},
     )
     monkeypatch.setattr(
-        "scripts.run_keqingrl_mortal_imitation._replay_sample_is_known_mortal_native_limitation",
-        lambda sample, env, events, native_decisions: False,
+        "scripts.run_keqingrl_mortal_imitation._replay_sample_known_mortal_native_limitation_case",
+        lambda sample, env, events, replay_id, native_decisions, rollout_seed: None,
     )
 
     def fake_step(sample, *, env, rollout_seed, replay_id, events, native_decisions):
@@ -814,7 +817,77 @@ def test_build_replay_imitation_batch_summarizes_controlled_and_mismatch_rows(mo
         "replay_skipped_label_mismatch_count": 1,
         "replay_file_count": 2,
         "replay_skipped_mortal_native_limitation_count": 0,
+        "review_case_rows": [],
     }
+
+
+def test_native_limitation_review_case_uses_decision_prefix_and_marks_missing_q(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_trigger_index(events, snapshot, *, event_index):
+        del events, snapshot, event_index
+        return 3
+
+    def fake_snapshot(events, actor):
+        captured["events"] = tuple(events)
+        return {
+            "bakaze": "E",
+            "kyoku": 1,
+            "honba": 0,
+            "oya": 0,
+            "kyotaku": 0,
+            "scores": [25000, 25000, 25000, 25000],
+            "hands": [["1m", "2m", "3m"], [], [], []],
+            "discards": [[], [], [], [{"pai": "4m", "reach_declared": True}]],
+            "melds": [[], [], [], []],
+            "riichi": [False, False, False, True],
+            "winds": ["E", "S", "W", "N"],
+            "last_discard": {"actor": 3, "pai": "4m"},
+        }, tuple(events)
+
+    monkeypatch.setattr(imitation_script, "_response_window_trigger_event_index", fake_trigger_index)
+    monkeypatch.setattr(imitation_script, "_review_snapshot_for_events", fake_snapshot)
+
+    q_values = torch.full((MORTAL_ACTION_SPACE,), float("-inf"), dtype=torch.float32)
+    q_values[MORTAL_PASS_ACTION_ID] = 0.25
+    action_mask = torch.zeros((MORTAL_ACTION_SPACE,), dtype=torch.bool)
+    action_mask[MORTAL_PASS_ACTION_ID] = True
+    native_teacher = NativeMortalReplayDecision(q_values=q_values, action_mask=action_mask)
+    legal_actions = (
+        ActionSpec(ActionType.PASS),
+        ActionSpec(ActionType.CHI, tile=_tile("4m"), consumed=(_tile("2m"), _tile("3m")), from_who=3),
+    )
+    events = (
+        {"type": "start_game"},
+        {"type": "start_kyoku"},
+        {"type": "reach", "actor": 3},
+        {"type": "dahai", "actor": 3, "pai": "4m"},
+        {"type": "chi", "actor": 0, "pai": "4m"},
+    )
+    sample = SimpleNamespace(actor=0, state={"kyoku": 1, "honba": 0}, event_index=4, actor_name="p0")
+
+    row = _native_limitation_review_case_row(
+        sample,
+        legal_actions=legal_actions,
+        events=events,
+        replay_id="game_00001",
+        actor=0,
+        rollout_seed=123,
+        native_teacher=native_teacher,
+        native_key=(0, 3),
+        reason="native_limitation:riichi_discard_chi_without_mortal_q",
+    )
+
+    assert [event["type"] for event in captured["events"]] == ["start_game", "start_kyoku", "reach", "dahai"]
+    assert row["is_native_limitation"] is True
+    assert row["round_state"]["last_discard"] == {"pai": "4m", "tsumogiri": False, "reach_declared": False}
+    assert row["native_mortal"]["missing_action_types"] == ["CHI"]
+    pass_row, chi_row = row["legal_actions"]
+    assert pass_row["mortal_available_action_ids"] == [MORTAL_PASS_ACTION_ID]
+    assert pass_row["native_limitation_missing_q"] is False
+    assert chi_row["mortal_source_action_ids"] == [MORTAL_CHI_HIGH_ACTION_ID]
+    assert chi_row["mortal_available_action_ids"] == []
+    assert chi_row["native_limitation_missing_q"] is True
 
 
 def test_imitation_metrics_writes_action_type_breakdown_for_teacher_top1() -> None:
