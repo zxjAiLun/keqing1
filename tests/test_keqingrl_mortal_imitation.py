@@ -31,6 +31,7 @@ from scripts.run_keqingrl_mortal_imitation import (
     _build_replay_imitation_batch,
     _ensure_mortal_encoded_observation_extras,
     _ensure_mortal_teacher_q_extras,
+    _generate_riichienv_mortal_selfplay_replays,
     _load_native_mortal_replay_decisions_sidecar,
     _native_mortal_decision_event_index,
     _replay_raw_legal_actions,
@@ -193,7 +194,7 @@ def test_mortal_imitation_defaults_to_rule_free_full_legal_support(monkeypatch: 
     assert args.delta_support_mode == "all"
     assert args.support_policy_mode == "unrestricted"
     assert args.max_kyokus == 0
-    assert args.rollout_source == "mortal-selfplay-replay"
+    assert args.rollout_source == "riichienv-mortal-selfplay-replay"
     assert args.rollout_behavior == "mortal-teacher"
     assert args.decision_review_case_streaming is True
     assert _student_logit_source(args) == "neural_delta_only"
@@ -594,6 +595,80 @@ def test_load_native_mortal_replay_decisions_sidecar_reads_saved_q_and_mask(tmp_
     assert sorted(decisions) == [(0, 7)]
     assert torch.allclose(decisions[(0, 7)].q_values, torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32))
     assert torch.equal(decisions[(0, 7)].action_mask, torch.tensor([True, False, True], dtype=torch.bool))
+
+
+def test_load_native_mortal_replay_decisions_sidecar_expands_compact_q_and_mask(tmp_path: Path) -> None:
+    replay_path = tmp_path / "game_00000.mjson"
+    replay_path.write_text('{"type":"start_game"}\n', encoding="utf-8")
+    replay_path.with_suffix(".decisions.json").write_text(
+        json.dumps(
+            {
+                "by_actor": {
+                    "0": [
+                        {
+                            "event_index": 9,
+                            "mortal_meta": {
+                                "mask_bits": (1 << 0) | (1 << 3),
+                                "q_values": [0.25, -0.5],
+                            },
+                        }
+                    ],
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    decisions = _load_native_mortal_replay_decisions_sidecar(replay_path, actor_filter={0})
+
+    assert decisions is not None
+    decision = decisions[(0, 9)]
+    assert decision.action_mask.shape == (MORTAL_ACTION_SPACE,)
+    assert decision.q_values.shape == (MORTAL_ACTION_SPACE,)
+    assert bool(decision.action_mask[0])
+    assert bool(decision.action_mask[3])
+    assert not bool(decision.action_mask[1])
+    assert float(decision.q_values[0].item()) == pytest.approx(0.25)
+    assert float(decision.q_values[3].item()) == pytest.approx(-0.5)
+    assert torch.isneginf(decision.q_values[1])
+
+
+def test_generate_riichienv_mortal_selfplay_replays_dispatches_generator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls = []
+
+    def fake_run(command, check, cwd):
+        calls.append((command, check, cwd))
+        replays_dir = tmp_path / "replay_out" / "replays"
+        replays_dir.mkdir(parents=True)
+        (replays_dir / "game_00000.mjson").write_text('{"type":"start_game"}\n', encoding="utf-8")
+
+    monkeypatch.setattr("scripts.run_keqingrl_mortal_imitation.subprocess.run", fake_run)
+    args = SimpleNamespace(
+        mortal_selfplay_device=None,
+        mortal_teacher_device=None,
+        device="cpu",
+        mortal_teacher_checkpoint=tmp_path / "mortal.pth",
+        mortal_root=Path("third_party/Mortal"),
+        episodes=1,
+        riichienv_game_mode="4p-red-half",
+    )
+
+    replay_paths = _generate_riichienv_mortal_selfplay_replays(
+        args,
+        replay_dir=tmp_path / "replay_out",
+        rollout_seed=123,
+    )
+
+    assert replay_paths == [tmp_path / "replay_out" / "replays" / "game_00000.mjson"]
+    command = calls[0][0]
+    assert "generate_mortal_riichienv_replays.py" in command[1]
+    assert "--game-mode" in command
+    assert command[command.index("--game-mode") + 1] == "4p-red-half"
+    assert command[command.index("--seed") + 1] == "123"
 
 
 def test_build_replay_imitation_batch_summarizes_controlled_and_mismatch_rows(monkeypatch: pytest.MonkeyPatch) -> None:

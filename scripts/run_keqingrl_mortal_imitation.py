@@ -89,7 +89,7 @@ from training.state_features import encode as encode_state_features
 
 ALLOWED_IMITATION_TEACHER_SOURCES = ("mortal-action-q",)
 TEACHER_SUPPORT_MODES = ("topk", "adaptive-topk", "full-legal")
-ROLLOUT_SOURCES = ("env", "mortal-selfplay-replay")
+ROLLOUT_SOURCES = ("env", "mortal-selfplay-replay", "riichienv-mortal-selfplay-replay")
 _ACTION_TYPE_CHOICES = tuple(action_type.name for action_type in ActionType)
 
 
@@ -259,8 +259,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rollout-source",
         choices=ROLLOUT_SOURCES,
-        default="mortal-selfplay-replay",
-        help="Training data source. mortal-selfplay-replay uses the existing Mortal bot selfplay path and converts saved replays into imitation batches.",
+        default="riichienv-mortal-selfplay-replay",
+        help=(
+            "Training data source. riichienv-mortal-selfplay-replay generates 4-Mortal RiichiEnv "
+            "replays and converts them into imitation batches; mortal-selfplay-replay keeps the "
+            "legacy BattleManager path for compatibility."
+        ),
     )
     parser.add_argument(
         "--rollout-behavior",
@@ -314,6 +318,11 @@ def _parse_args() -> argparse.Namespace:
         "--mortal-selfplay-device",
         default=None,
         help="Device passed to scripts/selfplay.py for mortal replay generation. Defaults to --mortal-teacher-device, then --device, then cpu.",
+    )
+    parser.add_argument(
+        "--riichienv-game-mode",
+        default="4p-red-half",
+        help="RiichiEnv game_mode used by riichienv-mortal-selfplay-replay.",
     )
     return parser.parse_args()
 
@@ -697,6 +706,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         max_kyokus = int(getattr(args, "max_kyokus", 0))
         if max_kyokus not in {0, 1}:
             raise ValueError("mortal-selfplay-replay currently supports --max-kyokus 0 (hanchan) or 1 (single-kyoku)")
+    if str(getattr(args, "rollout_source", "")) == "riichienv-mortal-selfplay-replay":
+        max_kyokus = int(getattr(args, "max_kyokus", 0))
+        if max_kyokus != 0:
+            raise ValueError("riichienv-mortal-selfplay-replay currently supports --max-kyokus 0 (hanchan)")
 
 
 def _load_teacher_runtime(args: argparse.Namespace, *, device: torch.device):
@@ -826,6 +839,11 @@ def _collect_imitation_rollout_context(
             args,
             rollout_seed=rollout_seed,
         )
+    if str(args.rollout_source) == "riichienv-mortal-selfplay-replay":
+        return _collect_riichienv_mortal_selfplay_replay_context(
+            args,
+            rollout_seed=rollout_seed,
+        )
     raise ValueError(f"unsupported rollout_source: {args.rollout_source}")
 
 
@@ -836,6 +854,31 @@ def _collect_mortal_selfplay_replay_context(
 ) -> ImitationRolloutContext:
     replay_dir = args.output_dir / "mortal_selfplay_replays" / f"iter_{int(rollout_seed)}"
     replay_paths = _generate_mortal_selfplay_replays(args, replay_dir=replay_dir, rollout_seed=rollout_seed)
+    build_batch_start = time.perf_counter()
+    prepared_steps, batch, replay_summary = _build_replay_imitation_batch(
+        args,
+        replay_paths=replay_paths,
+        rollout_seed=rollout_seed,
+    )
+    return ImitationRolloutContext(
+        prepared_steps=prepared_steps,
+        batch=batch,
+        build_batch_sec=time.perf_counter() - build_batch_start,
+        summary=replay_summary,
+    )
+
+
+def _collect_riichienv_mortal_selfplay_replay_context(
+    args: argparse.Namespace,
+    *,
+    rollout_seed: int,
+) -> ImitationRolloutContext:
+    replay_dir = args.output_dir / "riichienv_mortal_selfplay_replays" / f"iter_{int(rollout_seed)}"
+    replay_paths = _generate_riichienv_mortal_selfplay_replays(
+        args,
+        replay_dir=replay_dir,
+        rollout_seed=rollout_seed,
+    )
     build_batch_start = time.perf_counter()
     prepared_steps, batch, replay_summary = _build_replay_imitation_batch(
         args,
@@ -899,6 +942,45 @@ def _generate_mortal_selfplay_replays(
     replay_paths = sorted(replays_dir.glob("*.mjson"))
     if not replay_paths:
         raise RuntimeError(f"mortal selfplay replay generation produced no .mjson files under {replays_dir}")
+    return replay_paths
+
+
+def _generate_riichienv_mortal_selfplay_replays(
+    args: argparse.Namespace,
+    *,
+    replay_dir: Path,
+    rollout_seed: int,
+) -> list[Path]:
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    selfplay_device = str(
+        args.mortal_selfplay_device
+        or args.mortal_teacher_device
+        or args.device
+        or "cpu"
+    )
+    command = [
+        sys.executable,
+        str(_REPO_ROOT / "scripts" / "generate_mortal_riichienv_replays.py"),
+        "--model",
+        str(args.mortal_teacher_checkpoint),
+        "--mortal-root",
+        str(args.mortal_root),
+        "--games",
+        str(int(args.episodes)),
+        "--game-mode",
+        str(args.riichienv_game_mode),
+        "--output-dir",
+        str(replay_dir),
+        "--device",
+        selfplay_device,
+        "--seed",
+        str(int(rollout_seed)),
+    ]
+    subprocess.run(command, check=True, cwd=_REPO_ROOT)
+    replays_dir = replay_dir / "replays"
+    replay_paths = sorted(replays_dir.glob("*.mjson"))
+    if not replay_paths:
+        raise RuntimeError(f"riichienv Mortal selfplay produced no .mjson files under {replays_dir}")
     return replay_paths
 
 
@@ -1175,8 +1257,7 @@ def _load_native_mortal_replay_decisions_sidecar(
             if not isinstance(entry, Mapping):
                 continue
             meta = dict(entry.get("mortal_meta", {}) or {})
-            q_values = meta.get("expanded_q_values")
-            action_mask = meta.get("action_mask")
+            q_values, action_mask = _native_mortal_meta_q_and_mask(meta)
             event_index = entry.get("event_index")
             if q_values is None or action_mask is None or event_index is None:
                 continue
@@ -1185,6 +1266,31 @@ def _load_native_mortal_replay_decisions_sidecar(
                 action_mask=torch.tensor(action_mask, dtype=torch.bool),
             )
     return decisions
+
+
+def _native_mortal_meta_q_and_mask(meta: Mapping[str, Any]) -> tuple[list[float] | None, list[bool] | None]:
+    expanded_q = meta.get("expanded_q_values")
+    expanded_mask = meta.get("action_mask")
+    if expanded_q is not None and expanded_mask is not None:
+        return [float(value) for value in expanded_q], [bool(value) for value in expanded_mask]
+    if meta.get("mask_bits") is None or meta.get("q_values") is None:
+        return None, None
+    mask_bits = int(meta.get("mask_bits", 0) or 0)
+    compact_q = [float(value) for value in (meta.get("q_values") or [])]
+    q_values = [float("-inf")] * MORTAL_ACTION_SPACE
+    action_mask = [False] * MORTAL_ACTION_SPACE
+    compact_idx = 0
+    for action_id in range(MORTAL_ACTION_SPACE):
+        if not (mask_bits & (1 << action_id)):
+            continue
+        action_mask[action_id] = True
+        if compact_idx >= len(compact_q):
+            raise MortalTeacherMappingError("Mortal sidecar q_values shorter than mask_bits")
+        q_values[action_id] = compact_q[compact_idx]
+        compact_idx += 1
+    if compact_idx != len(compact_q):
+        raise MortalTeacherMappingError("Mortal sidecar q_values longer than mask_bits")
+    return q_values, action_mask
 
 
 def _native_mortal_decision_event_index(
