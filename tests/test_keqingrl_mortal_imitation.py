@@ -29,6 +29,7 @@ from mahjong_env.action_space import TILE_NAME_TO_IDX
 from scripts.run_keqingrl_mortal_imitation import (
     ALLOWED_IMITATION_TEACHER_SOURCES,
     _build_replay_imitation_batch,
+    _collect_native_mortal_replay_decisions,
     _ensure_mortal_encoded_observation_extras,
     _ensure_mortal_teacher_q_extras,
     _generate_riichienv_mortal_selfplay_replays,
@@ -47,6 +48,7 @@ from scripts.run_keqingrl_mortal_imitation import (
     audit_mortal_action_mapping,
     imitation_metrics,
     MortalTeacherBehaviorPolicy,
+    NativeMortalReplayDecision,
     mortal_imitation_loss,
     prepare_mortal_imitation_teacher_data,
 )
@@ -671,6 +673,49 @@ def test_generate_riichienv_mortal_selfplay_replays_dispatches_generator(
     assert command[command.index("--seed") + 1] == "123"
 
 
+def test_collect_native_mortal_replay_decisions_preserves_sidecar_when_fallback_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    replay_path = tmp_path / "game_00000.mjson"
+    replay_path.write_text('{"type":"start_game"}\n', encoding="utf-8")
+    sidecar_decision = NativeMortalReplayDecision(
+        q_values=torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32),
+        action_mask=torch.tensor([True, False, True], dtype=torch.bool),
+    )
+    monkeypatch.setattr(
+        "scripts.run_keqingrl_mortal_imitation._load_native_mortal_replay_decisions_sidecar",
+        lambda replay_path, actor_filter: {(1, 185): sidecar_decision},
+    )
+
+    class FakeBot:
+        def __init__(self, *args, **kwargs):
+            self.decision_log = []
+
+        def react(self, event):
+            return None
+
+    monkeypatch.setattr("scripts.run_keqingrl_mortal_imitation.MortalReviewBot", FakeBot)
+    args = SimpleNamespace(
+        mortal_teacher_device=None,
+        device="cpu",
+        mortal_teacher_checkpoint=tmp_path / "mortal.pth",
+        mortal_root=tmp_path / "mortal_root",
+    )
+
+    decisions = _collect_native_mortal_replay_decisions(
+        args,
+        replay_path=replay_path,
+        events=[{"type": "start_game"}],
+        actor_filter={1},
+        expected_keys={(1, 185), (1, 190)},
+    )
+
+    assert (1, 185) in decisions
+    assert torch.allclose(decisions[(1, 185)].q_values, sidecar_decision.q_values)
+    assert torch.equal(decisions[(1, 185)].action_mask, sidecar_decision.action_mask)
+
+
 def test_build_replay_imitation_batch_summarizes_controlled_and_mismatch_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     replay_paths = [Path("game_00001.mjson"), Path("game_00002.mjson")]
     samples_by_path = {
@@ -703,9 +748,14 @@ def test_build_replay_imitation_batch_summarizes_controlled_and_mismatch_rows(mo
         "scripts.run_keqingrl_mortal_imitation._collect_native_mortal_replay_decisions",
         lambda args, replay_path, events, actor_filter, expected_keys=None: {},
     )
+    monkeypatch.setattr(
+        "scripts.run_keqingrl_mortal_imitation._replay_sample_is_known_mortal_native_limitation",
+        lambda sample, env, events, native_decisions: False,
+    )
 
-    def fake_step(sample, *, env, rollout_seed, replay_id, native_decisions):
+    def fake_step(sample, *, env, rollout_seed, replay_id, events, native_decisions):
         del replay_id, native_decisions
+        assert events
         if int(sample.event_index) == 3:
             return RolloutStep(
                 obs=ObsTensorBatch(tile_obs=torch.zeros((1,)), scalar_obs=torch.zeros((1,))),
@@ -763,6 +813,7 @@ def test_build_replay_imitation_batch_summarizes_controlled_and_mismatch_rows(mo
         "replay_skipped_uncontrolled_count": 1,
         "replay_skipped_label_mismatch_count": 1,
         "replay_file_count": 2,
+        "replay_skipped_mortal_native_limitation_count": 0,
     }
 
 

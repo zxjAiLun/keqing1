@@ -137,16 +137,25 @@ def _write_mjson(path: Path, events: Sequence[Mapping[str, Any]]) -> None:
 
 
 def _new_bots(args: argparse.Namespace) -> dict[int, MortalReviewBot]:
-    return {
-        pid: MortalReviewBot(
+    first = MortalReviewBot(
+        player_id=0,
+        model_path=args.model,
+        mortal_root=args.mortal_root,
+        device=str(args.device),
+        enable_review_log=False,
+    )
+    bots = {0: first}
+    for pid in range(1, 4):
+        bots[pid] = MortalReviewBot(
             player_id=pid,
             model_path=args.model,
             mortal_root=args.mortal_root,
             device=str(args.device),
             enable_review_log=False,
+            shared_mortal_engine=first._mortal_engine,
+            shared_model=first.model,
         )
-        for pid in range(4)
-    }
+    return bots
 
 
 def _expand_compact_meta(*, mask_bits: int, compact_q: Sequence[Any]) -> tuple[list[float], list[bool]]:

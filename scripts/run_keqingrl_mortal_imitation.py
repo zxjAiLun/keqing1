@@ -49,6 +49,9 @@ from keqingrl.mortal_teacher import (
     MORTAL_ACTION_MASK_EXTRA_KEY,
     MORTAL_ACTION_SPACE,
     MORTAL_ACTION_TEACHER_CONTRACT_VERSION,
+    MORTAL_CHI_HIGH_ACTION_ID,
+    MORTAL_CHI_LOW_ACTION_ID,
+    MORTAL_CHI_MID_ACTION_ID,
     MORTAL_ENCODED_ACTION_MASK_EXTRA_KEY,
     MORTAL_ENCODED_OBS_EXTRA_KEY,
     MORTAL_KAN_SELECT_ACTION_MASK_EXTRA_KEY,
@@ -277,7 +280,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--delta-support-topk", type=int, default=3)
     parser.add_argument("--delta-support-margin-threshold", type=float, default=0.75)
     parser.add_argument("--outside-support-delta-mode", choices=("zero", "negative-clip"), default="zero")
-    parser.add_argument("--save-checkpoint-every", type=int, default=8)
+    parser.add_argument("--save-checkpoint-every", type=int, default=1)
     parser.add_argument("--seed-base", type=int, default=202604330000)
     parser.add_argument("--seed-stride", type=int, default=1)
     parser.add_argument("--torch-seed-base", type=int, default=202604330000)
@@ -997,6 +1000,7 @@ def _build_replay_imitation_batch(
     filtered_actor_samples = 0
     skipped_uncontrolled = 0
     skipped_label_mismatch = 0
+    skipped_mortal_native_limitation = 0
     actor_filter = {int(seat) for seat in args.learner_seats}
     for replay_path in replay_paths:
         events = read_mjai_jsonl(replay_path)
@@ -1018,11 +1022,20 @@ def _build_replay_imitation_batch(
             if actor_filter and int(sample.actor) not in actor_filter:
                 continue
             filtered_actor_samples += 1
+            if _replay_sample_is_known_mortal_native_limitation(
+                sample,
+                env=env,
+                events=events,
+                native_decisions=native_decisions,
+            ):
+                skipped_mortal_native_limitation += 1
+                continue
             step_and_rank = _replay_sample_to_rollout_step(
                 sample,
                 env=env,
                 rollout_seed=rollout_seed,
                 replay_id=replay_path.stem,
+                events=events,
                 native_decisions=native_decisions,
             )
             if step_and_rank is None:
@@ -1055,6 +1068,7 @@ def _build_replay_imitation_batch(
         "replay_skipped_uncontrolled_count": int(skipped_uncontrolled),
         "replay_skipped_label_mismatch_count": int(skipped_label_mismatch),
         "replay_file_count": int(len(replay_paths)),
+        "replay_skipped_mortal_native_limitation_count": int(skipped_mortal_native_limitation),
     }
 
 
@@ -1064,6 +1078,62 @@ def _sample_has_controlled_scope(env: DiscardOnlyMahjongEnv, sample: ReplaySampl
     snapshot["actor"] = actor
     raw_legal_actions = _replay_raw_legal_actions(sample, env=env)
     return bool(_controlled_action_pairs_for_replay_sample(env, snapshot, actor, raw_legal_actions))
+
+
+def _replay_sample_is_known_mortal_native_limitation(
+    sample: ReplaySample,
+    *,
+    env: DiscardOnlyMahjongEnv,
+    events: Sequence[Mapping[str, Any]],
+    native_decisions: Mapping[tuple[int, int], NativeMortalReplayDecision],
+) -> bool:
+    actor = int(sample.actor)
+    snapshot = dict(sample.state)
+    snapshot["actor"] = actor
+    if not _snapshot_is_response_window(snapshot, actor):
+        return False
+    trigger_index = _response_window_trigger_event_index(events, snapshot, event_index=int(sample.event_index))
+    if trigger_index is None or not _is_riichi_declaration_discard(events, trigger_index):
+        return False
+    raw_legal_actions = _replay_raw_legal_actions(sample, env=env)
+    controlled_pairs = _controlled_action_pairs_for_replay_sample(env, snapshot, actor, raw_legal_actions)
+    legal_actions = tuple(action for action, _events in controlled_pairs)
+    if not any(action.action_type == ActionType.CHI for action in legal_actions):
+        return False
+    native_key = (actor, _native_mortal_decision_event_index(sample, events=events))
+    native_teacher = native_decisions.get(native_key)
+    if native_teacher is None:
+        return False
+    mask = native_teacher.action_mask.bool()
+    return not any(
+        bool(mask[action_id].item())
+        for action_id in (MORTAL_CHI_LOW_ACTION_ID, MORTAL_CHI_MID_ACTION_ID, MORTAL_CHI_HIGH_ACTION_ID)
+    )
+
+
+def _response_window_trigger_event_index(
+    events: Sequence[Mapping[str, Any]],
+    snapshot: Mapping[str, Any],
+    *,
+    event_index: int,
+) -> int | None:
+    trigger_end = _response_window_trigger_end(events, snapshot, event_index=int(event_index))
+    if trigger_end is None or trigger_end <= 0:
+        return None
+    return int(trigger_end - 1)
+
+
+def _is_riichi_declaration_discard(events: Sequence[Mapping[str, Any]], event_index: int) -> bool:
+    if not 0 <= int(event_index) < len(events):
+        return False
+    discard = events[int(event_index)]
+    if str(discard.get("type")) != "dahai":
+        return False
+    previous_index = int(event_index) - 1
+    if previous_index < 0:
+        return False
+    previous = events[previous_index]
+    return str(previous.get("type")) == "reach" and int(previous.get("actor", -1)) == int(discard.get("actor", -2))
 
 
 def _replay_conversion_env(args: argparse.Namespace) -> DiscardOnlyMahjongEnv:
@@ -1081,11 +1151,11 @@ def _replay_sample_to_rollout_step(
     env: DiscardOnlyMahjongEnv,
     rollout_seed: int,
     replay_id: str,
+    events: Sequence[Mapping[str, Any]],
     native_decisions: Mapping[tuple[int, int], NativeMortalReplayDecision],
 ) -> tuple[RolloutStep, int] | None:
     snapshot = dict(sample.state)
     actor = int(sample.actor)
-    events = sample.events or []
     snapshot["actor"] = actor
     raw_legal_actions = _replay_raw_legal_actions(sample, env=env)
     controlled_pairs = _controlled_action_pairs_for_replay_sample(env, snapshot, actor, raw_legal_actions)
@@ -1204,7 +1274,7 @@ def _collect_native_mortal_replay_decisions(
     ):
         return sidecar_decisions
     device = str(getattr(args, "mortal_teacher_device", None) or getattr(args, "device", None) or "cpu")
-    decisions: dict[tuple[int, int], NativeMortalReplayDecision] = {}
+    decisions: dict[tuple[int, int], NativeMortalReplayDecision] = dict(sidecar_decisions or {})
     for actor in sorted(actor_filter):
         bot = MortalReviewBot(
             player_id=int(actor),
@@ -1227,10 +1297,12 @@ def _collect_native_mortal_replay_decisions(
                 raise MortalTeacherMappingError(
                     f"native Mortal replay decision missing q/mask for replay={replay_path.stem} actor={actor} event_index={event_index}"
                 )
-            decisions[(int(actor), int(event_index))] = NativeMortalReplayDecision(
-                q_values=torch.tensor(q_values, dtype=torch.float32),
-                action_mask=torch.tensor(action_mask, dtype=torch.bool),
-            )
+            key = (int(actor), int(event_index))
+            if key not in decisions:
+                decisions[key] = NativeMortalReplayDecision(
+                    q_values=torch.tensor(q_values, dtype=torch.float32),
+                    action_mask=torch.tensor(action_mask, dtype=torch.bool),
+                )
     return decisions
 
 

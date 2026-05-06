@@ -36,6 +36,8 @@ class MortalReviewBot:
         enable_rule_based_agari_guard: bool = True,
         enable_review_log: bool = True,
         model_version: Optional[str] = None,
+        shared_mortal_engine: Any | None = None,
+        shared_model: Any | None = None,
     ) -> None:
         self.player_id = int(player_id)
         self.verbose = bool(verbose)
@@ -48,8 +50,8 @@ class MortalReviewBot:
         self._enable_review_log = bool(enable_review_log)
         self.decision_log: list[dict[str, Any]] = []
         self.game_state = GameState()
-        self.model = None
-        self._mortal_engine = None
+        self.model = shared_model
+        self._mortal_engine = shared_mortal_engine
 
         self._mortal_bot = self._load_native_mortal_bot(
             enable_amp=self._enable_amp,
