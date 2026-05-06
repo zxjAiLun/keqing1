@@ -355,6 +355,55 @@ def test_collect_controlled_self_turn_actions_expanded_scope_preserves_order() -
     assert [dispatch[-1].get("pai") for _spec, dispatch in controlled_pairs[:4]] == ["4m", "7m", "4m", "7m"]
 
 
+def test_collect_controlled_self_turn_actions_keeps_raw_legal_kakan_when_replay_tsumo_pai_cleared() -> None:
+    env = DiscardOnlyMahjongEnv(
+        self_turn_action_types=(
+            ActionType.DISCARD,
+            ActionType.KAKAN,
+        )
+    )
+    snapshot = {
+        **_self_turn_snapshot(),
+        "tsumo_pai": None,
+        "last_tsumo": ["6p", None, None, None],
+        "last_tsumo_raw": ["6p", None, None, None],
+    }
+    raw_legal_actions = (
+        MahjongActionSpec(type="dahai", actor=0, pai="6p", tsumogiri=True),
+        MahjongActionSpec(type="kakan", actor=0, pai="6p", consumed=("6p", "6p", "6p")),
+    )
+
+    controlled_pairs = env._collect_controlled_self_turn_actions(snapshot, raw_legal_actions)
+
+    assert [spec.action_type for spec, _dispatch in controlled_pairs] == [
+        ActionType.DISCARD,
+        ActionType.KAKAN,
+    ]
+
+
+def test_collect_controlled_self_turn_actions_filters_kakan_without_current_draw_context() -> None:
+    env = DiscardOnlyMahjongEnv(
+        self_turn_action_types=(
+            ActionType.DISCARD,
+            ActionType.KAKAN,
+        )
+    )
+    snapshot = {
+        **_self_turn_snapshot(),
+        "tsumo_pai": None,
+        "last_tsumo": [None, None, None, None],
+        "last_tsumo_raw": [None, None, None, None],
+    }
+    raw_legal_actions = (
+        MahjongActionSpec(type="dahai", actor=0, pai="6p", tsumogiri=False),
+        MahjongActionSpec(type="kakan", actor=0, pai="5s", consumed=("5sr", "5s", "5s")),
+    )
+
+    controlled_pairs = env._collect_controlled_self_turn_actions(snapshot, raw_legal_actions)
+
+    assert [spec.action_type for spec, _dispatch in controlled_pairs] == [ActionType.DISCARD]
+
+
 def test_reach_discard_candidates_do_not_double_count_tsumo_in_full_hand_snapshot() -> None:
     env = DiscardOnlyMahjongEnv(
         self_turn_action_types=(
@@ -612,6 +661,61 @@ def test_collect_controlled_response_actions_filters_chi_without_post_call_disca
 
     assert [spec.action_type for spec, _dispatch in controlled_pairs] == [
         ActionType.RON,
+        ActionType.PASS,
+    ]
+
+
+def test_collect_controlled_response_actions_filters_red_five_kuikae_family() -> None:
+    env = DiscardOnlyMahjongEnv(
+        response_action_types=(
+            ActionType.CHI,
+            ActionType.PASS,
+        )
+    )
+    raw_actions = (
+        MahjongActionSpec(type="chi", actor=0, target=3, pai="5pr", consumed=("3p", "4p")),
+        MahjongActionSpec(type="none"),
+    )
+    snapshot = {
+        "actor": 0,
+        "hand": ["2p", "3p", "4p", "5pr"],
+        "last_discard": {"actor": 3, "pai": "5pr"},
+    }
+
+    controlled_pairs = env._collect_controlled_response_actions(
+        raw_actions,
+        snapshot=snapshot,
+        actor=0,
+    )
+
+    assert controlled_pairs == []
+
+
+def test_collect_controlled_response_actions_keeps_chi_with_non_forbidden_discard() -> None:
+    env = DiscardOnlyMahjongEnv(
+        response_action_types=(
+            ActionType.CHI,
+            ActionType.PASS,
+        )
+    )
+    raw_actions = (
+        MahjongActionSpec(type="chi", actor=0, target=3, pai="5p", consumed=("3p", "4p")),
+        MahjongActionSpec(type="none"),
+    )
+    snapshot = {
+        "actor": 0,
+        "hand": ["2p", "3p", "4p", "5p", "E"],
+        "last_discard": {"actor": 3, "pai": "5p"},
+    }
+
+    controlled_pairs = env._collect_controlled_response_actions(
+        raw_actions,
+        snapshot=snapshot,
+        actor=0,
+    )
+
+    assert [spec.action_type for spec, _dispatch in controlled_pairs] == [
+        ActionType.CHI,
         ActionType.PASS,
     ]
 

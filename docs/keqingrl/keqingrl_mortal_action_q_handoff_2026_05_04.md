@@ -87,6 +87,28 @@ teacher_agree=0.53681
 
 This is a functional native-route candidate, not a promoted best.
 
+The latest strict native seat-0 probe after replay conversion fixes is:
+
+```text
+reports/keqingrl_mortal_action_q_imitation_riichienv_seedF_ep8_seat0_20260506_fix_reach_kakan/checkpoint_config_000/policy_iter_0002.pt
+sha256=2c38988038f290115e67790b3a53c6ceb6ca8fb6ebec7577bc4f6b15ad4421c9
+episodes=8
+iterations=2
+learner_seats=0
+mapping=1345/1345
+teacher_valid=1345/1345
+fail_closed=0
+teacher_ce=1.46836
+teacher_kl=0.904697
+teacher_agree=0.552416
+rank_ge5=0.730697
+max_rss~=1.48 GiB
+```
+
+This proves the current RiichiEnv native path can close the strict mapping
+contract for that seed, but it is not promoted because full-legal/rule-free
+`rank_ge5` remains too high.
+
 Important correction: a reviewed `RON / CHI / PASS` row after a riichi
 declaration discard was initially treated as a Mortal native CHI-Q limitation.
 That was wrong. The actual issue was CHI legality: after eating `5p` with
@@ -95,6 +117,15 @@ discard candidates, so CHI leaves no legal post-call discard and must not enter
 KeqingRL controlled legal actions. `src/keqingrl/env.py` now filters CHI rows
 with no legal post-call discard before teacher scoring, matching Mortal/libriichi
 `forbidden_tiles` behavior.
+
+Two more replay conversion corrections are now part of the contract:
+
+```text
+1. Merge replay sample legal actions with runtime KeqingCore legal enumeration
+   so KAN options are not hidden by incomplete replay legal rows.
+2. Treat reach declaration + discard as one `REACH_DISCARD(tile)` row and skip
+   the post-reach discard duplicate sample.
+```
 
 Current detailed handoff:
 

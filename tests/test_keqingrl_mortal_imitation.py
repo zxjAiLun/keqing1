@@ -38,6 +38,7 @@ from scripts.run_keqingrl_mortal_imitation import (
     _load_native_mortal_replay_decisions_sidecar,
     _native_limitation_review_case_row,
     _native_mortal_decision_event_index,
+    _is_reach_followup_discard_sample,
     _replay_raw_legal_actions,
     _latest_checkpoint_rows,
     _load_imitation_candidates,
@@ -456,23 +457,79 @@ def test_replay_events_prefix_strips_post_discard_meta_before_response_label() -
     assert prefix == tuple(sample.events[:3])
 
 
-def test_replay_raw_legal_actions_prefers_replay_sample_legal_set() -> None:
+def test_replay_reach_followup_discard_sample_is_skipped() -> None:
+    events = [
+        {"type": "tsumo", "actor": 0, "pai": "7s"},
+        {"type": "reach", "actor": 0},
+        {"type": "dahai", "actor": 0, "pai": "9s", "tsumogiri": False},
+        {"type": "reach_accepted", "actor": 0},
+    ]
+    sample = SimpleNamespace(
+        actor=0,
+        event_index=3,
+        label_action={"type": "dahai", "actor": 0, "pai": "9s", "tsumogiri": False},
+    )
+
+    assert _is_reach_followup_discard_sample(sample, events) is True
+
+
+def test_replay_raw_legal_actions_merges_runtime_legal_extras() -> None:
     sample = SimpleNamespace(
         actor=0,
         state={"actor_to_move": 0},
         legal_actions=[
             {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
-            {"type": "kakan", "actor": 0, "pai": "S", "consumed": ["S", "S", "S"]},
         ],
     )
 
     class _Env:
         def _enumerate_runtime_legal_actions(self, snapshot, actor):
-            raise AssertionError("replay legal set should be authoritative")
+            return (
+                SimpleNamespace(
+                    type="dahai",
+                    actor=0,
+                    pai="4p",
+                    consumed=(),
+                    target=None,
+                    tsumogiri=True,
+                    to_mjai=lambda: {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
+                ),
+                SimpleNamespace(
+                    type="kakan",
+                    actor=0,
+                    pai="S",
+                    consumed=("S", "S", "S"),
+                    target=None,
+                    tsumogiri=None,
+                    to_mjai=lambda: {"type": "kakan", "actor": 0, "pai": "S", "consumed": ["S", "S", "S"]},
+                ),
+            )
 
     raw_legal_actions = _replay_raw_legal_actions(sample, env=_Env())
 
     assert [action.type for action in raw_legal_actions] == ["dahai", "kakan"]
+
+
+def test_replay_raw_legal_actions_uses_runtime_when_sample_legal_set_missing() -> None:
+    sample = SimpleNamespace(actor=0, state={"actor_to_move": 0}, legal_actions=[])
+
+    class _Env:
+        def _enumerate_runtime_legal_actions(self, snapshot, actor):
+            return (
+                SimpleNamespace(
+                    type="dahai",
+                    actor=0,
+                    pai="4p",
+                    consumed=(),
+                    target=None,
+                    tsumogiri=True,
+                    to_mjai=lambda: {"type": "dahai", "actor": 0, "pai": "4p", "tsumogiri": True},
+                ),
+            )
+
+    raw_legal_actions = _replay_raw_legal_actions(sample, env=_Env())
+
+    assert [action.type for action in raw_legal_actions] == ["dahai"]
 
 
 def test_native_mortal_decision_event_index_uses_triggering_discard_for_response() -> None:

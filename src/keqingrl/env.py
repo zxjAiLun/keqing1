@@ -981,7 +981,7 @@ class DiscardOnlyMahjongEnv:
             action_spec = action_from_mahjong_spec(raw_spec)
         elif raw_spec.type in {"ankan", "kakan"}:
             action_spec = action_from_mahjong_spec(raw_spec)
-            if snapshot.get("tsumo_pai") is None:
+            if not _snapshot_has_current_draw(snapshot, int(raw_spec.actor if raw_spec.actor is not None else snapshot["actor"])):
                 return None
         elif raw_spec.type == "ryukyoku":
             action_spec = action_from_mahjong_spec(raw_spec)
@@ -1388,6 +1388,21 @@ def _tile_name_to_deaka_id(value: object) -> int:
 
 def _deaka_tile_id(tile_id: int) -> int:
     return int(tile_id)
+
+
+def _snapshot_has_current_draw(snapshot: dict[str, object], actor: int) -> bool:
+    tsumo_pai = snapshot.get("tsumo_pai")
+    if isinstance(tsumo_pai, str) and tsumo_pai:
+        return True
+    last_tsumo = snapshot.get("last_tsumo")
+    if isinstance(last_tsumo, Sequence) and not isinstance(last_tsumo, (str, bytes)):
+        if 0 <= int(actor) < len(last_tsumo) and last_tsumo[int(actor)]:
+            return True
+    last_tsumo_raw = snapshot.get("last_tsumo_raw")
+    if isinstance(last_tsumo_raw, Sequence) and not isinstance(last_tsumo_raw, (str, bytes)):
+        if 0 <= int(actor) < len(last_tsumo_raw) and last_tsumo_raw[int(actor)]:
+            return True
+    return False
 
 
 def _sequence_or_empty(values: object) -> list[object]:

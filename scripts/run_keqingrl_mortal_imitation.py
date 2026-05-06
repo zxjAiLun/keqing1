@@ -1322,6 +1322,8 @@ def _replay_sample_to_rollout_step(
     snapshot = dict(sample.state)
     actor = int(sample.actor)
     snapshot["actor"] = actor
+    if _is_reach_followup_discard_sample(sample, events):
+        return None
     raw_legal_actions = _replay_raw_legal_actions(sample, env=env)
     controlled_pairs = _controlled_action_pairs_for_replay_sample(env, snapshot, actor, raw_legal_actions)
     if not controlled_pairs:
@@ -1414,12 +1416,32 @@ def _replay_raw_legal_actions(
     env: DiscardOnlyMahjongEnv,
 ) -> tuple[Any, ...]:
     sample_legal_actions = tuple(_mahjong_spec_from_payload(dict(item)) for item in (sample.legal_actions or []))
-    if sample_legal_actions:
-        return sample_legal_actions
     snapshot = dict(sample.state)
     actor = int(sample.actor)
     snapshot["actor"] = actor
-    return env._enumerate_runtime_legal_actions(snapshot, actor)
+    runtime_legal_actions = env._enumerate_runtime_legal_actions(snapshot, actor)
+    if not sample_legal_actions:
+        return runtime_legal_actions
+
+    merged = list(sample_legal_actions)
+    seen = {_raw_legal_action_identity(action) for action in sample_legal_actions}
+    for action in runtime_legal_actions:
+        identity = _raw_legal_action_identity(action)
+        if identity in seen:
+            continue
+        merged.append(action)
+        seen.add(identity)
+    return tuple(merged)
+
+
+def _raw_legal_action_identity(action: Any) -> str:
+    if hasattr(action, "to_mjai"):
+        payload = action.to_mjai()
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+    else:
+        payload = dict(action)
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _collect_native_mortal_replay_decisions(
@@ -1615,13 +1637,36 @@ def _resolve_replay_label_action_index(
 
 def _replay_reach_followup_label(sample: ReplaySample) -> dict[str, Any] | None:
     events = sample.events or []
-    followup_index = int(sample.event_index) + 1
-    if followup_index < 0 or followup_index >= len(events):
-        return None
-    followup = normalize_replay_label_for_legal_compare(dict(events[followup_index]))
-    if str(followup.get("type")) != "dahai":
-        return None
-    return followup
+    label = normalize_replay_label_for_legal_compare(dict(sample.label_action))
+    actor = int(getattr(sample, "actor", label.get("actor", -1)))
+    for followup_index in (int(sample.event_index), int(sample.event_index) + 1):
+        if followup_index < 0 or followup_index >= len(events):
+            continue
+        followup = normalize_replay_label_for_legal_compare(dict(events[followup_index]))
+        if str(followup.get("type")) == "dahai" and int(followup.get("actor", -1)) == actor:
+            return followup
+    return None
+
+
+def _is_reach_followup_discard_sample(sample: ReplaySample, events: Sequence[Mapping[str, Any]]) -> bool:
+    label = normalize_replay_label_for_legal_compare(dict(sample.label_action))
+    if str(label.get("type")) != "dahai":
+        return False
+    actor = int(sample.actor)
+    event_index = int(sample.event_index)
+    candidate_pairs = ((event_index - 2, event_index - 1), (event_index - 1, event_index))
+    for reach_index, discard_index in candidate_pairs:
+        if reach_index < 0 or discard_index < 0 or discard_index >= len(events):
+            continue
+        reach_event = events[reach_index]
+        discard_event = normalize_replay_label_for_legal_compare(dict(events[discard_index]))
+        if (
+            str(reach_event.get("type")) == "reach"
+            and int(reach_event.get("actor", -1)) == actor
+            and replay_label_matches_legal(label, [discard_event])
+        ):
+            return True
+    return False
 
 
 def _replay_events_prefix(sample: ReplaySample) -> tuple[dict[str, object], ...]:

@@ -196,6 +196,19 @@ KeqingRL kan choices are present, the adapter also requires an
 `at_kan_select=true` Q/mask pass and adds the tile-choice Q to id42. Without
 that second pass, multiple kan choices still fail closed as `ambiguous_kan`.
 
+RiichiEnv-native replay conversion must preserve KAN opportunities before
+teacher scoring. Replay sample legal rows are merged with runtime KeqingCore
+legal enumeration, because replay records can omit a runtime KAN option even
+when Mortal's native mask exposes id `42`. KAN is still filtered if the replay
+snapshot is not a current self-turn draw context, which prevents post-call
+immediate-discard rows from being incorrectly scored as KAKAN decisions.
+
+Reach replay conversion must bind a reach declaration and its concrete discard
+as one KeqingRL `REACH_DISCARD(tile)` row. The following post-reach discard
+sample is skipped; otherwise the row would compare a single forced discard
+against Mortal's broader reach-decision mask and create false strict-extra
+failures.
+
 ## Mask Contract
 
 For strict scoring, every KeqingRL legal action must map to at least one masked

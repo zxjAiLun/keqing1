@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
+from dataclasses import dataclass
+import inspect
 import json
 from pathlib import Path
 import sys
@@ -21,6 +23,13 @@ if str(_REPO_ROOT / "src") not in sys.path:
 
 from inference.mortal_bot import MortalReviewBot
 from keqingrl.mortal_teacher import MORTAL_ACTION_SPACE
+
+
+@dataclass(frozen=True)
+class EnvSeedInfo:
+    requested_seed: int | None
+    applied: bool
+    mode: str
 
 
 def _parse_args() -> argparse.Namespace:
@@ -120,13 +129,25 @@ def _sidecar_entry(
     }
 
 
-def _make_env(*, game_mode: str, seed: int | None):
+def _make_env(*, game_mode: str, seed: int | None) -> tuple[Any, EnvSeedInfo]:
     if seed is None:
-        return RiichiEnv(game_mode=game_mode)
+        return RiichiEnv(game_mode=game_mode), EnvSeedInfo(requested_seed=None, applied=False, mode="none")
     try:
-        return RiichiEnv(game_mode=game_mode, seed=int(seed))
+        return (
+            RiichiEnv(game_mode=game_mode, seed=int(seed)),
+            EnvSeedInfo(requested_seed=int(seed), applied=True, mode="constructor"),
+        )
     except TypeError:
-        return RiichiEnv(game_mode=game_mode)
+        env = RiichiEnv(game_mode=game_mode)
+        reset = getattr(env, "reset", None)
+        if callable(reset):
+            try:
+                reset_params = inspect.signature(reset).parameters
+                if "seed" in reset_params:
+                    return env, EnvSeedInfo(requested_seed=int(seed), applied=True, mode="reset")
+            except (TypeError, ValueError):
+                pass
+        return env, EnvSeedInfo(requested_seed=int(seed), applied=False, mode="fallback_unseeded")
 
 
 def _write_mjson(path: Path, events: Sequence[Mapping[str, Any]]) -> None:
@@ -187,9 +208,12 @@ def _legal_action_to_mjai(action: Any) -> dict[str, Any]:
 
 def run_game(args: argparse.Namespace, *, game_id: int) -> dict[str, Any]:
     game_seed = None if args.seed is None else int(args.seed) + int(game_id)
-    env = _make_env(game_mode=str(args.game_mode), seed=game_seed)
+    env, seed_info = _make_env(game_mode=str(args.game_mode), seed=game_seed)
     bots = _new_bots(args)
-    obs_dict = env.reset()
+    if seed_info.mode == "reset":
+        obs_dict = env.reset(seed=game_seed)
+    else:
+        obs_dict = env.reset()
     event_cursors = {pid: 0 for pid in range(4)}
     sidecar: DefaultDict[str, list[dict[str, Any]]] = defaultdict(list)
     obs_size_histogram: Counter[str] = Counter()
@@ -274,6 +298,8 @@ def run_game(args: argparse.Namespace, *, game_id: int) -> dict[str, Any]:
     return {
         "game_id": int(game_id),
         "seed": game_seed,
+        "env_seed_applied": bool(seed_info.applied),
+        "env_seed_mode": seed_info.mode,
         "scores": scores,
         "ranks": ranks,
         "events": replay_events,
@@ -281,6 +307,8 @@ def run_game(args: argparse.Namespace, *, game_id: int) -> dict[str, Any]:
         "summary": {
             "game_id": int(game_id),
             "seed": game_seed,
+            "env_seed_applied": bool(seed_info.applied),
+            "env_seed_mode": seed_info.mode,
             "wall_time_sec": elapsed,
             "env_step_count": int(step_count),
             "obs_dict_size_histogram": dict(obs_size_histogram),
@@ -348,6 +376,9 @@ def main() -> None:
         "games": int(args.games),
         "model": str(args.model),
         "device": str(args.device),
+        "seed": None if args.seed is None else int(args.seed),
+        "env_seed_applied_all": all(bool(row["env_seed_applied"]) for row in summaries),
+        "env_seed_modes": sorted({str(row["env_seed_mode"]) for row in summaries}),
         "wall_time_sec": total_wall,
         "game_summaries": summaries,
         "totals": {
