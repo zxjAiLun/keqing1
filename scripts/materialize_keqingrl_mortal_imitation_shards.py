@@ -18,12 +18,18 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from keqingrl.contracts import ObsTensorBatch, PolicyInput  # noqa: E402
+from keqingrl.actions import ActionSpec, ActionType  # noqa: E402
 from scripts.run_keqingrl_mortal_imitation import (  # noqa: E402
     _build_replay_imitation_batch,
     _file_sha256,
+    _teacher_top1_legal_index,
     _write_json,
     prepare_mortal_imitation_teacher_data,
 )
+
+
+_ACTION_TYPE_NAMES = tuple(action_type.name for action_type in ActionType)
+_ACTION_TYPE_COUNT = len(_ACTION_TYPE_NAMES)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -104,6 +110,7 @@ def main() -> None:
     shard_index = 0
     total_rows = 0
     total_summary: dict[str, int] = {}
+    metadata_summary: dict[str, dict[str, int]] = _empty_metadata_summary()
     started = time.perf_counter()
 
     for chunk_index, chunk_paths in enumerate(_chunks(replay_paths, int(args.replay_files_per_build))):
@@ -116,9 +123,13 @@ def main() -> None:
             teacher_support=str(args.teacher_support),
             teacher_topk=int(args.teacher_topk),
         )
+        teacher_batch, sanitize_summary = _sanitize_teacher_batch_with_stats(teacher_data.teacher_batch)
         _accumulate_summary(total_summary, replay_summary)
         _accumulate_summary(total_summary, teacher_data.summary)
-        shard_payload = _payload_from_batch(batch.policy_input, teacher_data.teacher_batch)
+        _accumulate_summary(total_summary, sanitize_summary)
+        row_metadata = _row_metadata_from_batch(batch.policy_input, teacher_batch)
+        _accumulate_metadata_summary(metadata_summary, row_metadata)
+        shard_payload = _payload_from_batch(batch.policy_input, teacher_batch, row_metadata=row_metadata)
         for start in range(0, int(shard_payload["row_count"]), int(args.shard_size_rows)):
             end = min(int(shard_payload["row_count"]), start + int(args.shard_size_rows))
             piece = _slice_payload(shard_payload, start, end)
@@ -152,6 +163,9 @@ def main() -> None:
         "mortal_teacher_checkpoint": str(args.mortal_teacher_checkpoint),
         "actors": [int(actor) for actor in args.actors],
         "summary": total_summary,
+        "row_count_by_teacher_top1_action_type": metadata_summary["teacher_top1_count_by_action_type"],
+        "legal_contains_count_by_action_type": metadata_summary["legal_contains_count_by_action_type"],
+        "row_count_by_scope": metadata_summary["row_count_by_scope"],
         "shards": shard_rows,
         "wall_time_sec": time.perf_counter() - started,
     }
@@ -176,7 +190,7 @@ def _chunks(paths: Sequence[Path], size: int) -> list[list[Path]]:
     return [list(paths[index : index + size]) for index in range(0, len(paths), size)]
 
 
-def _payload_from_batch(policy_input: PolicyInput, teacher_batch) -> dict[str, Any]:
+def _payload_from_batch(policy_input: PolicyInput, teacher_batch, *, row_metadata: Mapping[str, torch.Tensor] | None = None) -> dict[str, Any]:
     clean_obs = ObsTensorBatch(
         tile_obs=policy_input.obs.tile_obs.cpu(),
         scalar_obs=policy_input.obs.scalar_obs.cpu(),
@@ -194,6 +208,33 @@ def _payload_from_batch(policy_input: PolicyInput, teacher_batch) -> dict[str, A
         "row_count": int(policy_input.legal_action_mask.shape[0]),
         "policy_input": clean_input,
         "teacher_batch": _teacher_batch_to_cpu(teacher_batch),
+        "row_metadata": _row_metadata_to_cpu(row_metadata or {}),
+    }
+
+
+def _sanitize_teacher_batch_with_stats(teacher_batch):
+    from dataclasses import replace
+
+    before_valid = teacher_batch.row_valid_mask.bool()
+    support_mask = teacher_batch.support_mask
+    if support_mask is None:
+        support_mask = teacher_batch.legal_action_mask
+    if support_mask is None:
+        support_mask = torch.ones_like(teacher_batch.teacher_scores, dtype=torch.bool)
+    support_mask = support_mask.bool().to(device=teacher_batch.teacher_scores.device)
+    scores = teacher_batch.teacher_scores.float()
+    sentinel_floor = torch.finfo(torch.float32).min / 2
+    valid_scores = torch.isfinite(scores) & (scores > sentinel_floor)
+    after_valid = before_valid & support_mask.any(dim=-1) & (valid_scores | ~support_mask).all(dim=-1)
+    row_count = int(before_valid.numel())
+    before_count = int(before_valid.sum().item())
+    after_count = int(after_valid.sum().item())
+    return replace(teacher_batch, row_valid_mask=after_valid), {
+        "raw_row_count": row_count,
+        "teacher_row_valid_count_before_sanitize": before_count,
+        "teacher_row_valid_count_after_sanitize": after_count,
+        "teacher_row_invalid_count_after_sanitize": row_count - after_count,
+        "teacher_row_sanitized_invalid_count": max(0, before_count - after_count),
     }
 
 
@@ -210,11 +251,64 @@ def _teacher_batch_to_cpu(teacher_batch):
     )
 
 
+def _row_metadata_to_cpu(row_metadata: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    return {str(key): value.cpu() for key, value in row_metadata.items()}
+
+
+def _row_metadata_from_batch(policy_input: PolicyInput, teacher_batch) -> dict[str, torch.Tensor]:
+    row_count = int(policy_input.legal_action_mask.shape[0])
+    teacher_top1_type = torch.full((row_count,), -1, dtype=torch.long)
+    row_scope = torch.zeros((row_count,), dtype=torch.long)
+    legal_contains_type = torch.zeros((row_count, _ACTION_TYPE_COUNT), dtype=torch.bool)
+    contains_reach = torch.zeros((row_count,), dtype=torch.bool)
+    contains_kan = torch.zeros((row_count,), dtype=torch.bool)
+    contains_call = torch.zeros((row_count,), dtype=torch.bool)
+    contains_terminal = torch.zeros((row_count,), dtype=torch.bool)
+    if policy_input.legal_actions is None:
+        return {
+            "teacher_top1_action_type_id": teacher_top1_type,
+            "row_scope_id": row_scope,
+            "legal_contains_action_type_mask": legal_contains_type,
+            "contains_reach": contains_reach,
+            "contains_kan": contains_kan,
+            "contains_call": contains_call,
+            "contains_terminal": contains_terminal,
+        }
+    for row_idx, legal_actions in enumerate(policy_input.legal_actions):
+        row_scope[row_idx] = 1 if _is_response_row(legal_actions) else 0
+        action_types = {action.action_type for action in legal_actions}
+        for action_type in action_types:
+            legal_contains_type[row_idx, int(action_type)] = True
+        contains_reach[row_idx] = ActionType.REACH_DISCARD in action_types
+        contains_kan[row_idx] = bool({ActionType.ANKAN, ActionType.KAKAN, ActionType.DAIMINKAN} & action_types)
+        contains_call[row_idx] = bool({ActionType.CHI, ActionType.PON, ActionType.DAIMINKAN} & action_types)
+        contains_terminal[row_idx] = bool({ActionType.TSUMO, ActionType.RON, ActionType.RYUKYOKU} & action_types)
+        if bool(teacher_batch.row_valid_mask[row_idx].detach().cpu().item()):
+            legal_idx = _teacher_top1_legal_index(teacher_batch, row_idx)
+            if 0 <= legal_idx < len(legal_actions):
+                teacher_top1_type[row_idx] = int(legal_actions[legal_idx].action_type)
+    return {
+        "teacher_top1_action_type_id": teacher_top1_type,
+        "row_scope_id": row_scope,
+        "legal_contains_action_type_mask": legal_contains_type,
+        "contains_reach": contains_reach,
+        "contains_kan": contains_kan,
+        "contains_call": contains_call,
+        "contains_terminal": contains_terminal,
+    }
+
+
+def _is_response_row(legal_actions: Sequence[ActionSpec]) -> bool:
+    response_types = {ActionType.PASS, ActionType.RON, ActionType.PON, ActionType.CHI, ActionType.DAIMINKAN}
+    return any(action.action_type in response_types for action in legal_actions)
+
+
 def _slice_payload(payload: Mapping[str, Any], start: int, end: int) -> dict[str, Any]:
     return {
         "row_count": int(end - start),
         "policy_input": _slice_policy_input(payload["policy_input"], start, end),
         "teacher_batch": _slice_teacher_batch(payload["teacher_batch"], start, end),
+        "row_metadata": _slice_row_metadata(payload.get("row_metadata", {}), start, end),
     }
 
 
@@ -251,6 +345,10 @@ def _slice_teacher_batch(teacher_batch, start: int, end: int):
         legal_action_mask=None if teacher_batch.legal_action_mask is None else teacher_batch.legal_action_mask[start:end],
         mapped_legal_scores=None if teacher_batch.mapped_legal_scores is None else teacher_batch.mapped_legal_scores[start:end],
     )
+
+
+def _slice_row_metadata(row_metadata: Mapping[str, torch.Tensor], start: int, end: int) -> dict[str, torch.Tensor]:
+    return {str(key): value[start:end] for key, value in row_metadata.items()}
 
 
 def _append_piece(
@@ -294,6 +392,7 @@ def _concat_payloads(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[
         "row_count": int(left["row_count"]) + int(right["row_count"]),
         "policy_input": _concat_policy_inputs(left["policy_input"], right["policy_input"]),
         "teacher_batch": _concat_teacher_batches(left["teacher_batch"], right["teacher_batch"]),
+        "row_metadata": _concat_row_metadata(left.get("row_metadata", {}), right.get("row_metadata", {})),
     }
 
 
@@ -331,6 +430,15 @@ def _concat_teacher_batches(left, right):
     )
 
 
+def _concat_row_metadata(left: Mapping[str, torch.Tensor], right: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    keys = sorted(set(left) | set(right))
+    result: dict[str, torch.Tensor] = {}
+    for key in keys:
+        if key in left and key in right:
+            result[str(key)] = _cat_padded(left[key], right[key], pad_value=False if left[key].dtype == torch.bool else -1)
+    return result
+
+
 def _cat_padded(left: torch.Tensor, right: torch.Tensor, *, pad_value: float | bool | int) -> torch.Tensor:
     if left.ndim < 2 or right.ndim < 2 or int(left.shape[1]) == int(right.shape[1]):
         return torch.cat([left, right], dim=0)
@@ -355,19 +463,66 @@ def _write_shard(args: argparse.Namespace, payload: Mapping[str, Any], shard_ind
             "row_count": int(payload["row_count"]),
             "policy_input": payload["policy_input"],
             "teacher_batch": payload["teacher_batch"],
+            "row_metadata": payload.get("row_metadata", {}),
         },
         path,
     )
-    return {"path": str(path), "sha256": _file_sha256(path), "row_count": int(payload["row_count"])}
+    row = {"path": str(path), "sha256": _file_sha256(path), "row_count": int(payload["row_count"])}
+    row.update(_shard_metadata_counts(payload.get("row_metadata", {})))
+    return row
 
 
 def _accumulate_summary(total: dict[str, int], row: Mapping[str, Any]) -> None:
     for key, value in row.items():
-        if key.endswith("_count") or key in {"mapping_row_count", "mapping_available_count"}:
+        if "_count" in key or key in {"mapping_row_count", "mapping_available_count"}:
             try:
                 total[key] = int(total.get(key, 0)) + int(value)
             except (TypeError, ValueError):
                 continue
+
+
+def _empty_metadata_summary() -> dict[str, dict[str, int]]:
+    return {
+        "teacher_top1_count_by_action_type": {name: 0 for name in _ACTION_TYPE_NAMES},
+        "legal_contains_count_by_action_type": {name: 0 for name in _ACTION_TYPE_NAMES},
+        "row_count_by_scope": {"self-turn": 0, "response": 0},
+    }
+
+
+def _accumulate_metadata_summary(total: dict[str, dict[str, int]], row_metadata: Mapping[str, torch.Tensor]) -> None:
+    counts = _shard_metadata_counts(row_metadata)
+    for key, values in counts.items():
+        if not isinstance(values, Mapping):
+            continue
+        bucket = total.setdefault(key, {})
+        for value_key, value in values.items():
+            bucket[str(value_key)] = int(bucket.get(str(value_key), 0)) + int(value)
+
+
+def _shard_metadata_counts(row_metadata: Mapping[str, torch.Tensor]) -> dict[str, dict[str, int]]:
+    teacher_types = row_metadata.get("teacher_top1_action_type_id")
+    legal_contains = row_metadata.get("legal_contains_action_type_mask")
+    row_scope = row_metadata.get("row_scope_id")
+    teacher_counts = {name: 0 for name in _ACTION_TYPE_NAMES}
+    legal_counts = {name: 0 for name in _ACTION_TYPE_NAMES}
+    scope_counts = {"self-turn": 0, "response": 0}
+    if teacher_types is not None:
+        for type_id in teacher_types.detach().cpu().tolist():
+            if 0 <= int(type_id) < _ACTION_TYPE_COUNT:
+                teacher_counts[_ACTION_TYPE_NAMES[int(type_id)]] += 1
+    if legal_contains is not None:
+        legal_sums = legal_contains.detach().cpu().bool().sum(dim=0).tolist()
+        for type_id, count in enumerate(legal_sums[:_ACTION_TYPE_COUNT]):
+            legal_counts[_ACTION_TYPE_NAMES[int(type_id)]] = int(count)
+    if row_scope is not None:
+        values = row_scope.detach().cpu().tolist()
+        scope_counts["self-turn"] = sum(1 for value in values if int(value) == 0)
+        scope_counts["response"] = sum(1 for value in values if int(value) == 1)
+    return {
+        "teacher_top1_count_by_action_type": teacher_counts,
+        "legal_contains_count_by_action_type": legal_counts,
+        "row_count_by_scope": scope_counts,
+    }
 
 
 if __name__ == "__main__":

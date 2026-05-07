@@ -4396,6 +4396,7 @@ def _save_imitation_checkpoint(
         "teacher_row_valid_count": int(summary_row.get("teacher_row_valid_count", 0)),
         "teacher_row_valid_rate": float(summary_row.get("teacher_row_valid_rate", 0.0)),
         "teacher_row_invalid_count": int(summary_row.get("teacher_row_invalid_count", 0)),
+        "teacher_row_sanitized_invalid_count": int(summary_row.get("teacher_row_sanitized_invalid_count", 0)),
         "fail_closed_count": int(summary_row["fail_closed_count"]),
         "rule_score_scale": float(args.rule_score_scale),
         "rule_score_scale_version": RULE_SCORE_SCALE_VERSION,

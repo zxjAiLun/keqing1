@@ -17,7 +17,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scripts.materialize_keqingrl_mortal_imitation_shards import _slice_teacher_batch  # noqa: E402
+from scripts.materialize_keqingrl_mortal_imitation_shards import (  # noqa: E402
+    _sanitize_teacher_batch_with_stats,
+    _slice_teacher_batch,
+)
 from scripts.run_keqingrl_mortal_imitation import (  # noqa: E402
     DeltaSupportProjectionPolicy,
     _checkpoint_artifact_run_dir,
@@ -161,7 +164,10 @@ def main() -> None:
             for start in range(0, row_count, int(args.batch_size_rows)):
                 indices = order[start : start + int(args.batch_size_rows)]
                 policy_input = _index_policy_input(shard["policy_input"], indices).to(device) if hasattr(shard["policy_input"], "to") else _policy_input_to_device(_index_policy_input(shard["policy_input"], indices), device)
-                teacher_batch = _teacher_batch_to_device(_index_teacher_batch(shard["teacher_batch"], indices), device)
+                raw_teacher_batch = _index_teacher_batch(shard["teacher_batch"], indices)
+                teacher_batch, sanitize_summary = _sanitize_teacher_batch_with_stats(raw_teacher_batch)
+                source_rows = int(raw_teacher_batch.row_valid_mask.numel())
+                teacher_batch = _teacher_batch_to_device(teacher_batch, device)
                 optimizer.zero_grad(set_to_none=True)
                 output = policy(policy_input)
                 loss = mortal_imitation_loss(
@@ -177,7 +183,12 @@ def main() -> None:
                 if args.max_grad_norm is not None:
                     torch.nn.utils.clip_grad_norm_(base_policy.parameters(), float(args.max_grad_norm))
                 optimizer.step()
-                totals.add(loss, int(teacher_batch.row_valid_mask.sum().item()))
+                totals.add(
+                    loss,
+                    valid_rows=int(teacher_batch.row_valid_mask.sum().item()),
+                    source_rows=source_rows,
+                    sanitized_invalid=int(sanitize_summary["teacher_row_sanitized_invalid_count"]),
+                )
                 global_step += 1
             del shard
         row = totals.row(epoch=epoch, global_step=global_step, epoch_sec=time.perf_counter() - epoch_start)
@@ -220,36 +231,42 @@ def main() -> None:
 
 class _MetricTotals:
     def __init__(self) -> None:
-        self.row_count = 0
+        self.source_row_count = 0
         self.loss_sum = 0.0
         self.ce_sum = 0.0
         self.kl_sum = 0.0
         self.agree_sum = 0.0
         self.valid_sum = 0
+        self.sanitized_invalid_sum = 0
 
-    def add(self, loss, row_count: int) -> None:
-        rows = max(0, int(row_count))
-        self.row_count += rows
-        self.valid_sum += rows
-        self.loss_sum += float(loss.loss.detach().cpu()) * rows
-        self.ce_sum += float(loss.teacher_ce.detach().cpu()) * rows
-        self.kl_sum += float(loss.teacher_kl.detach().cpu()) * rows
-        self.agree_sum += float(loss.teacher_policy_agreement.detach().cpu()) * rows
+    def add(self, loss, *, valid_rows: int, source_rows: int, sanitized_invalid: int) -> None:
+        valid = max(0, int(valid_rows))
+        source = max(0, int(source_rows))
+        self.source_row_count += source
+        self.valid_sum += valid
+        self.sanitized_invalid_sum += max(0, int(sanitized_invalid))
+        self.loss_sum += float(loss.loss.detach().cpu()) * valid
+        self.ce_sum += float(loss.teacher_ce.detach().cpu()) * valid
+        self.kl_sum += float(loss.teacher_kl.detach().cpu()) * valid
+        self.agree_sum += float(loss.teacher_policy_agreement.detach().cpu()) * valid
 
     def row(self, *, epoch: int, global_step: int, epoch_sec: float) -> dict[str, Any]:
-        denom = max(1, self.row_count)
+        denom = max(1, self.valid_sum)
         return {
             "epoch": int(epoch),
             "global_step": int(global_step),
-            "row_count": int(self.row_count),
+            "row_count": int(self.valid_sum),
+            "source_row_count": int(self.source_row_count),
             "teacher_loss": self.loss_sum / denom,
             "teacher_ce": self.ce_sum / denom,
             "teacher_kl": self.kl_sum / denom,
             "teacher_policy_agreement": self.agree_sum / denom,
             "teacher_row_valid_count": int(self.valid_sum),
-            "teacher_row_valid_rate": float(self.valid_sum / denom),
+            "teacher_row_invalid_count": int(max(0, self.source_row_count - self.valid_sum)),
+            "teacher_row_sanitized_invalid_count": int(self.sanitized_invalid_sum),
+            "teacher_row_valid_rate": float(self.valid_sum / max(1, self.source_row_count)),
             "epoch_sec": float(epoch_sec),
-            "rows_per_sec": float(self.row_count / max(epoch_sec, 1e-9)),
+            "rows_per_sec": float(self.valid_sum / max(epoch_sec, 1e-9)),
         }
 
 
@@ -284,33 +301,16 @@ def _policy_input_to_device(policy_input, device: torch.device):
 def _teacher_batch_to_device(teacher_batch, device: torch.device):
     from dataclasses import replace
 
-    sanitized = _sanitize_teacher_batch(teacher_batch)
     return replace(
-        sanitized,
-        teacher_scores=sanitized.teacher_scores.to(device),
-        prior_logits=sanitized.prior_logits.to(device),
-        row_valid_mask=sanitized.row_valid_mask.to(device),
-        topk_indices=None if sanitized.topk_indices is None else sanitized.topk_indices.to(device),
-        support_mask=None if sanitized.support_mask is None else sanitized.support_mask.to(device),
-        legal_action_mask=None if sanitized.legal_action_mask is None else sanitized.legal_action_mask.to(device),
-        mapped_legal_scores=None if sanitized.mapped_legal_scores is None else sanitized.mapped_legal_scores.to(device),
+        teacher_batch,
+        teacher_scores=teacher_batch.teacher_scores.to(device),
+        prior_logits=teacher_batch.prior_logits.to(device),
+        row_valid_mask=teacher_batch.row_valid_mask.to(device),
+        topk_indices=None if teacher_batch.topk_indices is None else teacher_batch.topk_indices.to(device),
+        support_mask=None if teacher_batch.support_mask is None else teacher_batch.support_mask.to(device),
+        legal_action_mask=None if teacher_batch.legal_action_mask is None else teacher_batch.legal_action_mask.to(device),
+        mapped_legal_scores=None if teacher_batch.mapped_legal_scores is None else teacher_batch.mapped_legal_scores.to(device),
     )
-
-
-def _sanitize_teacher_batch(teacher_batch):
-    from dataclasses import replace
-
-    support_mask = teacher_batch.support_mask
-    if support_mask is None:
-        support_mask = teacher_batch.legal_action_mask
-    if support_mask is None:
-        support_mask = torch.ones_like(teacher_batch.teacher_scores, dtype=torch.bool)
-    support_mask = support_mask.bool()
-    scores = teacher_batch.teacher_scores.float()
-    sentinel_floor = torch.finfo(torch.float32).min / 2
-    valid_scores = torch.isfinite(scores) & (scores > sentinel_floor)
-    valid_rows = teacher_batch.row_valid_mask.bool() & support_mask.any(dim=-1) & (valid_scores | ~support_mask).all(dim=-1)
-    return replace(teacher_batch, row_valid_mask=valid_rows)
 
 
 def _index_policy_input(policy_input, indices: Sequence[int]):
@@ -367,11 +367,12 @@ def _checkpoint_summary_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "teacher_ce": float(row["teacher_ce"]),
         "teacher_kl": float(row["teacher_kl"]),
         "teacher_policy_agreement": float(row["teacher_policy_agreement"]),
-        "mapping_row_count": int(row["row_count"]),
-        "mapping_available_count": int(row["row_count"]),
+        "mapping_row_count": int(row["source_row_count"]),
+        "mapping_available_count": int(row["source_row_count"]),
         "teacher_row_valid_count": int(row["teacher_row_valid_count"]),
         "teacher_row_valid_rate": float(row["teacher_row_valid_rate"]),
-        "teacher_row_invalid_count": 0,
+        "teacher_row_invalid_count": int(row["teacher_row_invalid_count"]),
+        "teacher_row_sanitized_invalid_count": int(row["teacher_row_sanitized_invalid_count"]),
         "fail_closed_count": 0,
     }
 

@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import sys
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import torch
 
@@ -25,13 +25,19 @@ from scripts.train_keqingrl_mortal_imitation_shards import (  # noqa: E402
     _policy_input_to_device,
     _teacher_batch_to_device,
 )
+from scripts.materialize_keqingrl_mortal_imitation_shards import _sanitize_teacher_batch_with_stats  # noqa: E402
 from scripts.run_keqingrl_mortal_imitation import (  # noqa: E402
     DeltaSupportProjectionPolicy,
     _load_policy,
+    _teacher_support_tensors,
     _write_csv,
     _write_json,
     mortal_imitation_loss,
 )
+from keqingrl.actions import ActionType  # noqa: E402
+
+
+_ACTION_TYPE_NAMES = tuple(action_type.name for action_type in ActionType)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -89,17 +95,21 @@ def main() -> None:
     started = time.perf_counter()
     shard_rows: list[dict[str, Any]] = []
     totals = _EvalTotals()
+    breakdown = _ActionTypeBreakdown()
     with torch.no_grad():
         for shard_index, shard_path in enumerate(shard_paths):
             shard_start = time.perf_counter()
             shard = torch.load(shard_path, map_location="cpu", weights_only=False)
             row_count = int(shard["row_count"])
             shard_totals = _EvalTotals()
+            shard_breakdown = _ActionTypeBreakdown()
             for start in range(0, row_count, int(args.batch_size_rows)):
                 end = min(row_count, start + int(args.batch_size_rows))
                 indices = list(range(start, end))
                 policy_input = _policy_input_to_device(_index_policy_input(shard["policy_input"], indices), device)
-                teacher_batch = _teacher_batch_to_device(_index_teacher_batch(shard["teacher_batch"], indices), device)
+                raw_teacher_batch = _index_teacher_batch(shard["teacher_batch"], indices)
+                teacher_batch, sanitize_summary = _sanitize_teacher_batch_with_stats(raw_teacher_batch)
+                teacher_batch = _teacher_batch_to_device(teacher_batch, device)
                 output = policy(policy_input)
                 loss = mortal_imitation_loss(
                     output,
@@ -112,8 +122,13 @@ def main() -> None:
                 )
                 rank_stats = _rank_stats(output.action_logits, teacher_batch)
                 valid_rows = int(teacher_batch.row_valid_mask.sum().detach().cpu().item())
-                shard_totals.add(loss, rank_stats, valid_rows)
-                totals.add(loss, rank_stats, valid_rows)
+                source_rows = int(raw_teacher_batch.row_valid_mask.numel())
+                row_metadata = _index_row_metadata(shard.get("row_metadata", {}), indices)
+                batch_breakdown = _action_type_breakdown(output, policy_input, teacher_batch, row_metadata, float(args.teacher_temperature))
+                shard_totals.add(loss, rank_stats, valid_rows, source_rows, int(sanitize_summary["teacher_row_sanitized_invalid_count"]))
+                totals.add(loss, rank_stats, valid_rows, source_rows, int(sanitize_summary["teacher_row_sanitized_invalid_count"]))
+                shard_breakdown.add_rows(batch_breakdown)
+                breakdown.add_rows(batch_breakdown)
             row = shard_totals.row()
             row.update(
                 {
@@ -143,12 +158,14 @@ def main() -> None:
     )
     _write_csv(args.output_dir / "shard_eval_summary.csv", [summary])
     _write_csv(args.output_dir / "shard_eval_shards.csv", shard_rows)
+    _write_csv(args.output_dir / "shard_eval_action_type_breakdown.csv", breakdown.rows())
     _write_json(
         args.output_dir / "shard_eval.json",
         {
             "mode": "keqingrl_mortal_imitation_shard_eval_v1",
             "summary": summary,
             "shards": shard_rows,
+            "action_type_breakdown": breakdown.rows(),
         },
     )
     print(
@@ -162,31 +179,40 @@ def main() -> None:
 class _EvalTotals:
     def __init__(self) -> None:
         self.row_count = 0
+        self.source_row_count = 0
         self.ce_sum = 0.0
         self.kl_sum = 0.0
         self.agree_sum = 0.0
         self.rank_sum = 0.0
         self.rank_ge5_count = 0
+        self.sanitized_invalid_count = 0
 
-    def add(self, loss, rank_stats: Mapping[str, float], row_count: int) -> None:
+    def add(self, loss, rank_stats: Mapping[str, float], row_count: int, source_row_count: int, sanitized_invalid_count: int) -> None:
         rows = max(0, int(row_count))
         self.row_count += rows
+        self.source_row_count += max(0, int(source_row_count))
+        self.sanitized_invalid_count += max(0, int(sanitized_invalid_count))
         self.ce_sum += float(loss.teacher_ce.detach().cpu()) * rows
         self.kl_sum += float(loss.teacher_kl.detach().cpu()) * rows
         self.agree_sum += float(loss.teacher_policy_agreement.detach().cpu()) * rows
-        self.rank_sum += float(rank_stats["rank_mean"]) * rows
-        self.rank_ge5_count += int(round(float(rank_stats["rank_ge5_rate"]) * rows))
+        self.rank_sum += float(rank_stats["rank_sum"])
+        self.rank_ge5_count += int(rank_stats["rank_ge5_count"])
 
     def row(self) -> dict[str, Any]:
         denom = max(1, self.row_count)
         return {
             "row_count": int(self.row_count),
+            "source_row_count": int(self.source_row_count),
             "teacher_ce": self.ce_sum / denom,
             "teacher_kl": self.kl_sum / denom,
             "teacher_policy_agreement": self.agree_sum / denom,
             "teacher_top1_rank_mean": self.rank_sum / denom,
             "rank_ge5_count": int(self.rank_ge5_count),
             "rank_ge5_rate": self.rank_ge5_count / denom,
+            "teacher_row_valid_count": int(self.row_count),
+            "teacher_row_invalid_count": int(max(0, self.source_row_count - self.row_count)),
+            "teacher_row_sanitized_invalid_count": int(self.sanitized_invalid_count),
+            "teacher_row_valid_rate": float(self.row_count / max(1, self.source_row_count)),
         }
 
 
@@ -221,15 +247,155 @@ def _rank_stats(student_logits: torch.Tensor, teacher_batch) -> dict[str, float]
     logits = logits.masked_fill(~mask, torch.finfo(torch.float32).min)
     teacher_top1 = teacher_scores.argmax(dim=-1)
     ranks: list[int] = []
+    valid = teacher_batch.row_valid_mask.to(device=logits.device).bool()
     for row_idx, teacher_idx in enumerate(teacher_top1.detach().cpu().tolist()):
+        if not bool(valid[row_idx].detach().cpu().item()):
+            continue
         order = torch.argsort(logits[row_idx], descending=True).detach().cpu().tolist()
         ranks.append(int(order.index(int(teacher_idx)) + 1))
     if not ranks:
-        return {"rank_mean": 0.0, "rank_ge5_rate": 0.0}
+        return {"rank_mean": 0.0, "rank_sum": 0.0, "rank_ge5_count": 0, "rank_ge5_rate": 0.0}
+    rank_sum = sum(ranks)
+    rank_ge5_count = sum(1 for rank in ranks if rank >= 5)
     return {
-        "rank_mean": sum(ranks) / len(ranks),
-        "rank_ge5_rate": sum(1 for rank in ranks if rank >= 5) / len(ranks),
+        "rank_mean": rank_sum / len(ranks),
+        "rank_sum": float(rank_sum),
+        "rank_ge5_count": int(rank_ge5_count),
+        "rank_ge5_rate": rank_ge5_count / len(ranks),
     }
+
+
+class _ActionTypeBreakdown:
+    def __init__(self) -> None:
+        self._buckets: dict[str, dict[str, float]] = {}
+
+    def add_rows(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        for row in rows:
+            key = str(row["teacher_top1_action_type"])
+            bucket = self._buckets.setdefault(
+                key,
+                {
+                    "row_count": 0.0,
+                    "teacher_ce_sum": 0.0,
+                    "teacher_kl_sum": 0.0,
+                    "teacher_agree_count": 0.0,
+                    "rank_sum": 0.0,
+                    "rank_ge5_count": 0.0,
+                },
+            )
+            row_count = float(row["row_count"])
+            bucket["row_count"] += row_count
+            bucket["teacher_ce_sum"] += float(row["teacher_ce"]) * row_count
+            bucket["teacher_kl_sum"] += float(row["teacher_kl"]) * row_count
+            bucket["teacher_agree_count"] += float(row["teacher_agreement"]) * row_count
+            bucket["rank_sum"] += float(row["teacher_top1_rank_mean"]) * row_count
+            bucket["rank_ge5_count"] += float(row["rank_ge5_rate"]) * row_count
+
+    def rows(self) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for key in sorted(self._buckets):
+            bucket = self._buckets[key]
+            row_count = int(bucket["row_count"])
+            denom = max(1, row_count)
+            rows.append(
+                {
+                    "teacher_top1_action_type": key,
+                    "row_count": row_count,
+                    "teacher_ce": bucket["teacher_ce_sum"] / denom,
+                    "teacher_kl": bucket["teacher_kl_sum"] / denom,
+                    "teacher_agreement": bucket["teacher_agree_count"] / denom,
+                    "teacher_top1_rank_mean": bucket["rank_sum"] / denom,
+                    "rank_ge5_rate": bucket["rank_ge5_count"] / denom,
+                }
+            )
+        return rows
+
+
+def _index_row_metadata(row_metadata: Mapping[str, torch.Tensor], indices: Sequence[int]) -> dict[str, torch.Tensor]:
+    if not row_metadata:
+        return {}
+    tensor_indices = torch.tensor(indices, dtype=torch.long)
+    return {str(key): value.index_select(0, tensor_indices) for key, value in row_metadata.items()}
+
+
+def _action_type_breakdown(output, policy_input, teacher_batch, row_metadata: Mapping[str, torch.Tensor], teacher_temperature: float) -> list[dict[str, Any]]:
+    teacher_types = row_metadata.get("teacher_top1_action_type_id")
+    if teacher_types is None:
+        return []
+    support_logits, _, support_teacher, support_mask, _ = _teacher_support_tensors(output, policy_input, teacher_batch)
+    valid = teacher_batch.row_valid_mask.to(device=support_logits.device).bool() & support_mask.any(dim=-1)
+    min_value = torch.finfo(torch.float32).min
+    support_logits = support_logits.masked_fill(~support_mask, min_value)
+    support_teacher = support_teacher.masked_fill(~support_mask, min_value)
+    teacher_probs = torch.softmax(support_teacher / float(teacher_temperature), dim=-1)
+    teacher_log_probs = torch.log(teacher_probs.clamp_min(1e-12))
+    policy_log_probs = torch.log_softmax(support_logits, dim=-1)
+    per_row_ce = -(teacher_probs * policy_log_probs).sum(dim=-1)
+    per_row_kl = (teacher_probs * (teacher_log_probs - policy_log_probs)).sum(dim=-1)
+    teacher_argmax = support_teacher.argmax(dim=-1)
+    policy_argmax = support_logits.argmax(dim=-1)
+    rank_stats = _row_ranks(output.action_logits, teacher_batch)
+    buckets: dict[str, dict[str, float]] = {}
+    for row_idx, type_id in enumerate(teacher_types.detach().cpu().tolist()):
+        if not bool(valid[row_idx].detach().cpu().item()) or int(type_id) < 0 or int(type_id) >= len(_ACTION_TYPE_NAMES):
+            continue
+        key = _ACTION_TYPE_NAMES[int(type_id)]
+        bucket = buckets.setdefault(
+            key,
+            {
+                "row_count": 0.0,
+                "teacher_ce_sum": 0.0,
+                "teacher_kl_sum": 0.0,
+                "teacher_agree_count": 0.0,
+                "rank_sum": 0.0,
+                "rank_ge5_count": 0.0,
+            },
+        )
+        bucket["row_count"] += 1.0
+        bucket["teacher_ce_sum"] += float(per_row_ce[row_idx].detach().cpu().item())
+        bucket["teacher_kl_sum"] += float(per_row_kl[row_idx].detach().cpu().item())
+        bucket["teacher_agree_count"] += float(policy_argmax[row_idx].item() == teacher_argmax[row_idx].item())
+        rank = rank_stats.get(int(row_idx), 0)
+        bucket["rank_sum"] += float(rank)
+        bucket["rank_ge5_count"] += float(rank >= 5)
+    rows: list[dict[str, Any]] = []
+    for key in sorted(buckets):
+        bucket = buckets[key]
+        row_count = int(bucket["row_count"])
+        denom = max(1, row_count)
+        rows.append(
+            {
+                "teacher_top1_action_type": key,
+                "row_count": row_count,
+                "teacher_ce": bucket["teacher_ce_sum"] / denom,
+                "teacher_kl": bucket["teacher_kl_sum"] / denom,
+                "teacher_agreement": bucket["teacher_agree_count"] / denom,
+                "teacher_top1_rank_mean": bucket["rank_sum"] / denom,
+                "rank_ge5_rate": bucket["rank_ge5_count"] / denom,
+            }
+        )
+    return rows
+
+
+def _row_ranks(student_logits: torch.Tensor, teacher_batch) -> dict[int, int]:
+    logits = student_logits.float()
+    mask = teacher_batch.legal_action_mask
+    if mask is None:
+        mask = torch.ones_like(teacher_batch.teacher_scores, dtype=torch.bool)
+    mask = mask.to(device=logits.device).bool()
+    teacher_scores = teacher_batch.teacher_scores.to(device=logits.device).float().masked_fill(
+        ~mask,
+        torch.finfo(torch.float32).min,
+    )
+    logits = logits.masked_fill(~mask, torch.finfo(torch.float32).min)
+    valid = teacher_batch.row_valid_mask.to(device=logits.device).bool()
+    ranks: dict[int, int] = {}
+    for row_idx, teacher_idx in enumerate(teacher_scores.argmax(dim=-1).detach().cpu().tolist()):
+        if not bool(valid[row_idx].detach().cpu().item()):
+            continue
+        order = torch.argsort(logits[row_idx], descending=True).detach().cpu().tolist()
+        ranks[int(row_idx)] = int(order.index(int(teacher_idx)) + 1)
+    return ranks
 
 
 if __name__ == "__main__":

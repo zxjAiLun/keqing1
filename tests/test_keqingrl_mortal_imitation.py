@@ -301,6 +301,119 @@ def test_materialize_sidecar_parse_args_reads_json_config_and_cli_overrides(
     assert args.overwrite is False
 
 
+def test_materialize_shard_replay_paths_support_skip_and_limit(tmp_path: Path) -> None:
+    import scripts.materialize_keqingrl_mortal_imitation_shards as shards
+
+    replay_dir = tmp_path / "replays"
+    replay_dir.mkdir()
+    for index in range(10):
+        (replay_dir / f"game_{index:05d}.mjson").write_text("{}", encoding="utf-8")
+    args = SimpleNamespace(
+        replay_dir=replay_dir,
+        recursive=False,
+        skip=3,
+        limit=4,
+    )
+
+    paths = shards._replay_paths(args)
+
+    assert [path.name for path in paths] == [
+        "game_00003.mjson",
+        "game_00004.mjson",
+        "game_00005.mjson",
+        "game_00006.mjson",
+    ]
+
+
+def test_materialize_shards_sanitizes_sentinel_teacher_rows() -> None:
+    import scripts.materialize_keqingrl_mortal_imitation_shards as shards
+
+    teacher_batch = imitation_script.MortalImitationTeacherBatch(
+        teacher_support="full-legal",
+        teacher_topk=3,
+        teacher_scores=torch.tensor([[1.0, 0.0], [torch.finfo(torch.float32).min, 0.0]]),
+        prior_logits=torch.zeros((2, 2)),
+        row_valid_mask=torch.tensor([True, True]),
+        legal_action_mask=torch.ones((2, 2), dtype=torch.bool),
+    )
+
+    sanitized, summary = shards._sanitize_teacher_batch_with_stats(teacher_batch)
+
+    assert sanitized.row_valid_mask.tolist() == [True, False]
+    assert summary["raw_row_count"] == 2
+    assert summary["teacher_row_valid_count_before_sanitize"] == 2
+    assert summary["teacher_row_valid_count_after_sanitize"] == 1
+    assert summary["teacher_row_sanitized_invalid_count"] == 1
+
+
+def test_materialize_shards_accumulates_sanitize_counts() -> None:
+    import scripts.materialize_keqingrl_mortal_imitation_shards as shards
+
+    total: dict[str, int] = {}
+    shards._accumulate_summary(
+        total,
+        {
+            "teacher_row_valid_count_before_sanitize": 2,
+            "teacher_row_valid_count_after_sanitize": 1,
+            "teacher_row_invalid_count_after_sanitize": 1,
+            "teacher_row_sanitized_invalid_count": 1,
+        },
+    )
+
+    assert total["teacher_row_valid_count_before_sanitize"] == 2
+    assert total["teacher_row_valid_count_after_sanitize"] == 1
+    assert total["teacher_row_invalid_count_after_sanitize"] == 1
+    assert total["teacher_row_sanitized_invalid_count"] == 1
+
+
+def test_materialize_shards_records_action_type_metadata() -> None:
+    import scripts.materialize_keqingrl_mortal_imitation_shards as shards
+
+    actions = (
+        ActionSpec(ActionType.DISCARD, tile=_tile("1m")),
+        ActionSpec(ActionType.REACH_DISCARD, tile=_tile("2m")),
+    )
+    policy_input = _policy_input(actions, mask_ids=(0, MORTAL_RIICHI_ACTION_ID))
+    teacher_batch = imitation_script.MortalImitationTeacherBatch(
+        teacher_support="full-legal",
+        teacher_topk=3,
+        teacher_scores=torch.tensor([[0.0, 2.0, -1.0]]),
+        prior_logits=torch.zeros((1, 3)),
+        row_valid_mask=torch.tensor([True]),
+        legal_action_mask=torch.tensor([[True, True, False]]),
+    )
+
+    row_metadata = shards._row_metadata_from_batch(policy_input, teacher_batch)
+    counts = shards._shard_metadata_counts(row_metadata)
+
+    assert row_metadata["teacher_top1_action_type_id"].tolist() == [int(ActionType.REACH_DISCARD)]
+    assert row_metadata["contains_reach"].tolist() == [True]
+    assert counts["teacher_top1_count_by_action_type"]["REACH_DISCARD"] == 1
+    assert counts["legal_contains_count_by_action_type"]["DISCARD"] == 1
+    assert counts["legal_contains_count_by_action_type"]["REACH_DISCARD"] == 1
+
+
+def test_shard_eval_rank_stats_ignore_invalid_rows() -> None:
+    import scripts.eval_keqingrl_mortal_imitation_shards as shard_eval
+
+    teacher_batch = imitation_script.MortalImitationTeacherBatch(
+        teacher_support="full-legal",
+        teacher_topk=3,
+        teacher_scores=torch.tensor([[10.0, 0.0], [0.0, 10.0]]),
+        prior_logits=torch.zeros((2, 2)),
+        row_valid_mask=torch.tensor([True, False]),
+        legal_action_mask=torch.ones((2, 2), dtype=torch.bool),
+    )
+    stats = shard_eval._rank_stats(
+        torch.tensor([[0.0, 1.0], [1.0, 0.0]]),
+        teacher_batch,
+    )
+
+    assert stats["rank_sum"] == 2.0
+    assert stats["rank_ge5_count"] == 0
+    assert stats["rank_mean"] == 2.0
+
+
 def test_mortal_teacher_behavior_policy_selects_mortal_top1() -> None:
     legal_actions = (
         ActionSpec(ActionType.PASS),
