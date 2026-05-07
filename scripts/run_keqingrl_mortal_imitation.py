@@ -100,6 +100,15 @@ ALLOWED_IMITATION_TEACHER_SOURCES = ("mortal-action-q",)
 TEACHER_SUPPORT_MODES = ("topk", "adaptive-topk", "full-legal")
 ROLLOUT_SOURCES = ("env", "mortal-selfplay-replay", "riichienv-mortal-selfplay-replay", "replay-pool")
 _ACTION_TYPE_CHOICES = tuple(action_type.name for action_type in ActionType)
+_BOOLEAN_OPTIONAL_CONFIG_KEYS = {
+    "defer_mortal_teacher_runtime",
+    "defer_mortal_observation_bridge",
+    "mortal_teacher_strict_extra_mask",
+    "replay_pool_shuffle",
+    "replay_decision_sidecar_cache",
+    "decision_review_case_streaming",
+}
+_STORE_TRUE_CONFIG_KEYS = {"export_decision_review_cases"}
 
 
 @dataclass(frozen=True)
@@ -243,7 +252,18 @@ def _resolve_action_specs(policy_input: PolicyInput, action_index: torch.Tensor)
 
 
 def _parse_args() -> argparse.Namespace:
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", type=Path)
+    config_args, remaining_argv = config_parser.parse_known_args()
+    configured_argv: list[str] = []
+    if config_args.config is not None:
+        configured_argv = _config_mapping_to_argv(
+            _load_json_config(config_args.config),
+            boolean_optional_keys=_BOOLEAN_OPTIONAL_CONFIG_KEYS,
+            store_true_keys=_STORE_TRUE_CONFIG_KEYS,
+        )
     parser = argparse.ArgumentParser(description="Run KeqingRL Mortal action-Q imitation training")
+    parser.add_argument("--config", type=Path, default=config_args.config, help="JSON config file. CLI args override config values.")
     parser.add_argument("--candidate-summary", type=Path, required=True)
     parser.add_argument("--source-config-ids", type=int, nargs="+", default=(93,))
     parser.add_argument("--rerun-config-ids", type=int, nargs="+", default=None)
@@ -371,7 +391,42 @@ def _parse_args() -> argparse.Namespace:
         default="4p-red-half",
         help="RiichiEnv game_mode used by riichienv-mortal-selfplay-replay.",
     )
-    return parser.parse_args()
+    return parser.parse_args(configured_argv + remaining_argv)
+
+
+def _load_json_config(path: Path) -> dict[str, Any]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"config must be a JSON object: {path}")
+    return dict(payload)
+
+
+def _config_mapping_to_argv(
+    config: Mapping[str, Any],
+    *,
+    boolean_optional_keys: set[str],
+    store_true_keys: set[str],
+) -> list[str]:
+    argv: list[str] = []
+    for key, value in config.items():
+        if value is None:
+            continue
+        flag = f"--{str(key).replace('_', '-')}"
+        if isinstance(value, bool):
+            if key in boolean_optional_keys:
+                argv.append(flag if value else f"--no-{str(key).replace('_', '-')}")
+            elif key in store_true_keys:
+                if value:
+                    argv.append(flag)
+            else:
+                raise ValueError(f"boolean config key is not a known boolean CLI option: {key}")
+            continue
+        argv.append(flag)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            argv.extend(str(item) for item in value)
+        else:
+            argv.append(str(value))
+    return argv
 
 
 def main() -> None:
@@ -1025,9 +1080,10 @@ def _select_replay_pool_paths(args: argparse.Namespace, *, rollout_seed: int) ->
 
     iteration_offset = 0
     seed_stride = max(1, int(getattr(args, "seed_stride", 1)))
+    seed_step = max(1, int(getattr(args, "episodes", 1)) * seed_stride)
     seed_base = int(getattr(args, "seed_base", 0))
     if int(rollout_seed) >= seed_base:
-        iteration_offset = (int(rollout_seed) - seed_base) // seed_stride
+        iteration_offset = (int(rollout_seed) - seed_base) // seed_step
     start = (iteration_offset * files_per_iteration) % len(ordered)
     selected: list[Path] = []
     for index in range(files_per_iteration):

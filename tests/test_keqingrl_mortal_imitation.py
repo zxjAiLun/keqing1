@@ -207,6 +207,100 @@ def test_mortal_imitation_defaults_to_rule_free_full_legal_support(monkeypatch: 
     assert _student_logit_source(args) == "neural_delta_only"
 
 
+def test_mortal_imitation_parse_args_reads_json_config_and_cli_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "train_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "candidate_summary": str(tmp_path / "summary.csv"),
+                "output_dir": str(tmp_path / "out"),
+                "artifact_dir": str(tmp_path / "artifacts"),
+                "mortal_teacher_checkpoint": str(tmp_path / "mortal.pth"),
+                "rollout_source": "replay-pool",
+                "replay_pool_dir": str(tmp_path / "pool"),
+                "replay_pool_files_per_iteration": 10,
+                "replay_pool_shuffle": False,
+                "episodes": 10,
+                "iterations": 25,
+                "learner_seats": [0, 1, 2, 3],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_keqingrl_mortal_imitation.py",
+            "--config",
+            str(config_path),
+            "--iterations",
+            "3",
+        ],
+    )
+
+    args = _parse_args()
+
+    assert args.candidate_summary == tmp_path / "summary.csv"
+    assert args.artifact_dir == tmp_path / "artifacts"
+    assert args.rollout_source == "replay-pool"
+    assert args.replay_pool_dir == tmp_path / "pool"
+    assert args.replay_pool_files_per_iteration == 10
+    assert args.replay_pool_shuffle is False
+    assert args.episodes == 10
+    assert args.iterations == 3
+    assert args.learner_seats == [0, 1, 2, 3]
+
+
+def test_materialize_sidecar_parse_args_reads_json_config_and_cli_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import scripts.materialize_mortal_replay_sidecars as sidecars
+
+    config_path = tmp_path / "sidecar_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "replay_dir": str(tmp_path / "replays"),
+                "model": str(tmp_path / "mortal.pth"),
+                "mortal_root": str(tmp_path / "Mortal"),
+                "device": "cuda",
+                "actors": [0, 1, 2, 3],
+                "limit": 0,
+                "recursive": True,
+                "overwrite": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "materialize_mortal_replay_sidecars.py",
+            "--config",
+            str(config_path),
+            "--limit",
+            "7",
+        ],
+    )
+
+    args = sidecars._parse_args()
+
+    assert args.replay_dir == tmp_path / "replays"
+    assert args.model == tmp_path / "mortal.pth"
+    assert args.mortal_root == tmp_path / "Mortal"
+    assert args.device == "cuda"
+    assert args.actors == [0, 1, 2, 3]
+    assert args.limit == 7
+    assert args.recursive is True
+    assert args.overwrite is False
+
+
 def test_mortal_teacher_behavior_policy_selects_mortal_top1() -> None:
     legal_actions = (
         ActionSpec(ActionType.PASS),
@@ -564,9 +658,28 @@ def test_select_replay_pool_paths_uses_replays_subdir_and_episode_default(tmp_pa
         seed_base=100,
     )
 
-    selected = _select_replay_pool_paths(args, rollout_seed=101)
+    selected = _select_replay_pool_paths(args, rollout_seed=103)
 
     assert [path.name for path in selected] == ["game_00003.mjson", "game_00004.mjson", "game_00000.mjson"]
+
+
+def test_select_replay_pool_paths_uses_iteration_seed_step_for_sequential_chunks(tmp_path: Path) -> None:
+    replays_dir = tmp_path / "pool" / "replays"
+    replays_dir.mkdir(parents=True)
+    for index in range(100):
+        (replays_dir / f"game_{index:05d}.mjson").write_text("{}", encoding="utf-8")
+    args = SimpleNamespace(
+        replay_pool_dir=tmp_path / "pool",
+        replay_pool_files_per_iteration=10,
+        episodes=10,
+        replay_pool_shuffle=False,
+        seed_stride=1,
+        seed_base=202604330000,
+    )
+
+    selected = _select_replay_pool_paths(args, rollout_seed=202604330010)
+
+    assert [path.name for path in selected] == [f"game_{index:05d}.mjson" for index in range(10, 20)]
 
 
 def test_select_replay_pool_paths_can_take_all_files(tmp_path: Path) -> None:
