@@ -295,7 +295,7 @@ def _adapt_policy_action_feature_dim(policy, action_feature_dim: int) -> None:
     if not isinstance(first, nn.Linear):
         return
     expected_in = int(action_id_dim) + int(action_feature_dim)
-    current_in = int(first.in_features)
+    current_in = int(first.weight.shape[1])
     if current_in == expected_in:
         return
     if current_in > expected_in:

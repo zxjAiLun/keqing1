@@ -7,6 +7,16 @@ Updated: 2026-05-04
 > `docs/keqingrl/keqingrl_riichienv_mortal_imitation_2026_05_06.md` first for
 > the current RiichiEnv-native Mortal replay route, rule-free defaults,
 > all-seat correction, GUI review workflow, and CHI kuikae legality fix.
+>
+> 2026-05-07 update: the active large-data route is now Mortal reviewed replay
+> sidecars -> KeqingRL tensor shards -> fast shard train/eval. The current
+> representation hypothesis is under-call caused by teacher/student information
+> mismatch, not a value/rank-head problem. `keqingrl_action_feature_v2` keeps the
+> old 8 action-feature columns as a prefix and appends response/call context
+> such as last discard, call availability, call/pass family flags, consumed
+> tiles, CHI shape, dora/aka target flags, and relative `from_who`. Old v1
+> checkpoints can warm-start v2 shards by expanding the first action projection
+> layer with zero-initialized new columns.
 
 This is the current handoff for the KeqingRL model line. It records the route
 from early KeqingRL development to the current Mortal Action-Q imitation
