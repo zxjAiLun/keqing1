@@ -24,6 +24,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from keqingrl.actions import ActionSpec, ActionType, encode_action_id
+from keqingrl.action_features import build_keqingrl_action_features
 from keqingrl.buffer import build_ppo_batch
 from keqingrl.contracts import ActionSample, ObsTensorBatch, PolicyInput, PolicyOutput
 from keqingrl.distribution import MaskedCategorical
@@ -74,7 +75,6 @@ from keqingrl.selfplay import build_episodes_ppo_batch, collect_selfplay_episode
 from keqingrl.policy import InteractivePolicy
 from keqingrl.rollout import RolloutStep
 from keqingrl.rule_score import score_legal_actions
-from mahjong_env.feature_tracker import SnapshotFeatureTracker
 from mahjong_env.action_space import IDX_TO_TILE_NAME
 from mahjong_env.replay import ReplaySample, build_replay_samples_mc_return, read_mjai_jsonl
 from mahjong_env.replay_normalizer import normalize_replay_label_for_legal_compare, replay_label_matches_legal
@@ -2326,14 +2326,11 @@ def _replay_action_features(
     *,
     remaining_wall: int,
 ) -> list[list[float]]:
-    tracker = SnapshotFeatureTracker.from_state(snapshot, actor=int(snapshot["actor"]))
-    return keqing_core.build_keqingrl_action_features_typed(
-        tracker.hand_counts34,
-        tracker.visible_counts34,
-        [int(spec.action_type) for spec in legal_actions],
-        [-1 if spec.tile is None else int(spec.tile) for spec in legal_actions],
-        [int(spec.flags) for spec in legal_actions],
-        int(remaining_wall),
+    return build_keqingrl_action_features(
+        snapshot,
+        legal_actions,
+        remaining_wall=int(remaining_wall),
+        contract_version=ACTION_FEATURE_CONTRACT_VERSION,
     )
 
 

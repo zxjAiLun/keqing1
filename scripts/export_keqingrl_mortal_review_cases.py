@@ -59,6 +59,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--mortal-teacher-strict-extra-mask", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--replay-decision-sidecar-cache", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--decision-review-case-limit", type=int, default=500)
+    parser.add_argument("--high-risk-call-case-limit", type=int, default=100)
+    parser.add_argument("--high-margin-threshold", type=float, default=1.0)
     parser.add_argument("--rule-score-scale", type=float, default=0.0)
     parser.add_argument("--support-policy-mode", choices=("support-only-topk", "unrestricted"), default="unrestricted")
     parser.add_argument("--delta-support-mode", choices=("topk", "all"), default="all")
@@ -140,8 +142,12 @@ def main() -> None:
             mapping_summary=teacher_data.summary,
             export_decision_review_cases=True,
         )
+    review_case_rows = [_annotate_case_risk(row, high_margin_threshold=float(args.high_margin_threshold)) for row in review_case_rows]
     review_case_rows = _risk_sorted_cases(review_case_rows)[: int(args.decision_review_case_limit)]
+    high_risk_call_rows = [row for row in review_case_rows if row.get("call_risk_kind")]
+    high_risk_call_rows = sorted(high_risk_call_rows, key=_call_risk_score, reverse=True)[: int(args.high_risk_call_case_limit)]
     _write_jsonl(args.output_dir / "decision_review_cases.jsonl", review_case_rows)
+    _write_jsonl(args.output_dir / "high_risk_call_cases.jsonl", high_risk_call_rows)
     _write_csv(args.output_dir / "changed_decisions.csv", changed_rows)
     _write_csv(args.output_dir / "teacher_disagreements.csv", disagreement_rows)
     _write_csv(args.output_dir / "decision_review_candidates.csv", review_rows)
@@ -152,6 +158,7 @@ def main() -> None:
         "replay_count": len(replay_paths),
         "row_count": int(batch.policy_input.legal_action_mask.shape[0]),
         "review_case_count": len(review_case_rows),
+        "high_risk_call_case_count": len(high_risk_call_rows),
         **replay_summary,
         **teacher_data.summary,
         **metrics,
@@ -223,9 +230,11 @@ def _parent_candidate_from_checkpoint(checkpoint: Path, config_out: Path) -> dic
 
 
 def _risk_sorted_cases(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    def score(row: Mapping[str, Any]) -> tuple[int, int, int, int]:
+    def score(row: Mapping[str, Any]) -> tuple[int, float, int, int, int, int]:
         reason = str(row.get("review_reason", ""))
         return (
+            int(bool(row.get("call_risk_kind"))),
+            float(row.get("call_risk_margin", 0.0) or 0.0),
             int(bool(row.get("selected_changed")) and bool(row.get("teacher_disagreed"))),
             int("regressed" in reason or "teacher_disagreement" in reason),
             int(any(token in reason for token in ("kan", "reach", "call", "ron"))),
@@ -233,6 +242,80 @@ def _risk_sorted_cases(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         )
 
     return sorted((dict(row) for row in rows), key=score, reverse=True)
+
+
+def _annotate_case_risk(row: Mapping[str, Any], *, high_margin_threshold: float) -> dict[str, Any]:
+    annotated = dict(row)
+    info = _call_risk_info(annotated, high_margin_threshold=high_margin_threshold)
+    annotated.update(info)
+    return annotated
+
+
+def _call_risk_score(row: Mapping[str, Any]) -> tuple[float, int]:
+    return (float(row.get("call_risk_margin", 0.0) or 0.0), int(bool(row.get("teacher_disagreed"))))
+
+
+def _call_risk_info(row: Mapping[str, Any], *, high_margin_threshold: float) -> dict[str, Any]:
+    actions = row.get("legal_actions", ())
+    if not isinstance(actions, Sequence) or isinstance(actions, (str, bytes)):
+        return {"call_risk_kind": "", "call_risk_margin": 0.0}
+    teacher = _top_action(actions, "is_mortal_top1")
+    student = _top_action(actions, "is_student_after_top1")
+    if teacher is None or student is None:
+        return {"call_risk_kind": "", "call_risk_margin": 0.0}
+    teacher_type = str(teacher.get("type", ""))
+    student_type = str(student.get("type", ""))
+    best_call_q = _best_score(actions, action_types={"CHI", "PON", "DAIMINKAN"}, score_key="mortal_q")
+    best_pass_q = _best_score(actions, action_types={"PASS"}, score_key="mortal_q")
+    if best_call_q is None or best_pass_q is None:
+        return {"call_risk_kind": "", "call_risk_margin": 0.0}
+    if teacher_type == "PASS" and student_type in {"CHI", "PON", "DAIMINKAN"}:
+        margin = best_pass_q - best_call_q
+        if margin >= float(high_margin_threshold):
+            return {"call_risk_kind": "student_call_when_high_margin_teacher_pass", "call_risk_margin": float(margin)}
+    if teacher_type in {"CHI", "PON", "DAIMINKAN"} and student_type == "PASS":
+        margin = best_call_q - best_pass_q
+        if margin >= float(high_margin_threshold):
+            return {"call_risk_kind": "student_pass_when_high_margin_teacher_call", "call_risk_margin": float(margin)}
+    if teacher_type == "CHI" and student_type == "CHI" and teacher.get("canonical_key") != student.get("canonical_key"):
+        chi_margin = _best_second_margin(actions, action_types={"CHI"}, score_key="mortal_q")
+        if chi_margin >= float(high_margin_threshold):
+            return {"call_risk_kind": "student_wrong_high_margin_chi_shape", "call_risk_margin": float(chi_margin)}
+    return {"call_risk_kind": "", "call_risk_margin": 0.0}
+
+
+def _top_action(actions: Sequence[Any], flag: str) -> Mapping[str, Any] | None:
+    for action in actions:
+        if isinstance(action, Mapping) and bool(action.get(flag)):
+            return action
+    return None
+
+
+def _best_score(actions: Sequence[Any], *, action_types: set[str], score_key: str) -> float | None:
+    values = [
+        float(action[score_key])
+        for action in actions
+        if isinstance(action, Mapping)
+        and str(action.get("type", "")) in action_types
+        and action.get(score_key) is not None
+    ]
+    return max(values) if values else None
+
+
+def _best_second_margin(actions: Sequence[Any], *, action_types: set[str], score_key: str) -> float:
+    values = sorted(
+        (
+            float(action[score_key])
+            for action in actions
+            if isinstance(action, Mapping)
+            and str(action.get("type", "")) in action_types
+            and action.get(score_key) is not None
+        ),
+        reverse=True,
+    )
+    if len(values) < 2:
+        return 0.0
+    return float(values[0] - values[1])
 
 
 if __name__ == "__main__":

@@ -11,8 +11,10 @@ import pytest
 import torch
 
 import scripts.run_keqingrl_mortal_imitation as imitation_script
-from keqingrl.actions import ActionSpec, ActionType
+from keqingrl.actions import ActionSpec, ActionType, encode_action_id
 from keqingrl.contracts import ObsTensorBatch, PolicyInput, PolicyOutput
+from keqingrl.metadata import ACTION_FEATURE_CONTRACT_VERSION
+from keqingrl.policy import RulePriorDeltaPolicy
 from keqingrl.rollout import RolloutStep
 from keqingrl.mortal_teacher import (
     MORTAL_ACTION_MASK_EXTRA_KEY,
@@ -412,6 +414,104 @@ def test_shard_eval_rank_stats_ignore_invalid_rows() -> None:
     assert stats["rank_sum"] == 2.0
     assert stats["rank_ge5_count"] == 0
     assert stats["rank_mean"] == 2.0
+
+
+def test_shard_eval_family_diagnostics_tracks_pass_vs_call() -> None:
+    import scripts.eval_keqingrl_mortal_imitation_shards as shard_eval
+
+    actions = (
+        ActionSpec(ActionType.PASS),
+        ActionSpec(ActionType.CHI, tile=_tile("3m"), consumed=(_tile("1m"), _tile("2m")), from_who=0),
+        ActionSpec(ActionType.RON, tile=_tile("3m"), from_who=0),
+    )
+    policy_input = _policy_input(
+        actions,
+        mask_ids=(MORTAL_PASS_ACTION_ID, MORTAL_CHI_HIGH_ACTION_ID),
+        prior_logits=torch.tensor([[4.0, 1.0, 0.0]], dtype=torch.float32),
+    )
+    policy_input = replace(
+        policy_input,
+        legal_action_ids=torch.tensor([[encode_action_id(action) for action in actions]], dtype=torch.long),
+    )
+    teacher_batch = imitation_script.MortalImitationTeacherBatch(
+        teacher_support="full-legal",
+        teacher_topk=3,
+        teacher_scores=torch.tensor([[5.0, 1.0, 0.0]], dtype=torch.float32),
+        prior_logits=torch.zeros((1, 3)),
+        row_valid_mask=torch.tensor([True]),
+        legal_action_mask=torch.tensor([[True, True, True]]),
+    )
+
+    rows = shard_eval._family_diagnostics(
+        torch.tensor([[0.0, 4.0, 1.0]], dtype=torch.float32),
+        policy_input,
+        teacher_batch,
+        high_margin_threshold=1.0,
+    )
+    by_bucket = {row["bucket"]: row for row in rows}
+
+    assert by_bucket["call_opportunity"]["student_call_count"] == 1
+    assert by_bucket["call_opportunity"]["teacher_call_count"] == 0
+    assert by_bucket["call_opportunity"]["student_call_when_teacher_pass_count"] == 1
+    assert by_bucket["call_opportunity"]["student_call_when_high_margin_teacher_pass_count"] == 1
+    assert by_bucket["call_opportunity"]["family_agreement_count"] == 0
+
+
+def test_review_export_marks_high_margin_call_risk() -> None:
+    import scripts.export_keqingrl_mortal_review_cases as review_export
+
+    row = {
+        "teacher_disagreed": True,
+        "legal_actions": [
+            {
+                "type": "PASS",
+                "mortal_q": 3.0,
+                "is_mortal_top1": True,
+                "is_student_after_top1": False,
+                "canonical_key": "pass",
+            },
+            {
+                "type": "CHI",
+                "mortal_q": 1.5,
+                "is_mortal_top1": False,
+                "is_student_after_top1": True,
+                "canonical_key": "chi-a",
+            },
+        ],
+    }
+
+    info = review_export._call_risk_info(row, high_margin_threshold=1.0)
+
+    assert info["call_risk_kind"] == "student_call_when_high_margin_teacher_pass"
+    assert info["call_risk_margin"] == pytest.approx(1.5)
+
+
+def test_shard_trainer_expands_v1_action_projection_for_v2_features() -> None:
+    import scripts.train_keqingrl_mortal_imitation_shards as shard_train
+
+    def policy_input(width: int) -> PolicyInput:
+        return PolicyInput(
+            obs=ObsTensorBatch(
+                tile_obs=torch.zeros((1, 57, 34), dtype=torch.float32),
+                scalar_obs=torch.zeros((1, 56), dtype=torch.float32),
+            ),
+            legal_action_ids=torch.zeros((1, 2), dtype=torch.long),
+            legal_action_features=torch.zeros((1, 2, width), dtype=torch.float32),
+            legal_action_mask=torch.tensor([[True, True]], dtype=torch.bool),
+            rule_context=torch.zeros((1, 5), dtype=torch.float32),
+            prior_logits=torch.zeros((1, 2), dtype=torch.float32),
+        )
+
+    policy = RulePriorDeltaPolicy(hidden_dim=16, num_res_blocks=1, dropout=0.0)
+    policy(policy_input(8))
+
+    assert policy.action_proj[0].in_features == 24
+
+    shard_train._adapt_policy_action_feature_dim(policy, 32)
+    output = policy(policy_input(32))
+
+    assert policy.action_proj[0].in_features == 48
+    assert output.action_logits.shape == (1, 2)
 
 
 def test_mortal_teacher_behavior_policy_selects_mortal_top1() -> None:
@@ -1188,7 +1288,7 @@ def test_build_replay_imitation_batch_summarizes_controlled_and_mismatch_rows(mo
                 style_context=torch.zeros((1,), dtype=torch.float32),
                 chosen_action_canonical_key=ActionSpec(ActionType.PASS).canonical_key,
                 observation_contract_version="keqingrl_observation_v1",
-                action_feature_contract_version="keqingrl_action_feature_v1",
+                action_feature_contract_version=ACTION_FEATURE_CONTRACT_VERSION,
                 env_contract_version="keqingrl_env_v2",
                 native_schema_name="keqingrl_native_boundary",
                 native_schema_version=1,

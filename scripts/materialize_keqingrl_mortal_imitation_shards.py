@@ -19,6 +19,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from keqingrl.contracts import ObsTensorBatch, PolicyInput  # noqa: E402
 from keqingrl.actions import ActionSpec, ActionType  # noqa: E402
+from keqingrl.metadata import ACTION_FEATURE_CONTRACT_VERSION  # noqa: E402
 from scripts.run_keqingrl_mortal_imitation import (  # noqa: E402
     _build_replay_imitation_batch,
     _file_sha256,
@@ -162,6 +163,8 @@ def main() -> None:
         "teacher_temperature": float(args.teacher_temperature),
         "mortal_teacher_checkpoint": str(args.mortal_teacher_checkpoint),
         "actors": [int(actor) for actor in args.actors],
+        "action_feature_contract_version": ACTION_FEATURE_CONTRACT_VERSION,
+        "action_feature_dim": _payload_action_feature_dim(pending, shard_rows),
         "summary": total_summary,
         "row_count_by_teacher_top1_action_type": metadata_summary["teacher_top1_count_by_action_type"],
         "legal_contains_count_by_action_type": metadata_summary["legal_contains_count_by_action_type"],
@@ -210,6 +213,18 @@ def _payload_from_batch(policy_input: PolicyInput, teacher_batch, *, row_metadat
         "teacher_batch": _teacher_batch_to_cpu(teacher_batch),
         "row_metadata": _row_metadata_to_cpu(row_metadata or {}),
     }
+
+
+def _payload_action_feature_dim(pending: Mapping[str, Any] | None, shard_rows: Sequence[Mapping[str, Any]]) -> int | None:
+    if pending is not None:
+        policy_input = pending.get("policy_input")
+        if policy_input is not None:
+            return int(policy_input.legal_action_features.shape[-1])
+    for row in reversed(shard_rows):
+        value = row.get("action_feature_dim")
+        if value is not None:
+            return int(value)
+    return None
 
 
 def _sanitize_teacher_batch_with_stats(teacher_batch):
@@ -468,6 +483,7 @@ def _write_shard(args: argparse.Namespace, payload: Mapping[str, Any], shard_ind
         path,
     )
     row = {"path": str(path), "sha256": _file_sha256(path), "row_count": int(payload["row_count"])}
+    row["action_feature_dim"] = int(payload["policy_input"].legal_action_features.shape[-1])
     row.update(_shard_metadata_counts(payload.get("row_metadata", {})))
     return row
 

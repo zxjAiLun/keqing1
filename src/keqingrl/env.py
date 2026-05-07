@@ -20,6 +20,7 @@ from keqingrl.actions import (
     bind_reach_discard,
     encode_action_id,
 )
+from keqingrl.action_features import build_keqingrl_action_features
 from keqingrl.contracts import ObsTensorBatch, PolicyInput
 from keqingrl.metadata import (
     ACTION_FEATURE_CONTRACT_VERSION,
@@ -1239,15 +1240,12 @@ class DiscardOnlyMahjongEnv:
         snapshot: dict[str, object],
         specs: Sequence[ActionSpec],
     ) -> list[list[float]]:
-        tracker = SnapshotFeatureTracker.from_state(snapshot, actor=int(snapshot["actor"]))
         try:
-            return keqing_core.build_keqingrl_action_features_typed(
-                tracker.hand_counts34,
-                tracker.visible_counts34,
-                [int(spec.action_type) for spec in specs],
-                [-1 if spec.tile is None else int(spec.tile) for spec in specs],
-                [int(spec.flags) for spec in specs],
-                self._require_room().remaining_wall(),
+            return build_keqingrl_action_features(
+                snapshot,
+                specs,
+                remaining_wall=self._require_room().remaining_wall(),
+                contract_version=ACTION_FEATURE_CONTRACT_VERSION,
             )
         except RuntimeError as exc:
             if keqing_core.is_missing_rust_capability_error(exc):

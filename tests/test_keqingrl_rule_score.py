@@ -72,6 +72,13 @@ def test_checkpoint_metadata_rejects_contract_version_mismatch() -> None:
             raise AssertionError(f"expected checkpoint {key} mismatch")
 
 
+def test_checkpoint_metadata_accepts_v1_action_feature_contract_for_compat() -> None:
+    metadata = default_checkpoint_metadata()
+    metadata["action_feature_contract_version"] = "keqingrl_action_feature_v1"
+
+    validate_checkpoint_metadata(metadata)
+
+
 def test_checkpoint_metadata_rejects_rule_score_scale_mismatch() -> None:
     metadata = default_checkpoint_metadata(rule_score_scale=0.25)
 

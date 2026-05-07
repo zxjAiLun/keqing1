@@ -7,6 +7,7 @@ import pytest
 import keqing_core
 
 from keqingrl import ActionSpec, ActionType, DiscardOnlyMahjongEnv, action_from_mahjong_spec, bind_reach_discard
+from keqingrl.action_features import ACTION_FEATURE_DIM_V2
 from keqingrl.actions import ACTION_FLAG_TSUMOGIRI
 from keqingrl.env import _TurnContext
 from mahjong_env.feature_tracker import SnapshotFeatureTracker
@@ -126,7 +127,7 @@ def test_discard_only_env_keeps_ordered_legal_actions_stable_within_turn() -> No
     assert [id(spec) for spec in first] == [id(spec) for spec in second]
     assert observed.legal_actions == (first,)
     assert observed.legal_action_ids.shape == (1, len(first))
-    assert observed.legal_action_features.shape == (1, len(first), 8)
+    assert observed.legal_action_features.shape == (1, len(first), ACTION_FEATURE_DIM_V2)
     assert observed.legal_action_mask.shape == (1, len(first))
     assert all(spec.action_type == ActionType.DISCARD for spec in first)
 
@@ -1143,7 +1144,13 @@ def test_rust_action_feature_parity_covers_non_discard_unlock_scope() -> None:
 
     assert len(actual) == len(expected)
     for actual_row, expected_row in zip(actual, expected):
-        assert actual_row == pytest.approx(expected_row)
+        assert actual_row[:8] == pytest.approx(expected_row)
+        assert len(actual_row) == ACTION_FEATURE_DIM_V2
+    chi_row = actual[3]
+    assert chi_row[8] == 1.0  # response row
+    assert chi_row[11] == 1.0  # row contains CHI
+    assert chi_row[17] == 1.0  # action is CHI
+    assert chi_row[30] == pytest.approx(1.0)  # chi-high consumed shape
     assert keqing_core.keqingrl_action_feature_dim() == 8
 
 

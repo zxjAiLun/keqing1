@@ -12,6 +12,7 @@ import time
 from typing import Any, Mapping, Sequence
 
 import torch
+import torch.nn as nn
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
@@ -133,7 +134,9 @@ def main() -> None:
         raise RuntimeError(f"shard trainer expects exactly one candidate, got {len(candidates)}")
     candidate = candidates[0]
     device = torch.device(args.device)
+    action_feature_dim = _manifest_action_feature_dim(manifest, shard_paths[0])
     base_policy = _load_policy(candidate, device)
+    _adapt_policy_action_feature_dim(base_policy, action_feature_dim)
     base_policy.rule_score_scale = float(args.rule_score_scale)
     policy = DeltaSupportProjectionPolicy(
         base_policy,
@@ -275,6 +278,41 @@ def _load_manifest(shard_dir: Path) -> dict[str, Any]:
     if manifest.get("mode") != "keqingrl_mortal_imitation_shards_v1":
         raise RuntimeError(f"unsupported shard manifest: {manifest.get('mode')}")
     return manifest
+
+
+def _manifest_action_feature_dim(manifest: Mapping[str, Any], first_shard_path: Path) -> int:
+    value = manifest.get("action_feature_dim")
+    if value is not None:
+        return int(value)
+    shard = torch.load(first_shard_path, map_location="cpu", weights_only=False)
+    return int(shard["policy_input"].legal_action_features.shape[-1])
+
+
+def _adapt_policy_action_feature_dim(policy, action_feature_dim: int) -> None:
+    action_proj = getattr(policy, "action_proj", None)
+    action_id_dim = getattr(policy, "action_id_embed").embedding_dim
+    first = action_proj[0] if action_proj is not None and len(action_proj) > 0 else None
+    if not isinstance(first, nn.Linear):
+        return
+    expected_in = int(action_id_dim) + int(action_feature_dim)
+    current_in = int(first.in_features)
+    if current_in == expected_in:
+        return
+    if current_in > expected_in:
+        raise RuntimeError(
+            "checkpoint action feature width is newer than shard feature width: "
+            f"checkpoint_in={current_in} expected_in={expected_in}"
+        )
+    replacement = nn.Linear(expected_in, int(first.out_features), bias=first.bias is not None).to(
+        device=first.weight.device,
+        dtype=first.weight.dtype,
+    )
+    with torch.no_grad():
+        replacement.weight.zero_()
+        replacement.weight[:, :current_in].copy_(first.weight)
+        if first.bias is not None and replacement.bias is not None:
+            replacement.bias.copy_(first.bias)
+    action_proj[0] = replacement
 
 
 def _policy_input_to_device(policy_input, device: torch.device):

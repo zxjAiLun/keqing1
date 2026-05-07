@@ -13,7 +13,11 @@ NATIVE_ACTION_IDENTITY_VERSION = 1
 NATIVE_LEGAL_ENUMERATION_VERSION = 1
 NATIVE_TERMINAL_RESOLVER_VERSION = 1
 OBSERVATION_CONTRACT_VERSION = "keqingrl_observation_v1"
-ACTION_FEATURE_CONTRACT_VERSION = "keqingrl_action_feature_v1"
+ACTION_FEATURE_CONTRACT_VERSION = "keqingrl_action_feature_v2"
+SUPPORTED_ACTION_FEATURE_CONTRACT_VERSIONS = (
+    "keqingrl_action_feature_v1",
+    ACTION_FEATURE_CONTRACT_VERSION,
+)
 ENV_CONTRACT_VERSION = "keqingrl_env_v2"
 RULE_SCORE_VERSION = "keqingrl_rule_score_v1"
 RULE_SCORE_SCALE_VERSION = "keqingrl_rule_score_scale_v1"
@@ -121,7 +125,6 @@ def validate_checkpoint_metadata(
         "native_legal_enumeration_version": NATIVE_LEGAL_ENUMERATION_VERSION,
         "native_terminal_resolver_version": NATIVE_TERMINAL_RESOLVER_VERSION,
         "observation_contract_version": OBSERVATION_CONTRACT_VERSION,
-        "action_feature_contract_version": ACTION_FEATURE_CONTRACT_VERSION,
         "env_contract_version": ENV_CONTRACT_VERSION,
         "rule_score_version": RULE_SCORE_VERSION,
         "rule_context_encoding_version": RULE_CONTEXT_ENCODING_VERSION,
@@ -135,6 +138,12 @@ def validate_checkpoint_metadata(
         actual = metadata[key]
         if actual != expected:
             raise ValueError(f"unsupported {key}: {actual!r}; expected {expected!r}")
+    actual_action_feature_contract = metadata.get("action_feature_contract_version")
+    if actual_action_feature_contract is not None and actual_action_feature_contract not in SUPPORTED_ACTION_FEATURE_CONTRACT_VERSIONS:
+        raise ValueError(
+            "unsupported action_feature_contract_version: "
+            f"{actual_action_feature_contract!r}; expected one of {SUPPORTED_ACTION_FEATURE_CONTRACT_VERSIONS!r}"
+        )
     if int(metadata["style_context_dim"]) != STYLE_CONTEXT_DIM:
         raise ValueError(
             f"unsupported style_context_dim: {metadata['style_context_dim']!r}; "
@@ -208,6 +217,7 @@ __all__ = [
     "RULE_SCORE_VERSION",
     "STYLE_CONTEXT_DIM",
     "STYLE_CONTEXT_VERSION",
+    "SUPPORTED_ACTION_FEATURE_CONTRACT_VERSIONS",
     "default_checkpoint_metadata",
     "resolve_rule_score_scale_metadata",
     "validate_checkpoint_metadata",
