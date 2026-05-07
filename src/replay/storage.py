@@ -48,7 +48,7 @@ class ReplayStorage:
         self,
         events: list[dict],
         decisions: dict,
-        bot_type: str = "xmodel1",
+        bot_type: str = "mortal",
         player_names: Optional[list[str]] = None,
     ) -> str:
         """保存回放到文件系统，返回 replay_id。"""

@@ -9,7 +9,7 @@ import { GameBoardReplayPage } from './pages/GameBoardReplayPage';
 import { BattlePage } from './pages/BattlePage';
 import { BotBattlePage } from './pages/BotBattlePage';
 import { SelfplayAnomaliesPage } from './pages/SelfplayAnomaliesPage';
-import { KeqingrlDecisionReviewPage } from './pages/KeqingrlDecisionReviewPage';
+import { MortalDecisionReviewPage } from './pages/MortalDecisionReviewPage';
 import { ThemeProvider } from './context/ThemeContext';
 import './styles/globals.css';
 
@@ -24,7 +24,8 @@ export default function App() {
             <Route path="/bot-battle" element={<BotBattlePage />} />
             <Route path="/review" element={<ReviewPage />} />
             <Route path="/selfplay-anomalies" element={<SelfplayAnomaliesPage />} />
-            <Route path="/keqingrl-review" element={<KeqingrlDecisionReviewPage />} />
+            <Route path="/mortal-review" element={<MortalDecisionReviewPage />} />
+            <Route path="/keqingrl-review" element={<MortalDecisionReviewPage />} />
             <Route path="/game" element={<GameBoardPage />} />
             <Route path="/game-replay" element={<GameBoardReplayPage />} />
             <Route path="/replay" element={<ReplayViewPage />} />

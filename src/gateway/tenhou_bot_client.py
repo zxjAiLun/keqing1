@@ -15,31 +15,21 @@ from typing import Any
 from gateway.tenhou_bridge import normalize_tenhou_room
 
 logger = logging.getLogger(__name__)
-SUPPORTED_GATEWAY_BOTS = {"keqingv4", "xmodel1", "rulebase"}
+SUPPORTED_GATEWAY_BOTS = {"mortal", "rulebase"}
 
 
 def create_runtime_bot_for_gateway(**kwargs):
     bot_name = kwargs["bot_name"]
-    if bot_name == "rulebase":
-        from inference.rulebase_bot import RulebaseBot
+    from inference.bot_registry import create_runtime_bot
 
-        return RulebaseBot(player_id=kwargs["player_id"], verbose=kwargs.get("verbose", False))
-    from inference.runtime_bot import RuntimeBot
-
-    project_root = Path(kwargs["project_root"])
-    model_path = kwargs.get("model_path")
-    resolved_model_path = (
-        Path(model_path)
-        if model_path is not None
-        else project_root / "artifacts" / "models" / bot_name / "best.pth"
-    )
-    return RuntimeBot(
+    return create_runtime_bot(
+        bot_name=bot_name,
         player_id=kwargs["player_id"],
-        model_path=resolved_model_path,
+        project_root=kwargs["project_root"],
+        model_path=kwargs.get("model_path"),
         device=kwargs.get("device", "cuda"),
         verbose=kwargs.get("verbose", False),
         rank_pt_lambda=kwargs.get("rank_pt_lambda", 0.0),
-        model_version=bot_name,
     )
 
 
@@ -49,7 +39,7 @@ class BotClientConfig:
     port: int = 11600
     room: str = "L2147_9"
     name: str = "NoName"
-    bot_name: str = "xmodel1"
+    bot_name: str = "mortal"
     project_root: Path = Path.cwd()
     model_path: Path | None = None
     device: str = "cuda"
@@ -61,7 +51,9 @@ class BotClientConfig:
             return None
         if self.model_path is not None:
             return Path(self.model_path)
-        return Path(self.project_root) / "artifacts" / "models" / self.bot_name / "best.pth"
+        if self.bot_name == "mortal":
+            return Path(self.project_root) / "artifacts" / "mortal_serving" / "mortal.pth"
+        raise ValueError(f"unsupported bot name: {self.bot_name}")
 
 
 class GatewayBotClient:

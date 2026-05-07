@@ -1,2 +1,0 @@
-"""Bot adapters for mjai."""
-

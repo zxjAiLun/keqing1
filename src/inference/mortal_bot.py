@@ -8,13 +8,40 @@ from typing import Any, Optional
 
 import torch
 
-from inference import DefaultDecisionContextBuilder, DefaultRuntimeReviewExporter
+from inference.default_context import DefaultDecisionContextBuilder
+from inference.review import DefaultRuntimeReviewExporter
 from inference.contracts import DecisionResult, ModelAuxOutputs, ScoredCandidate
-from inference.runtime_bot import enumerate_legal_actions, inject_shanten_waits
-from keqingrl.mortal_observation import sanitize_event_for_mortal
-from keqingrl.mortal_teacher import MORTAL_ACTION_SPACE, MORTAL_DISCARD_ID_TO_TILE
+from mahjong_env.legal_actions import enumerate_legal_actions
 from mahjong_env.state import GameState
 from mahjong_env.tiles import normalize_tile
+
+MORTAL_ACTION_SPACE = 46
+MORTAL_DISCARD_ID_TO_TILE = (
+    "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m",
+    "1p", "2p", "3p", "4p", "5p", "6p", "7p", "8p", "9p",
+    "1s", "2s", "3s", "4s", "5s", "6s", "7s", "8s", "9s",
+    "E", "S", "W", "N", "P", "F", "C",
+    "5mr", "5pr", "5sr",
+)
+_MORTAL_UNSUPPORTED_ANNOUNCE_EVENTS = {"kakan_accepted"}
+
+
+def sanitize_event_for_mortal(event: dict[str, Any]) -> dict[str, Any] | None:
+    event_type = str(event.get("type", ""))
+    if event_type in _MORTAL_UNSUPPORTED_ANNOUNCE_EVENTS:
+        return None
+    if event_type == "none" and "actor" in event:
+        return None
+    return dict(event)
+
+
+def inject_shanten_waits(snap: dict, *, hand_list: list, melds_list: list, model_version: str) -> None:
+    from mahjong_env.replay import _calc_shanten_waits
+
+    shanten, waits_cnt, waits_tiles, _ = _calc_shanten_waits(hand_list, melds_list)
+    snap["shanten"] = shanten
+    snap["waits_count"] = waits_cnt
+    snap["waits_tiles"] = waits_tiles
 
 
 class MortalReviewBot:

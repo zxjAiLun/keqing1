@@ -1,4 +1,4 @@
-"""跑谱 Review 系统：将 tenhou6 JSON / mjai JSONL 牌谱发给 RuntimeBot 逐步决策分析，输出 HTML 报告。"""
+"""Replay review system for Mortal/rulebase bots."""
 
 from __future__ import annotations
 
@@ -29,14 +29,11 @@ for _dir in (str(_SRC_DIR), str(_SCRIPTS_DIR), str(_PROJECT_ROOT)):
         _sys.path.insert(0, _dir)
 
 from inference.rulebase_bot import RulebaseBot
-from inference.runtime_bot import RuntimeBot
 from inference.mortal_bot import MortalReviewBot
 
 # bot 类型 → run_replay_from_source 内部创建 Bot 时用
 _BOT_CLASSES = {
-    "keqingv4": RuntimeBot,
     "mortal": MortalReviewBot,
-    "xmodel1": RuntimeBot,
     "rulebase": RulebaseBot,
 }
 
@@ -44,9 +41,7 @@ PLAYER_NAMES = ["East", "South", "West", "North"]
 
 # 默认 checkpoint 路径（按 bot 类型，相对于 PROJECT_ROOT）
 _DEFAULT_CHECKPOINTS = {
-    "keqingv4": _PROJECT_ROOT / "artifacts/models/keqingv4/best.pth",
     "mortal": _PROJECT_ROOT / "artifacts/mortal_serving/mortal.pth",
-    "xmodel1": _PROJECT_ROOT / "artifacts/models/xmodel1/best.pth",
 }
 _REVIEW_EXPORTER = DefaultRuntimeReviewExporter()
 
@@ -158,7 +153,7 @@ def run_replay_from_source(
     player_id: int,
     checkpoint: Union[str, Path] | None = None,
     input_type: str = "auto",
-    bot_type: str = "xmodel1",
+    bot_type: str = "mortal",
     render_html_report: bool = True,
 ) -> tuple:
     """运行跑谱并返回 (Bot实例, HTML报告字符串)。
@@ -179,7 +174,7 @@ def run_replay_from_source(
         输入内容类型："auto"（自动检测）、"tenhou6"（tenhou6 JSON）、"mjai"（mjai JSONL）。
         "url" 模式下 source 已是 mjai 事件列表。
     bot_type : str
-        Bot 类型：`xmodel1` / `keqingv4` / `mortal` / `rulebase`。
+        Bot type: `mortal` / `rulebase`.
         `rulebase` 不加载 checkpoint；其余模型在 checkpoint 为 None 时使用默认路径。
 
     Returns
@@ -211,8 +206,10 @@ def run_replay_from_source(
             model_path=checkpoint,
             mortal_root=_PROJECT_ROOT / "third_party" / "Mortal",
         )
+    elif bot_type in _BOT_CLASSES:
+        bot = bot_cls(player_id=player_id, model_path=checkpoint)
     else:
-        bot = bot_cls(player_id=player_id, model_path=checkpoint, model_version=bot_type)
+        raise ValueError(f"Unsupported bot_type: {bot_type}")
     setattr(bot, "player_names", [])
 
     _MELD_TYPES = {"chi", "pon", "daiminkan", "ankan", "kakan"}
@@ -308,7 +305,7 @@ def run_replay_from_source(
     return bot, html
 
 
-def render_replay_json(bot: RuntimeBot) -> dict:
+def render_replay_json(bot) -> dict:
     """将 bot.decision_log 转换为前端 Vue 可用的 JSON 数据结构。"""
     log = bot.decision_log
 
@@ -353,7 +350,7 @@ def render_replay_json(bot: RuntimeBot) -> dict:
     })
 
 
-def render_html(bot: RuntimeBot, tiles_dir: Path | None = None) -> str:
+def render_html(bot, tiles_dir: Path | None = None) -> str:
     set_svg_dir(tiles_dir)
     pid = bot.player_id
     log = bot.decision_log
@@ -524,7 +521,7 @@ def render_html(bot: RuntimeBot, tiles_dir: Path | None = None) -> str:
     """
 
 
-def render_replay_html(bot: RuntimeBot) -> str:
+def render_replay_html(bot) -> str:
     """返回嵌入到 result-view 的 HTML 内容片段（无外层 html/body）。"""
     html = render_html(bot)
     start = html.find("<body")
@@ -569,9 +566,9 @@ def main():
     )
     parser.add_argument(
         "--bot-type",
-        default="xmodel1",
-        choices=["xmodel1", "keqingv4", "rulebase"],
-        help="Bot 类型：xmodel1 / keqingv4 / rulebase",
+        default="mortal",
+        choices=["mortal", "rulebase"],
+        help="Bot 类型：mortal / rulebase",
     )
     parser.add_argument("--output", default=None, help="HTML 输出路径")
     parser.add_argument(

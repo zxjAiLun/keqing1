@@ -295,14 +295,13 @@
       <div style="flex:1;min-width:130px">
         <label for="bot-type">模型类型</label>
         <select id="bot-type">
-          <option value="xmodel1" selected>xmodel1 · 当前主线</option>
-          <option value="keqingv4">keqingv4 · 当前备线</option>
+          <option value="mortal" selected>mortal · 当前主线</option>
           <option value="rulebase">rulebase · 规则基线</option>
         </select>
       </div>
       <div style="flex:2;min-width:200px">
         <label for="checkpoint">模型路径</label>
-        <input type="text" id="checkpoint" value="artifacts/models/xmodel1/best.pth">
+        <input type="text" id="checkpoint" value="artifacts/mortal_serving/mortal.pth">
       </div>
       <button id="btn-run">▶ 运行 Review</button>
     </div>
@@ -759,8 +758,7 @@ jsonTextarea.addEventListener('input', () => {
 
 // bot 类型切换时自动更新默认 checkpoint 路径
 const BOT_DEFAULTS = {
-  xmodel1: 'artifacts/models/xmodel1/best.pth',
-  keqingv4: 'artifacts/models/keqingv4/best.pth',
+  mortal: 'artifacts/mortal_serving/mortal.pth',
   rulebase: '',
 };
 const checkpointInput = document.getElementById('checkpoint');

@@ -4,10 +4,9 @@ from pathlib import Path
 from typing import Any
 
 from inference.rulebase_bot import RulebaseBot
-from inference.runtime_bot import RuntimeBot
 from inference.mortal_bot import MortalReviewBot
 
-SUPPORTED_BOT_NAMES = {"keqingv4", "xmodel1", "rulebase", "mortal"}
+SUPPORTED_BOT_NAMES = {"rulebase", "mortal"}
 
 
 def create_runtime_bot(
@@ -37,20 +36,4 @@ def create_runtime_bot(
             device=device,
             verbose=verbose,
         )
-    if bot_name not in SUPPORTED_BOT_NAMES:
-        raise ValueError(f"Unsupported bot name: {bot_name}")
-    resolved_model_path = (
-        Path(model_path)
-        if model_path is not None
-        else Path(project_root) / "artifacts" / "models" / bot_name / "best.pth"
-    )
-    return RuntimeBot(
-        player_id=player_id,
-        model_path=resolved_model_path,
-        device=device,
-        verbose=verbose,
-        beam_k=beam_k,
-        beam_lambda=beam_lambda,
-        rank_pt_lambda=rank_pt_lambda,
-        model_version=bot_name,
-    )
+    raise ValueError(f"Unsupported bot name: {bot_name}")

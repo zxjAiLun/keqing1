@@ -4,14 +4,20 @@ from typing import Optional
 
 import keqing_core
 
-from inference import (
-    DefaultDecisionContextBuilder,
-    DefaultRuntimeReviewExporter,
-    same_action,
-)
+from inference.default_context import DefaultDecisionContextBuilder
+from inference.review import DefaultRuntimeReviewExporter, same_action
 from inference.contracts import DecisionResult, ModelAuxOutputs, ScoredCandidate
-from inference.runtime_bot import enumerate_legal_actions, inject_shanten_waits
+from mahjong_env.legal_actions import enumerate_legal_actions
 from mahjong_env.state import GameState
+
+
+def inject_shanten_waits(snap: dict, *, hand_list: list, melds_list: list, model_version: str) -> None:
+    from mahjong_env.replay import _calc_shanten_waits
+
+    shanten, waits_cnt, waits_tiles, _ = _calc_shanten_waits(hand_list, melds_list)
+    snap["shanten"] = shanten
+    snap["waits_count"] = waits_cnt
+    snap["waits_tiles"] = waits_tiles
 
 
 class RulebaseBot:
@@ -50,11 +56,16 @@ class RulebaseBot:
         if not legal_actions:
             return None
 
-        chosen = keqing_core.choose_rulebase_action(
-            ctx.runtime_snap,
-            actor,
-            legal_actions,
-        )
+        try:
+            chosen = keqing_core.choose_rulebase_action(
+                ctx.runtime_snap,
+                actor,
+                legal_actions,
+            )
+        except RuntimeError as exc:
+            if not keqing_core.is_missing_rust_capability_error(exc):
+                raise
+            chosen = _choose_rulebase_fallback(ctx.runtime_snap, actor, legal_actions)
         if chosen is None:
             chosen = legal_actions[0]
 
@@ -89,3 +100,38 @@ class RulebaseBot:
                 score = 0.0
             scores.append(ScoredCandidate(action=action, logit=score, final_score=score))
         return scores
+
+
+def _choose_rulebase_fallback(snap: dict, actor: int, legal_actions: list[dict]) -> dict | None:
+    for action_type in ("hora", "reach", "ryukyoku"):
+        for action in legal_actions:
+            if action.get("type") == action_type:
+                return action
+
+    reached = snap.get("reached") or []
+    if actor < len(reached) and bool(reached[actor]):
+        last_tsumo = snap.get("last_tsumo") or []
+        drawn = last_tsumo[actor] if actor < len(last_tsumo) else None
+        for action in legal_actions:
+            if action.get("type") == "dahai" and action.get("pai") == drawn and bool(action.get("tsumogiri")):
+                return action
+
+    if any(bool(value) for idx, value in enumerate(reached) if idx != actor):
+        genbutsu = {
+            discard.get("pai")
+            for idx, discards in enumerate(snap.get("discards") or [])
+            if idx != actor and idx < len(reached) and bool(reached[idx])
+            for discard in discards
+            if isinstance(discard, dict)
+        }
+        for action in legal_actions:
+            if action.get("type") == "dahai" and action.get("pai") in genbutsu:
+                return action
+
+    for action in legal_actions:
+        if action.get("type") == "none":
+            return action
+    for action in legal_actions:
+        if action.get("type") == "dahai":
+            return action
+    return legal_actions[0] if legal_actions else None

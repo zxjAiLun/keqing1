@@ -29,7 +29,7 @@ const NAV_ITEMS: Array<{
   { path: '/battle', icon: Users, label: '人机对战' },
   { path: '/bot-battle', icon: Bot, label: '4 Bot 对战' },
   { path: '/review', icon: BarChart2, label: '牌谱分析' },
-  { path: '/keqingrl-review', icon: BrainCircuit, label: 'RL审阅' },
+  { path: '/mortal-review', icon: BrainCircuit, label: 'Mortal审阅' },
   { path: '/selfplay-anomalies', icon: AlertTriangle, label: '对局回放' },
 ];
 
@@ -237,7 +237,7 @@ export function Sidebar() {
             </Button>
             <div>
               <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--text-primary)' }}>Keqing1</div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>xmodel1 主线工作台</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Mortal 主线工作台</div>
             </div>
           </div>
           <ThemeToggle />
@@ -288,7 +288,7 @@ export function Sidebar() {
             {logo}
             <div>
               <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--sidebar-text)' }}>Keqing1</div>
-              <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>xmodel1 主线工作台</div>
+              <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>Mortal 主线工作台</div>
             </div>
           </div>
 
@@ -349,7 +349,7 @@ export function Sidebar() {
             {logo}
             <div>
               <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--sidebar-text)' }}>Keqing1</div>
-              <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>xmodel1 主线工作台</div>
+              <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>Mortal 主线工作台</div>
             </div>
           </div>
         )}
