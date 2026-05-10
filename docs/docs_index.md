@@ -1,12 +1,15 @@
 # Keqing1 Docs Index
 
-Updated: 2026-05-08
+Updated: 2026-05-10
 
 ## Active Control Surfaces
 
 - `docs/project_overview_current.md`: current project direction and boundaries
 - `docs/project_progress.md`: live status board
 - `docs/agent_sync.md`: coordination and handoff rules
+- `docs/mortal/mainline_pivot_2026_05_09.md`: Mortal encoding mainline decision
+- `docs/mortal/deep_research_sync_2026_05_10.md`: synchronized architecture,
+  progress, and development plan from the two Mortal deep research reports
 - `docs/mortal/archive_decisions_2026_05.md`: project contraction/archive decision
 
 ## Active Mainline
@@ -14,9 +17,15 @@ Updated: 2026-05-08
 ### Mortal Fine-Tuning / Selfplay / Evaluation
 
 - `docs/mortal_action_contract.md`: Mortal Q/mask/action mapping and prior teacher-gate corrections
+- `docs/mortal/deep_research_sync_2026_05_10.md`: native-first Mortal
+  architecture understanding and implementation priority
 - `plans/mortal_training_runbook_2026_04_28.md`: operational Mortal training runbook
 - `scripts/mortal/generate_riichienv_selfplay_replays.py`: current 4-Mortal RiichiEnv selfplay replay generator
 - `scripts/mortal/materialize_replay_sidecars.py`: current Mortal Q/mask decision sidecar exporter
+
+Active model work should use Mortal/libriichi observation encoding, Mortal Brain,
+and Mortal Dueling DQN checkpoints. Future policy/value/rank heads belong on
+that compatible backbone unless a later control document says otherwise.
 
 ## Archived Experiments
 
