@@ -28,7 +28,7 @@ export const BOT_CATALOG: BotCatalogEntry[] = [
 export const DEFAULT_BOT_TYPE: BotType = 'mortal';
 
 export const BOT_CHECKPOINT_DEFAULTS: Record<BotType, string> = {
-  mortal: 'artifacts/mortal_serving/mortal.pth',
+  mortal: 'artifacts/mortal_training/mortal.pth',
   rulebase: '',
 };
 

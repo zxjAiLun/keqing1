@@ -1,1 +1,1 @@
-# Test helpers live under the `tests` package for direct reuse across xmodel1 suites.
+# Test helpers live under the `tests` package for direct reuse across suites.

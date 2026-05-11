@@ -1,6 +1,6 @@
 # Mortal Mainline Archive Decisions
 
-Updated: 2026-05-09
+Updated: 2026-05-10
 
 ## Decision
 
@@ -31,10 +31,14 @@ Archived routes:
 
 ## Implementation Boundary
 
-Phase 0 freezes direction in documentation without deleting code.
+Phase 0 freezes direction before new model work. KeqingRL, old materialize
+sidecars, self-written replay core, xmodel, and keqingv routes are archive-only
+for strength development. Keep only tools that still produce useful MJAI,
+`json.gz`, replay review, or metrics artifacts.
 
-Phase 1 moves useful Mortal tools into `scripts/mortal/` and leaves deprecated
-wrappers at old paths for command compatibility.
+Phase 1 moves useful Mortal tools into `scripts/mortal/`, adds fixed-seed
+Mortal selfplay tests, and standardizes metric export. Deprecated wrappers at
+old paths are retained only for command compatibility.
 
 Phase 2 may mark KeqingRL entrypoints as archived or move them under
 `archive/keqingrl_mortal_imitation_202605/`, but only after imports/tests are
@@ -50,6 +54,51 @@ default CI does not carry frozen routes.
 - `scripts/mortal/generate_riichienv_selfplay_replays.py`
 - `scripts/mortal/materialize_replay_sidecars.py`
 - `scripts/mortal/export_decision_review_cases.py`
+- `scripts/mortal/one_vs_three_smoke.py`
+- `scripts/mortal/ab_match.py`
+- `scripts/mortal/eval_metrics.py`
+
+## Phase 0 Freeze Directory
+
+| Category | Handling |
+| --- | --- |
+| Self-written game core / rules | Archive for strength work. Keep only when needed by UI/gateway compatibility or regression tests. |
+| KeqingRL / legacy policy route | Archive. These paths are not environment setup blockers and should not be revived for new training. |
+| Old materialize sidecars | Archive, except Mortal replay-review sidecars under `scripts/mortal/`. |
+| xmodel / keqingv export formats | Archive for model development. Retain only as historical conversion code until removed from build/test scope. |
+| Data download / organizing scripts | Cherry-pick keep when they produce or repair MJAI input data. |
+| Replay conversion to Mortal data | Keep when the output is Mortal-compatible `*.json.gz`. |
+| Replay review / visualization | Keep when it consumes MJAI/Mortal-review artifacts. |
+| Mortal / libriichi / RiichiEnv adapter layer | New mainline. Phase 1 evaluation should use these contracts. |
+
+## Phase 1 Commands
+
+Mortal native fixed-seed smoke:
+
+```bash
+uv run python scripts/mortal/one_vs_three_smoke.py \
+  --challenger artifacts/mortal_training/mortal.pth \
+  --champion artifacts/mortal_training/mortal.pth \
+  --seed-start 10000 \
+  --seed-key 8192 \
+  --seed-count 1 \
+  --output-dir artifacts/eval/one_vs_three_smoke
+```
+
+RiichiEnv A/B match:
+
+```bash
+uv run python scripts/mortal/ab_match.py \
+  --model-a artifacts/mortal_training/mortal.pth \
+  --model-b artifacts/mortal_serving/backups/mortal_step30000_before_step41200_20260430_201553.pth \
+  --games 4 \
+  --seat-mode one-vs-three \
+  --seed 10000 \
+  --output-dir artifacts/eval/riichienv_ab_match
+```
+
+Both commands write `metrics.json` using schema
+`keqing.mortal.eval.metrics.v1`.
 
 Deprecated wrappers are intentionally retained:
 

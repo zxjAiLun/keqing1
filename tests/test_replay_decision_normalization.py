@@ -56,10 +56,10 @@ def test_normalize_replay_decisions_fills_response_gt_action_from_confirmed_acti
         ],
     }
 
-    normalized = normalize_replay_decisions(decisions, meta={"bot_type": "xmodel1"})
+    normalized = normalize_replay_decisions(decisions, meta={"bot_type": "mortal"})
 
     assert normalized["log"][0]["gt_action"]["type"] == "chi"
-    assert normalized["bot_type"] == "xmodel1"
+    assert normalized["bot_type"] == "mortal"
     assert normalized["match_count"] == 1
 
 

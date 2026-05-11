@@ -14,25 +14,6 @@ _resolve_model_path = _MODULE._resolve_model_path
 _canonicalize_action_for_server = _MODULE._canonicalize_action_for_server
 
 
-def test_resolve_seat_bots_supports_rulebase_mix(tmp_path, monkeypatch):
-    for model_name in ("xmodel1", "keqingv4"):
-        model_dir = tmp_path / model_name
-        model_dir.mkdir(parents=True)
-        (model_dir / "best.pth").write_bytes(b"checkpoint")
-    monkeypatch.setattr(_MODULE, "MODEL_ROOT", tmp_path)
-
-    sources, labels, kinds = _resolve_seat_bots(
-        "xmodel1",
-        ["xmodel1", "rulebase", "rulebase", "keqingv4"],
-        None,
-        None,
-    )
-
-    assert sources[1] == "rulebase"
-    assert labels[1] == "rulebase"
-    assert kinds == ["xmodel1", "rulebase", "rulebase", "keqingv4"]
-
-
 def test_resolve_model_path_supports_mortal_default(tmp_path, monkeypatch):
     ckpt = tmp_path / "mortal.pth"
     ckpt.write_bytes(b"checkpoint")

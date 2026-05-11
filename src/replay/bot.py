@@ -41,7 +41,7 @@ PLAYER_NAMES = ["East", "South", "West", "North"]
 
 # 默认 checkpoint 路径（按 bot 类型，相对于 PROJECT_ROOT）
 _DEFAULT_CHECKPOINTS = {
-    "mortal": _PROJECT_ROOT / "artifacts/mortal_serving/mortal.pth",
+    "mortal": _PROJECT_ROOT / "artifacts/mortal_training/mortal.pth",
 }
 _REVIEW_EXPORTER = DefaultRuntimeReviewExporter()
 

@@ -50,6 +50,7 @@ class ReplayStorage:
         decisions: dict,
         bot_type: str = "mortal",
         player_names: Optional[list[str]] = None,
+        checkpoint: Optional[str] = None,
     ) -> str:
         """保存回放到文件系统，返回 replay_id。"""
         replay_id = f"replay_{uuid.uuid4().hex[:8]}_{int(time.time())}"
@@ -82,6 +83,7 @@ class ReplayStorage:
             "replay_id": replay_id,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "bot_type": bot_type,
+            "checkpoint": checkpoint,
             "kyoku_count": kyoku_count,
             "total_steps": total_steps,
             "player_names": player_names or ["E", "S", "W", "N"],

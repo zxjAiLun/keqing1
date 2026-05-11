@@ -9,7 +9,8 @@ from .loader import load_static_table_bundle
 from .schema import StaticTableBundle, StaticTableRecord
 from .query import PointEvQuery, StaticExactQuery, StaticTableHit, TileDangerQuery
 
-_DEFAULT_BUNDLE_PATH = Path("data/static/tables/mahjong_book_stats.json")
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_BUNDLE_PATH = _PROJECT_ROOT / "dataset" / "data" / "static" / "tables" / "mahjong_book_stats.json"
 
 
 @dataclass

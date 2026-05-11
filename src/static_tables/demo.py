@@ -30,7 +30,10 @@ def annotate_replay_candidate_demo(candidate: dict, entry: Optional[dict] = None
     pai = action.get("pai")
     if not isinstance(pai, str):
         return candidate
-    hit = lookup_replay_dahai_danger_demo(pai, entry)
+    try:
+        hit = lookup_replay_dahai_danger_demo(pai, entry)
+    except FileNotFoundError:
+        return candidate
     if hit is None:
         return candidate
     annotated = dict(candidate)

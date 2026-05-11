@@ -30,6 +30,7 @@ where = ["src"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 python_files = [
+    "test_mortal_eval_metrics.py",
     "test_generate_mortal_riichienv_replays.py",
     "test_prepare_mortal_training.py",
     "test_rulebase_bot.py",
@@ -51,10 +52,6 @@ python_files = [
     "test_rust_hora_shape_parity.py",
     "test_rust_state_core_parity.py",
 ]
-markers = [
-    "archive: archived KeqingRL/Keqingv/XModel/old SL preprocess tests; not collected by default",
-]
-
 [dependency-groups]
 dev = [
     "mahjong>=1.4.0",

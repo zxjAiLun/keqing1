@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import numpy as np
 import xml.etree.ElementTree as ET
@@ -25,6 +26,24 @@ class _NumpyEncoder(json.JSONEncoder):
         if isinstance(obj, np.ndarray):
             return obj.tolist()
         return super().default(obj)
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {key: _json_safe(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist())
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        value = float(value)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
 from fastapi.staticfiles import StaticFiles
 
 BASE_DIR = Path(__file__).parent
@@ -156,7 +175,7 @@ def _infer_player_bot_type(player_name: str | None, fallback: str | None = None)
 
 def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
     mapping = {
-        "mortal": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "mortal.pth",
+        "mortal": BASE_DIR.parent.parent / "artifacts" / "mortal_training" / "mortal.pth",
     }
     return mapping[bot_type]
 
@@ -256,13 +275,14 @@ async def replay(
                 decisions=result,
                 bot_type=bot_type,
                 player_names=result.get("player_names"),
+                checkpoint=checkpoint or str(_default_checkpoint_for_bot_type(bot_type)),
             )
             result = {
                 **result,
                 "replay_id": replay_id,
             }
         return Response(
-            content=json.dumps(result, cls=_NumpyEncoder, ensure_ascii=False),
+            content=json.dumps(_json_safe(result), cls=_NumpyEncoder, ensure_ascii=False, allow_nan=False),
             media_type="application/json",
         )
 
@@ -281,6 +301,7 @@ async def save_replay(
     decisions: dict = Form(...),
     bot_type: str = Form("mortal"),
     player_names: str = Form(""),
+    checkpoint: str = Form(""),
 ):
     """手动保存回放到存储（内部使用或高级用户）。"""
     storage = get_storage()
@@ -290,6 +311,7 @@ async def save_replay(
         decisions=decisions,
         bot_type=bot_type,
         player_names=names,
+        checkpoint=checkpoint or None,
     )
     return JSONResponse(content={"replay_id": replay_id, "status": "saved"})
 
@@ -325,7 +347,7 @@ async def get_replay(replay_id: str, player_id: int | None = None):
         fallback_bot_type = meta.get("bot_type") or decisions.get("bot_type") or "mortal"
         player_name = player_names[player_id] if 0 <= player_id < len(player_names) else None
         bot_type = _infer_player_bot_type(player_name, fallback=fallback_bot_type)
-        checkpoint = _default_checkpoint_for_bot_type(bot_type)
+        checkpoint = meta.get("checkpoint") or _default_checkpoint_for_bot_type(bot_type)
         bot = run_replay_single_raw(
             events,
             player_id=player_id,
@@ -338,7 +360,7 @@ async def get_replay(replay_id: str, player_id: int | None = None):
     if isinstance(decisions, dict):
         decisions = normalize_replay_decisions(decisions, meta=meta)
         decisions = _merge_terminal_event_details(decisions, events)
-    return JSONResponse(content=decisions)
+    return JSONResponse(content=_json_safe(decisions))
 
 
 @app.get("/api/replay/{replay_id}/meta", response_class=JSONResponse)

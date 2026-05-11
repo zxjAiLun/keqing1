@@ -80,42 +80,6 @@ def test_normalize_observation_state_reads_riichienv_meld_type_from_string() -> 
     ]
 
 
-def test_keqing_agent_scores_request_action_from_observation(monkeypatch) -> None:
-    fake_obs = FakeObservation(player_id=2)
-
-    def fake_decode(message):
-        assert message["observation"] == "encoded"
-        return fake_obs, fake_obs.to_dict()
-
-    class FakeScorer:
-        def score(self, ctx):
-            assert ctx.actor == 2
-            assert ctx.legal_actions == [{"type": "none"}]
-            assert ctx.model_snap["actor"] == 2
-            return type("Decision", (), {"chosen": {"type": "none"}})()
-
-    class FakeAdapter:
-        @classmethod
-        def from_checkpoint(cls, *args, **kwargs):
-            return object()
-
-    monkeypatch.setattr(rdc, "_decode_observation", fake_decode)
-    monkeypatch.setattr(rdc, "KeqingModelAdapter", FakeAdapter)
-    monkeypatch.setattr(rdc, "DefaultActionScorer", lambda **kwargs: FakeScorer())
-
-    agent = rdc.ObservationScoringAgent(model_path=Path("fake.pth"), device="cpu")
-    action = agent.select_action(
-        {
-            "type": "request_action",
-            "observation": "encoded",
-            "possible_actions": [{"type": "none"}],
-        },
-        seat=None,
-    )
-
-    assert action == {"type": "none", "actor": 2}
-
-
 def test_client_tracks_seat_and_only_replies_to_request_action() -> None:
     agent = StubAgent({"type": "dahai", "pai": "3m", "actor": 1})
     client = rdc.RiichiDevBotClient(
@@ -507,30 +471,6 @@ def test_ws_url_override_takes_precedence() -> None:
     assert cfg.ws_url() == "wss://games.riichi.dev/ws/validate"
 
 
-def test_agent_converts_string_device_before_building_adapter(monkeypatch) -> None:
-    captured = {}
-
-    def fake_from_checkpoint(cls, *args, **kwargs):
-        captured["device"] = kwargs["device"]
-        return object()
-
-    class FakeScorer:
-        def score(self, ctx):
-            return type("Decision", (), {"chosen": {"type": "none"}})()
-
-    class FakeAdapter:
-        @classmethod
-        def from_checkpoint(cls, *args, **kwargs):
-            return fake_from_checkpoint(cls, *args, **kwargs)
-
-    monkeypatch.setattr(rdc, "KeqingModelAdapter", FakeAdapter)
-    monkeypatch.setattr(rdc, "DefaultActionScorer", lambda **kwargs: FakeScorer())
-
-    rdc.ObservationScoringAgent(model_path=Path("fake.pth"), device="cpu")
-
-    assert str(captured["device"]) == "cpu"
-
-
 def test_resolve_ws_url_accepts_https_base_url() -> None:
     assert (
         rdc._resolve_ws_url("https://riichi.dev", "validate")
@@ -541,26 +481,18 @@ def test_resolve_ws_url_accepts_https_base_url() -> None:
 def test_resolve_default_token_prefers_lattekey(monkeypatch) -> None:
     monkeypatch.setenv("LATTEKEY", "latte-token")
 
-    assert rdc._resolve_default_token("xmodel1") == "latte-token"
+    assert rdc._resolve_default_token("mortal") == "latte-token"
 
 
 def test_resolve_default_token_uses_lattekey_for_other_bots(monkeypatch) -> None:
     monkeypatch.setenv("LATTEKEY", "latte-token")
-    assert rdc._resolve_default_token("keqingv4") == "latte-token"
+    assert rdc._resolve_default_token("rulebase") == "latte-token"
 
 
 def test_resolve_default_token_with_source_prefers_lattekey(monkeypatch) -> None:
     monkeypatch.setenv("LATTEKEY", "latte-token")
 
-    assert rdc._resolve_default_token_with_source("xmodel1") == ("latte-token", "LATTEKEY")
-
-
-def test_resolve_model_path_uses_default_checkpoint() -> None:
-    assert rdc._resolve_model_path(
-        bot_name="keqingv4",
-        project_root=Path("/tmp/project"),
-        model_path=None,
-    ) == Path("/tmp/project/artifacts/models/keqingv4/best.pth")
+    assert rdc._resolve_default_token_with_source("mortal") == ("latte-token", "LATTEKEY")
 
 
 def test_resolve_model_path_uses_mortal_default_checkpoint() -> None:
@@ -581,72 +513,6 @@ def test_decode_jwt_payload_unverified_reads_name_and_bot_id() -> None:
     payload = rdc._decode_jwt_payload_unverified(token)
 
     assert payload == {"name": "mocha", "type": "bot", "bot_id": "bot-123"}
-
-
-def test_create_agent_supports_xmodel1_spec(monkeypatch) -> None:
-    created = {}
-
-    class FakeObservationAgent:
-        def __init__(self, **kwargs):
-            created.update(kwargs)
-
-    monkeypatch.setattr(rdc, "ObservationScoringAgent", FakeObservationAgent)
-    agent = rdc.create_riichi_dev_agent(
-        bot_name="xmodel1",
-        project_root=Path("."),
-        model_path=None,
-        device="cpu",
-        verbose=False,
-    )
-
-    assert isinstance(agent, FakeObservationAgent)
-    assert created["model_version"] == "xmodel1"
-    assert created["hidden_dim"] == rdc.DEFAULT_DECISION_AGENT_SPEC.hidden_dim
-    assert created["num_res_blocks"] == rdc.DEFAULT_DECISION_AGENT_SPEC.num_res_blocks
-
-
-def test_create_agent_supports_keqingv4_spec(monkeypatch) -> None:
-    created = {}
-
-    class FakeObservationAgent:
-        def __init__(self, **kwargs):
-            created.update(kwargs)
-
-    monkeypatch.setattr(rdc, "ObservationScoringAgent", FakeObservationAgent)
-    agent = rdc.create_riichi_dev_agent(
-        bot_name="keqingv4",
-        project_root=Path("."),
-        model_path=None,
-        device="cpu",
-        verbose=False,
-    )
-
-    assert isinstance(agent, FakeObservationAgent)
-    assert created["model_version"] == "keqingv4"
-    assert created["hidden_dim"] == 320
-    assert created["num_res_blocks"] == 6
-    assert created["rank_pt_lambda"] == 0.0
-
-
-def test_create_agent_allows_rank_pt_lambda_override(monkeypatch) -> None:
-    created = {}
-
-    class FakeObservationAgent:
-        def __init__(self, **kwargs):
-            created.update(kwargs)
-
-    monkeypatch.setattr(rdc, "ObservationScoringAgent", FakeObservationAgent)
-    agent = rdc.create_riichi_dev_agent(
-        bot_name="keqingv4",
-        project_root=Path("."),
-        model_path=None,
-        device="cpu",
-        verbose=False,
-        rank_pt_lambda=0.1,
-    )
-
-    assert isinstance(agent, FakeObservationAgent)
-    assert created["rank_pt_lambda"] == 0.1
 
 
 def test_create_agent_supports_rulebase() -> None:
@@ -1817,34 +1683,6 @@ def test_mortal_legalize_accepts_riichienv_hora_without_target(caplog) -> None:
     assert "mortal legality guard fallback" not in caplog.text
 
 
-def test_create_agent_passes_model_version_and_weights(monkeypatch) -> None:
-    captured = {}
-
-    class FakeObservationAgent:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr(rdc, "ObservationScoringAgent", FakeObservationAgent)
-
-    agent = rdc.create_riichi_dev_agent(
-        bot_name="futurev5",
-        project_root=Path("."),
-        model_path=Path("artifacts/models/futurev5/custom_best.pth"),
-        device="cpu",
-        verbose=False,
-        model_version="futurev5_exp",
-    )
-
-    assert isinstance(agent, FakeObservationAgent)
-    assert captured["model_path"] == Path("artifacts/models/futurev5/custom_best.pth")
-    assert captured["model_version"] == "futurev5_exp"
-    assert captured["beam_k"] == rdc.DEFAULT_DECISION_AGENT_SPEC.beam_k
-    assert captured["beam_lambda"] == rdc.DEFAULT_DECISION_AGENT_SPEC.beam_lambda
-    assert captured["score_delta_lambda"] == rdc.DEFAULT_DECISION_AGENT_SPEC.score_delta_lambda
-    assert captured["win_prob_lambda"] == rdc.DEFAULT_DECISION_AGENT_SPEC.win_prob_lambda
-    assert captured["dealin_prob_lambda"] == rdc.DEFAULT_DECISION_AGENT_SPEC.dealin_prob_lambda
-
-
 def test_riichi_dev_client_leaves_rank_pt_lambda_unset_when_config_omits_override(monkeypatch) -> None:
     captured = {}
 
@@ -1857,7 +1695,7 @@ def test_riichi_dev_client_leaves_rank_pt_lambda_unset_when_config_omits_overrid
     client = rdc.RiichiDevBotClient(
         rdc.RiichiDevClientConfig(
             token="t",
-            bot_name="keqingv4",
+            bot_name="mortal",
             model_path=Path("fake.pth"),
         )
     )
@@ -1878,7 +1716,7 @@ def test_riichi_dev_client_config_rank_pt_lambda_overrides_spec(monkeypatch) -> 
     client = rdc.RiichiDevBotClient(
         rdc.RiichiDevClientConfig(
             token="t",
-            bot_name="keqingv4",
+            bot_name="mortal",
             model_path=Path("fake.pth"),
             rank_pt_lambda=0.25,
         )
@@ -1982,7 +1820,7 @@ def test_audit_logger_logs_send_result(tmp_path: Path) -> None:
 
     logger.log_send_result(
         queue="ranked",
-        bot_name="keqingv4",
+        bot_name="mortal",
         model_version=None,
         seat=0,
         request_seq=11,
@@ -2091,7 +1929,7 @@ def test_audit_logger_logs_protocol_action(tmp_path: Path) -> None:
 
     logger.log_protocol_action(
         queue="ranked",
-        bot_name="xmodel1",
+        bot_name="mortal",
         model_version=None,
         seat=0,
         trigger_message={"type": "reach", "actor": 0},
@@ -2103,51 +1941,6 @@ def test_audit_logger_logs_protocol_action(tmp_path: Path) -> None:
     assert payload["kind"] == "protocol_action"
     assert payload["trigger_type"] == "reach"
     assert payload["response"]["pai"] == "4m"
-
-
-def test_observation_agent_reuses_cached_reach_discard(monkeypatch) -> None:
-    fake_obs = FakeObservation(player_id=1)
-
-    def fake_decode(message):
-        return fake_obs, fake_obs.to_dict()
-
-    class FakeScorer:
-        def score(self, ctx):
-            from inference.contracts import DecisionResult, ScoredCandidate, ModelAuxOutputs
-
-            return DecisionResult(
-                chosen={"type": "reach", "actor": 1},
-                candidates=[
-                    ScoredCandidate(
-                        action={"type": "reach", "actor": 1},
-                        logit=1.0,
-                        final_score=2.0,
-                        beam_score=2.0,
-                        meta={"reach_discard": {"type": "dahai", "actor": 1, "pai": "3p", "tsumogiri": False}},
-                    )
-                ],
-                model_value=0.0,
-                model_aux=ModelAuxOutputs(),
-            )
-
-    class FakeAdapter:
-        @classmethod
-        def from_checkpoint(cls, *args, **kwargs):
-            return object()
-
-    monkeypatch.setattr(rdc, "_decode_observation", fake_decode)
-    monkeypatch.setattr(rdc, "KeqingModelAdapter", FakeAdapter)
-    monkeypatch.setattr(rdc, "DefaultActionScorer", lambda **kwargs: FakeScorer())
-
-    agent = rdc.ObservationScoringAgent(model_path=Path("fake.pth"), device="cpu")
-    first = agent.select_action(
-        {"type": "request_action", "observation": "encoded", "possible_actions": [{"type": "reach", "actor": 1}]},
-        seat=1,
-    )
-    second = agent.select_action({"type": "reach", "actor": 1}, seat=1)
-
-    assert first == {"type": "reach", "actor": 1}
-    assert second == {"type": "dahai", "actor": 1, "pai": "3p", "tsumogiri": False}
 
 
 def test_client_ignores_reach_event_without_agent_call() -> None:
@@ -2172,19 +1965,6 @@ def test_client_ignores_reach_event_without_agent_call() -> None:
 
     assert response is None
     assert agent.calls == []
-
-
-def test_observation_agent_ignores_non_request_reach_without_pending_followup() -> None:
-    agent = rdc.ObservationScoringAgent.__new__(rdc.ObservationScoringAgent)
-    agent._pending_reach_discard = None
-
-    response = rdc.ObservationScoringAgent.select_action(
-        agent,
-        {"type": "reach", "actor": 1},
-        seat=1,
-    )
-
-    assert response == {"type": "none"}
 
 
 def test_validation_safe_agent_prefers_tsumogiri_when_legal() -> None:
@@ -2225,7 +2005,7 @@ def test_log_startup_self_check_rejects_missing_model_path(caplog) -> None:
     try:
         rdc._log_startup_self_check(
             queue="validate",
-            bot_name="keqingv4",
+            bot_name="mortal",
             model_version=None,
             token=(
                 "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -2246,7 +2026,7 @@ def test_log_startup_self_check_rejects_missing_model_path(caplog) -> None:
 def test_log_startup_self_check_is_silent_without_debug(caplog) -> None:
     rdc._log_startup_self_check(
         queue="validate",
-        bot_name="keqingv4",
+        bot_name="mortal",
         model_version=None,
         token=(
             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."

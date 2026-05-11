@@ -54,7 +54,7 @@ def test_start_game_creates_runtime_bot_and_defaults_to_none(monkeypatch, tmp_pa
         tbc.BotClientConfig(
             name="bot-b",
             room="2147_0",
-            bot_name="xmodel1",
+            bot_name="mortal",
             project_root=Path('/tmp/project'),
             model_path=fake_ckpt,
         )
@@ -63,7 +63,7 @@ def test_start_game_creates_runtime_bot_and_defaults_to_none(monkeypatch, tmp_pa
     response = client.handle_message({"type": "start_game", "id": 2, "names": []})
 
     assert created["player_id"] == 2
-    assert created["bot_name"] == "xmodel1"
+    assert created["bot_name"] == "mortal"
     assert response == {"type": "none", "actor": 2}
 
 
