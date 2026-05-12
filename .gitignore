@@ -126,6 +126,8 @@ docs/**
 !docs/mortal/
 !docs/mortal/archive_decisions_2026_05.md
 !docs/mortal/mainline_pivot_2026_05_09.md
+!docs/mortal/reward_pt_experiment_report_2026_05.md
+!docs/mortal/grp_audit_report_2026_05.md
 !docs/mortal_action_contract.md
 !docs/riichi_dev_mortal_handoff.md
 !docs/keqingrl/

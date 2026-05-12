@@ -10,7 +10,9 @@ from pathlib import Path
 import sys
 from typing import Any
 
-DEFAULT_RANK_PTS = (90, 45, 0, -135)
+from scripts.mortal import eval_metrics
+
+DEFAULT_RANK_PTS = eval_metrics.TENHOU_RANK_POINTS
 
 RAW_FIELDS = (
     "game",
@@ -154,13 +156,13 @@ def parse_player_specs(specs: Sequence[str]) -> dict[str, str]:
     return players
 
 
-def stat_to_metrics(stat: Any, *, rank_pts: Sequence[int] = DEFAULT_RANK_PTS) -> dict[str, Any]:
+def stat_to_metrics(stat: Any, *, rank_pts: Sequence[int | float] = DEFAULT_RANK_PTS) -> dict[str, Any]:
     metrics: dict[str, Any] = {"raw": {}, "derived": {}, "text": str(stat)}
     for field in RAW_FIELDS:
         metrics["raw"][field] = _normalize_value(getattr(stat, field))
     for field in DERIVED_FIELDS:
         metrics["derived"][field] = _normalize_value(getattr(stat, field))
-    pts = [int(value) for value in rank_pts]
+    pts = [float(value) for value in rank_pts]
     metrics["derived"]["total_rank_pt"] = _normalize_value(stat.total_pt(pts))
     metrics["derived"]["avg_rank_pt"] = _normalize_value(stat.avg_pt(pts))
     return metrics
@@ -171,7 +173,8 @@ def build_stat_report(
     log_dir: str | Path,
     players: Mapping[str, str],
     mortal_root: str | Path = Path("third_party/Mortal"),
-    rank_pts: Sequence[int] = DEFAULT_RANK_PTS,
+    rank_pts: Sequence[int | float] = DEFAULT_RANK_PTS,
+    rank_points_profile: str = "custom",
 ) -> dict[str, Any]:
     stat_cls = import_stat_class(mortal_root)
     player_stats: dict[str, dict[str, Any]] = {}
@@ -185,7 +188,9 @@ def build_stat_report(
         "schema": "keqing.mortal.libriichi.stat.v1",
         "backend": "libriichi.stat.Stat.from_dir",
         "log_dir": str(log_dir),
-        "rank_pts": [int(value) for value in rank_pts],
+        "rank_points_profile": str(rank_points_profile),
+        "rank_points_values": [float(value) for value in rank_pts],
+        "rank_pts": [float(value) for value in rank_pts],
         "players": player_stats,
     }
 
@@ -196,11 +201,18 @@ def write_stat_report(
     log_dir: str | Path,
     players: Mapping[str, str],
     mortal_root: str | Path = Path("third_party/Mortal"),
-    rank_pts: Sequence[int] = DEFAULT_RANK_PTS,
+    rank_pts: Sequence[int | float] = DEFAULT_RANK_PTS,
+    rank_points_profile: str = "custom",
 ) -> dict[str, Any]:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    report = build_stat_report(log_dir=log_dir, players=players, mortal_root=mortal_root, rank_pts=rank_pts)
+    report = build_stat_report(
+        log_dir=log_dir,
+        players=players,
+        mortal_root=mortal_root,
+        rank_pts=rank_pts,
+        rank_points_profile=rank_points_profile,
+    )
     (output_path / "detailed_stats.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
@@ -217,6 +229,7 @@ def format_markdown_report(report: Mapping[str, Any]) -> str:
         "",
         f"- Backend: `{report['backend']}`",
         f"- Log dir: `{report['log_dir']}`",
+        f"- Rank point profile: `{report.get('rank_points_profile', 'custom')}`",
         f"- Rank pts: `{report['rank_pts']}`",
         "",
         "| Metric | " + " | ".join(labels) + " |",
@@ -266,16 +279,23 @@ def _parse_args() -> argparse.Namespace:
         required=True,
         help="LABEL=PLAYER_NAME. Can be repeated, e.g. '4.1c (x1)=challenger'.",
     )
+    eval_metrics.add_rank_point_args(parser)
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    _profile, rank_pts = eval_metrics.resolve_rank_points(
+        rank_points=getattr(args, "rank_points", None),
+        profile=str(getattr(args, "rank_points_profile", "tenhou_reference")),
+    )
     report = write_stat_report(
         output_dir=args.output_dir,
         log_dir=args.log_dir,
         players=parse_player_specs(args.player),
         mortal_root=args.mortal_root,
+        rank_pts=rank_pts,
+        rank_points_profile=_profile,
     )
     print(format_markdown_report(report), end="")
 

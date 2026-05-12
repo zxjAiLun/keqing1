@@ -5,7 +5,7 @@ import { Loader2 } from 'lucide-react';
 import type { ReplayData } from '../types/replay';
 import type { DecisionLogEntry } from '../types/replay';
 import { replayApi } from '../api/replayApi';
-import { actionLabel, sameReplayAction } from '../utils/tileUtils';
+import { actionLabel, isReplayDiffForPlayer, isReplayPlayerDecision, sameReplayAction } from '../utils/tileUtils';
 import { CN_BAKAZE, SEAT_NAMES_CN } from '../utils/constants';
 import { normalizeReplayPlayerNames, replayPlayerDisplayName } from '../utils/replayNames';
 
@@ -142,7 +142,7 @@ function CandidateTable({
 // 统计面板
 // ---------------------------------------------------------------------------
 export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () => void }) {
-  const log = data.log.filter(e => !e.is_obs);
+  const log = data.log.filter(e => isReplayPlayerDecision(e, data.player_id));
   const total = log.length;
   const match = log.filter((e) => sameReplayAction(e.chosen, e.gt_action)).length;
   const pct = total ? (match / total * 100).toFixed(1) : '0.0';
@@ -472,11 +472,7 @@ export function ReplayViewPage() {
   }) : [];
 
   const isDiff = useCallback((e: DecisionLogEntry) =>
-    data !== null &&
-    !e.is_obs &&
-    e.actor_to_move === data.player_id &&
-    e.gt_action !== null &&
-    !sameReplayAction(e.chosen, e.gt_action)
+    data !== null && isReplayDiffForPlayer(e, data.player_id)
   , [data]);
 
   const jumpToPrevDiff = useCallback(() => {

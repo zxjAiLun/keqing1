@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - mortal-mainline-cleanup
+      - codex/mortal-encoding-mainline
   pull_request:
     branches:
       - main

@@ -16,7 +16,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scripts.mortal.eval_metrics import build_metrics_document, summarize_rank_counts, write_metrics
+from scripts.mortal.eval_metrics import (
+    add_rank_point_args,
+    build_metrics_document,
+    resolve_rank_points,
+    summarize_rank_counts_with_references,
+    write_metrics,
+)
 from scripts.mortal.stat_report import write_stat_report
 
 
@@ -33,6 +39,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-amp", action="store_true")
     parser.add_argument("--challenger-label", default="challenger (x1)")
     parser.add_argument("--champion-label", default="champion (x3)")
+    add_rank_point_args(parser)
     return parser.parse_args()
 
 
@@ -80,6 +87,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     from libriichi.arena import OneVsThree  # noqa: PLC0415
 
     champion_path = args.champion or args.challenger
+    rank_points_profile, rank_points = resolve_rank_points(
+        rank_points=getattr(args, "rank_points", None),
+        profile=str(getattr(args, "rank_points_profile", "tenhou_reference")),
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     log_dir = args.output_dir / "logs"
 
@@ -117,9 +128,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "seed_key": int(args.seed_key),
             "seed_count": int(args.seed_count),
             "device": str(args.device),
+            "rank_points_profile": rank_points_profile,
+            "rank_points_values": [float(value) for value in rank_points],
         },
-        metrics={"challenger": summarize_rank_counts(rank_counts)},
+        metrics={"challenger": summarize_rank_counts_with_references(rank_counts, rank_points=rank_points)},
         artifacts={"log_dir": str(log_dir)},
+        rank_points_profile=rank_points_profile,
+        rank_points_values=rank_points,
     )
     write_metrics(args.output_dir / "metrics.json", document)
     stat_report = write_stat_report(
@@ -130,6 +145,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             str(getattr(args, "champion_label", "champion (x3)")): "champion",
         },
         mortal_root=args.mortal_root,
+        rank_pts=rank_points,
+        rank_points_profile=rank_points_profile,
     )
     document["artifacts"]["detailed_stats_json"] = str(args.output_dir / "detailed_stats.json")
     document["artifacts"]["detailed_stats_md"] = str(args.output_dir / "detailed_stats.md")

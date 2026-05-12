@@ -10,7 +10,7 @@ import { entryToBattleState, buildLogitData, hasReplayPostAction, hasReplayReach
 import { useReplayPlayer } from '../hooks/useReplayPlayer';
 import { replayApi } from '../api/replayApi';
 import { CN_BAKAZE } from '../utils/constants';
-import { sameReplayAction, TILE_ORDER } from '../utils/tileUtils';
+import { isReplayDiffForPlayer, TILE_ORDER } from '../utils/tileUtils';
 import { normalizeReplayPlayerNames, replayPlayerDisplayName } from '../utils/replayNames';
 import type { Action, ReplayData } from '../types/replay';
 import {
@@ -194,16 +194,11 @@ export function GameBoardReplayPage() {
     goToKyoku(kyokuIdx);
   }, [goToKyoku, resetBoardPhase]);
 
-  const isDiff = (e: import('../types/replay').DecisionLogEntry, pid: number) =>
-    !e.is_obs &&
-    e.actor_to_move === pid && e.gt_action !== null &&
-    !sameReplayAction(e.chosen, e.gt_action);
-
   const jumpToPrevDiff = useCallback(() => {
     if (!data) return;
     const pid = data.player_id;
     for (let i = currentStep - 1; i >= 0; i--) {
-      if (isDiff(data.log[i], pid)) {
+      if (isReplayDiffForPlayer(data.log[i], pid)) {
         resetBoardPhase();
         setShowOpponentHands(false);
         goToStep(i);
@@ -216,7 +211,7 @@ export function GameBoardReplayPage() {
     if (!data) return;
     const pid = data.player_id;
     for (let i = currentStep + 1; i < data.log.length; i++) {
-      if (isDiff(data.log[i], pid)) {
+      if (isReplayDiffForPlayer(data.log[i], pid)) {
         resetBoardPhase();
         setShowOpponentHands(false);
         goToStep(i);

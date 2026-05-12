@@ -21,7 +21,13 @@ if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from inference.mortal_bot import MortalReviewBot
-from scripts.mortal.eval_metrics import build_metrics_document, summarize_rank_counts, write_metrics
+from scripts.mortal.eval_metrics import (
+    add_rank_point_args,
+    build_metrics_document,
+    resolve_rank_points,
+    summarize_rank_counts_with_references,
+    write_metrics,
+)
 from scripts.mortal.generate_riichienv_selfplay_replays import _make_env
 
 
@@ -37,6 +43,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=10000)
     parser.add_argument("--max-steps", type=int, default=10000)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    add_rank_point_args(parser)
     return parser.parse_args()
 
 
@@ -154,7 +161,11 @@ def _run_game(args: argparse.Namespace, *, game_id: int) -> dict[str, Any]:
     }
 
 
-def _summarize_games(games: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def _summarize_games(
+    games: Sequence[Mapping[str, Any]],
+    *,
+    rank_points: Sequence[int | float] = (90.0, 45.0, 0.0, -135.0),
+) -> dict[str, Any]:
     rank_counts = {"A": Counter(), "B": Counter()}
     score_sums = {"A": 0.0, "B": 0.0}
     seat_counts = {"A": 0, "B": 0}
@@ -168,7 +179,7 @@ def _summarize_games(games: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     by_label = {}
     for label in ("A", "B"):
         counts = [rank_counts[label].get(rank, 0) for rank in range(4)]
-        summary = summarize_rank_counts(counts)
+        summary = summarize_rank_counts_with_references(counts, rank_points=rank_points)
         summary["avg_score"] = None if seat_counts[label] == 0 else score_sums[label] / seat_counts[label]
         summary["seat_count"] = seat_counts[label]
         by_label[label] = summary
@@ -194,6 +205,10 @@ def _rank_index(rank: int) -> int:
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    rank_points_profile, rank_points = resolve_rank_points(
+        rank_points=getattr(args, "rank_points", None),
+        profile=str(getattr(args, "rank_points_profile", "tenhou_reference")),
+    )
     games = [_run_game(args, game_id=game_id) for game_id in range(int(args.games))]
     manifest_path = args.output_dir / "manifest.json"
     manifest_path.write_text(json.dumps({"games": games}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -208,9 +223,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "seat_mode": str(args.seat_mode),
             "seed": int(args.seed),
             "device": str(args.device),
+            "rank_points_profile": rank_points_profile,
+            "rank_points_values": [float(value) for value in rank_points],
         },
-        metrics=_summarize_games(games),
+        metrics=_summarize_games(games, rank_points=rank_points),
         artifacts={"manifest": str(manifest_path), "replay_dir": str(args.output_dir / "replays")},
+        rank_points_profile=rank_points_profile,
+        rank_points_values=rank_points,
     )
     write_metrics(args.output_dir / "metrics.json", document)
     print(json.dumps(document["metrics"], ensure_ascii=False, indent=2), flush=True)

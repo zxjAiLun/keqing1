@@ -4,8 +4,11 @@ import json
 from types import SimpleNamespace
 
 from scripts.mortal import ab_match
+from scripts.mortal import audit_grp_on_logs
 from scripts.mortal import eval_metrics
+from scripts.mortal import experiment_registry
 from scripts.mortal import one_vs_three_smoke
+from scripts.mortal import prepare_reward_pt_experiments
 from scripts.mortal import stat_report
 
 
@@ -16,6 +19,39 @@ def test_summarize_rank_counts_exports_rank_and_pt() -> None:
     assert summary["rank_counts"] == [1, 2, 1, 0]
     assert summary["avg_rank"] == 2.0
     assert summary["avg_rank_pt"] == 45.0
+
+
+def test_rank_point_profiles_and_custom_values() -> None:
+    profile, points = eval_metrics.resolve_rank_points(profile="avoid4_strong")
+    assert profile == "avoid4_strong"
+    assert points == (4.0, 3.0, 2.0, -3.0)
+    assert eval_metrics.resolve_rank_points(rank_points="1,2,3,4") == ("custom", (1.0, 2.0, 3.0, 4.0))
+
+    try:
+        eval_metrics.parse_rank_points("1,2,3")
+    except ValueError as exc:
+        assert "length 4" in str(exc)
+    else:
+        raise AssertionError("expected invalid rank point list to fail")
+
+    try:
+        eval_metrics.resolve_rank_points(profile="custom")
+    except ValueError as exc:
+        assert "requires --rank-points" in str(exc)
+    else:
+        raise AssertionError("expected custom profile without values to fail")
+
+
+def test_build_metrics_document_records_rank_point_metadata() -> None:
+    document = eval_metrics.build_metrics_document(
+        run={"kind": "unit"},
+        metrics={},
+        rank_points_profile="custom",
+        rank_points_values=(1, 2, 3, 4),
+    )
+
+    assert document["rank_points_profile"] == "custom"
+    assert document["rank_points_values"] == [1.0, 2.0, 3.0, 4.0]
 
 
 def test_ab_match_one_vs_three_seat_assignment_rotates_challenger() -> None:
@@ -52,10 +88,12 @@ def test_ab_match_summarize_games_uses_one_based_riichienv_ranks() -> None:
         },
     ]
 
-    summary = ab_match._summarize_games(games)
+    summary = ab_match._summarize_games(games, rank_points=(100, 50, 0, -100))
 
     assert summary["by_label"]["A"]["rank_counts"] == [1, 0, 0, 1]
     assert summary["by_label"]["A"]["avg_rank"] == 2.5
+    assert summary["by_label"]["A"]["avg_rank_pt"] == 0.0
+    assert summary["by_label"]["A"]["avg_rank_pt_tenhou_reference"] == -22.5
     assert summary["by_label"]["A"]["avg_score"] == 25500
     assert summary["by_label"]["B"]["seat_count"] == 6
     assert summary["totals"]["games"] == 2
@@ -109,7 +147,10 @@ def test_one_vs_three_smoke_writes_unified_metrics(monkeypatch, tmp_path) -> Non
     written = json.loads((tmp_path / "out" / "metrics.json").read_text(encoding="utf-8"))
     assert document["schema"] == eval_metrics.METRICS_SCHEMA
     assert written["schema"] == eval_metrics.METRICS_SCHEMA
+    assert written["rank_points_profile"] == "tenhou_reference"
+    assert written["rank_points_values"] == [90.0, 45.0, 0.0, -135.0]
     assert written["metrics"]["challenger"]["rank_counts"] == [1, 1, 1, 1]
+    assert written["metrics"]["challenger"]["avg_rank_pt_training_profile"] == 0.0
     assert written["artifacts"]["detailed_stats_json"].endswith("detailed_stats.json")
 
 
@@ -198,4 +239,104 @@ def test_stat_report_normalizes_and_formats_markdown() -> None:
 
     assert metrics["derived"]["avg_point_per_oya_agari"] is None
     assert "| Games | 4 |" in markdown
+    assert "- Rank point profile: `custom`" in markdown
     assert "| 1st (rate) | 1 (0.250000) |" in markdown
+
+
+def test_registry_helper_appends_valid_jsonl(tmp_path) -> None:
+    path = tmp_path / "registry.jsonl"
+    entry = {
+        "experiment_id": "R0_base",
+        "parent_checkpoint": "artifacts/mortal_training/mortal.pth",
+        "reward_profile": "base",
+        "pt_table": [6, 4, 2, 0],
+        "grp_checkpoint": "artifacts/mortal_training/grp.pth",
+        "training_data": "artifacts/mortal_mjai_gz/train/**/*.json.gz",
+        "style_data": None,
+        "train_steps": 5000,
+        "eval_bundle": None,
+        "notes": "unit",
+    }
+
+    first = experiment_registry.append_registry_entry(path, entry)
+    second = experiment_registry.append_registry_entry(path, {**entry, "experiment_id": "R1_avoid4"})
+
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert first["schema"] == experiment_registry.REGISTRY_SCHEMA
+    assert second["experiment_id"] == "R1_avoid4"
+    assert [row["experiment_id"] for row in rows] == ["R0_base", "R1_avoid4"]
+
+
+def test_prepare_reward_pt_experiments_dry_run_is_isolated(tmp_path) -> None:
+    base_config = tmp_path / "config.toml"
+    base_config.write_text(
+        """
+[control]
+state_file = "/tmp/base/mortal.pth"
+best_state_file = "/tmp/base/mortal_best.pth"
+tensorboard_dir = "/tmp/base/tb_mortal"
+
+[train_play.default]
+log_dir = "/tmp/base/train_play"
+
+[test_play]
+log_dir = "/tmp/base/test_play"
+
+[dataset]
+globs = ["/data/train/**/*.json.gz"]
+file_index = "/tmp/base/file_index.pth"
+
+[env]
+pts = [6.0, 4.0, 2.0, 0.0]
+
+[grp]
+state_file = "/tmp/base/grp.pth"
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    report = prepare_reward_pt_experiments.write_experiment_configs(
+        base_config_path=base_config,
+        parent_checkpoint=tmp_path / "parent.pth",
+        output_root=tmp_path / "experiments",
+        matrix=[("R1_avoid4_strong", "avoid4_strong")],
+        target_steps=65000,
+        train_steps=5000,
+        copy_parent_checkpoint=False,
+        dry_run=True,
+    )
+
+    row = report["experiments"][0]
+    assert row["pt_table"] == [4.0, 3.0, 2.0, -3.0]
+    assert row["target_steps"] == 65000
+    assert row["config"].endswith("R1_avoid4_strong/config.toml")
+    assert not (tmp_path / "experiments").exists()
+
+
+def test_grp_audit_finalizers_export_calibration_and_reward_variance() -> None:
+    calibration = audit_grp_on_logs.finalize_calibration(
+        [
+            {"count": 2, "confidence_sum": 1.0, "accuracy_sum": 1.0, "true_prob_sum": 0.8},
+            *[
+                {"count": 0, "confidence_sum": 0.0, "accuracy_sum": 0.0, "true_prob_sum": 0.0}
+                for _ in range(9)
+            ],
+        ]
+    )
+    errors = audit_grp_on_logs.finalize_profile_errors(
+        {
+            "base": {
+                "count": 2,
+                "abs_error_sum": 3.0,
+                "sq_error_sum": 5.0,
+                "signed_error_sum": 1.0,
+                "reward_deltas": [1.0, 3.0],
+            }
+        }
+    )
+
+    assert calibration[0]["avg_confidence"] == 0.5
+    assert calibration[0]["accuracy"] == 0.5
+    assert errors["base"]["mean_abs_expected_pt_error"] == 1.5
+    assert errors["base"]["old_grp_reward_delta_mean"] == 2.0
+    assert errors["base"]["old_grp_reward_delta_variance"] == 1.0

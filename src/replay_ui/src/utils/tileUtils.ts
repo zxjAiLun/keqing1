@@ -211,3 +211,32 @@ export function sameReplayAction(
 
   return actionComparableKey(a) === actionComparableKey(b);
 }
+
+type ReplayDecisionLike = {
+  is_obs?: boolean;
+  actor_to_move?: number | null;
+  chosen?: ComparableAction | null;
+  gt_action?: ComparableAction | null;
+  candidates?: Array<{ action?: ComparableAction | null }>;
+};
+
+function actionBelongsToPlayer(action: ComparableAction | null | undefined, playerId: number): boolean {
+  return action?.actor === playerId;
+}
+
+export function isReplayPlayerDecision(entry: ReplayDecisionLike, playerId: number): boolean {
+  if (entry.is_obs) return false;
+  if (entry.actor_to_move === playerId) return true;
+  if (actionBelongsToPlayer(entry.chosen, playerId)) return true;
+  if (actionBelongsToPlayer(entry.gt_action, playerId)) return true;
+  return Boolean(entry.candidates?.some((candidate) => actionBelongsToPlayer(candidate.action, playerId)));
+}
+
+export function isReplayDiffForPlayer(entry: ReplayDecisionLike, playerId: number): boolean {
+  return (
+    isReplayPlayerDecision(entry, playerId) &&
+    entry.gt_action !== null &&
+    entry.gt_action !== undefined &&
+    !sameReplayAction(entry.chosen, entry.gt_action)
+  );
+}

@@ -80,8 +80,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed-start", "--seed", dest="seed_start", type=int, default=None)
     parser.add_argument("--seed-key", default="0xd5dfaa4cef265cd7")
     parser.add_argument("--profiles", default="base,atk_fuuro,def_menzen")
+    parser.add_argument("--seat-profiles", default=None)
     parser.add_argument("--profile-mode", choices=("rotate", "random"), default="rotate")
     parser.add_argument("--style-alpha", type=float, default=0.25)
+    parser.add_argument("--rank-points", default="90,45,0,-135")
     parser.add_argument("--max-steps", type=int, default=10000)
     parser.add_argument("--trace-mode", choices=("compact", "full"), default="compact")
     return parser.parse_args()
@@ -128,6 +130,10 @@ def parse_seed_key(value: Any) -> int:
     return int(text, 16 if text.lower().startswith("0x") else 10)
 
 
+def parse_rank_points(value: str | Sequence[int | float]) -> tuple[float, float, float, float]:
+    return eval_metrics.parse_rank_points(value)
+
+
 def assign_style_profiles(
     *,
     game_id: int,
@@ -143,6 +149,25 @@ def assign_style_profiles(
         rng = random.Random((int(seed_key) & ((1 << 63) - 1)) ^ int(game_id))
         return {seat: rng.choice(list(profiles)) for seat in range(4)}
     raise ValueError(f"unsupported profile mode: {mode}")
+
+
+def assign_seat_profiles(value: str | None) -> dict[int, StyleProfile] | None:
+    if value is None:
+        return None
+    profiles = parse_style_profiles(value)
+    if len(profiles) != 4:
+        raise ValueError(f"--seat-profiles must contain exactly 4 profiles, got {len(profiles)}")
+    return {seat: profiles[seat] for seat in range(4)}
+
+
+def seat_profile_schedule(seat_profiles: Mapping[int, StyleProfile], *, style_alpha: float) -> list[dict[str, Any]]:
+    return [
+        {
+            "seat": int(seat),
+            **seat_profiles[int(seat)].to_json(style_alpha=float(style_alpha)),
+        }
+        for seat in sorted(seat_profiles)
+    ]
 
 
 def _event_equal(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
@@ -342,6 +367,10 @@ class MortalStylePolicy:
             return StyleDecision(action=dict(base_action), meta=style_meta)
 
         q_values, action_mask = _expand_compact_meta(mask_bits=int(mask_bits), compact_q=compact_q)
+        base_action_ids = tuple(
+            action_id for action_id in _mortal_action_ids_for_mjai(dict(base_action)) if action_mask[action_id]
+        )
+        base_action_score = _score_action_ids(base_action_ids, q_values=q_values)
         candidates: list[dict[str, Any]] = []
         for legal_action in legal_actions:
             action = _legal_action_to_mjai(legal_action)
@@ -369,14 +398,33 @@ class MortalStylePolicy:
 
         candidates.sort(key=lambda item: float(item["final_score"]), reverse=True)
         selected = dict(candidates[0]["action"])
+        selected_action_ids = tuple(int(action_id) for action_id in candidates[0]["mortal_action_ids"])
+        semantic_changed = actions_semantically_changed(
+            base_action=dict(base_action),
+            selected_action=selected,
+            base_action_ids=base_action_ids,
+            selected_action_ids=selected_action_ids,
+        )
+        q_gap = (
+            None
+            if base_action_score is None
+            else float(base_action_score) - float(candidates[0]["base_score"])
+        )
         style_meta.update(
             {
                 "applied": True,
                 "selected_action": selected,
+                "base_action_ids": list(base_action_ids),
+                "selected_action_ids": list(selected_action_ids),
+                "base_action_type": str(base_action.get("type", "")),
+                "selected_action_type": str(selected.get("type", "")),
+                "base_action_score": base_action_score,
                 "selected_base_score": candidates[0]["base_score"],
                 "selected_style_bias": candidates[0]["style_bias"],
                 "selected_final_score": candidates[0]["final_score"],
-                "changed": selected != dict(base_action),
+                "changed": semantic_changed,
+                "semantic_changed": semantic_changed,
+                "base_to_selected_q_gap": q_gap,
                 "candidate_count": len(candidates),
             }
         )
@@ -400,6 +448,44 @@ class MortalStylePolicy:
         return 0.0
 
 
+def _score_action_ids(action_ids: Sequence[int], *, q_values: Sequence[float]) -> float | None:
+    scores = [float(q_values[action_id]) for action_id in action_ids]
+    scores = [score for score in scores if math.isfinite(score)]
+    if not scores:
+        return None
+    return max(scores)
+
+
+def actions_semantically_changed(
+    *,
+    base_action: Mapping[str, Any],
+    selected_action: Mapping[str, Any],
+    base_action_ids: Sequence[int] = (),
+    selected_action_ids: Sequence[int] = (),
+) -> bool:
+    if base_action_ids and selected_action_ids:
+        return set(int(action_id) for action_id in base_action_ids).isdisjoint(
+            int(action_id) for action_id in selected_action_ids
+        )
+    return canonical_action_signature(base_action) != canonical_action_signature(selected_action)
+
+
+def canonical_action_signature(action: Mapping[str, Any]) -> tuple[Any, ...]:
+    consumed = action.get("consumed", [])
+    if isinstance(consumed, Sequence) and not isinstance(consumed, str):
+        consumed_sig = tuple(sorted(str(item) for item in consumed))
+    else:
+        consumed_sig = ()
+    return (
+        action.get("type"),
+        action.get("actor"),
+        action.get("target"),
+        action.get("pai"),
+        consumed_sig,
+        action.get("tsumogiri"),
+    )
+
+
 def _legal_action_to_mjai(action: Any) -> dict[str, Any]:
     if hasattr(action, "to_mjai"):
         payload = action.to_mjai()
@@ -414,7 +500,8 @@ def _empty_style_bucket(style_id: str, style_weights: Sequence[float]) -> dict[s
         "style_id": style_id,
         "style_weights": [float(value) for value in style_weights],
         "seat_count": 0,
-        "games": 0,
+        "seat_games": 0,
+        "unique_hanchans": 0,
         "rounds": 0,
         "rank_counts": [0, 0, 0, 0],
         "score_sum": 0.0,
@@ -424,7 +511,12 @@ def _empty_style_bucket(style_id: str, style_weights: Sequence[float]) -> dict[s
         "riichi_count": 0,
         "ryukyoku_count": 0,
         "decision_count": 0,
+        "style_applied_count": 0,
         "style_changed_count": 0,
+        "semantic_changed_count": 0,
+        "q_gap_count": 0,
+        "q_gap_sum": 0.0,
+        "semantic_changed_transitions": {},
     }
 
 
@@ -460,7 +552,15 @@ def _summarize_events_by_seat(events: Sequence[Mapping[str, Any]]) -> dict[int, 
 
 def _summarize_sidecar_by_seat(sidecar: Mapping[str, Any]) -> dict[int, dict[str, int]]:
     by_seat: dict[int, dict[str, int]] = {
-        seat: {"decision_count": 0, "style_changed_count": 0}
+        seat: {
+            "decision_count": 0,
+            "style_applied_count": 0,
+            "style_changed_count": 0,
+            "semantic_changed_count": 0,
+            "q_gap_count": 0,
+            "q_gap_sum": 0.0,
+            "semantic_changed_transitions": {},
+        }
         for seat in range(4)
     }
     for seat_text, rows in dict(sidecar.get("by_actor", {}) or {}).items():
@@ -468,12 +568,41 @@ def _summarize_sidecar_by_seat(sidecar: Mapping[str, Any]) -> dict[int, dict[str
         for row in rows or []:
             by_seat[seat]["decision_count"] += 1
             style_policy = ((row.get("mortal_meta") or {}).get("style_policy") or {})
+            if style_policy.get("applied"):
+                by_seat[seat]["style_applied_count"] += 1
             if style_policy.get("changed"):
                 by_seat[seat]["style_changed_count"] += 1
+            if style_policy.get("semantic_changed"):
+                by_seat[seat]["semantic_changed_count"] += 1
+                transition_key = (
+                    f"{style_policy.get('base_action_type', '')}"
+                    f"->{style_policy.get('selected_action_type', '')}"
+                )
+                transitions = by_seat[seat]["semantic_changed_transitions"]
+                transition = transitions.setdefault(
+                    transition_key,
+                    {
+                        "base_action_type": str(style_policy.get("base_action_type", "")),
+                        "selected_action_type": str(style_policy.get("selected_action_type", "")),
+                        "count": 0,
+                        "q_gaps": [],
+                    },
+                )
+                transition["count"] += 1
+                if style_policy.get("base_to_selected_q_gap") is not None:
+                    transition["q_gaps"].append(float(style_policy["base_to_selected_q_gap"]))
+            q_gap = style_policy.get("base_to_selected_q_gap")
+            if q_gap is not None:
+                by_seat[seat]["q_gap_count"] += 1
+                by_seat[seat]["q_gap_sum"] += float(q_gap)
     return by_seat
 
 
-def build_style_metrics(games: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def build_style_metrics(
+    games: Sequence[Mapping[str, Any]],
+    *,
+    rank_points: Sequence[int | float] = eval_metrics.TENHOU_RANK_POINTS,
+) -> dict[str, Any]:
     buckets: dict[str, dict[str, Any]] = {}
     for game in games:
         summary = dict(game["summary"])
@@ -485,16 +614,18 @@ def build_style_metrics(games: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         decision_counts = _summarize_sidecar_by_seat(sidecar)
         ranks = [int(rank) for rank in summary.get("ranks", [])]
         scores = [float(score) for score in summary.get("scores", [])]
+        styles_seen_in_game: set[str] = set()
 
         for player in summary.get("players", []):
             seat = int(player["seat"])
             style_id = str(player["style_id"])
+            styles_seen_in_game.add(style_id)
             bucket = buckets.setdefault(
                 style_id,
                 _empty_style_bucket(style_id, player.get("style_weights", [])),
             )
             bucket["seat_count"] += 1
-            bucket["games"] += 1
+            bucket["seat_games"] += 1
             bucket["rounds"] += rounds
             if seat < len(ranks) and 1 <= ranks[seat] <= 4:
                 bucket["rank_counts"][ranks[seat] - 1] += 1
@@ -504,26 +635,127 @@ def build_style_metrics(games: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 bucket[key] += int(value)
             bucket["ryukyoku_count"] += ryukyoku_count
             for key, value in decision_counts[seat].items():
-                bucket[key] += int(value)
+                if key == "q_gap_sum":
+                    bucket[key] += float(value)
+                elif key == "semantic_changed_transitions":
+                    merge_transition_buckets(bucket[key], value)
+                else:
+                    bucket[key] += int(value)
+        for style_id in styles_seen_in_game:
+            buckets[style_id]["unique_hanchans"] += 1
 
     by_style: dict[str, Any] = {}
     for style_id, bucket in sorted(buckets.items()):
-        rank_summary = eval_metrics.summarize_rank_counts(bucket["rank_counts"])
+        rank_summary = eval_metrics.summarize_rank_counts(bucket["rank_counts"], rank_points=rank_points)
         rounds = int(bucket["rounds"])
         seat_count = int(bucket["seat_count"])
         decision_count = int(bucket["decision_count"])
+        q_gap_count = int(bucket["q_gap_count"])
         by_style[style_id] = {
             **bucket,
-            **rank_summary,
+            "games": int(bucket["unique_hanchans"]),
+            "rank_sample_count": rank_summary["games"],
+            "rank_counts": rank_summary["rank_counts"],
+            "avg_rank": rank_summary["avg_rank"],
+            "avg_rank_pt": rank_summary["avg_rank_pt"],
             "avg_score": (float(bucket["score_sum"]) / seat_count) if seat_count else None,
             "win_rate": (bucket["win_count"] / rounds) if rounds else None,
             "deal_in_rate": (bucket["deal_in_count"] / rounds) if rounds else None,
             "call_rate": (bucket["call_count"] / rounds) if rounds else None,
             "riichi_rate": (bucket["riichi_count"] / rounds) if rounds else None,
             "ryukyoku_rate": (bucket["ryukyoku_count"] / rounds) if rounds else None,
+            "style_applied_rate": (bucket["style_applied_count"] / decision_count) if decision_count else None,
             "style_changed_rate": (bucket["style_changed_count"] / decision_count) if decision_count else None,
+            "semantic_changed_rate": (bucket["semantic_changed_count"] / decision_count) if decision_count else None,
+            "mean_base_to_selected_q_gap": (bucket["q_gap_sum"] / q_gap_count) if q_gap_count else None,
+            "semantic_changed_transition_breakdown": finalize_transition_breakdown(
+                bucket["semantic_changed_transitions"],
+                denominator=int(bucket["semantic_changed_count"]),
+            ),
         }
-    return {"by_style": by_style}
+    return {"by_style": by_style, "delta_vs_base": build_delta_vs_base(by_style)}
+
+
+def merge_transition_buckets(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    for transition_key, source_row in source.items():
+        target_row = target.setdefault(
+            transition_key,
+            {
+                "base_action_type": str(source_row.get("base_action_type", "")),
+                "selected_action_type": str(source_row.get("selected_action_type", "")),
+                "count": 0,
+                "q_gaps": [],
+            },
+        )
+        target_row["count"] += int(source_row.get("count", 0))
+        target_row["q_gaps"].extend(float(value) for value in source_row.get("q_gaps", []))
+
+
+def finalize_transition_breakdown(transitions: Mapping[str, Any], *, denominator: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for transition_key, row in transitions.items():
+        q_gaps = sorted(float(value) for value in row.get("q_gaps", []))
+        count = int(row.get("count", 0))
+        rows.append(
+            {
+                "transition": transition_key,
+                "base_action_type": str(row.get("base_action_type", "")),
+                "selected_action_type": str(row.get("selected_action_type", "")),
+                "changed_count": count,
+                "changed_rate": (count / denominator) if denominator else None,
+                "mean_q_gap": (sum(q_gaps) / len(q_gaps)) if q_gaps else None,
+                "p50_q_gap": percentile(q_gaps, 0.50),
+                "p90_q_gap": percentile(q_gaps, 0.90),
+                "p99_q_gap": percentile(q_gaps, 0.99),
+            }
+        )
+    rows.sort(key=lambda item: (-int(item["changed_count"]), str(item["transition"])))
+    return rows
+
+
+def percentile(sorted_values: Sequence[float], q: float) -> float | None:
+    if not sorted_values:
+        return None
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    position = max(0.0, min(1.0, float(q))) * (len(sorted_values) - 1)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return float(sorted_values[lower])
+    weight = position - lower
+    return float(sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight)
+
+
+def build_delta_vs_base(by_style: Mapping[str, Mapping[str, Any]], *, baseline_style: str = "base") -> dict[str, Any]:
+    baseline = by_style.get(baseline_style)
+    if baseline is None:
+        return {}
+    delta_keys = [
+        "avg_rank",
+        "avg_rank_pt",
+        "avg_score",
+        "win_rate",
+        "deal_in_rate",
+        "call_rate",
+        "riichi_rate",
+        "ryukyoku_rate",
+        "style_changed_rate",
+        "semantic_changed_rate",
+        "style_applied_rate",
+        "mean_base_to_selected_q_gap",
+    ]
+    deltas: dict[str, Any] = {}
+    for style_id, style_metrics in by_style.items():
+        if style_id == baseline_style:
+            continue
+        row: dict[str, Any] = {}
+        for key in delta_keys:
+            left = style_metrics.get(key)
+            right = baseline.get(key)
+            row[key] = None if left is None or right is None else float(left) - float(right)
+        deltas[style_id] = row
+    return deltas
 
 
 def format_style_markdown(metrics: Mapping[str, Any]) -> str:
@@ -532,7 +764,8 @@ def format_style_markdown(metrics: Mapping[str, Any]) -> str:
         "|---|" + "|".join("---" for _ in metrics.get("by_style", {})) + "|",
     ]
     metric_keys = [
-        ("Games", "games"),
+        ("Unique hanchans", "unique_hanchans"),
+        ("Seat games", "seat_games"),
         ("Rounds", "rounds"),
         ("1st", ("rank_counts", 0)),
         ("2nd", ("rank_counts", 1)),
@@ -546,7 +779,10 @@ def format_style_markdown(metrics: Mapping[str, Any]) -> str:
         ("Call rate", "call_rate"),
         ("Riichi rate", "riichi_rate"),
         ("Ryukyoku rate", "ryukyoku_rate"),
+        ("Style applied rate", "style_applied_rate"),
         ("Style changed rate", "style_changed_rate"),
+        ("Semantic changed rate", "semantic_changed_rate"),
+        ("Mean base-to-selected Q gap", "mean_base_to_selected_q_gap"),
     ]
     styles = list(metrics.get("by_style", {}).values())
     for label, key in metric_keys:
@@ -559,6 +795,62 @@ def format_style_markdown(metrics: Mapping[str, Any]) -> str:
                 value = style.get(key)
             values.append(_format_metric_cell(value))
         rows.append("| " + label + " | " + " | ".join(values) + " |")
+    if metrics.get("delta_vs_base"):
+        rows.extend(["", "## Delta vs base", "", "| Metric | " + " | ".join(metrics["delta_vs_base"].keys()) + " |"])
+        rows.append("|---|" + "|".join("---" for _ in metrics["delta_vs_base"]) + "|")
+        delta_keys = [
+            ("Avg rank", "avg_rank"),
+            ("Avg rank pt", "avg_rank_pt"),
+            ("Avg score", "avg_score"),
+            ("Win rate", "win_rate"),
+            ("Deal-in rate", "deal_in_rate"),
+            ("Call rate", "call_rate"),
+            ("Riichi rate", "riichi_rate"),
+            ("Ryukyoku rate", "ryukyoku_rate"),
+            ("Style applied rate", "style_applied_rate"),
+            ("Style changed rate", "style_changed_rate"),
+            ("Semantic changed rate", "semantic_changed_rate"),
+            ("Mean base-to-selected Q gap", "mean_base_to_selected_q_gap"),
+        ]
+        delta_styles = list(metrics["delta_vs_base"].values())
+        for label, key in delta_keys:
+            rows.append(
+                "| "
+                + label
+                + " | "
+                + " | ".join(_format_metric_cell(style.get(key)) for style in delta_styles)
+                + " |"
+            )
+    rows.extend(["", "## Semantic Changed Transition Breakdown", ""])
+    for style_id, style_metrics in metrics.get("by_style", {}).items():
+        breakdown = style_metrics.get("semantic_changed_transition_breakdown") or []
+        if not breakdown:
+            continue
+        rows.extend(
+            [
+                f"### {style_id}",
+                "",
+                "| transition | changed_count | changed_rate | mean_q_gap | p50_q_gap | p90_q_gap | p99_q_gap |",
+                "|---|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for transition in breakdown:
+            rows.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(transition.get("transition", "")),
+                        _format_metric_cell(transition.get("changed_count")),
+                        _format_metric_cell(transition.get("changed_rate")),
+                        _format_metric_cell(transition.get("mean_q_gap")),
+                        _format_metric_cell(transition.get("p50_q_gap")),
+                        _format_metric_cell(transition.get("p90_q_gap")),
+                        _format_metric_cell(transition.get("p99_q_gap")),
+                    ]
+                )
+                + " |"
+            )
+        rows.append("")
     return "\n".join(rows) + "\n"
 
 
@@ -577,6 +869,10 @@ def write_style_metrics_csv(path: Path, metrics: Mapping[str, Any]) -> None:
     fieldnames = [
         "style_id",
         "games",
+        "unique_hanchans",
+        "seat_games",
+        "seat_count",
+        "rank_sample_count",
         "rounds",
         "avg_rank",
         "avg_rank_pt",
@@ -586,7 +882,10 @@ def write_style_metrics_csv(path: Path, metrics: Mapping[str, Any]) -> None:
         "call_rate",
         "riichi_rate",
         "ryukyoku_rate",
+        "style_applied_rate",
         "style_changed_rate",
+        "semantic_changed_rate",
+        "mean_base_to_selected_q_gap",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -598,12 +897,14 @@ def write_style_metrics_csv(path: Path, metrics: Mapping[str, Any]) -> None:
 def run_game(args: argparse.Namespace, *, game_id: int) -> dict[str, Any]:
     profile_pool = parse_style_profiles(str(args.profiles))
     seed_key = parse_seed_key(getattr(args, "seed_key", 0))
-    seat_profiles = assign_style_profiles(
+    explicit_seat_profiles = assign_seat_profiles(getattr(args, "seat_profiles", None))
+    seat_profiles = explicit_seat_profiles or assign_style_profiles(
         game_id=int(game_id),
         profiles=profile_pool,
         seed_key=seed_key,
         mode=str(getattr(args, "profile_mode", "rotate")),
     )
+    schedule = seat_profile_schedule(seat_profiles, style_alpha=float(args.style_alpha))
     style_policies = {
         seat: MortalStylePolicy(profile=profile, style_alpha=float(args.style_alpha))
         for seat, profile in seat_profiles.items()
@@ -706,6 +1007,9 @@ def run_game(args: argparse.Namespace, *, game_id: int) -> dict[str, Any]:
         "game_id": int(game_id),
         "seed": game_seed,
         "seed_key": hex(seed_key),
+        "profile_mode": "explicit" if explicit_seat_profiles is not None else str(getattr(args, "profile_mode", "rotate")),
+        "profile_pool": [profile.to_json(style_alpha=float(args.style_alpha)) for profile in profile_pool],
+        "seat_profile_schedule": schedule,
         "players": [
             {
                 "seat": seat,
@@ -724,6 +1028,9 @@ def run_game(args: argparse.Namespace, *, game_id: int) -> dict[str, Any]:
             "game_id": int(game_id),
             "seed": game_seed,
             "seed_key": hex(seed_key),
+            "profile_mode": "explicit" if explicit_seat_profiles is not None else str(getattr(args, "profile_mode", "rotate")),
+            "profile_pool": [profile.to_json(style_alpha=float(args.style_alpha)) for profile in profile_pool],
+            "seat_profile_schedule": schedule,
             "players": [
                 {
                     "seat": seat,
@@ -760,6 +1067,9 @@ def main() -> None:
     replays_dir.mkdir(parents=True, exist_ok=True)
     profile_pool = parse_style_profiles(str(args.profiles))
     seed_key = parse_seed_key(getattr(args, "seed_key", 0))
+    rank_points = parse_rank_points(args.rank_points)
+    explicit_seat_profiles = assign_seat_profiles(getattr(args, "seat_profiles", None))
+    profile_mode = "explicit" if explicit_seat_profiles is not None else str(args.profile_mode)
     game_results: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
     manifest: list[dict[str, Any]] = []
@@ -788,6 +1098,9 @@ def main() -> None:
                 "game_id": int(game_id),
                 "seed": result["summary"]["seed"],
                 "seed_key": result["summary"]["seed_key"],
+                "profile_mode": result["summary"]["profile_mode"],
+                "profile_pool": result["summary"]["profile_pool"],
+                "seat_profile_schedule": result["summary"]["seat_profile_schedule"],
                 "players": result["summary"]["players"],
                 "mjson": str(replay_path),
                 "json_gz": str(replay_gz_path),
@@ -814,8 +1127,14 @@ def main() -> None:
         "device": str(args.device),
         "seed_start": None if args.seed_start is None else int(args.seed_start),
         "seed_key": hex(seed_key),
+        "rank_points": [float(value) for value in rank_points],
         "profiles": [profile.to_json(style_alpha=float(args.style_alpha)) for profile in profile_pool],
-        "profile_mode": str(args.profile_mode),
+        "profile_mode": profile_mode,
+        "seat_profiles": (
+            None
+            if explicit_seat_profiles is None
+            else seat_profile_schedule(explicit_seat_profiles, style_alpha=float(args.style_alpha))
+        ),
         "env_seed_applied_all": all(bool(row["env_seed_applied"]) for row in summaries),
         "env_seed_modes": sorted({str(row["env_seed_mode"]) for row in summaries}),
         "wall_time_sec": total_wall,
@@ -833,7 +1152,7 @@ def main() -> None:
             "event_index_mismatch_count": sum(int(row["event_index_mismatch_count"]) for row in summaries),
         },
     }
-    style_metrics = build_style_metrics(game_results)
+    style_metrics = build_style_metrics(game_results, rank_points=rank_points)
     metrics_document = eval_metrics.build_metrics_document(
         run={
             "backend": "riichienv",
@@ -842,8 +1161,14 @@ def main() -> None:
             "games": int(args.games),
             "seed_start": None if args.seed_start is None else int(args.seed_start),
             "seed_key": hex(seed_key),
+            "rank_points": [float(value) for value in rank_points],
             "profiles": [profile.to_json(style_alpha=float(args.style_alpha)) for profile in profile_pool],
-            "profile_mode": str(args.profile_mode),
+            "profile_mode": profile_mode,
+            "seat_profiles": (
+                None
+                if explicit_seat_profiles is None
+                else seat_profile_schedule(explicit_seat_profiles, style_alpha=float(args.style_alpha))
+            ),
         },
         metrics=style_metrics,
         artifacts={
@@ -853,6 +1178,8 @@ def main() -> None:
             "detailed_stats_md": str(output_dir / "detailed_stats.md"),
             "metrics_csv": str(output_dir / "metrics.csv"),
         },
+        rank_points_profile="custom",
+        rank_points_values=rank_points,
     )
     (replays_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_manifest_jsonl(replays_dir / "manifest.jsonl", manifest)

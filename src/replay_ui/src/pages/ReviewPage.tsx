@@ -5,7 +5,7 @@ import { CheckCircle2 } from 'lucide-react';
 import { UploadForm } from '../components/Upload/UploadForm';
 import type { ReplayData } from '../types/replay';
 import { MetricCard, PageHeader, PageShell, SectionTitle } from '../components/Layout/PageScaffold';
-import { sameReplayAction } from '../utils/tileUtils';
+import { isReplayPlayerDecision, sameReplayAction } from '../utils/tileUtils';
 
 export function ReviewPage() {
   const navigate = useNavigate();
@@ -15,9 +15,11 @@ export function ReviewPage() {
     setUploadedData(data as ReplayData);
   };
 
-  const liveMatchCount = uploadedData
-    ? uploadedData.log.filter((entry) => !entry.is_obs && sameReplayAction(entry.chosen, entry.gt_action)).length
-    : 0;
+  const liveDecisionLog = uploadedData
+    ? uploadedData.log.filter((entry) => isReplayPlayerDecision(entry, uploadedData.player_id))
+    : [];
+  const liveMatchCount = liveDecisionLog.filter((entry) => sameReplayAction(entry.chosen, entry.gt_action)).length;
+  const liveTotalOps = liveDecisionLog.length;
 
   return (
     <PageShell width={980}>
@@ -39,19 +41,19 @@ export function ReviewPage() {
           <div className="flex items-center gap-2 mb-4">
             <CheckCircle2 size={16} style={{ color: 'var(--success)' }} />
             <div className="card-title" style={{ marginBottom: 0 }}>
-              数据已加载 · {uploadedData.total_ops} 决策步 / {uploadedData.log.length} 总步
+              数据已加载 · {liveTotalOps} 决策步 / {uploadedData.log.length} 总步
             </div>
           </div>
 
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
-            <MetricCard label="总决策数" value={uploadedData.total_ops} />
+            <MetricCard label="总决策数" value={liveTotalOps} />
             <MetricCard label="匹配数" value={liveMatchCount} tone="success" />
             <MetricCard label="小局数" value={uploadedData.kyoku_order?.length ?? 0} />
             <MetricCard
               label="匹配率"
               value={
-                uploadedData.total_ops > 0
-                  ? ((liveMatchCount / uploadedData.total_ops) * 100).toFixed(1) + '%'
+                liveTotalOps > 0
+                  ? ((liveMatchCount / liveTotalOps) * 100).toFixed(1) + '%'
                   : '0%'
               }
               tone="warning"
