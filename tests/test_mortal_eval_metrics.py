@@ -22,9 +22,11 @@ def test_summarize_rank_counts_exports_rank_and_pt() -> None:
 
 
 def test_rank_point_profiles_and_custom_values() -> None:
-    profile, points = eval_metrics.resolve_rank_points(profile="avoid4_strong")
-    assert profile == "avoid4_strong"
-    assert points == (4.0, 3.0, 2.0, -3.0)
+    profile, points = eval_metrics.resolve_rank_points(profile="avoid4_norm")
+    assert profile == "avoid4_norm"
+    assert points == (15.0 / 7.0, 9.0 / 7.0, 3.0 / 7.0, -27.0 / 7.0)
+    assert eval_metrics.resolve_rank_points(profile="mortal_default")[1] == (6.0, 4.0, 2.0, 0.0)
+    assert "zero_sum_balanced" not in eval_metrics.RANK_POINT_PROFILES
     assert eval_metrics.resolve_rank_points(rank_points="1,2,3,4") == ("custom", (1.0, 2.0, 3.0, 4.0))
 
     try:
@@ -246,9 +248,9 @@ def test_stat_report_normalizes_and_formats_markdown() -> None:
 def test_registry_helper_appends_valid_jsonl(tmp_path) -> None:
     path = tmp_path / "registry.jsonl"
     entry = {
-        "experiment_id": "R0_base",
+        "experiment_id": "R0_mortal_default",
         "parent_checkpoint": "artifacts/mortal_training/mortal.pth",
-        "reward_profile": "base",
+        "reward_profile": "mortal_default",
         "pt_table": [6, 4, 2, 0],
         "grp_checkpoint": "artifacts/mortal_training/grp.pth",
         "training_data": "artifacts/mortal_mjai_gz/train/**/*.json.gz",
@@ -264,7 +266,7 @@ def test_registry_helper_appends_valid_jsonl(tmp_path) -> None:
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert first["schema"] == experiment_registry.REGISTRY_SCHEMA
     assert second["experiment_id"] == "R1_avoid4"
-    assert [row["experiment_id"] for row in rows] == ["R0_base", "R1_avoid4"]
+    assert [row["experiment_id"] for row in rows] == ["R0_mortal_default", "R1_avoid4"]
 
 
 def test_prepare_reward_pt_experiments_dry_run_is_isolated(tmp_path) -> None:
@@ -299,7 +301,7 @@ state_file = "/tmp/base/grp.pth"
         base_config_path=base_config,
         parent_checkpoint=tmp_path / "parent.pth",
         output_root=tmp_path / "experiments",
-        matrix=[("R1_avoid4_strong", "avoid4_strong")],
+        matrix=[("R1_avoid4_norm", "avoid4_norm")],
         target_steps=65000,
         train_steps=5000,
         copy_parent_checkpoint=False,
@@ -307,9 +309,9 @@ state_file = "/tmp/base/grp.pth"
     )
 
     row = report["experiments"][0]
-    assert row["pt_table"] == [4.0, 3.0, 2.0, -3.0]
+    assert row["pt_table"] == [15.0 / 7.0, 9.0 / 7.0, 3.0 / 7.0, -27.0 / 7.0]
     assert row["target_steps"] == 65000
-    assert row["config"].endswith("R1_avoid4_strong/config.toml")
+    assert row["config"].endswith("R1_avoid4_norm/config.toml")
     assert not (tmp_path / "experiments").exists()
 
 
@@ -325,7 +327,7 @@ def test_grp_audit_finalizers_export_calibration_and_reward_variance() -> None:
     )
     errors = audit_grp_on_logs.finalize_profile_errors(
         {
-            "base": {
+            "mortal_default": {
                 "count": 2,
                 "abs_error_sum": 3.0,
                 "sq_error_sum": 5.0,
@@ -337,6 +339,6 @@ def test_grp_audit_finalizers_export_calibration_and_reward_variance() -> None:
 
     assert calibration[0]["avg_confidence"] == 0.5
     assert calibration[0]["accuracy"] == 0.5
-    assert errors["base"]["mean_abs_expected_pt_error"] == 1.5
-    assert errors["base"]["old_grp_reward_delta_mean"] == 2.0
-    assert errors["base"]["old_grp_reward_delta_variance"] == 1.0
+    assert errors["mortal_default"]["mean_abs_expected_pt_error"] == 1.5
+    assert errors["mortal_default"]["old_grp_reward_delta_mean"] == 2.0
+    assert errors["mortal_default"]["old_grp_reward_delta_variance"] == 1.0

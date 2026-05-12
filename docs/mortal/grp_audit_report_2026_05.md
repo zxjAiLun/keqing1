@@ -40,11 +40,13 @@ uv run python scripts/mortal/audit_grp_on_logs.py \
 
 Consider GRP retraining only if selfplay-domain calibration is clearly worse than original logs and the reward-delta variance/error under the active PT profiles is large enough to make DQN targets noisy.
 
+Audit profiles are `mortal_default`, `avoid4_norm`, `top1_norm`, plus optional raw variants and Tenhou reference. `zero_sum_balanced` is not reported separately because it is a constant-shift equivalent of Mortal default.
+
 ## Results
 
 Fill after audit runs complete.
 
-| Domain | games | samples | rank CE | top-1 acc | base MAE | avoid4 MAE | top1 MAE | zero-sum MAE | Decision |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| original | | | | | | | | | |
-| style selfplay | | | | | | | | | |
+| Domain | games | samples | rank CE | top-1 acc | mortal default MAE | avoid4 norm MAE | top1 norm MAE | Decision |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| original | | | | | | | | |
+| style selfplay | | | | | | | | |

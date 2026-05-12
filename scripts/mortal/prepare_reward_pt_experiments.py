@@ -20,10 +20,9 @@ if str(_REPO_ROOT) not in sys.path:
 from scripts.mortal.eval_metrics import RANK_POINT_PROFILES
 
 DEFAULT_MATRIX: tuple[tuple[str, str], ...] = (
-    ("R0_base", "base"),
-    ("R1_avoid4_strong", "avoid4_strong"),
-    ("R2_top1_heavy", "top1_heavy"),
-    ("R3_zero_sum_balanced", "zero_sum_balanced"),
+    ("R0_mortal_default", "mortal_default"),
+    ("R1_avoid4_norm", "avoid4_norm"),
+    ("R2_top1_norm", "top1_norm"),
 )
 
 
@@ -51,7 +50,7 @@ def parse_matrix(value: str) -> list[tuple[str, str]]:
         experiment_id, profile = [part.strip() for part in raw.split(":", 1)]
         if not experiment_id or not profile:
             raise ValueError(f"matrix item must be EXPERIMENT_ID:PROFILE, got {raw!r}")
-        if profile not in RANK_POINT_PROFILES or profile == "tenhou_reference":
+        if not is_training_reward_profile(profile):
             known = ", ".join(profile for profile in sorted(RANK_POINT_PROFILES) if profile != "tenhou_reference")
             raise ValueError(f"unknown training reward profile {profile!r}; known profiles: {known}")
         rows.append((experiment_id, profile))
@@ -72,7 +71,7 @@ def prepare_config(
     reward_profile: str,
     output_root: Path,
 ) -> tuple[dict[str, Any], Path]:
-    if reward_profile not in RANK_POINT_PROFILES or reward_profile == "tenhou_reference":
+    if not is_training_reward_profile(reward_profile):
         raise ValueError(f"unsupported reward profile for training: {reward_profile!r}")
     exp_dir = output_root / experiment_id
     config = copy.deepcopy(dict(base_config))
@@ -97,6 +96,10 @@ def prepare_config(
         if isinstance(config["1v3"].get("challenger"), dict):
             config["1v3"]["challenger"]["state_file"] = control["state_file"]
     return config, exp_dir
+
+
+def is_training_reward_profile(profile: str) -> bool:
+    return profile in RANK_POINT_PROFILES and profile != "tenhou_reference"
 
 
 def build_training_command(*, config_path: Path, target_steps: int) -> list[str]:

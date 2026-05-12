@@ -13,10 +13,11 @@ METRICS_SCHEMA = "keqing.mortal.eval.metrics.v1"
 TENHOU_RANK_POINTS = (90.0, 45.0, 0.0, -135.0)
 RANK_POINT_PROFILES: dict[str, tuple[float, float, float, float]] = {
     "tenhou_reference": TENHOU_RANK_POINTS,
-    "base": (6.0, 4.0, 2.0, 0.0),
-    "avoid4_strong": (4.0, 3.0, 2.0, -3.0),
-    "top1_heavy": (8.0, 3.0, 1.0, -2.0),
-    "zero_sum_balanced": (3.0, 1.0, -1.0, -3.0),
+    "mortal_default": (6.0, 4.0, 2.0, 0.0),
+    "avoid4_norm": (15.0 / 7.0, 9.0 / 7.0, 3.0 / 7.0, -27.0 / 7.0),
+    "top1_norm": (3.3, 0.3, -0.9, -2.7),
+    "avoid4_raw": (4.0, 3.0, 2.0, -3.0),
+    "top1_raw": (8.0, 3.0, 1.0, -2.0),
 }
 
 
