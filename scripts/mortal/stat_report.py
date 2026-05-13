@@ -163,8 +163,9 @@ def stat_to_metrics(stat: Any, *, rank_pts: Sequence[int | float] = DEFAULT_RANK
     for field in DERIVED_FIELDS:
         metrics["derived"][field] = _normalize_value(getattr(stat, field))
     pts = [float(value) for value in rank_pts]
-    metrics["derived"]["total_rank_pt"] = _normalize_value(stat.total_pt(pts))
-    metrics["derived"]["avg_rank_pt"] = _normalize_value(stat.avg_pt(pts))
+    total_rank_pt = sum(float(getattr(stat, f"rank_{rank}")) * pts[rank - 1] for rank in range(1, 5))
+    metrics["derived"]["total_rank_pt"] = _normalize_value(total_rank_pt)
+    metrics["derived"]["avg_rank_pt"] = _normalize_value(total_rank_pt / float(stat.game) if stat.game else float("nan"))
     return metrics
 
 

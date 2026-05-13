@@ -19,6 +19,8 @@ if str(_REPO_ROOT) not in sys.path:
 
 from scripts.mortal.eval_metrics import RANK_POINT_PROFILES
 
+RAW_SCALE_CONFOUND_PROFILES = frozenset({"avoid4_raw", "top1_raw"})
+
 DEFAULT_MATRIX: tuple[tuple[str, str], ...] = (
     ("R0_mortal_default", "mortal_default"),
     ("R1_avoid4_norm", "avoid4_norm"),
@@ -31,7 +33,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--base-config", type=Path, default=Path("artifacts/mortal_training/config.toml"))
     parser.add_argument("--parent-checkpoint", type=Path, default=Path("artifacts/mortal_training/mortal.pth"))
     parser.add_argument("--output-root", type=Path, default=Path("artifacts/experiments/reward_pt_2026_05"))
-    parser.add_argument("--target-steps", type=int, default=65000)
+    parser.add_argument("--target-steps", type=int, default=None, help="Defaults to parent checkpoint steps + --train-steps")
     parser.add_argument("--train-steps", type=int, default=5000)
     parser.add_argument("--matrix", default=",".join(f"{exp}:{profile}" for exp, profile in DEFAULT_MATRIX))
     parser.add_argument("--copy-parent-checkpoint", action="store_true")
@@ -153,6 +155,8 @@ def write_experiment_configs(
             "training_command": build_training_command(config_path=config_path, target_steps=target_steps),
             "notes": "Mortal/libriichi reward-only pt-table short run; no obs/model-head changes.",
         }
+        if reward_profile in RAW_SCALE_CONFOUND_PROFILES:
+            manifest["warning"] = "raw profile changes reward scale as well as utility shape"
         output_rows.append(manifest)
         if dry_run:
             continue
@@ -174,6 +178,13 @@ def write_experiment_configs(
         "copy_parent_checkpoint": bool(copy_parent_checkpoint),
         "experiments": output_rows,
     }
+
+
+def read_checkpoint_steps(checkpoint: str | Path) -> int:
+    import torch  # noqa: PLC0415
+
+    state = torch.load(checkpoint, weights_only=True, map_location="cpu")
+    return int(state["steps"])
 
 
 def dump_toml(data: Mapping[str, Any]) -> str:
@@ -218,12 +229,17 @@ def _toml_value(value: Any) -> str:
 
 def main() -> None:
     args = _parse_args()
+    target_steps = (
+        int(args.target_steps)
+        if args.target_steps is not None
+        else read_checkpoint_steps(args.parent_checkpoint) + int(args.train_steps)
+    )
     report = write_experiment_configs(
         base_config_path=args.base_config,
         parent_checkpoint=args.parent_checkpoint,
         output_root=args.output_root,
         matrix=parse_matrix(str(args.matrix)),
-        target_steps=int(args.target_steps),
+        target_steps=target_steps,
         train_steps=int(args.train_steps),
         copy_parent_checkpoint=bool(args.copy_parent_checkpoint),
         dry_run=bool(args.dry_run),

@@ -229,7 +229,7 @@ def test_stat_report_normalizes_and_formats_markdown() -> None:
         def __str__(self):
             return "fake stat"
 
-    metrics = stat_report.stat_to_metrics(FakeStat())
+    metrics = stat_report.stat_to_metrics(FakeStat(), rank_pts=[2.5, 1.5, 0.5, -4.5])
     report = {
         "backend": "fake",
         "log_dir": "logs",
@@ -240,6 +240,8 @@ def test_stat_report_normalizes_and_formats_markdown() -> None:
     markdown = stat_report.format_markdown_report(report)
 
     assert metrics["derived"]["avg_point_per_oya_agari"] is None
+    assert metrics["derived"]["total_rank_pt"] == 0.0
+    assert metrics["derived"]["avg_rank_pt"] == 0.0
     assert "| Games | 4 |" in markdown
     assert "- Rank point profile: `custom`" in markdown
     assert "| 1st (rate) | 1 (0.250000) |" in markdown
@@ -313,6 +315,39 @@ state_file = "/tmp/base/grp.pth"
     assert row["target_steps"] == 65000
     assert row["config"].endswith("R1_avoid4_norm/config.toml")
     assert not (tmp_path / "experiments").exists()
+
+
+def test_prepare_reward_pt_experiments_warns_for_raw_scale_profiles(tmp_path) -> None:
+    base_config = tmp_path / "config.toml"
+    base_config.write_text(
+        """
+[control]
+state_file = "/tmp/base/mortal.pth"
+best_state_file = "/tmp/base/mortal_best.pth"
+tensorboard_dir = "/tmp/base/tb_mortal"
+
+[dataset]
+globs = ["/data/train/**/*.json.gz"]
+file_index = "/tmp/base/file_index.pth"
+
+[env]
+pts = [6.0, 4.0, 2.0, 0.0]
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    report = prepare_reward_pt_experiments.write_experiment_configs(
+        base_config_path=base_config,
+        parent_checkpoint=tmp_path / "parent.pth",
+        output_root=tmp_path / "experiments",
+        matrix=[("R1_avoid4_raw", "avoid4_raw")],
+        target_steps=65000,
+        train_steps=5000,
+        copy_parent_checkpoint=False,
+        dry_run=True,
+    )
+
+    assert report["experiments"][0]["warning"] == "raw profile changes reward scale as well as utility shape"
 
 
 def test_grp_audit_finalizers_export_calibration_and_reward_variance() -> None:
