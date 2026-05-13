@@ -1,6 +1,6 @@
 # Reward / PT Table Experiment Report
 
-Status: R0/R1/R2 short training complete; 100 half-game quick smoke and 1000 half-game gates complete.
+Status: R0/R1/R2 short training complete; 100 half-game quick smoke, 1000 half-game gates, and R1 final two-direction A/B complete.
 
 ## Fixed Matrix
 
@@ -41,7 +41,7 @@ uv run python scripts/mortal/one_vs_three_smoke.py \
   --output-dir artifacts/eval/reward_pt_2026_05/R0_mortal_default_quick
 ```
 
-Gate uses 250 seeds for 1000 half-games. Final A/B uses `scripts/mortal/ab_match.py` with both one-vs-three directions.
+Gate uses 250 seeds for 1000 half-games. Final A/B uses `scripts/mortal/one_vs_three_smoke.py` with both one-vs-three directions and 1250 seeds per direction.
 
 ## Result Table
 
@@ -62,6 +62,27 @@ Gate B compares each variant against the same-step R0 70k checkpoint, so it isol
 | GateB_R1_vs_R0_1000h | R1_avoid4_norm | R0_mortal_default | 2.474 | 0.0600 | 2.160 | 257 | 239 | 0.2189 | 0.1319 | 0.2922 | 0.1911 | avoid4 has a positive 1000h same-step signal |
 | GateB_R2_vs_R0_1000h | R2_top1_norm | R0_mortal_default | 2.493 | 0.0204 | 0.765 | 255 | 245 | 0.2184 | 0.1309 | 0.2933 | 0.1898 | top1 remains mildly positive, weaker than quick smoke |
 
+## Final A/B
+
+R1 was the only candidate advanced to final A/B. R2 remains parked because its same-step Gate B signal was weaker. A short RiichiEnv `ab_match.py` run was started first, but it was stopped after confirming throughput was unsuitable for 5000h; the recorded final results below use the same libriichi arena backend as quick smoke and gates.
+
+| Direction | challenger | champion | games | avg rank | pt(profile) | pt(Tenhou) | 1st | 4th | agari | houjuu | fuuro | riichi | Read |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| R1_vs_3R0 | R1_avoid4_norm | R0_mortal_default | 5000 | 2.5078 | -0.0122 | -0.495 | 1244 | 1258 | 0.2154 | 0.1341 | 0.2930 | 0.1843 | R1 does not reproduce Gate B advantage as single challenger |
+| R0_vs_3R1 | R0_mortal_default | R1_avoid4_norm | 5000 | 2.4842 | 3.0316 | 1.305 | 1256 | 1217 | 0.2189 | 0.1328 | 0.2891 | 0.1861 | R0 is positive as single challenger against R1 |
+
+Final A/B does not support promoting `R1_avoid4_norm` over `R0_mortal_default` as the next main checkpoint. The 1000h Gate B signal appears to have been noise or not robust to the higher-sample two-direction setup.
+
+## Decision
+
+This reward/PT first-pass line is closed for the current 70k checkpoints.
+
+- `R0_mortal_default` remains the default mainline candidate.
+- `R1_avoid4_norm` is rejected for mainline promotion. It showed a positive 1000h same-step gate signal, but failed to reproduce in 5000h two-direction final A/B.
+- `R2_top1_norm` is parked. It had early positive signal, but its same-step gate advantage was weaker than R1, so it was not advanced to final A/B.
+
+The experimental chain itself is valid: configurable PT table -> reward scalarization -> continued training -> quick smoke -> gate -> final A/B. The result is a negative promotion decision for these normalized reward variants, not a failure of the tooling. Further PT shaping should wait until default training plateaus, GRP audit shows a relevant mismatch, or a platform/style-specific objective becomes the primary goal.
+
 ## Artifacts
 
 | Experiment | checkpoint | quick metrics | Gate A metrics |
@@ -75,8 +96,14 @@ Gate B artifacts:
 - `artifacts/experiments/reward_pt_2026_05/gates/GateB_R1_vs_R0_1000h/metrics.json`
 - `artifacts/experiments/reward_pt_2026_05/gates/GateB_R2_vs_R0_1000h/metrics.json`
 
+Final A/B artifacts:
+
+- `artifacts/experiments/reward_pt_2026_05/final_ab/arena_R1_vs_3R0_5000h/metrics.json`
+- `artifacts/experiments/reward_pt_2026_05/final_ab/arena_R0_vs_3R1_5000h/metrics.json`
+
 Notes:
 
 - The parent checkpoint was already at 65000 local steps, so this run targets 70000.
 - Training used `--num-workers 0` because this environment returned `OSError: [Errno 95] Operation not supported` from multiprocessing DataLoader sockets.
 - R0's first quick smoke wrote logs but failed while formatting detailed stats for float rank points; the fixed full run is under `quick_smoke_100h_v2`.
+- The incomplete RiichiEnv final A/B trial under `final_ab/R1_vs_3R0_5000h` is not used in the report.
