@@ -123,6 +123,7 @@ def write_experiment_configs(
     parent_checkpoint: Path,
     output_root: Path,
     matrix: Sequence[tuple[str, str]],
+    parent_steps: int,
     target_steps: int,
     train_steps: int,
     copy_parent_checkpoint: bool,
@@ -148,7 +149,9 @@ def write_experiment_configs(
             "grp_checkpoint": str(config.get("grp", {}).get("state_file", "")),
             "training_data": list(config.get("dataset", {}).get("globs", [])),
             "style_data": None,
+            "parent_steps": int(parent_steps),
             "train_steps": int(train_steps),
+            "effective_train_steps": int(target_steps) - int(parent_steps),
             "target_steps": int(target_steps),
             "config": str(config_path),
             "state_file": str(state_file),
@@ -173,6 +176,7 @@ def write_experiment_configs(
         "schema": "keqing.mortal.reward_pt_experiment_prepare.v1",
         "base_config": str(base_config_path),
         "parent_checkpoint": str(parent_checkpoint),
+        "parent_steps": int(parent_steps),
         "output_root": str(output_root),
         "dry_run": bool(dry_run),
         "copy_parent_checkpoint": bool(copy_parent_checkpoint),
@@ -229,16 +233,18 @@ def _toml_value(value: Any) -> str:
 
 def main() -> None:
     args = _parse_args()
+    parent_steps = read_checkpoint_steps(args.parent_checkpoint)
     target_steps = (
         int(args.target_steps)
         if args.target_steps is not None
-        else read_checkpoint_steps(args.parent_checkpoint) + int(args.train_steps)
+        else parent_steps + int(args.train_steps)
     )
     report = write_experiment_configs(
         base_config_path=args.base_config,
         parent_checkpoint=args.parent_checkpoint,
         output_root=args.output_root,
         matrix=parse_matrix(str(args.matrix)),
+        parent_steps=parent_steps,
         target_steps=target_steps,
         train_steps=int(args.train_steps),
         copy_parent_checkpoint=bool(args.copy_parent_checkpoint),

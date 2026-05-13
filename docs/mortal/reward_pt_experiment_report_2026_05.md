@@ -1,6 +1,6 @@
 # Reward / PT Table Experiment Report
 
-Status: R0/R1/R2 short training complete; 100 half-game quick smoke complete.
+Status: R0/R1/R2 short training complete; 100 half-game quick smoke and 1000 half-game gates complete.
 
 ## Fixed Matrix
 
@@ -45,21 +45,35 @@ Gate uses 250 seeds for 1000 half-games. Final A/B uses `scripts/mortal/ab_match
 
 ## Result Table
 
-Quick smoke uses each 70k checkpoint as `challenger` against the 65k parent as `champion`, with 25 `OneVsThree` seeds (100 half-games). Gate and A/B are not run yet.
+Quick smoke uses each 70k checkpoint as `challenger` against the 65k parent as `champion`, with 25 `OneVsThree` seeds (100 half-games). Gate A uses the same pairing with 250 seeds. Gate B compares reward variants against R0 70k with 250 seeds.
 
-| Experiment | quick avg rank | quick pt(profile) | quick pt(Tenhou) | gate avg rank | 1st | 4th | agari | houjuu | fuuro | riichi | Decision |
+| Experiment | quick avg rank | quick pt(profile) | quick pt(Tenhou) | Gate A avg rank | Gate A pt(Tenhou) | 1st | 4th | agari | houjuu | fuuro | riichi | Decision |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| R0_mortal_default | 2.48 | 3.04 | -3.60 | pending | 27 | 30 | 0.2243 | 0.1214 | 0.2948 | 0.1832 | quick smoke only |
-| R1_avoid4_norm | 2.49 | -0.1286 | -3.15 | pending | 27 | 29 | 0.2178 | 0.1270 | 0.2959 | 0.1904 | quick smoke only |
-| R2_top1_norm | 2.41 | 0.1620 | 1.35 | pending | 29 | 28 | 0.2202 | 0.1204 | 0.2984 | 0.1859 | quick smoke only |
+| R0_mortal_default | 2.48 | 3.04 | -3.60 | 2.491 | -0.315 | 243 | 258 | 0.2177 | 0.1304 | 0.2908 | 0.1886 | baseline gate complete |
+| R1_avoid4_norm | 2.49 | -0.1286 | -3.15 | 2.510 | -1.350 | 242 | 260 | 0.2191 | 0.1301 | 0.2928 | 0.1886 | Gate B positive vs R0 |
+| R2_top1_norm | 2.41 | 0.1620 | 1.35 | 2.486 | 1.080 | 242 | 245 | 0.2185 | 0.1290 | 0.2945 | 0.1875 | Gate A positive vs parent |
+
+## Gate B
+
+Gate B compares each variant against the same-step R0 70k checkpoint, so it isolates reward shape more cleanly than parent-only Gate A.
+
+| Match | challenger | champion | avg rank | pt(profile) | pt(Tenhou) | 1st | 4th | agari | houjuu | fuuro | riichi | Read |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| GateB_R1_vs_R0_1000h | R1_avoid4_norm | R0_mortal_default | 2.474 | 0.0600 | 2.160 | 257 | 239 | 0.2189 | 0.1319 | 0.2922 | 0.1911 | avoid4 has a positive 1000h same-step signal |
+| GateB_R2_vs_R0_1000h | R2_top1_norm | R0_mortal_default | 2.493 | 0.0204 | 0.765 | 255 | 245 | 0.2184 | 0.1309 | 0.2933 | 0.1898 | top1 remains mildly positive, weaker than quick smoke |
 
 ## Artifacts
 
-| Experiment | checkpoint | quick metrics |
-| --- | --- | --- |
-| R0_mortal_default | `artifacts/experiments/reward_pt_2026_05/R0_mortal_default/mortal.pth` | `artifacts/experiments/reward_pt_2026_05/R0_mortal_default/eval/quick_smoke_100h_v2/metrics.json` |
-| R1_avoid4_norm | `artifacts/experiments/reward_pt_2026_05/R1_avoid4_norm/mortal.pth` | `artifacts/experiments/reward_pt_2026_05/R1_avoid4_norm/eval/quick_smoke_100h/metrics.json` |
-| R2_top1_norm | `artifacts/experiments/reward_pt_2026_05/R2_top1_norm/mortal.pth` | `artifacts/experiments/reward_pt_2026_05/R2_top1_norm/eval/quick_smoke_100h/metrics.json` |
+| Experiment | checkpoint | quick metrics | Gate A metrics |
+| --- | --- | --- | --- |
+| R0_mortal_default | `artifacts/experiments/reward_pt_2026_05/R0_mortal_default/mortal.pth` | `artifacts/experiments/reward_pt_2026_05/R0_mortal_default/eval/quick_smoke_100h_v2/metrics.json` | `artifacts/experiments/reward_pt_2026_05/gates/GateA_R0_vs_parent_1000h/metrics.json` |
+| R1_avoid4_norm | `artifacts/experiments/reward_pt_2026_05/R1_avoid4_norm/mortal.pth` | `artifacts/experiments/reward_pt_2026_05/R1_avoid4_norm/eval/quick_smoke_100h/metrics.json` | `artifacts/experiments/reward_pt_2026_05/gates/GateA_R1_vs_parent_1000h/metrics.json` |
+| R2_top1_norm | `artifacts/experiments/reward_pt_2026_05/R2_top1_norm/mortal.pth` | `artifacts/experiments/reward_pt_2026_05/R2_top1_norm/eval/quick_smoke_100h/metrics.json` | `artifacts/experiments/reward_pt_2026_05/gates/GateA_R2_vs_parent_1000h/metrics.json` |
+
+Gate B artifacts:
+
+- `artifacts/experiments/reward_pt_2026_05/gates/GateB_R1_vs_R0_1000h/metrics.json`
+- `artifacts/experiments/reward_pt_2026_05/gates/GateB_R2_vs_R0_1000h/metrics.json`
 
 Notes:
 

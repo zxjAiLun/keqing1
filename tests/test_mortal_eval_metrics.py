@@ -304,6 +304,7 @@ state_file = "/tmp/base/grp.pth"
         parent_checkpoint=tmp_path / "parent.pth",
         output_root=tmp_path / "experiments",
         matrix=[("R1_avoid4_norm", "avoid4_norm")],
+        parent_steps=60000,
         target_steps=65000,
         train_steps=5000,
         copy_parent_checkpoint=False,
@@ -312,7 +313,9 @@ state_file = "/tmp/base/grp.pth"
 
     row = report["experiments"][0]
     assert row["pt_table"] == [15.0 / 7.0, 9.0 / 7.0, 3.0 / 7.0, -27.0 / 7.0]
+    assert row["parent_steps"] == 60000
     assert row["target_steps"] == 65000
+    assert row["effective_train_steps"] == 5000
     assert row["config"].endswith("R1_avoid4_norm/config.toml")
     assert not (tmp_path / "experiments").exists()
 
@@ -341,6 +344,7 @@ pts = [6.0, 4.0, 2.0, 0.0]
         parent_checkpoint=tmp_path / "parent.pth",
         output_root=tmp_path / "experiments",
         matrix=[("R1_avoid4_raw", "avoid4_raw")],
+        parent_steps=60000,
         target_steps=65000,
         train_steps=5000,
         copy_parent_checkpoint=False,
