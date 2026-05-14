@@ -10,6 +10,7 @@ from scripts.mortal import audit_grp_on_logs
 from scripts.mortal import compare_checkpoint_stat_reports
 from scripts.mortal import eval_metrics
 from scripts.mortal import experiment_registry
+from scripts.mortal import export_behavior_replay_cases
 from scripts.mortal import one_vs_three_smoke
 from scripts.mortal import prepare_reward_pt_experiments
 from scripts.mortal import stat_report
@@ -360,6 +361,54 @@ def test_decision_drift_parser_reads_call_margin_and_outcome(tmp_path) -> None:
     assert all_row["avg_margin"] == 0.5
     assert all_row["positive_margin_rate"] == 1.0
     assert all_row["houjuu_rate"] == 1.0
+
+
+def test_export_behavior_replay_cases_writes_manifest_and_mjson(tmp_path) -> None:
+    def write_log(path, *, model: str, actor: int, scores: list[int], terminal: dict[str, object]) -> None:
+        mask_bits = (1 << 41) | (1 << 45)
+        events = [
+            {"type": "start_game", "names": ["a", "b", "c", "d"]},
+            {"type": "start_kyoku", "bakaze": "E", "kyoku": 1, "oya": actor, "scores": scores},
+            {"type": "tsumo", "actor": actor, "pai": "1m"},
+            {
+                "type": "pon",
+                "actor": actor,
+                "target": (actor + 1) % 4,
+                "pai": "1m",
+                "consumed": ["1m", "1m"],
+                "meta": {"mask_bits": mask_bits, "q_values": [2.0, 1.0], "shanten": 2, "model": model},
+            },
+            terminal,
+            {"type": "end_kyoku"},
+        ]
+        import gzip
+
+        with gzip.open(path, "wt", encoding="utf-8") as handle:
+            for event in events:
+                handle.write(json.dumps(event) + "\n")
+
+    log70 = tmp_path / "70k.json.gz"
+    log80 = tmp_path / "80k.json.gz"
+    write_log(log70, model="70k", actor=1, scores=[30000, 29000, 25000, 16000], terminal={"type": "hora", "actor": 1, "target": 1})
+    write_log(log80, model="80k", actor=1, scores=[30000, 29000, 25000, 16000], terminal={"type": "hora", "actor": 2, "target": 1})
+
+    candidates = [
+        *export_behavior_replay_cases.collect_candidates([log70], model_label="70k"),
+        *export_behavior_replay_cases.collect_candidates([log80], model_label="80k"),
+    ]
+    selected = export_behavior_replay_cases.select_cases(candidates, top_k=10)
+    manifest = export_behavior_replay_cases.write_cases(selected, tmp_path / "out")
+    export_behavior_replay_cases.write_manifest(tmp_path / "out", manifest)
+
+    kinds = {row["case_kind"] for row in manifest}
+    assert "70k_dealer_call_good" in kinds
+    assert "70k_rank2_call_good" in kinds
+    assert "80k_dealer_call_bad" in kinds
+    assert "80k_rank2_call_bad" in kinds
+    first = manifest[0]
+    assert first["focus_event_index"] == 3
+    assert (tmp_path / "out" / first["mjson_path"]).exists()
+    assert (tmp_path / "out" / "manifest.jsonl").exists()
 
 
 def test_registry_helper_appends_valid_jsonl(tmp_path) -> None:

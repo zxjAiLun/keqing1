@@ -143,6 +143,37 @@ Chosen-riichi deltas:
 
 L3 diagnosis: the 80k problem is concentrated in calls, not riichi. The surprising signal is that 80k chosen calls have a higher average `Q(call)-Q(pass)` margin, yet worse outcomes. Dealer calls and start-rank 2 calls are the clearest bad pockets. This points away from "ambiguous marginal calls flipped by noise" and toward a value-estimation or policy-drift issue where 80k is more confident in calls whose downstream results are worse.
 
+## L4 Replay Casebook Export
+
+Representative call cases were exported with `scripts/mortal/export_behavior_replay_cases.py`.
+
+Artifacts:
+
+- `artifacts/experiments/default_mainline_2026_05/behavior_replay_cases/manifest.jsonl`
+- `artifacts/experiments/default_mainline_2026_05/behavior_replay_cases/manifest.json`
+- `artifacts/experiments/default_mainline_2026_05/behavior_replay_cases/cases/*.mjson`
+- `artifacts/experiments/default_mainline_2026_05/behavior_replay_cases/review_payloads/*.review.json`
+
+Case kinds:
+
+| Case kind | Count | Purpose |
+| --- | ---: | --- |
+| `80k_dealer_call_bad` | 20 | High-margin 80k dealer calls with bad downstream outcomes |
+| `80k_rank2_call_bad` | 20 | High-margin 80k start-rank 2 calls with bad downstream outcomes |
+| `70k_dealer_call_good` | 20 | High-margin 70k dealer-call good controls |
+| `70k_rank2_call_good` | 20 | High-margin 70k start-rank 2 call good controls |
+
+Each manifest row includes:
+
+- `mjson_path`: replay file loadable by the existing mjai replay path
+- `focus_event_index` / `focus_step`: the key call decision
+- `slice_tags`: dealer/start-rank/outcome tags
+- `margin`: original arena-log `Q(call)-Q(pass)`
+- `outcome`: `agari`, `houjuu`, `ryukyoku`, or `not_agari`
+- `review_payload_path`: compact precomputed focus-event/Q payload
+
+This is the MVP bridge from statistics to GUI review. The current GUI can manually load a case `.mjson`; manifest focus fields identify where to jump. A later GUI case-bundle viewer can consume `manifest.jsonl` directly and auto-load the focused replay step.
+
 ## Decision
 
 - Keep `mortal_default_70k` as the current default promotion candidate.
@@ -167,9 +198,11 @@ Key result under the active `mortal_default` audit profile:
 
 ## Next Recommended Work
 
-1. Generate a smaller sidecar-rich RiichiEnv sample only if full PASS-vs-CALL opportunity analysis is needed.
-2. Focus any policy diagnostics on dealer call windows and start-rank 2 call windows.
-3. If default training continues, archive every 5k or 10k checkpoint and compare against the 70k candidate, not only the latest `mortal.pth`.
-4. Keep GRP unchanged unless future selfplay audits show both calibration degradation and expected-PT or reward-delta degradation.
+1. Review the L4 casebook in GUI, starting with `80k_dealer_call_bad` and its 70k dealer-call controls.
+2. Build a GUI case-bundle viewer only if manual manifest-guided review is too slow.
+3. Generate a smaller sidecar-rich RiichiEnv sample only if full PASS-vs-CALL opportunity analysis is needed.
+4. Focus any policy diagnostics on dealer call windows and start-rank 2 call windows.
+5. If default training continues, archive every 5k or 10k checkpoint and compare against the 70k candidate, not only the latest `mortal.pth`.
+6. Keep GRP unchanged unless future selfplay audits show both calibration degradation and expected-PT or reward-delta degradation.
 
 The 80k-vs-65k run under `artifacts/experiments/default_mainline_2026_05/gates/GateA_80k_vs_65k_1000h` was produced by a mistaken baseline choice and is not used for this decision.
