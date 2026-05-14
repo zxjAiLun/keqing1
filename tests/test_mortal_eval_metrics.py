@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from scripts.mortal import ab_match
 from scripts.mortal import audit_grp_on_logs
+from scripts.mortal import compare_checkpoint_stat_reports
 from scripts.mortal import eval_metrics
 from scripts.mortal import experiment_registry
 from scripts.mortal import one_vs_three_smoke
@@ -245,6 +246,36 @@ def test_stat_report_normalizes_and_formats_markdown() -> None:
     assert "| Games | 4 |" in markdown
     assert "- Rank point profile: `custom`" in markdown
     assert "| 1st (rate) | 1 (0.250000) |" in markdown
+
+
+def test_compare_checkpoint_stat_reports_builds_delta() -> None:
+    def player(*, agari: float, houjuu: float, fuuro: float, riichi: float):
+        derived = {key: 0.0 for _, _, key, _ in compare_checkpoint_stat_reports.METRICS}
+        derived.update(
+            {
+                "agari_rate": agari,
+                "houjuu_rate": houjuu,
+                "fuuro_rate": fuuro,
+                "riichi_rate": riichi,
+                "agari_rate_after_fuuro": 0.3,
+                "houjuu_rate_after_fuuro": 0.1,
+                "agari_rate_after_riichi": 0.5,
+                "houjuu_rate_after_riichi": 0.14,
+            }
+        )
+        return {"player_name": "champion", "raw": {}, "derived": derived}
+
+    delta = compare_checkpoint_stat_reports.build_delta(
+        left_report={"log_dir": "left-logs", "players": {"left": player(agari=0.2, houjuu=0.1, fuuro=0.25, riichi=0.15)}},
+        right_report={"log_dir": "right-logs", "players": {"right": player(agari=0.21, houjuu=0.13, fuuro=0.3, riichi=0.18)}},
+        left_label="70k",
+        right_label="80k",
+    )
+    markdown = compare_checkpoint_stat_reports.format_markdown(delta)
+
+    assert delta["rows"][0]["delta"] == 0.009999999999999981
+    assert any("calls more often" in note for note in delta["diagnosis"])
+    assert "| Win rate | 20.00% | 21.00% | +1.00pp |" in markdown
 
 
 def test_registry_helper_appends_valid_jsonl(tmp_path) -> None:

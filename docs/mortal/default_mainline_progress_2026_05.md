@@ -44,6 +44,34 @@ Compared with the 70k baseline in the reverse gate, 80k shows a more aggressive 
 
 The 80k checkpoint wins and calls more, but also deals in substantially more. The higher houjuu rate is the main warning sign: default offline training from 70k to 80k appears to have pushed the policy toward a more aggressive style without robust strength gain.
 
+## L1 Behavior Diff
+
+The all-same 500h arena selfplay logs were compared with `scripts/mortal/compare_checkpoint_stat_reports.py`.
+
+Artifacts:
+
+- `artifacts/experiments/default_mainline_2026_05/behavior_diff/stat_70k.json`
+- `artifacts/experiments/default_mainline_2026_05/behavior_diff/stat_80k.json`
+- `artifacts/experiments/default_mainline_2026_05/behavior_diff/stat_delta.md`
+
+Key deltas, 80k minus 70k:
+
+| Metric | 70k | 80k | Delta |
+| --- | ---: | ---: | ---: |
+| Win rate | 21.69% | 22.28% | +0.59pp |
+| Deal-in rate | 13.13% | 14.66% | +1.53pp |
+| Call rate | 28.71% | 31.82% | +3.11pp |
+| Riichi rate | 18.84% | 19.90% | +1.07pp |
+| Winning rate after call | 33.73% | 32.24% | -1.50pp |
+| Deal-in rate after call | 14.91% | 15.78% | +0.87pp |
+| Winning rate after riichi | 49.09% | 49.31% | +0.21pp |
+| Deal-in rate after riichi | 14.95% | 14.64% | -0.31pp |
+| Avg winning delta score | 6236.14 | 5814.60 | -421.54 |
+| Chasing riichi rate | 16.97% | 20.94% | +3.97pp |
+| Riichi chased rate | 18.28% | 22.55% | +4.27pp |
+
+L1 diagnosis: the 80k drift is more consistent with call/fuuro quality degradation than with riichi quality degradation. 80k calls much more often, wins less often after calls, and deals in more often after calls. Riichi is also more frequent, but post-riichi win/deal-in rates do not show the same deterioration in this aggregate view.
+
 ## Decision
 
 - Keep `mortal_default_70k` as the current default promotion candidate.
@@ -68,8 +96,9 @@ Key result under the active `mortal_default` audit profile:
 
 ## Next Recommended Work
 
-1. Diagnose 70k vs 80k behavior drift, especially riichi/call choices and houjuu concentration.
-2. If default training continues, archive every 5k or 10k checkpoint and compare against the 70k candidate, not only the latest `mortal.pth`.
-3. Keep GRP unchanged unless future selfplay audits show both calibration degradation and expected-PT or reward-delta degradation.
+1. Run L2 behavior slices focused first on fuuro/call contexts: dealer vs non-dealer, start rank, round stage, and turn bucket.
+2. Use L3 sidecar/Q analysis only after L2 identifies the highest-risk call windows.
+3. If default training continues, archive every 5k or 10k checkpoint and compare against the 70k candidate, not only the latest `mortal.pth`.
+4. Keep GRP unchanged unless future selfplay audits show both calibration degradation and expected-PT or reward-delta degradation.
 
 The 80k-vs-65k run under `artifacts/experiments/default_mainline_2026_05/gates/GateA_80k_vs_65k_1000h` was produced by a mistaken baseline choice and is not used for this decision.
