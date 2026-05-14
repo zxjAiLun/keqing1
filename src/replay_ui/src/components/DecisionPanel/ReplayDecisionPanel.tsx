@@ -22,6 +22,22 @@ function displayScoreLabel(c: { logit: number; beam_score?: number; final_score?
   return displayScore(c).toFixed(2);
 }
 
+function softmaxProbabilities(scores: number[]): number[] {
+  if (scores.length === 0) return [];
+  const maxScore = Math.max(...scores);
+  const exps = scores.map((score) => Math.exp(score - maxScore));
+  const total = exps.reduce((sum, value) => sum + value, 0);
+  if (!Number.isFinite(total) || total <= 0) {
+    return scores.map(() => 0);
+  }
+  return exps.map((value) => value / total);
+}
+
+function displayProbLabel(probability: number): string {
+  if (!Number.isFinite(probability)) return '—';
+  return `${(probability * 100).toFixed(1)}%`;
+}
+
 function ensureVisibleCandidates(
   candidates: DecisionLogEntry['candidates'],
   chosen: DecisionLogEntry['chosen'],
@@ -45,17 +61,6 @@ function ensureVisibleCandidates(
   ensureAction(gtAction);
 
   return visible.sort((a, b) => displayScore(b) - displayScore(a));
-}
-
-function normalizedBarPercents(scores: number[]): number[] {
-  if (scores.length === 0) return [];
-  const maxScore = Math.max(...scores);
-  const exps = scores.map((score) => Math.exp(score - maxScore));
-  const total = exps.reduce((sum, value) => sum + value, 0);
-  if (!Number.isFinite(total) || total <= 0) {
-    return scores.map(() => 0);
-  }
-  return exps.map((value) => (value / total) * 100);
 }
 
 /** 动作的短名（用于表格第一列） */
@@ -123,9 +128,18 @@ export function ReplayDecisionPanel({
   // 按显示分值降序排序；即使超出前 12，也强制展示 Bot 选择和实际动作。
   const sorted = ensureVisibleCandidates(candidates, chosen, gt_action, 12);
 
-  const barPercents = normalizedBarPercents(sorted.map((candidate) => displayScore(candidate)));
+  const fallbackProbs = softmaxProbabilities(candidates.map((candidate) => displayScore(candidate)));
+  const fallbackProbByCandidate = new Map<DecisionLogEntry['candidates'][number], number>(
+    candidates.map((candidate, idx) => [candidate, fallbackProbs[idx] ?? 0]),
+  );
+  const probabilityOf = (candidate: DecisionLogEntry['candidates'][number]): number => {
+    const backendProb = candidate.prob;
+    return typeof backendProb === 'number' && Number.isFinite(backendProb)
+      ? backendProb
+      : fallbackProbByCandidate.get(candidate) ?? 0;
+  };
 
-  const scoreTypeLabelShort = 'Final';
+  const scoreTypeLabelShort = 'Final / P';
 
   const chosenIsGt = chosen && gt_action && sameReplayAction(chosen, gt_action);
 
@@ -181,7 +195,8 @@ export function ReplayDecisionPanel({
           {sorted.map((c, idx) => {
             const isChosen = sameReplayAction(c.action, chosen);
             const isGt = sameReplayAction(c.action, gt_action);
-            const pct = Math.max(8, Math.round(barPercents[idx] ?? 0));
+            const probability = probabilityOf(c);
+            const pct = Math.max(8, Math.round(probability * 100));
 
             const barColor = isChosen && isGt ? '#8e44ad'
               : isChosen ? '#e74c3c'
@@ -224,12 +239,13 @@ export function ReplayDecisionPanel({
                     }} />
                   </div>
                   <div style={{
-                    width: 38, textAlign: 'right', flexShrink: 0,
+                    width: 52, textAlign: 'right', flexShrink: 0,
                     fontSize: 11, fontFamily: 'Menlo, monospace',
                     color: isChosen || isGt ? barColor : 'var(--text-muted)',
                     fontWeight: isChosen || isGt ? 700 : 400,
                   }}>
-                    {displayScoreLabel(c)}
+                    <div>{displayScoreLabel(c)}</div>
+                    <div style={{ fontSize: 10, opacity: 0.78 }}>P {displayProbLabel(probability)}</div>
                   </div>
                 </div>
               </div>

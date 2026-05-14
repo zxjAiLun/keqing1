@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import math
+
 from mahjong_env.types import action_dict_to_spec, action_specs_match
 
 from inference.contracts import DecisionContext, DecisionResult, ScoredCandidate
+
+DEFAULT_CANDIDATE_SOFTMAX_TEMPERATURE = 1.0
 
 
 def candidate_to_log_dict(candidate: ScoredCandidate) -> dict:
@@ -16,6 +20,52 @@ def candidate_to_log_dict(candidate: ScoredCandidate) -> dict:
     if candidate.meta:
         out.update(candidate.meta)
     return out
+
+
+def candidate_score(candidate: dict) -> float | None:
+    if candidate.get("final_score") is not None:
+        return float(candidate["final_score"])
+    if candidate.get("beam_score") is not None:
+        return float(candidate["beam_score"])
+    if candidate.get("logit") is not None:
+        return float(candidate["logit"])
+    return None
+
+
+def candidate_probabilities(
+    candidates: list[dict],
+    *,
+    temperature: float = DEFAULT_CANDIDATE_SOFTMAX_TEMPERATURE,
+) -> list[float]:
+    if not candidates:
+        return []
+    tau = float(temperature)
+    if not math.isfinite(tau) or tau <= 0:
+        tau = DEFAULT_CANDIDATE_SOFTMAX_TEMPERATURE
+
+    scores: list[float | None] = []
+    finite_scores: list[float] = []
+    for candidate in candidates:
+        score = candidate_score(candidate)
+        if score is None or not math.isfinite(score):
+            scores.append(None)
+            continue
+        scaled = score / tau
+        scores.append(scaled)
+        finite_scores.append(scaled)
+
+    if not finite_scores:
+        return [0.0 for _ in candidates]
+
+    max_score = max(finite_scores)
+    exps = [
+        math.exp(score - max_score) if score is not None else 0.0
+        for score in scores
+    ]
+    total = sum(exps)
+    if not math.isfinite(total) or total <= 0:
+        return [0.0 for _ in candidates]
+    return [value / total for value in exps]
 
 
 def action_cmp_key(action: dict | None):
@@ -111,13 +161,7 @@ def summarize_reach_followup(
 
 class DefaultRuntimeReviewExporter:
     def candidate_score(self, candidate: dict) -> float | None:
-        if candidate.get("final_score") is not None:
-            return float(candidate["final_score"])
-        if candidate.get("beam_score") is not None:
-            return float(candidate["beam_score"])
-        if candidate.get("logit") is not None:
-            return float(candidate["logit"])
-        return None
+        return candidate_score(candidate)
 
     def candidate_sort_key(self, candidate: dict) -> float:
         score = self.candidate_score(candidate)
@@ -126,11 +170,7 @@ class DefaultRuntimeReviewExporter:
     def compute_rating(
         self,
         log: list[dict],
-        *,
-        alpha: float = 0.5,
     ) -> float | None:
-        import math
-
         rating_scores = []
         for entry in log:
             gt = entry.get("gt_action")
@@ -139,26 +179,29 @@ class DefaultRuntimeReviewExporter:
             candidates = entry.get("candidates", [])
             if not candidates:
                 continue
-            chosen = entry.get("chosen", {})
-
-            bot_score = None
             gt_score = None
+            finite_scores = []
             for candidate in candidates:
                 score = self.candidate_score(candidate)
-                if score is None:
+                if score is None or not math.isfinite(score):
                     continue
-                if same_action(candidate.get("action"), chosen) and bot_score is None:
-                    bot_score = score
+                finite_scores.append(score)
                 if same_action(candidate.get("action"), gt) and gt_score is None:
                     gt_score = score
-            if bot_score is None or gt_score is None:
+            if gt_score is None or len(finite_scores) < 2:
                 continue
-            delta = bot_score - gt_score
-            rating_scores.append(math.exp(-alpha * max(delta, 0.0)))
+
+            min_score = min(finite_scores)
+            max_score = max(finite_scores)
+            score_range = max_score - min_score
+            if score_range <= 0:
+                continue
+            rating_scores.append((gt_score - min_score) / score_range)
 
         if not rating_scores:
             return None
-        return round(100.0 * sum(rating_scores) / len(rating_scores), 1)
+        mean_score = sum(rating_scores) / len(rating_scores)
+        return round(100.0 * mean_score * mean_score, 1)
 
     def build_decision_entry(
         self,
@@ -171,6 +214,8 @@ class DefaultRuntimeReviewExporter:
     ) -> dict:
         model_snap = ctx.model_snap
         scored = [candidate_to_log_dict(c) for c in decision.candidates]
+        for candidate, probability in zip(scored, candidate_probabilities(scored)):
+            candidate["prob"] = probability
         return {
             "step": step,
             "bakaze": model_snap.get("bakaze", ""),

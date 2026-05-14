@@ -1,4 +1,10 @@
-from inference.review import same_action as _same_action
+import pytest
+
+from inference.review import (
+    DefaultRuntimeReviewExporter,
+    candidate_probabilities,
+    same_action as _same_action,
+)
 from replay.legacy_render import render_candidates_logit
 
 
@@ -58,3 +64,36 @@ def test_render_candidates_logit_marks_equivalent_gt_action():
 
     assert "✓Bot" in html
     assert "★玩家" in html
+
+
+def test_candidate_probabilities_use_softmax_over_final_scores():
+    candidates = [
+        {"action": {"type": "dahai", "actor": 0, "pai": "1m"}, "logit": 0.0, "final_score": 2.0},
+        {"action": {"type": "dahai", "actor": 0, "pai": "2m"}, "logit": 0.0, "final_score": 1.0},
+    ]
+
+    probs = candidate_probabilities(candidates)
+
+    assert probs == pytest.approx([0.7310586, 0.2689414])
+
+
+def test_rating_matches_mortal_faq_minmax_squared_formula():
+    log = [
+        {
+            "gt_action": {"type": "dahai", "actor": 0, "pai": "2m"},
+            "candidates": [
+                {"action": {"type": "dahai", "actor": 0, "pai": "1m"}, "logit": 2.0, "final_score": 2.0},
+                {"action": {"type": "dahai", "actor": 0, "pai": "2m"}, "logit": 1.0, "final_score": 1.0},
+                {"action": {"type": "dahai", "actor": 0, "pai": "3m"}, "logit": 0.0, "final_score": 0.0},
+            ],
+        },
+        {
+            "gt_action": {"type": "dahai", "actor": 0, "pai": "1p"},
+            "candidates": [
+                {"action": {"type": "dahai", "actor": 0, "pai": "1p"}, "logit": 4.0, "final_score": 4.0},
+                {"action": {"type": "dahai", "actor": 0, "pai": "2p"}, "logit": 0.0, "final_score": 0.0},
+            ],
+        },
+    ]
+
+    assert DefaultRuntimeReviewExporter().compute_rating(log) == 56.2

@@ -378,6 +378,18 @@ def test_grp_audit_finalizers_export_calibration_and_reward_variance() -> None:
 
     assert calibration[0]["avg_confidence"] == 0.5
     assert calibration[0]["accuracy"] == 0.5
+    assert audit_grp_on_logs.summarize_calibration(calibration) == {"ece": 0.0, "mce": 0.0}
     assert errors["mortal_default"]["mean_abs_expected_pt_error"] == 1.5
     assert errors["mortal_default"]["old_grp_reward_delta_mean"] == 2.0
     assert errors["mortal_default"]["old_grp_reward_delta_variance"] == 1.0
+
+
+def test_grp_audit_sample_log_files_is_deterministic() -> None:
+    files = [f"log_{idx}.json.gz" for idx in range(10)]
+
+    sample_a = audit_grp_on_logs.sample_log_files(files, sample_log_files=4, sample_seed=7)
+    sample_b = audit_grp_on_logs.sample_log_files(reversed(files), sample_log_files=4, sample_seed=7)
+
+    assert sample_a == sample_b
+    assert sample_a == sorted(sample_a)
+    assert audit_grp_on_logs.sample_log_files(files, sample_log_files=20, sample_seed=7) == files

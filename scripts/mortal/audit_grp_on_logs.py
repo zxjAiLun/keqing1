@@ -10,6 +10,7 @@ import glob
 import json
 import math
 from pathlib import Path
+import random
 import sys
 from typing import Any, Mapping, Sequence
 
@@ -33,6 +34,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("artifacts/experiments/grp_audit/metrics.json"))
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--limit-games", type=int, default=None)
+    parser.add_argument("--sample-log-files", type=int, default=None, help="Deterministically sample N log files after expansion")
+    parser.add_argument("--sample-seed", type=int, default=20260514)
     parser.add_argument("--max-prefixes-per-game", type=int, default=None)
     return parser.parse_args()
 
@@ -58,6 +61,19 @@ def expand_log_paths(values: Sequence[str | Path]) -> list[str]:
     if not unique:
         raise FileNotFoundError(f"no .json.gz files found from: {list(values)}")
     return unique
+
+
+def sample_log_files(log_files: Sequence[str | Path], *, sample_log_files: int | None, sample_seed: int) -> list[str]:
+    files = sorted(str(path) for path in log_files)
+    if sample_log_files is None:
+        return files
+    sample_size = int(sample_log_files)
+    if sample_size < 0:
+        raise ValueError(f"sample_log_files must be non-negative, got {sample_size}")
+    if sample_size >= len(files):
+        return files
+    rng = random.Random(int(sample_seed))
+    return sorted(rng.sample(files, sample_size))
 
 
 def _load_grp_model(*, grp_checkpoint: Path, mortal_root: Path, device: torch.device) -> Any:
@@ -162,6 +178,7 @@ def audit_grp(
                 for left, right in zip(full_seq, full_seq[1:]):
                     deltas.extend(float(right[player_id]) - float(left[player_id]) for player_id in range(4))
 
+    calibration_report = finalize_calibration(calibration)
     return {
         "schema": AUDIT_SCHEMA,
         "grp_checkpoint": str(grp_checkpoint),
@@ -170,7 +187,8 @@ def audit_grp(
         "sample_count": sample_count,
         "rank_ce": None if sample_count == 0 else ce_sum / sample_count,
         "top1_rank_accuracy": None if sample_count == 0 else top1_correct / sample_count,
-        "calibration": finalize_calibration(calibration),
+        "calibration": calibration_report,
+        "calibration_summary": summarize_calibration(calibration_report),
         "expected_pt_error_by_profile": finalize_profile_errors(profile_errors),
     }
 
@@ -190,6 +208,26 @@ def finalize_calibration(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, An
             }
         )
     return output
+
+
+def summarize_calibration(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    total = sum(int(row["count"]) for row in rows)
+    ece_sum = 0.0
+    mce = 0.0
+    for row in rows:
+        count = int(row["count"])
+        confidence = row.get("avg_confidence")
+        accuracy = row.get("accuracy")
+        if count == 0 or confidence is None or accuracy is None:
+            continue
+        gap = abs(float(confidence) - float(accuracy))
+        if total:
+            ece_sum += (count / total) * gap
+        mce = max(mce, gap)
+    return {
+        "ece": None if total == 0 else ece_sum,
+        "mce": None if total == 0 else mce,
+    }
 
 
 def finalize_profile_errors(profile_errors: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
@@ -213,7 +251,12 @@ def finalize_profile_errors(profile_errors: Mapping[str, Mapping[str, Any]]) -> 
 
 def main() -> None:
     args = _parse_args()
-    log_files = expand_log_paths(args.logs)
+    expanded_log_files = expand_log_paths(args.logs)
+    log_files = sample_log_files(
+        expanded_log_files,
+        sample_log_files=args.sample_log_files,
+        sample_seed=int(args.sample_seed),
+    )
     report = audit_grp(
         grp_checkpoint=args.grp_checkpoint,
         mortal_root=args.mortal_root,
@@ -230,6 +273,9 @@ def main() -> None:
             "logs": [str(value) for value in args.logs],
             "device": str(args.device),
             "limit_games": args.limit_games,
+            "expanded_log_file_count": len(expanded_log_files),
+            "sample_log_files": args.sample_log_files,
+            "sample_seed": int(args.sample_seed),
             "max_prefixes_per_game": args.max_prefixes_per_game,
         },
         "metrics": report,

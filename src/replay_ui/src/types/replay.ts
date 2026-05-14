@@ -88,8 +88,8 @@ export interface DecisionLogEntry {
   is_obs: boolean;
   /** 当前视角 Bot 的决策（obs 步为他家实际动作） */
   chosen: Action;
-  /** 所有合法动作候选；final_score 为默认展示/统计口径，旧版本回放兼容 beam_score/logit */
-  candidates: Array<{ action: Action; logit: number; beam_score?: number; final_score?: number }>;
+  /** 所有合法动作候选；prob 为 Q value 按 tau=1 softmax 后的概率，旧版本回放前端会补算 */
+  candidates: Array<{ action: Action; logit: number; beam_score?: number; final_score?: number; prob?: number }>;
   /** 当前视角 Bot 的 value loss 预测 */
   value?: number;
   /** ground truth：玩家实际动作 */

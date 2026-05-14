@@ -32,20 +32,46 @@ function tileUrl(name: string) {
 interface TileWithMeta {
   name: string;
   logit?: number;
+  prob?: number;
   minLogit: number;
   logitRange: number;
   isTsumo: boolean;
+}
+
+function softmaxProbabilities(scores: number[]): number[] {
+  if (scores.length === 0) return [];
+  const maxScore = Math.max(...scores);
+  const exps = scores.map((score) => Math.exp(score - maxScore));
+  const total = exps.reduce((sum, value) => sum + value, 0);
+  if (!Number.isFinite(total) || total <= 0) return scores.map(() => 0);
+  return exps.map((value) => value / total);
+}
+
+function candidateScore(c: { logit: number; beam_score?: number; final_score?: number }): number {
+  return c.final_score ?? c.beam_score ?? c.logit;
+}
+
+function candidateProbabilities(candidates: Array<{ logit: number; beam_score?: number; final_score?: number; prob?: number }>): number[] {
+  const fallback = softmaxProbabilities(candidates.map(candidateScore));
+  return candidates.map((candidate, idx) => (
+    typeof candidate.prob === 'number' && Number.isFinite(candidate.prob)
+      ? candidate.prob
+      : fallback[idx] ?? 0
+  ));
 }
 
 function buildSortedTiles(entry: DecisionLogEntry): TileWithMeta[] {
   const hand = entry.hand || [];
   const tsumo_pai = entry.tsumo_pai || null;
   const tileLogit: Record<string, number> = {};
+  const tileProb: Record<string, number> = {};
   let minLogit = 0, maxLogit = 1;
   if (entry.candidates && entry.candidates.length) {
-    entry.candidates.forEach(c => {
+    const probs = candidateProbabilities(entry.candidates);
+    entry.candidates.forEach((c, idx) => {
       if (c.action && c.action.type === 'dahai' && c.action.pai) {
         tileLogit[c.action.pai] = c.logit;
+        tileProb[c.action.pai] = probs[idx] ?? 0;
       }
     });
     const vals = Object.values(tileLogit);
@@ -59,6 +85,7 @@ function buildSortedTiles(entry: DecisionLogEntry): TileWithMeta[] {
   return sorted.map(name => ({
     name,
     logit: tileLogit[name],
+    prob: tileProb[name],
     minLogit,
     logitRange,
     isTsumo: name === tsumo_pai,
@@ -67,7 +94,9 @@ function buildSortedTiles(entry: DecisionLogEntry): TileWithMeta[] {
 
 function barHeight(tile: TileWithMeta): number {
   if (tile.logit === undefined) return 0;
-  const pct = Math.max(1, (tile.logit - tile.minLogit) / tile.logitRange * 100);
+  const pct = tile.prob !== undefined
+    ? Math.max(1, tile.prob * 100)
+    : Math.max(1, (tile.logit - tile.minLogit) / tile.logitRange * 100);
   return Math.max(3, Math.round(pct / 100 * MAX_BAR_H));
 }
 
@@ -96,12 +125,13 @@ function CandidateTable({
   chosen,
   gtAction,
 }: {
-  candidates: Array<{ action: import('../types/replay').Action; logit: number; beam_score?: number; final_score?: number }>;
+  candidates: Array<{ action: import('../types/replay').Action; logit: number; beam_score?: number; final_score?: number; prob?: number }>;
   chosen: import('../types/replay').Action | null;
   gtAction: import('../types/replay').Action | null;
 }) {
   const hasFinal = candidates.some(c => c.final_score !== undefined);
   const hasBeam = candidates.some(c => c.beam_score !== undefined);
+  const probs = candidateProbabilities(candidates);
   return (
     <div style={{ marginTop: 6, fontSize: 11, overflowX: 'auto' }}>
       <table style={{ borderCollapse: 'collapse', width: '100%' }}>
@@ -111,6 +141,7 @@ function CandidateTable({
             <th style={{ padding: '2px 8px', textAlign: 'right', color: '#475569', borderBottom: '1px solid #e2e8f0', fontFamily: 'monospace' }}>Logit</th>
             {hasFinal && <th style={{ padding: '2px 8px', textAlign: 'right', color: '#475569', borderBottom: '1px solid #e2e8f0', fontFamily: 'monospace' }}>Final</th>}
             {hasBeam && <th style={{ padding: '2px 8px', textAlign: 'right', color: '#475569', borderBottom: '1px solid #e2e8f0', fontFamily: 'monospace' }}>Beam</th>}
+            <th style={{ padding: '2px 8px', textAlign: 'right', color: '#475569', borderBottom: '1px solid #e2e8f0', fontFamily: 'monospace' }}>P</th>
             <th style={{ padding: '2px 8px', borderBottom: '1px solid #e2e8f0' }}></th>
           </tr>
         </thead>
@@ -128,6 +159,7 @@ function CandidateTable({
                 <td style={{ padding: '2px 8px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #f1f5f9' }}>{c.logit >= 0 ? '+' : ''}{c.logit.toFixed(3)}</td>
                 {hasFinal && <td style={{ padding: '2px 8px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #f1f5f9' }}>{c.final_score !== undefined ? (c.final_score >= 0 ? '+' : '') + c.final_score.toFixed(3) : '—'}</td>}
                 {hasBeam && <td style={{ padding: '2px 8px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #f1f5f9' }}>{c.beam_score !== undefined ? (c.beam_score >= 0 ? '+' : '') + c.beam_score.toFixed(3) : '—'}</td>}
+                <td style={{ padding: '2px 8px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #f1f5f9' }}>{((probs[i] ?? 0) * 100).toFixed(1)}%</td>
                 <td style={{ padding: '2px 8px', fontSize: 10, color: '#666', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>{marks}</td>
               </tr>
             );
@@ -187,7 +219,7 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
                 {data.rating.toFixed(1)}
               </span>
               <span style={{ fontSize: 13, color: '#64748b', marginLeft: 4 }}>/ 100 Rating</span>
-              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>基于 logit 差距的相似度评分</div>
+              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>按 Mortal FAQ 的 Q 值 min-max 公式计算</div>
             </div>
           )}
 

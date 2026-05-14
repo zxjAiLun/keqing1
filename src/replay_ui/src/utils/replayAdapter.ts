@@ -13,7 +13,9 @@ export interface LogitTileData {
   pai: string;
   /** final_score 优先，兼容 beam_score/logit；undefined 表示该牌无候选权重 */
   score: number | undefined;
-  /** 相对百分比 0-100，用于柱高 */
+  /** Q value 按 tau=1 softmax 后的概率 */
+  prob?: number;
+  /** 概率百分比 0-100，用于柱高 */
   pct: number;
   isChosen: boolean;
   isGt: boolean;
@@ -40,9 +42,13 @@ export function buildLogitData(entry: DecisionLogEntry): LogitTileData[] {
 
   // 构建 pai → score 映射（final_score 优先，兼容 beam/logit）
   const scoreMap: Record<string, number> = {};
+  const probMap: Record<string, number> = {};
   for (const c of entry.candidates ?? []) {
     if (c.action?.type === 'dahai' && c.action.pai) {
       scoreMap[c.action.pai] = c.final_score ?? c.beam_score ?? c.logit;
+      if (typeof c.prob === 'number' && Number.isFinite(c.prob)) {
+        probMap[c.action.pai] = c.prob;
+      }
     }
   }
 
@@ -58,12 +64,14 @@ export function buildLogitData(entry: DecisionLogEntry): LogitTileData[] {
 
   return sorted.map(pai => {
     const score = scoreMap[pai];
+    const prob = probMap[pai];
     const pct = score !== undefined
-      ? Math.max(6, scorePctMap[pai] ?? 0)
+      ? Math.max(6, prob !== undefined ? prob * 100 : scorePctMap[pai] ?? 0)
       : 0;
     return {
       pai,
       score,
+      prob,
       pct,
       isChosen: pai === chosenPai,
       isGt: pai === gtPai,
@@ -76,6 +84,7 @@ export function buildLogitData(entry: DecisionLogEntry): LogitTileData[] {
 export interface CandidateScore {
   action: DecisionLogEntry['candidates'][number]['action'];
   score: number;
+  prob?: number;
   isChosen: boolean;
   isGt: boolean;
 }
@@ -88,6 +97,7 @@ export function buildCandidateScores(entry: DecisionLogEntry): CandidateScore[] 
   const list: CandidateScore[] = candidates.map(c => ({
     action: c.action,
     score: c.final_score ?? c.beam_score ?? c.logit,
+    prob: c.prob,
     isChosen: sameReplayAction(chosen, c.action),
     isGt: sameReplayAction(gt, c.action),
   }));

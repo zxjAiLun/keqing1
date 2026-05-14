@@ -86,6 +86,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--rank-points", default="90,45,0,-135")
     parser.add_argument("--max-steps", type=int, default=10000)
     parser.add_argument("--trace-mode", choices=("compact", "full"), default="compact")
+    parser.add_argument(
+        "--artifact-mode",
+        choices=("full", "audit-gz-only"),
+        default="full",
+        help="full writes mjson/meta/decision sidecars; audit-gz-only writes only GRP-audit gzip logs and manifests.",
+    )
     return parser.parse_args()
 
 
@@ -909,6 +915,7 @@ def run_game(args: argparse.Namespace, *, game_id: int) -> dict[str, Any]:
         seat: MortalStylePolicy(profile=profile, style_alpha=float(args.style_alpha))
         for seat, profile in seat_profiles.items()
     }
+    collect_decision_traces = str(getattr(args, "artifact_mode", "full")) == "full"
     game_seed = None if args.seed_start is None else int(args.seed_start) + int(game_id)
     env, seed_info = _make_env(game_mode=str(args.game_mode), seed=game_seed)
     bots = _new_bots(args)
@@ -937,13 +944,16 @@ def run_game(args: argparse.Namespace, *, game_id: int) -> dict[str, Any]:
             legal_actions = obs.legal_actions()
             raw_events = obs.new_events()
             parsed_events = [json.loads(event) if isinstance(event, str) else dict(event) for event in raw_events]
-            event_indices, next_cursor, mismatches = _assign_event_indices(
-                events=parsed_events,
-                mjai_log=getattr(env, "mjai_log", []),
-                cursor=event_cursors.get(pid, 0),
-            )
-            event_cursors[pid] = next_cursor
-            event_index_mismatch_count += mismatches
+            if collect_decision_traces:
+                event_indices, next_cursor, mismatches = _assign_event_indices(
+                    events=parsed_events,
+                    mjai_log=getattr(env, "mjai_log", []),
+                    cursor=event_cursors.get(pid, 0),
+                )
+                event_cursors[pid] = next_cursor
+                event_index_mismatch_count += mismatches
+            else:
+                event_indices = [-1] * len(parsed_events)
 
             mjai_action: dict[str, Any] | None = None
             for event, event_index in zip(parsed_events, event_indices):
@@ -952,16 +962,19 @@ def run_game(args: argparse.Namespace, *, game_id: int) -> dict[str, Any]:
                 if reaction is not None:
                     raw_reaction = dict(reaction)
                     meta = dict(raw_reaction.pop("meta", {}) or {})
-                    style_decision = style_policies[pid].select_action(
-                        base_action=raw_reaction,
-                        mortal_meta=meta,
-                        legal_actions=legal_actions,
-                    )
-                    meta["style_policy"] = style_decision.meta
-                    mjai_action = style_decision.action
+                    if style_policies[pid].enabled or collect_decision_traces:
+                        style_decision = style_policies[pid].select_action(
+                            base_action=raw_reaction,
+                            mortal_meta=meta,
+                            legal_actions=legal_actions,
+                        )
+                        meta["style_policy"] = style_decision.meta
+                        mjai_action = style_decision.action
+                    else:
+                        mjai_action = raw_reaction
                 else:
                     meta = {}
-                if not meta:
+                if not collect_decision_traces or not meta:
                     continue
                 actual_decision_count += 1
                 trace_entry = _sidecar_entry(
@@ -1070,6 +1083,7 @@ def main() -> None:
     rank_points = parse_rank_points(args.rank_points)
     explicit_seat_profiles = assign_seat_profiles(getattr(args, "seat_profiles", None))
     profile_mode = "explicit" if explicit_seat_profiles is not None else str(args.profile_mode)
+    artifact_mode = str(getattr(args, "artifact_mode", "full"))
     game_results: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
     manifest: list[dict[str, Any]] = []
@@ -1081,35 +1095,41 @@ def main() -> None:
         replay_gz_path = replays_dir / f"game_{game_id:05d}.json.gz"
         sidecar_path = replays_dir / f"game_{game_id:05d}.decisions.json"
         meta_path = replays_dir / f"game_{game_id:05d}.json"
-        _write_mjson(replay_path, result["events"])
         _write_mjson_gz(replay_gz_path, result["events"])
-        sidecar_path.write_text(json.dumps(result["sidecar"], ensure_ascii=False, indent=2), encoding="utf-8")
+        if artifact_mode == "full":
+            _write_mjson(replay_path, result["events"])
+            sidecar_path.write_text(json.dumps(result["sidecar"], ensure_ascii=False, indent=2), encoding="utf-8")
         meta = {
             **result["summary"],
-            "mjson": str(replay_path),
             "json_gz": str(replay_gz_path),
-            "decision_traces": str(sidecar_path),
         }
-        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        if artifact_mode == "full":
+            meta["mjson"] = str(replay_path)
+            meta["decision_traces"] = str(sidecar_path)
+            meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         game_results.append(result)
         summaries.append(result["summary"])
-        manifest.append(
-            {
-                "game_id": int(game_id),
-                "seed": result["summary"]["seed"],
-                "seed_key": result["summary"]["seed_key"],
-                "profile_mode": result["summary"]["profile_mode"],
-                "profile_pool": result["summary"]["profile_pool"],
-                "seat_profile_schedule": result["summary"]["seat_profile_schedule"],
-                "players": result["summary"]["players"],
-                "mjson": str(replay_path),
-                "json_gz": str(replay_gz_path),
-                "meta": str(meta_path),
-                "decision_traces": str(sidecar_path),
-                "scores": result["summary"]["scores"],
-                "ranks": result["summary"]["ranks"],
-            }
-        )
+        manifest_row = {
+            "game_id": int(game_id),
+            "seed": result["summary"]["seed"],
+            "seed_key": result["summary"]["seed_key"],
+            "profile_mode": result["summary"]["profile_mode"],
+            "profile_pool": result["summary"]["profile_pool"],
+            "seat_profile_schedule": result["summary"]["seat_profile_schedule"],
+            "players": result["summary"]["players"],
+            "json_gz": str(replay_gz_path),
+            "scores": result["summary"]["scores"],
+            "ranks": result["summary"]["ranks"],
+        }
+        if artifact_mode == "full":
+            manifest_row.update(
+                {
+                    "mjson": str(replay_path),
+                    "meta": str(meta_path),
+                    "decision_traces": str(sidecar_path),
+                }
+            )
+        manifest.append(manifest_row)
         print(
             "riichienv-mortal game="
             f"{game_id + 1}/{int(args.games)} steps={result['summary']['env_step_count']} "
@@ -1125,6 +1145,7 @@ def main() -> None:
         "games": int(args.games),
         "model": str(args.model),
         "device": str(args.device),
+        "artifact_mode": artifact_mode,
         "seed_start": None if args.seed_start is None else int(args.seed_start),
         "seed_key": hex(seed_key),
         "rank_points": [float(value) for value in rank_points],
@@ -1162,6 +1183,7 @@ def main() -> None:
             "seed_start": None if args.seed_start is None else int(args.seed_start),
             "seed_key": hex(seed_key),
             "rank_points": [float(value) for value in rank_points],
+            "artifact_mode": artifact_mode,
             "profiles": [profile.to_json(style_alpha=float(args.style_alpha)) for profile in profile_pool],
             "profile_mode": profile_mode,
             "seat_profiles": (
@@ -1185,8 +1207,9 @@ def main() -> None:
     _write_manifest_jsonl(replays_dir / "manifest.jsonl", manifest)
     (output_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     eval_metrics.write_metrics(output_dir / "metrics.json", metrics_document)
-    (output_dir / "detailed_stats.md").write_text(format_style_markdown(style_metrics), encoding="utf-8")
-    write_style_metrics_csv(output_dir / "metrics.csv", style_metrics)
+    if artifact_mode == "full":
+        (output_dir / "detailed_stats.md").write_text(format_style_markdown(style_metrics), encoding="utf-8")
+        write_style_metrics_csv(output_dir / "metrics.csv", style_metrics)
 
 
 if __name__ == "__main__":

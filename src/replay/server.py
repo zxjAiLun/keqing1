@@ -240,9 +240,9 @@ async def replay(
             data = json.loads(text)
             bot = run_replay_single_raw(data, player_id=player_id, checkpoint=checkpoint or None, input_type="tenhou6", bot_type=bot_type)
             try:
-                from replay.bot import _parse_to_events
+                from replay.bot import _load_events_from_source
 
-                events = _parse_to_events(data, input_type="tenhou6")
+                events = _load_events_from_source(data, input_type="tenhou6")
             except Exception:
                 events = None
 

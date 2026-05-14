@@ -225,6 +225,37 @@ uv run python scripts/run_mortal_dqn_offline.py \
   --num-workers 0
 ```
 
+For unattended continued training, start the same runner in a detached session
+from the repository root. Set `TARGET_STEPS` to the desired absolute checkpoint
+step, not the number of additional steps:
+
+```bash
+TARGET_STEPS=80000
+LOG="logs/mortal_dqn_to_${TARGET_STEPS}_$(date +%Y%m%d%H%M%S).log"
+mkdir -p logs
+setsid bash -lc "cd /mnt/e/AUbuntuProject/project/keqing1; \
+  export TMPDIR=/tmp; \
+  echo \"wrapper start \$(date)\"; \
+  uv run python scripts/run_mortal_dqn_offline.py \
+    --config artifacts/mortal_training/config.toml \
+    --target-steps ${TARGET_STEPS} \
+    --num-workers 1 \
+    --log-every 50; \
+  rc=\$?; echo \"wrapper exit \$rc \$(date)\"; exit \$rc" \
+  > "$LOG" 2>&1 < /dev/null &
+echo "pid=$!"
+echo "log=$LOG"
+```
+
+Use `TMPDIR=/tmp` for detached runs on this WSL workspace; otherwise PyTorch
+DataLoader workers can fail while creating multiprocessing sockets on the
+mounted project drive. To check progress later:
+
+```bash
+tail -f "$LOG"
+pgrep -af 'run_mortal_dqn_offline|python.*mortal'
+```
+
 It saves the same checkpoint keys needed by the KeqingRL teacher runtime:
 
 ```text
