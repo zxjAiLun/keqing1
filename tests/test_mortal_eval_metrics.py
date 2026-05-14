@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 from scripts.mortal import ab_match
+from scripts.mortal import analyze_checkpoint_behavior_slices
 from scripts.mortal import audit_grp_on_logs
 from scripts.mortal import compare_checkpoint_stat_reports
 from scripts.mortal import eval_metrics
@@ -276,6 +277,44 @@ def test_compare_checkpoint_stat_reports_builds_delta() -> None:
     assert delta["rows"][0]["delta"] == 0.009999999999999981
     assert any("calls more often" in note for note in delta["diagnosis"])
     assert "| Win rate | 20.00% | 21.00% | +1.00pp |" in markdown
+
+
+def test_behavior_slice_parser_summarizes_player_rounds(tmp_path) -> None:
+    log_path = tmp_path / "game.json.gz"
+    events = [
+        {"type": "start_game", "names": ["a", "b", "c", "d"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "oya": 0,
+            "scores": [30000, 25000, 24000, 21000],
+        },
+        {"type": "tsumo", "actor": 0, "pai": "1m"},
+        {"type": "reach", "actor": 0},
+        {"type": "dahai", "actor": 0, "pai": "1m"},
+        {"type": "tsumo", "actor": 1, "pai": "2m"},
+        {"type": "pon", "actor": 2, "target": 1, "pai": "2m", "consumed": ["2m", "2m"]},
+        {"type": "hora", "actor": 2, "target": 0},
+        {"type": "end_kyoku"},
+    ]
+    import gzip
+
+    with gzip.open(log_path, "wt", encoding="utf-8") as handle:
+        for event in events:
+            handle.write(json.dumps(event) + "\n")
+
+    summary = analyze_checkpoint_behavior_slices.analyze_logs([log_path], model_label="unit")
+    all_row = next(row for row in summary["rows"] if row["slice_dim"] == "all")
+    rank_1 = next(row for row in summary["rows"] if row["slice_dim"] == "start_rank" and row["slice_value"] == "1")
+
+    assert summary["game_count"] == 1
+    assert summary["player_rounds"] == 4
+    assert all_row["agari_rate"] == 0.25
+    assert all_row["houjuu_rate"] == 0.25
+    assert all_row["fuuro_rate"] == 0.25
+    assert all_row["riichi_rate"] == 0.25
+    assert rank_1["houjuu_rate"] == 1.0
 
 
 def test_registry_helper_appends_valid_jsonl(tmp_path) -> None:

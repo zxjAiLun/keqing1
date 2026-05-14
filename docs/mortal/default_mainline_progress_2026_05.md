@@ -72,6 +72,43 @@ Key deltas, 80k minus 70k:
 
 L1 diagnosis: the 80k drift is more consistent with call/fuuro quality degradation than with riichi quality degradation. 80k calls much more often, wins less often after calls, and deals in more often after calls. Riichi is also more frequent, but post-riichi win/deal-in rates do not show the same deterioration in this aggregate view.
 
+## L2 Behavior Slices
+
+The same 500h logs were then parsed directly with `scripts/mortal/analyze_checkpoint_behavior_slices.py`. Unlike the L1 `stat_report.py` artifact, this pass includes all four seats from the all-same arena logs.
+
+Artifacts:
+
+- `artifacts/experiments/default_mainline_2026_05/behavior_slices/behavior_slices_left.json`
+- `artifacts/experiments/default_mainline_2026_05/behavior_slices/behavior_slices_right.json`
+- `artifacts/experiments/default_mainline_2026_05/behavior_slices/slice_metrics.csv`
+- `artifacts/experiments/default_mainline_2026_05/behavior_slices/slice_diff.csv`
+- `artifacts/experiments/default_mainline_2026_05/behavior_slices/behavior_slice_report.md`
+
+Overall all-seat deltas, 80k minus 70k:
+
+| Metric | Delta |
+| --- | ---: |
+| Agari rate | +0.60pp |
+| Houjuu rate | +1.61pp |
+| Fuuro rate | +2.86pp |
+| Riichi rate | +1.07pp |
+| After-fuuro agari rate | -1.29pp |
+| After-fuuro houjuu rate | +1.23pp |
+| After-riichi houjuu rate | -0.41pp |
+
+Main slices:
+
+| Slice | Fuuro delta | Houjuu delta | After-fuuro agari delta | After-fuuro houjuu delta |
+| --- | ---: | ---: | ---: | ---: |
+| dealer | +4.00pp | +2.20pp | -3.09pp | +3.97pp |
+| nondealer | +2.48pp | +1.42pp | -0.64pp | +0.17pp |
+| start rank 1 | +2.83pp | +1.41pp | -0.80pp | -0.96pp |
+| start rank 2 | +2.62pp | +2.09pp | -1.88pp | +5.17pp |
+| start rank 3 | +3.54pp | +1.99pp | +0.12pp | +0.27pp |
+| start rank 4 | +2.45pp | +0.97pp | -2.64pp | +0.23pp |
+
+L2 diagnosis: 80k is not merely becoming more aggressive when behind. The call-rate increase appears in every start-rank bucket, including rank 1, and the dealer slice is especially risky. The worst localized signal is dealer call quality: after-fuuro agari falls while after-fuuro houjuu rises sharply. The next diagnostic pass should focus on call windows, especially dealer calls and start-rank 2 calls.
+
 ## Decision
 
 - Keep `mortal_default_70k` as the current default promotion candidate.
@@ -96,8 +133,8 @@ Key result under the active `mortal_default` audit profile:
 
 ## Next Recommended Work
 
-1. Run L2 behavior slices focused first on fuuro/call contexts: dealer vs non-dealer, start rank, round stage, and turn bucket.
-2. Use L3 sidecar/Q analysis only after L2 identifies the highest-risk call windows.
+1. Run L3 sidecar/Q analysis focused on call windows, especially dealer calls and start-rank 2 calls.
+2. Check whether 80k is selecting calls with worse `Q(call)-Q(pass)` margins or whether the same margins lead to worse outcomes.
 3. If default training continues, archive every 5k or 10k checkpoint and compare against the 70k candidate, not only the latest `mortal.pth`.
 4. Keep GRP unchanged unless future selfplay audits show both calibration degradation and expected-PT or reward-delta degradation.
 
