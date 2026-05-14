@@ -212,6 +212,7 @@ export interface BehaviorReplayCase {
   focus_event_index: number;
   focus_step: number;
   model_label: string;
+  checkpoint_path?: string | null;
   slice_tags: string[];
   decision_kind: string;
   action_type: string;
@@ -245,6 +246,7 @@ export interface BehaviorCaseImportResponse {
   focus_event_index: number;
   focus_step: number;
   focus_replay_step: number | null;
+  focus_resolution: 'exact' | 'nearest' | 'missing';
   game_board_url: string;
 }
 

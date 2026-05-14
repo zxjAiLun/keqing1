@@ -29,6 +29,7 @@ export function BehaviorCasebookPage() {
   const [selectedKind, setSelectedKind] = useState<string>('80k_dealer_call_bad');
   const [loading, setLoading] = useState(true);
   const [openingCaseId, setOpeningCaseId] = useState<string | null>(null);
+  const [focusNotice, setFocusNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = () => {
@@ -71,11 +72,17 @@ export function BehaviorCasebookPage() {
     setError(null);
     try {
       const result = await replayApi.importBehaviorCase(item.case_id);
+      if (result.focus_resolution !== 'exact') {
+        setFocusNotice(result.focus_resolution === 'nearest'
+          ? '该案例未精确命中原始事件，已跳到最近的回放决策步。'
+          : '该案例没有可定位的回放决策步。');
+      }
       navigate(
         `/game-replay?id=${encodeURIComponent(result.replay_id)}`
         + `&player_id=${result.player_id}`
         + `&focus_event_index=${result.focus_event_index}`
-        + (result.focus_replay_step !== null ? `&focus_step=${result.focus_replay_step}` : ''),
+        + (result.focus_replay_step !== null ? `&focus_step=${result.focus_replay_step}` : '')
+        + `&focus_resolution=${result.focus_resolution}`,
       );
     } catch (e) {
       setError(String(e));
@@ -110,6 +117,12 @@ export function BehaviorCasebookPage() {
       {error && (
         <div className="card" style={{ marginBottom: 16, color: 'var(--error)', fontSize: 14 }}>
           {error}
+        </div>
+      )}
+
+      {focusNotice && (
+        <div className="card" style={{ marginBottom: 16, color: 'var(--text-secondary)', fontSize: 14 }}>
+          {focusNotice}
         </div>
       )}
 
@@ -165,6 +178,7 @@ export function BehaviorCasebookPage() {
                     <span>focus {item.focus_event_index}</span>
                     <span>margin {fmtMargin(item.margin)}</span>
                     <span>shanten {item.shanten ?? '-'}</span>
+                    {item.checkpoint_path && <span>checkpoint {item.checkpoint_path.split('/').pop()}</span>}
                   </div>
                   <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     {item.slice_tags.map((tag) => (

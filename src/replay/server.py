@@ -188,8 +188,8 @@ _DEFAULT_BEHAVIOR_CASEBOOK = (
     / "behavior_replay_cases"
 )
 _CASEBOOK_CHECKPOINTS = {
-    "70k": BASE_DIR.parent.parent / "artifacts" / "experiments" / "reward_pt_2026_05" / "R0_mortal_default" / "mortal.pth",
-    "80k": BASE_DIR.parent.parent / "artifacts" / "mortal_training" / "mortal.pth",
+    "70k": BASE_DIR.parent.parent / "artifacts" / "mortal_training" / "checkpoints" / "mortal_default_70k_promoted_candidate.pth",
+    "80k": BASE_DIR.parent.parent / "artifacts" / "mortal_training" / "checkpoints" / "mortal_default_80k_rejected_gate.pth",
 }
 
 
@@ -220,9 +220,9 @@ def _find_behavior_case(case_id: str) -> tuple[dict, Path] | None:
     return None
 
 
-def _resolve_focus_replay_step(decisions: dict, focus_event_index: int | None) -> int | None:
+def _resolve_focus_replay_step(decisions: dict, focus_event_index: int | None) -> tuple[int | None, str]:
     if focus_event_index is None:
-        return None
+        return None, "missing"
     log = decisions.get("log", []) if isinstance(decisions, dict) else []
     exact = [
         idx
@@ -230,16 +230,27 @@ def _resolve_focus_replay_step(decisions: dict, focus_event_index: int | None) -
         if isinstance(entry, dict) and entry.get("source_event_index") == focus_event_index
     ]
     if exact:
-        return int(exact[0])
+        return int(exact[0]), "exact"
     candidates = [
         (abs(int(entry["source_event_index"]) - int(focus_event_index)), idx)
         for idx, entry in enumerate(log)
         if isinstance(entry, dict) and isinstance(entry.get("source_event_index"), int)
     ]
     if not candidates:
-        return None
+        return None, "missing"
     _distance, idx = min(candidates, key=lambda item: (item[0], item[1]))
-    return int(idx)
+    return int(idx), "nearest"
+
+
+def _checkpoint_for_behavior_case(row: dict) -> Path:
+    checkpoint_path = row.get("checkpoint_path")
+    if isinstance(checkpoint_path, str) and checkpoint_path.strip():
+        path = Path(checkpoint_path)
+        if not path.is_absolute():
+            path = BASE_DIR.parent.parent / path
+        return path
+    model_label = str(row.get("model_label", ""))
+    return _CASEBOOK_CHECKPOINTS.get(model_label, _default_checkpoint_for_bot_type("mortal"))
 
 
 # ========== 旧接口（兼容） ==========
@@ -552,8 +563,7 @@ async def import_behavior_case(case_id: str):
     if not mjson_path.exists() or casebook_dir.resolve() not in mjson_path.parents:
         return JSONResponse(status_code=404, content={"error": f"case mjson 不存在: {mjson_path}"})
 
-    model_label = str(row.get("model_label", ""))
-    checkpoint = _CASEBOOK_CHECKPOINTS.get(model_label, _default_checkpoint_for_bot_type("mortal"))
+    checkpoint = _checkpoint_for_behavior_case(row)
     player_id = int(row.get("actor", 0))
     events = _read_mjson_events(mjson_path)
 
@@ -572,13 +582,14 @@ async def import_behavior_case(case_id: str):
         decisions["bot_type"] = "mortal"
         decisions["casebook_case"] = row
         focus_event_index = row.get("focus_event_index")
-        focus_replay_step = _resolve_focus_replay_step(
+        focus_replay_step, focus_resolution = _resolve_focus_replay_step(
             decisions,
             int(focus_event_index) if isinstance(focus_event_index, int) else None,
         )
         decisions["casebook_focus"] = {
             "focus_event_index": focus_event_index,
             "focus_replay_step": focus_replay_step,
+            "focus_resolution": focus_resolution,
         }
         normalized_events = _normalize_replay_events(events)
         decisions = _merge_terminal_event_details(decisions, normalized_events)
@@ -598,10 +609,12 @@ async def import_behavior_case(case_id: str):
                 "focus_event_index": focus_event_index,
                 "focus_step": row.get("focus_step"),
                 "focus_replay_step": focus_replay_step,
+                "focus_resolution": focus_resolution,
                 "game_board_url": (
                     f"/game-replay?id={replay_id}&player_id={player_id}"
                     f"&focus_event_index={focus_event_index}"
                     f"&focus_step={focus_replay_step if focus_replay_step is not None else ''}"
+                    f"&focus_resolution={focus_resolution}"
                 ),
             }
         )

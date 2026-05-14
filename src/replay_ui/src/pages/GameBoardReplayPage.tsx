@@ -43,6 +43,7 @@ export function GameBoardReplayPage() {
   const requestedFocusEventIndex = Number.isFinite(focusEventIndexFromQuery) ? focusEventIndexFromQuery : null;
   const focusStepFromQuery = Number(params.get('focus_step') ?? '');
   const requestedFocusStep = Number.isFinite(focusStepFromQuery) ? focusStepFromQuery : null;
+  const focusResolution = params.get('focus_resolution');
   const [data, setData] = useState<ReplayData | null>(null);
   const [events, setEvents] = useState<Record<string, unknown>[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -362,6 +363,25 @@ export function GameBoardReplayPage() {
               onToggleOpponentHands={() => setShowOpponentHands((v) => !v)}
             />
             {resultSummary && <ReplayResultOverlay summary={resultSummary} playerNames={playerNames} />}
+            {focusResolution && focusResolution !== 'exact' && (
+              <div
+                style={{
+                  position: 'absolute',
+                  left: 16,
+                  bottom: 16,
+                  zIndex: 35,
+                  padding: '8px 10px',
+                  borderRadius: 8,
+                  border: '1px solid rgba(255,255,255,0.16)',
+                  background: 'rgba(17,24,39,0.82)',
+                  color: '#f3f4f6',
+                  fontSize: 12,
+                  boxShadow: '0 10px 28px rgba(0,0,0,0.25)',
+                }}
+              >
+                {focusResolution === 'nearest' ? '已跳到最近的回放决策步' : '未找到可定位的焦点步'}
+              </div>
+            )}
 
             <div style={floatingTopBarWrapStyle}>
               <button

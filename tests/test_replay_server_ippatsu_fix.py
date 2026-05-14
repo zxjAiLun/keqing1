@@ -12,9 +12,9 @@ def test_resolve_focus_replay_step_exact_and_nearest():
         ]
     }
 
-    assert _resolve_focus_replay_step(decisions, 20) == 1
-    assert _resolve_focus_replay_step(decisions, 23) == 1
-    assert _resolve_focus_replay_step(decisions, None) is None
+    assert _resolve_focus_replay_step(decisions, 20) == (1, "exact")
+    assert _resolve_focus_replay_step(decisions, 23) == (1, "nearest")
+    assert _resolve_focus_replay_step(decisions, None) == (None, "missing")
 
 
 def test_normalize_replay_events_injects_legacy_kakan_accepted_before_followup_draw():

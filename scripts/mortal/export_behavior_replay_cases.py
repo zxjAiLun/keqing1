@@ -302,6 +302,7 @@ def manifest_row_for_case(
         "focus_event_index": case.focus_event_index,
         "focus_step": case.focus_step,
         "model_label": case.model_label,
+        "checkpoint_path": checkpoint_path_for_model(case.model_label),
         "slice_tags": slice_tags(case),
         "decision_kind": "chosen_call",
         "action_type": case.action_type,
@@ -319,6 +320,14 @@ def manifest_row_for_case(
         "selection_score": case.selection_score,
         "shanten": case.shanten,
     }
+
+
+def checkpoint_path_for_model(model_label: str) -> str | None:
+    if model_label == "70k":
+        return "artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth"
+    if model_label == "80k":
+        return "artifacts/mortal_training/checkpoints/mortal_default_80k_rejected_gate.pth"
+    return None
 
 
 def slice_tags(case: CaseCandidate) -> list[str]:
