@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from scripts.mortal import ab_match
 from scripts.mortal import analyze_checkpoint_behavior_slices
+from scripts.mortal import analyze_checkpoint_decision_drift
 from scripts.mortal import audit_grp_on_logs
 from scripts.mortal import compare_checkpoint_stat_reports
 from scripts.mortal import eval_metrics
@@ -315,6 +316,50 @@ def test_behavior_slice_parser_summarizes_player_rounds(tmp_path) -> None:
     assert all_row["fuuro_rate"] == 0.25
     assert all_row["riichi_rate"] == 0.25
     assert rank_1["houjuu_rate"] == 1.0
+
+
+def test_decision_drift_parser_reads_call_margin_and_outcome(tmp_path) -> None:
+    log_path = tmp_path / "game.json.gz"
+    mask_bits = (1 << 41) | (1 << 45)
+    events = [
+        {"type": "start_game", "names": ["a", "b", "c", "d"]},
+        {
+            "type": "start_kyoku",
+            "bakaze": "E",
+            "kyoku": 1,
+            "oya": 0,
+            "scores": [30000, 25000, 24000, 21000],
+        },
+        {"type": "tsumo", "actor": 0, "pai": "1m"},
+        {
+            "type": "pon",
+            "actor": 0,
+            "target": 1,
+            "pai": "1m",
+            "consumed": ["1m", "1m"],
+            "meta": {"mask_bits": mask_bits, "q_values": [2.0, 1.5], "shanten": 2},
+        },
+        {"type": "hora", "actor": 2, "target": 0},
+        {"type": "end_kyoku"},
+    ]
+    import gzip
+
+    with gzip.open(log_path, "wt", encoding="utf-8") as handle:
+        for event in events:
+            handle.write(json.dumps(event) + "\n")
+
+    summary = analyze_checkpoint_decision_drift.analyze_logs([log_path], model_label="unit")
+    all_row = next(
+        row
+        for row in summary["rows"]
+        if row["decision_kind"] == "chosen_call" and row["slice_dim"] == "all"
+    )
+
+    assert summary["decision_count"] == 1
+    assert all_row["count"] == 1
+    assert all_row["avg_margin"] == 0.5
+    assert all_row["positive_margin_rate"] == 1.0
+    assert all_row["houjuu_rate"] == 1.0
 
 
 def test_registry_helper_appends_valid_jsonl(tmp_path) -> None:

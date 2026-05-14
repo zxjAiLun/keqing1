@@ -109,6 +109,40 @@ Main slices:
 
 L2 diagnosis: 80k is not merely becoming more aggressive when behind. The call-rate increase appears in every start-rank bucket, including rank 1, and the dealer slice is especially risky. The worst localized signal is dealer call quality: after-fuuro agari falls while after-fuuro houjuu rises sharply. The next diagnostic pass should focus on call windows, especially dealer calls and start-rank 2 calls.
 
+## L3 Decision Drift
+
+The same arena logs were analyzed with `scripts/mortal/analyze_checkpoint_decision_drift.py`, using per-event Mortal Q metadata from the arena mjai logs.
+
+Artifacts:
+
+- `artifacts/experiments/default_mainline_2026_05/decision_drift/decision_drift_left.json`
+- `artifacts/experiments/default_mainline_2026_05/decision_drift/decision_drift_right.json`
+- `artifacts/experiments/default_mainline_2026_05/decision_drift/decision_metrics.csv`
+- `artifacts/experiments/default_mainline_2026_05/decision_drift/decision_diff.csv`
+- `artifacts/experiments/default_mainline_2026_05/decision_drift/decision_drift_report.md`
+
+This L3 pass can measure chosen action margins such as `Q(call)-Q(pass)` and `Q(reach)-Q(discard)`. It cannot fully count pass-over-call opportunities because arena logs do not emit pass events; a sidecar-rich RiichiEnv sample is still needed for full PASS-vs-CALL opportunity analysis.
+
+Chosen-call deltas, 80k minus 70k:
+
+| Slice | Count delta | Avg margin delta | Agari delta | Houjuu delta |
+| --- | ---: | ---: | ---: | ---: |
+| all | +1282 | +0.3930 | -1.48pp | +0.55pp |
+| dealer | +457 | +0.4017 | -2.26pp | +4.62pp |
+| nondealer | +825 | +0.3855 | -1.18pp | -1.09pp |
+| start rank 2 | +279 | +0.4054 | -1.20pp | +4.58pp |
+| start rank 4 | +209 | +0.3019 | -5.78pp | -0.79pp |
+
+Chosen-riichi deltas:
+
+| Slice | Count delta | Avg margin delta | Agari delta | Houjuu delta |
+| --- | ---: | ---: | ---: | ---: |
+| all | +167 | -0.0150 | +0.22pp | -0.41pp |
+| dealer | -14 | -0.1183 | +0.46pp | +0.93pp |
+| nondealer | +181 | +0.0289 | -0.02pp | -0.85pp |
+
+L3 diagnosis: the 80k problem is concentrated in calls, not riichi. The surprising signal is that 80k chosen calls have a higher average `Q(call)-Q(pass)` margin, yet worse outcomes. Dealer calls and start-rank 2 calls are the clearest bad pockets. This points away from "ambiguous marginal calls flipped by noise" and toward a value-estimation or policy-drift issue where 80k is more confident in calls whose downstream results are worse.
+
 ## Decision
 
 - Keep `mortal_default_70k` as the current default promotion candidate.
@@ -133,8 +167,8 @@ Key result under the active `mortal_default` audit profile:
 
 ## Next Recommended Work
 
-1. Run L3 sidecar/Q analysis focused on call windows, especially dealer calls and start-rank 2 calls.
-2. Check whether 80k is selecting calls with worse `Q(call)-Q(pass)` margins or whether the same margins lead to worse outcomes.
+1. Generate a smaller sidecar-rich RiichiEnv sample only if full PASS-vs-CALL opportunity analysis is needed.
+2. Focus any policy diagnostics on dealer call windows and start-rank 2 call windows.
 3. If default training continues, archive every 5k or 10k checkpoint and compare against the 70k candidate, not only the latest `mortal.pth`.
 4. Keep GRP unchanged unless future selfplay audits show both calibration degradation and expected-PT or reward-delta degradation.
 
