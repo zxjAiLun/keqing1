@@ -47,7 +47,7 @@ def expand_log_paths(values: Sequence[str | Path]) -> list[str]:
         if path.is_dir():
             files.extend(sorted(path.glob("**/*.json.gz")))
             continue
-        matches = [Path(match) for match in sorted(glob.glob(str(value)))]
+        matches = [Path(match) for match in sorted(glob.glob(str(value), recursive=True))]
         if matches:
             for match in matches:
                 if match.is_dir():
