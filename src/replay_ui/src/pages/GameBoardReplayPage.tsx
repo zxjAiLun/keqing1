@@ -39,6 +39,10 @@ export function GameBoardReplayPage() {
   const replayIdFromRoute = routeState?.replayId ?? params.get('id');
   const playerIdFromQuery = Number(params.get('player_id') ?? '0');
   const requestedPlayerId = Number.isFinite(playerIdFromQuery) ? playerIdFromQuery : 0;
+  const focusEventIndexFromQuery = Number(params.get('focus_event_index') ?? '');
+  const requestedFocusEventIndex = Number.isFinite(focusEventIndexFromQuery) ? focusEventIndexFromQuery : null;
+  const focusStepFromQuery = Number(params.get('focus_step') ?? '');
+  const requestedFocusStep = Number.isFinite(focusStepFromQuery) ? focusStepFromQuery : null;
   const [data, setData] = useState<ReplayData | null>(null);
   const [events, setEvents] = useState<Record<string, unknown>[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -107,6 +111,19 @@ export function GameBoardReplayPage() {
   const resetBoardPhase = useCallback(() => {
     setBoardPhase('pre');
   }, []);
+
+  useEffect(() => {
+    if (!data) return;
+    let targetStep = requestedFocusStep;
+    if (targetStep === null && requestedFocusEventIndex !== null) {
+      targetStep = data.log.findIndex((entry) => entry.source_event_index === requestedFocusEventIndex);
+    }
+    if (typeof targetStep === 'number' && targetStep >= 0) {
+      resetBoardPhase();
+      setShowOpponentHands(false);
+      goToStep(targetStep);
+    }
+  }, [data, requestedFocusEventIndex, requestedFocusStep, goToStep, resetBoardPhase]);
 
   const moveBoardStep = useCallback((direction: 1 | -1) => {
     if (!data || !currentEntry) return;

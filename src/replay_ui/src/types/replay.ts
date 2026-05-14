@@ -203,6 +203,51 @@ export interface SelfplayAnomalyReplayGroup {
   items: SelfplayAnomalyReplayItem[];
 }
 
+export interface BehaviorReplayCase {
+  case_id: string;
+  case_kind: string;
+  source_log: string;
+  mjson_path: string;
+  review_payload_path: string;
+  focus_event_index: number;
+  focus_step: number;
+  model_label: string;
+  slice_tags: string[];
+  decision_kind: string;
+  action_type: string;
+  actor: number;
+  turn: number;
+  margin: number;
+  chosen_q: number;
+  alternative_action: string;
+  alternative_q: number;
+  outcome: string;
+  agari: boolean;
+  houjuu: boolean;
+  ryukyoku: boolean;
+  why_selected: string;
+  selection_score: number;
+  shanten: number | null;
+}
+
+export interface BehaviorCasebookResponse {
+  casebook_dir: string;
+  manifest_path: string;
+  updated_at: number | null;
+  case_counts: Record<string, number>;
+  cases: BehaviorReplayCase[];
+}
+
+export interface BehaviorCaseImportResponse {
+  replay_id: string;
+  case: BehaviorReplayCase;
+  player_id: number;
+  focus_event_index: number;
+  focus_step: number;
+  focus_replay_step: number | null;
+  game_board_url: string;
+}
+
 export type PlayerMode =
   | { type: 'replay'; replay_id: string }
   | { type: 'realtime'; game_id: string };

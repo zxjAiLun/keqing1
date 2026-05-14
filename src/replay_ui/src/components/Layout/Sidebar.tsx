@@ -6,6 +6,7 @@ import {
   BarChart2,
   AlertTriangle,
   BrainCircuit,
+  BookOpen,
   Menu,
   X,
   Bot,
@@ -31,6 +32,7 @@ const NAV_ITEMS: Array<{
   { path: '/review', icon: BarChart2, label: '牌谱分析' },
   { path: '/mortal-review', icon: BrainCircuit, label: 'Mortal审阅' },
   { path: '/selfplay-anomalies', icon: AlertTriangle, label: '对局回放' },
+  { path: '/behavior-casebook', icon: BookOpen, label: '行为案例' },
 ];
 
 export function Sidebar() {

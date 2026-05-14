@@ -1,5 +1,11 @@
 // src/replay_ui/src/api/replayApi.ts
-import type { ReplayData, ReplayMeta, SelfplayAnomalyReplayGroup } from '../types/replay';
+import type {
+  BehaviorCaseImportResponse,
+  BehaviorCasebookResponse,
+  ReplayData,
+  ReplayMeta,
+  SelfplayAnomalyReplayGroup,
+} from '../types/replay';
 import type { BotType } from '../types/bot';
 import { DEFAULT_BOT_TYPE } from '../utils/botCatalog';
 
@@ -84,6 +90,14 @@ export const replayApi = {
   /** 列出 selfplay 对局回放导出 */
   listSelfplayReplayCollections: (): Promise<{ groups: SelfplayAnomalyReplayGroup[] }> =>
     api<{ groups: SelfplayAnomalyReplayGroup[] }>('/selfplay/replay-collections'),
+
+  /** 列出 Mortal default mainline 行为诊断 casebook */
+  listBehaviorCasebook: (): Promise<BehaviorCasebookResponse> =>
+    api<BehaviorCasebookResponse>('/behavior-casebook'),
+
+  /** 将 casebook 案例导入为普通 replay，便于复用牌桌回放页 */
+  importBehaviorCase: (caseId: string): Promise<BehaviorCaseImportResponse> =>
+    api<BehaviorCaseImportResponse>(`/behavior-casebook/import/${encodeURIComponent(caseId)}`, { method: 'POST' }),
 
   /** 导出 HTML */
   exportHtml: (data: ReplayData): Promise<Blob> =>
