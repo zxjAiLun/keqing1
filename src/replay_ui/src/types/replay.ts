@@ -231,17 +231,60 @@ export interface BehaviorReplayCase {
   shanten: number | null;
 }
 
+export interface PairedBehaviorReplayCase {
+  case_id: string;
+  case_kind: string;
+  left_model: string;
+  right_model: string;
+  left_checkpoint_path?: string | null;
+  right_checkpoint_path?: string | null;
+  left_source_log: string;
+  right_source_log: string;
+  left_mjson_path: string;
+  right_mjson_path: string;
+  left_focus_event_index: number;
+  right_focus_event_index: number;
+  prefix_match_event_count: number;
+  divergence_kind: string;
+  actor: number;
+  oya: number | null;
+  bakaze: string | null;
+  kyoku: number | null;
+  turn: number | null;
+  start_rank: number | null;
+  score_bucket: string | null;
+  left_action: Action;
+  right_action: Action;
+  downstream_summary: {
+    left_kyoku_outcome?: string;
+    right_kyoku_outcome?: string;
+    left_final_scores?: number[];
+    right_final_scores?: number[];
+    left_actor_final_rank?: number;
+    right_actor_final_rank?: number;
+  };
+  slice_tags: string[];
+  why_selected: string;
+  selection_score: number;
+}
+
 export interface BehaviorCasebookResponse {
   casebook_dir: string;
   manifest_path: string;
   updated_at: number | null;
   case_counts: Record<string, number>;
   cases: BehaviorReplayCase[];
+  paired_casebook_dir?: string;
+  paired_manifest_path?: string;
+  paired_updated_at?: number | null;
+  paired_case_counts?: Record<string, number>;
+  paired_cases?: PairedBehaviorReplayCase[];
 }
 
 export interface BehaviorCaseImportResponse {
   replay_id: string;
-  case: BehaviorReplayCase;
+  case: BehaviorReplayCase | PairedBehaviorReplayCase;
+  side?: 'left' | 'right';
   player_id: number;
   focus_event_index: number;
   focus_step: number;

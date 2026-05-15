@@ -99,6 +99,13 @@ export const replayApi = {
   importBehaviorCase: (caseId: string): Promise<BehaviorCaseImportResponse> =>
     api<BehaviorCaseImportResponse>(`/behavior-casebook/import/${encodeURIComponent(caseId)}`, { method: 'POST' }),
 
+  /** 将 paired divergence case 的一侧导入为普通 replay。 */
+  importPairedBehaviorCase: (caseId: string, side: 'left' | 'right'): Promise<BehaviorCaseImportResponse> =>
+    api<BehaviorCaseImportResponse>(
+      `/behavior-casebook/import-paired/${encodeURIComponent(caseId)}/${side}`,
+      { method: 'POST' },
+    ),
+
   /** 导出 HTML */
   exportHtml: (data: ReplayData): Promise<Blob> =>
     fetch(`${API_BASE}/export-html`, {

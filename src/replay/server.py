@@ -187,6 +187,13 @@ _DEFAULT_BEHAVIOR_CASEBOOK = (
     / "default_mainline_2026_05"
     / "behavior_replay_cases"
 )
+_DEFAULT_PAIRED_BEHAVIOR_CASEBOOK = (
+    BASE_DIR.parent.parent
+    / "artifacts"
+    / "experiments"
+    / "default_mainline_2026_05"
+    / "paired_behavior_cases"
+)
 _CASEBOOK_CHECKPOINTS = {
     "70k": BASE_DIR.parent.parent / "artifacts" / "mortal_training" / "checkpoints" / "mortal_default_70k_promoted_candidate.pth",
     "80k": BASE_DIR.parent.parent / "artifacts" / "mortal_training" / "checkpoints" / "mortal_default_80k_rejected_gate.pth",
@@ -208,6 +215,21 @@ def _load_behavior_case_manifest(casebook_dir: Path = _DEFAULT_BEHAVIOR_CASEBOOK
     return rows
 
 
+def _load_paired_behavior_case_manifest(casebook_dir: Path = _DEFAULT_PAIRED_BEHAVIOR_CASEBOOK) -> list[dict]:
+    manifest_path = casebook_dir / "paired_manifest.jsonl"
+    if not manifest_path.exists():
+        return []
+    rows = []
+    for line in manifest_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        row["casebook_dir"] = str(casebook_dir)
+        row["manifest_path"] = str(manifest_path)
+        rows.append(row)
+    return rows
+
+
 def _read_mjson_events(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
@@ -215,6 +237,14 @@ def _read_mjson_events(path: Path) -> list[dict]:
 def _find_behavior_case(case_id: str) -> tuple[dict, Path] | None:
     casebook_dir = _DEFAULT_BEHAVIOR_CASEBOOK
     for row in _load_behavior_case_manifest(casebook_dir):
+        if row.get("case_id") == case_id:
+            return row, casebook_dir
+    return None
+
+
+def _find_paired_behavior_case(case_id: str) -> tuple[dict, Path] | None:
+    casebook_dir = _DEFAULT_PAIRED_BEHAVIOR_CASEBOOK
+    for row in _load_paired_behavior_case_manifest(casebook_dir):
         if row.get("case_id") == case_id:
             return row, casebook_dir
     return None
@@ -251,6 +281,63 @@ def _checkpoint_for_behavior_case(row: dict) -> Path:
         return path
     model_label = str(row.get("model_label", ""))
     return _CASEBOOK_CHECKPOINTS.get(model_label, _default_checkpoint_for_bot_type("mortal"))
+
+
+def _resolve_casebook_path(casebook_dir: Path, raw_path: str) -> Path | None:
+    path = (casebook_dir / raw_path).resolve()
+    if not path.exists() or casebook_dir.resolve() not in path.parents:
+        return None
+    return path
+
+
+def _checkpoint_from_raw(raw_path: str | None, *, fallback_model: str = "mortal") -> Path:
+    if isinstance(raw_path, str) and raw_path.strip():
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = BASE_DIR.parent.parent / path
+        return path
+    return _default_checkpoint_for_bot_type(fallback_model)
+
+
+def _import_case_mjson(
+    *,
+    row: dict,
+    mjson_path: Path,
+    checkpoint: Path,
+    player_id: int,
+    focus_event_index: int | None,
+) -> tuple[str, dict, int | None, str, list[dict]]:
+    from replay.api import run_replay_single_raw
+    from replay.bot import render_replay_json
+
+    events = _read_mjson_events(mjson_path)
+    bot = run_replay_single_raw(
+        events,
+        player_id=player_id,
+        checkpoint=str(checkpoint),
+        input_type="mjai",
+        bot_type="mortal",
+    )
+    decisions = normalize_replay_decisions(render_replay_json(bot))
+    decisions["bot_type"] = "mortal"
+    decisions["casebook_case"] = row
+    focus_replay_step, focus_resolution = _resolve_focus_replay_step(decisions, focus_event_index)
+    decisions["casebook_focus"] = {
+        "focus_event_index": focus_event_index,
+        "focus_replay_step": focus_replay_step,
+        "focus_resolution": focus_resolution,
+    }
+    normalized_events = _normalize_replay_events(events)
+    decisions = _merge_terminal_event_details(decisions, normalized_events)
+    storage = get_storage()
+    replay_id = storage.save(
+        events=normalized_events,
+        decisions=decisions,
+        bot_type="mortal",
+        player_names=decisions.get("player_names"),
+        checkpoint=str(checkpoint),
+    )
+    return replay_id, decisions, focus_replay_step, focus_resolution, normalized_events
 
 
 # ========== 旧接口（兼容） ==========
@@ -533,14 +620,24 @@ async def list_behavior_casebook():
     """列出默认主线行为诊断 casebook。"""
     casebook_dir = _DEFAULT_BEHAVIOR_CASEBOOK
     cases = _load_behavior_case_manifest(casebook_dir)
+    paired_casebook_dir = _DEFAULT_PAIRED_BEHAVIOR_CASEBOOK
+    paired_cases = _load_paired_behavior_case_manifest(paired_casebook_dir)
     case_counts: dict[str, int] = {}
     for row in cases:
         kind = str(row.get("case_kind", "unknown"))
         case_counts[kind] = case_counts.get(kind, 0) + 1
+    paired_case_counts: dict[str, int] = {}
+    for row in paired_cases:
+        kind = str(row.get("case_kind", "unknown"))
+        paired_case_counts[kind] = paired_case_counts.get(kind, 0) + 1
     updated_at = None
     manifest_path = casebook_dir / "manifest.jsonl"
     if manifest_path.exists():
         updated_at = manifest_path.stat().st_mtime
+    paired_updated_at = None
+    paired_manifest_path = paired_casebook_dir / "paired_manifest.jsonl"
+    if paired_manifest_path.exists():
+        paired_updated_at = paired_manifest_path.stat().st_mtime
     return JSONResponse(
         content={
             "casebook_dir": str(casebook_dir),
@@ -548,6 +645,11 @@ async def list_behavior_casebook():
             "updated_at": updated_at,
             "case_counts": case_counts,
             "cases": cases,
+            "paired_casebook_dir": str(paired_casebook_dir),
+            "paired_manifest_path": str(paired_manifest_path),
+            "paired_updated_at": paired_updated_at,
+            "paired_case_counts": paired_case_counts,
+            "paired_cases": paired_cases,
         }
     )
 
@@ -559,47 +661,22 @@ async def import_behavior_case(case_id: str):
     if found is None:
         return JSONResponse(status_code=404, content={"error": f"case {case_id} 不存在"})
     row, casebook_dir = found
-    mjson_path = (casebook_dir / str(row.get("mjson_path", ""))).resolve()
-    if not mjson_path.exists() or casebook_dir.resolve() not in mjson_path.parents:
-        return JSONResponse(status_code=404, content={"error": f"case mjson 不存在: {mjson_path}"})
+    mjson_path = _resolve_casebook_path(casebook_dir, str(row.get("mjson_path", "")))
+    if mjson_path is None:
+        return JSONResponse(status_code=404, content={"error": f"case mjson 不存在: {row.get('mjson_path')}"})
 
     checkpoint = _checkpoint_for_behavior_case(row)
     player_id = int(row.get("actor", 0))
-    events = _read_mjson_events(mjson_path)
+    focus_event_index = row.get("focus_event_index")
+    focus_event_index = int(focus_event_index) if isinstance(focus_event_index, int) else None
 
     try:
-        from replay.api import run_replay_single_raw
-        from replay.bot import render_replay_json
-
-        bot = run_replay_single_raw(
-            events,
+        replay_id, _decisions, focus_replay_step, focus_resolution, _events = _import_case_mjson(
+            row=row,
+            mjson_path=mjson_path,
+            checkpoint=checkpoint,
             player_id=player_id,
-            checkpoint=str(checkpoint),
-            input_type="mjai",
-            bot_type="mortal",
-        )
-        decisions = normalize_replay_decisions(render_replay_json(bot))
-        decisions["bot_type"] = "mortal"
-        decisions["casebook_case"] = row
-        focus_event_index = row.get("focus_event_index")
-        focus_replay_step, focus_resolution = _resolve_focus_replay_step(
-            decisions,
-            int(focus_event_index) if isinstance(focus_event_index, int) else None,
-        )
-        decisions["casebook_focus"] = {
-            "focus_event_index": focus_event_index,
-            "focus_replay_step": focus_replay_step,
-            "focus_resolution": focus_resolution,
-        }
-        normalized_events = _normalize_replay_events(events)
-        decisions = _merge_terminal_event_details(decisions, normalized_events)
-        storage = get_storage()
-        replay_id = storage.save(
-            events=normalized_events,
-            decisions=decisions,
-            bot_type="mortal",
-            player_names=decisions.get("player_names"),
-            checkpoint=str(checkpoint),
+            focus_event_index=focus_event_index,
         )
         return JSONResponse(
             content={
@@ -608,6 +685,59 @@ async def import_behavior_case(case_id: str):
                 "player_id": player_id,
                 "focus_event_index": focus_event_index,
                 "focus_step": row.get("focus_step"),
+                "focus_replay_step": focus_replay_step,
+                "focus_resolution": focus_resolution,
+                "game_board_url": (
+                    f"/game-replay?id={replay_id}&player_id={player_id}"
+                    f"&focus_event_index={focus_event_index}"
+                    f"&focus_step={focus_replay_step if focus_replay_step is not None else ''}"
+                    f"&focus_resolution={focus_resolution}"
+                ),
+            }
+        )
+    except Exception as e:
+        import traceback
+
+        return JSONResponse(status_code=500, content={"error": str(e), "detail": traceback.format_exc()})
+
+
+@app.post("/api/behavior-casebook/import-paired/{case_id}/{side}", response_class=JSONResponse)
+async def import_paired_behavior_case(case_id: str, side: str):
+    """把 paired divergence case 的 left/right 侧导入为普通 replay。"""
+    if side not in {"left", "right"}:
+        return JSONResponse(status_code=400, content={"error": "side 必须是 left 或 right"})
+    found = _find_paired_behavior_case(case_id)
+    if found is None:
+        return JSONResponse(status_code=404, content={"error": f"paired case {case_id} 不存在"})
+    row, casebook_dir = found
+    mjson_key = f"{side}_mjson_path"
+    focus_key = f"{side}_focus_event_index"
+    checkpoint_key = f"{side}_checkpoint_path"
+    mjson_path = _resolve_casebook_path(casebook_dir, str(row.get(mjson_key, "")))
+    if mjson_path is None:
+        return JSONResponse(status_code=404, content={"error": f"paired case mjson 不存在: {row.get(mjson_key)}"})
+    checkpoint = _checkpoint_from_raw(row.get(checkpoint_key))
+    player_id = int(row.get("actor", 0))
+    focus_event_index = row.get(focus_key)
+    focus_event_index = int(focus_event_index) if isinstance(focus_event_index, int) else None
+    case_payload = {**row, "paired_side": side}
+
+    try:
+        replay_id, _decisions, focus_replay_step, focus_resolution, _events = _import_case_mjson(
+            row=case_payload,
+            mjson_path=mjson_path,
+            checkpoint=checkpoint,
+            player_id=player_id,
+            focus_event_index=focus_event_index,
+        )
+        return JSONResponse(
+            content={
+                "replay_id": replay_id,
+                "case": row,
+                "side": side,
+                "player_id": player_id,
+                "focus_event_index": focus_event_index,
+                "focus_step": focus_replay_step,
                 "focus_replay_step": focus_replay_step,
                 "focus_resolution": focus_resolution,
                 "game_board_url": (
