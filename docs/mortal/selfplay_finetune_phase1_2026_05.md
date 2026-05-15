@@ -103,6 +103,56 @@ The current reusable checkpoints are:
 - `A2_aggressive_lineage_continuation`: `artifacts/experiments/selfplay_finetune_2026_05/A2_aggressive_lineage_continuation/mortal.pth@80400`
 - `M1_mixed_selfplay`: `artifacts/experiments/selfplay_finetune_2026_05/M1_mixed_selfplay/mortal.pth@71000`
 
+## Phase 1.1 Behavior Readout
+
+Low-cost 100h same-model arena samples were generated with the same seed set:
+
+- seed start: `310000`
+- seed key: `8192`
+- seed count: `25` (`100` half-games)
+- output root: `artifacts/experiments/selfplay_finetune_2026_05/readout_100h`
+
+This is a behavior readout only. It is not a strength gate, and the samples are too small for promotion decisions.
+
+L2 all-seat behavior deltas versus 70k anchor:
+
+| Model | Rounds | Agari d | Houjuu d | Fuuro d | Riichi d | Post-fuuro houjuu d | Dealer houjuu d | Rank-2 fuuro d | Rank-2 houjuu d |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `anchor_80k` | 4416 | +0.86pp | +1.67pp | +1.50pp | +1.45pp | -0.78pp | +0.36pp | -2.93pp | +1.32pp |
+| `S1@70400` | 4448 | -0.56pp | -0.77pp | -3.04pp | +0.94pp | +0.54pp | +2.06pp | -8.56pp | +3.75pp |
+| `A1@70400` | 4136 | +0.95pp | +1.57pp | +0.19pp | +2.15pp | -1.46pp | +3.69pp | -2.10pp | -0.99pp |
+| `A2@80400` | 3816 | +1.87pp | +2.10pp | +1.66pp | -0.36pp | +0.91pp | +3.31pp | +1.72pp | +5.87pp |
+| `M1@71000` | 3968 | +0.83pp | +0.35pp | -2.52pp | -0.82pp | -3.05pp | +1.88pp | -2.52pp | +1.01pp |
+
+L3 chosen-call deltas versus 70k anchor:
+
+| Model | Chosen-call count d | Avg margin d | Chosen-call houjuu d | Dealer call count d | Rank-2 call count d |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `anchor_80k` | +392 | +0.3142 | -0.17pp | +120 | +32 |
+| `S1@70400` | +12 | +4.3366 | -0.36pp | -40 | -72 |
+| `A1@70400` | +189 | +3.3515 | -3.53pp | +15 | +22 |
+| `A2@80400` | +177 | +4.2441 | -0.72pp | +12 | +58 |
+| `M1@71000` | -132 | +3.5346 | -4.17pp | -60 | -4 |
+
+Paired divergence export counts versus 70k anchor:
+
+| Model | Paired case counts |
+| --- | --- |
+| `S1@70400` | `paired_discard_divergence=10`, `paired_first_divergence=4` |
+| `A1@70400` | `paired_call_divergence=4`, `paired_dealer_call_divergence=4`, `paired_discard_divergence=10`, `paired_first_divergence=4` |
+| `A2@80400` | `paired_call_divergence=4`, `paired_discard_divergence=10` |
+| `M1@71000` | `paired_call_divergence=4`, `paired_discard_divergence=10`, `paired_first_divergence=4` |
+
+Readout interpretation:
+
+- `A1` already shows the intended data-transfer signal: chosen-call count rises substantially (`+189`) while all-seat fuuro rate is nearly flat (`+0.19pp`) and riichi rises (`+2.15pp`). This is a useful early style-shaping signal, not a strength claim.
+- `A2` is the clearest aggressive-lineage signal: fuuro rises (`+1.66pp`), agari rises (`+1.87pp`), but houjuu also rises (`+2.10pp`), with rank-2 houjuu especially high (`+5.87pp`). This branch needs a larger fair run before any gate.
+- `M1` completed the full +1000 updates and looks more conservative in this 100h readout: fuuro drops (`-2.52pp`), riichi drops (`-0.82pp`), and post-fuuro houjuu improves (`-3.05pp`). Because it has +1000 updates while S1/A1/A2 have +400 saved updates, do not compare it as a fair recipe result yet.
+- `S1` did not simply stay identical at +400; fuuro drops and dealer/rank-2 houjuu pockets move. This supports doing a larger fair single-domain run before interpreting standard selfplay behavior.
+- Fine-tuned branches show much larger `Q(call)-Q(pass)` margin shifts than the 80k anchor. Treat Q-margin magnitude as a scale-sensitive diagnostic here; use action counts and outcome deltas as the primary first-pass readout.
+
+Current Phase 1.1 conclusion: behavior differences are already visible enough to justify building fair 1000h single-domain pools for S1/A1/A2. Do not run 1000h strength gates yet.
+
 Primary style metrics:
 
 - fuuro rate

@@ -182,6 +182,10 @@ def write_experiment_configs(
             "config": str(config_path),
             "state_file": str(state_file),
             "training_command": build_training_command(config_path=config_path, target_steps=effective_target),
+            "target_reached": None,
+            "last_trained_step_observed": None,
+            "last_saved_step": int(parent_steps) if copy_parent_checkpoint else None,
+            "dataset_exhausted_step": None,
             "notes": notes,
         }
         output_rows.append(manifest)

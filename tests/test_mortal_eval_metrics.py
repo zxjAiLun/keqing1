@@ -568,6 +568,10 @@ state_file = "/tmp/base/grp.pth"
     assert row["target_steps"] == 71000
     assert row["effective_train_steps"] == 1000
     assert row["pt_table"] == [6.0, 4.0, 2.0, 0.0]
+    assert row["target_reached"] is None
+    assert row["last_trained_step_observed"] is None
+    assert row["last_saved_step"] is None
+    assert row["dataset_exhausted_step"] is None
     assert row["config"].endswith("A1_aggressive_data_transfer/config.toml")
     assert not (tmp_path / "selfplay").exists()
 
