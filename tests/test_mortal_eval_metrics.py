@@ -13,6 +13,7 @@ from scripts.mortal import experiment_registry
 from scripts.mortal import export_behavior_replay_cases
 from scripts.mortal import one_vs_three_smoke
 from scripts.mortal import prepare_reward_pt_experiments
+from scripts.mortal import prepare_selfplay_finetune_experiments
 from scripts.mortal import stat_report
 
 
@@ -516,6 +517,58 @@ pts = [6.0, 4.0, 2.0, 0.0]
     )
 
     assert report["experiments"][0]["warning"] == "raw profile changes reward scale as well as utility shape"
+
+
+def test_prepare_selfplay_finetune_experiments_dry_run_is_isolated(tmp_path, monkeypatch) -> None:
+    base_config = tmp_path / "config.toml"
+    base_config.write_text(
+        """
+[control]
+state_file = "/tmp/base/mortal.pth"
+best_state_file = "/tmp/base/mortal_best.pth"
+tensorboard_dir = "/tmp/base/tb_mortal"
+
+[train_play.default]
+log_dir = "/tmp/base/train_play"
+
+[test_play]
+log_dir = "/tmp/base/test_play"
+
+[dataset]
+globs = ["/data/original/**/*.json.gz"]
+file_index = "/tmp/base/file_index.pth"
+
+[env]
+pts = [6.0, 4.0, 2.0, 0.0]
+
+[grp]
+state_file = "/tmp/base/grp.pth"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prepare_selfplay_finetune_experiments, "read_checkpoint_steps", lambda _checkpoint: 70000)
+
+    report = prepare_selfplay_finetune_experiments.write_experiment_configs(
+        base_config_path=base_config,
+        output_root=tmp_path / "selfplay",
+        experiment_ids=["A1_aggressive_data_transfer"],
+        checkpoint_paths={"70k": tmp_path / "70k.pth", "80k": tmp_path / "80k.pth"},
+        log_globs={"70k": "/logs/70k/**/*.json.gz", "80k": "/logs/80k/**/*.json.gz"},
+        train_steps=1000,
+        target_steps=None,
+        copy_parent_checkpoint=False,
+        dry_run=True,
+    )
+
+    row = report["experiments"][0]
+    assert row["parent_label"] == "70k"
+    assert row["training_data_labels"] == ["80k"]
+    assert row["training_data"] == ["/logs/80k/**/*.json.gz"]
+    assert row["target_steps"] == 71000
+    assert row["effective_train_steps"] == 1000
+    assert row["pt_table"] == [6.0, 4.0, 2.0, 0.0]
+    assert row["config"].endswith("A1_aggressive_data_transfer/config.toml")
+    assert not (tmp_path / "selfplay").exists()
 
 
 def test_grp_audit_finalizers_export_calibration_and_reward_variance() -> None:

@@ -96,8 +96,9 @@ Do not retrain or adapt GRP yet.
 
 Current evidence supports:
 
-- Keep 70k default as the current mainline candidate.
-- Keep 80k rejected by gate, but do not attribute the rejection primarily to GRP expected-PT error or reward-delta variance.
+- Use 70k default as the standard reference / balanced anchor.
+- Use 80k default as an aggressive / fuuro-heavy behavior anchor. It did not pass automatic promotion in the 1000h screening gate, but that gate is not a final strength verdict and does not remove its value as a style source.
+- Do not attribute 80k non-promotion primarily to GRP expected-PT error or reward-delta variance.
 - Continue tracking calibration if future selfplay or style runs move farther from the original distribution.
 - Reopen mixed-domain GRP adaptation only if future audits show both calibration degradation and expected-PT or reward-delta degradation on selfplay domains.
 

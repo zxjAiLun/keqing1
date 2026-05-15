@@ -1,22 +1,24 @@
 # Default Mortal Mainline Progress
 
-Status: 80k default checkpoint evaluated against 70k default baseline; 80k is not promoted. Four-domain GRP audit is complete and does not support GRP retraining yet.
+Status: 80k default checkpoint was screened against the 70k default reference. The gate blocks automatic mainline promotion of 80k, but it is not a final strength verdict. Four-domain GRP audit is complete and does not support GRP retraining yet.
 
 ## Checkpoints
 
 | Label | Path | Step | Role |
 | --- | --- | ---: | --- |
-| `mortal_default_70k` | `artifacts/experiments/reward_pt_2026_05/R0_mortal_default/mortal.pth` | 70000 | Current default promotion candidate |
-| `mortal_default_80k` | `artifacts/mortal_training/mortal.pth` | 80000 | Evaluated, not promoted |
+| `mortal_default_70k` | `artifacts/experiments/reward_pt_2026_05/R0_mortal_default/mortal.pth` | 70000 | Standard reference / balanced anchor |
+| `mortal_default_80k` | `artifacts/mortal_training/mortal.pth` | 80000 | Aggressive / fuuro-heavy behavior anchor; not auto-promoted |
 
 Stable local archive copies:
 
 - `artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth`
 - `artifacts/mortal_training/checkpoints/mortal_default_80k_rejected_gate.pth`
 
+Naming note: the archive filenames reflect the earlier promotion-gate workflow. The current research framing is more neutral: 70k is the standard anchor, and 80k is an aggressive behavior anchor that did not pass this screening gate as an automatic replacement.
+
 ## Gate Setup
 
-Both gates use `scripts/mortal/one_vs_three_smoke.py`, 250 seeds, and 1000 half-games. Rank point reporting should use Tenhou reference `[90,45,0,-135]` for readability; the `mortal_default` training point table `[6,4,2,0]` is only the training reward scalarization.
+Both gates use `scripts/mortal/one_vs_three_smoke.py`, 250 seed blocks, 4 seat rotations per block, and therefore 1000 half-games. Rank point reporting should use Tenhou reference `[90,45,0,-135]` for readability; the `mortal_default` training point table `[6,4,2,0]` is only the training reward scalarization.
 
 | Gate | Challenger | Champion | Purpose |
 | --- | --- | --- | --- |
@@ -30,7 +32,7 @@ Both gates use `scripts/mortal/one_vs_three_smoke.py`, 250 seeds, and 1000 half-
 | GateA_80k_vs_70k_1000h | 80k | 2.508 | -0.81 | `[255,237,253,255]` | 0.2232 | 0.1455 | 0.3171 | 0.2080 |
 | GateB_70k_vs_80k_1000h | 70k | 2.458 | 4.32 | `[244,277,256,223]` | 0.2209 | 0.1303 | 0.2976 | 0.1825 |
 
-In GateA, 80k is slightly negative against 70k. In GateB, 70k is clearly positive against 80k. This does not support promoting the 80k checkpoint.
+In GateA, 80k is slightly negative against 70k. In GateB, 70k is positive against 80k. This is sufficient to block automatic 80k promotion, but because the setup is 250 independent seed blocks with rotations, it should be treated as a screening result rather than a final 70k > 80k strength theorem.
 
 ## Behavior Drift
 
@@ -42,7 +44,7 @@ Compared with the 70k baseline in the reverse gate, 80k shows a more aggressive 
 | 70k as challenger vs 80k | 0.2209 | 0.1303 | 0.2976 | 0.1825 |
 | 80k as champions vs 70k | 0.2243 | 0.1432 | 0.3171 | 0.1991 |
 
-The 80k checkpoint wins and calls more, but also deals in substantially more. The higher houjuu rate is the main warning sign: default offline training from 70k to 80k appears to have pushed the policy toward a more aggressive style without robust strength gain.
+The 80k checkpoint wins and calls more, but also deals in substantially more. The higher houjuu rate is the main warning sign for automatic promotion. For research use, this same drift makes 80k useful as an aggressive / fuuro-heavy behavior source.
 
 ## L1 Behavior Diff
 
@@ -236,11 +238,12 @@ The import API returns `focus_resolution`:
 
 ## Decision
 
-- Keep `mortal_default_70k` as the current default promotion candidate.
-- Mark `mortal_default_80k` as rejected at the 1000h gate.
-- Do not attribute the 80k rejection primarily to GRP expected-PT error or reward-delta variance degradation.
+- Use `mortal_default_70k` as the standard reference / balanced anchor.
+- Use `mortal_default_80k` as an aggressive / fuuro-heavy behavior anchor. It is not auto-promoted over 70k by this gate, but it remains valuable as a style source.
+- Do not interpret the 1000h bidirectional gate as a final strong claim that 70k is absolutely stronger than 80k.
+- Do not attribute the 80k non-promotion primarily to GRP expected-PT error or reward-delta variance degradation.
 - Do not blindly continue default offline training to 100k without a checkpoint retention and evaluation plan.
-- If default training continues, compare retained checkpoints against the 70k candidate and monitor behavior drift.
+- If default training continues, compare retained checkpoints against the 70k anchor and monitor behavior drift.
 
 ## GRP Audit Follow-Up
 
@@ -258,12 +261,15 @@ Key result under the active `mortal_default` audit profile:
 
 ## Next Recommended Work
 
-1. Review paired L4 cases in GUI, starting with `paired_dealer_call_divergence` and `paired_rank2_call_divergence`.
-2. Use the legacy single-case section only as supporting context, not as the main good/bad judgment.
-3. Add dual-pane synchronized replay only if the two-button paired workflow is too slow.
-4. Generate a smaller sidecar-rich RiichiEnv sample only if full PASS-vs-CALL opportunity analysis is needed.
-5. Focus any policy diagnostics on dealer call windows and start-rank 2 call windows.
-6. If default training continues, archive every 5k or 10k checkpoint and compare against the 70k candidate, not only the latest `mortal.pth`.
-7. Keep GRP unchanged unless future selfplay audits show both calibration degradation and expected-PT or reward-delta degradation.
+1. Start Selfplay Fine-tune Phase 1 with 70k as the standard anchor and 80k as the aggressive behavior anchor.
+2. Review paired L4 cases in GUI as an explanatory tool, starting with `paired_dealer_call_divergence` and `paired_rank2_call_divergence`.
+3. Use the legacy single-case section only as supporting context, not as the main good/bad judgment.
+4. Add dual-pane synchronized replay only if the two-button paired workflow is too slow.
+5. Generate a smaller sidecar-rich RiichiEnv sample only if full PASS-vs-CALL opportunity analysis is needed.
+6. Focus any policy diagnostics on dealer call windows and start-rank 2 call windows.
+7. If default training continues, archive every 5k or 10k checkpoint and compare against the 70k anchor, not only the latest `mortal.pth`.
+8. Keep GRP unchanged unless future selfplay audits show both calibration degradation and expected-PT or reward-delta degradation.
 
 The 80k-vs-65k run under `artifacts/experiments/default_mainline_2026_05/gates/GateA_80k_vs_65k_1000h` was produced by a mistaken baseline choice and is not used for this decision.
+
+Selfplay Fine-tune Phase 1 is specified in `docs/mortal/selfplay_finetune_phase1_2026_05.md`.
