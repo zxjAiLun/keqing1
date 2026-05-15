@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 from types import SimpleNamespace
 
 from scripts.mortal import ab_match
@@ -569,6 +570,40 @@ state_file = "/tmp/base/grp.pth"
     assert row["pt_table"] == [6.0, 4.0, 2.0, 0.0]
     assert row["config"].endswith("A1_aggressive_data_transfer/config.toml")
     assert not (tmp_path / "selfplay").exists()
+
+
+def test_prepare_selfplay_finetune_rejects_target_not_above_parent(tmp_path, monkeypatch) -> None:
+    base_config = tmp_path / "config.toml"
+    base_config.write_text(
+        """
+[control]
+state_file = "/tmp/base/mortal.pth"
+best_state_file = "/tmp/base/mortal_best.pth"
+tensorboard_dir = "/tmp/base/tb_mortal"
+
+[dataset]
+globs = ["/data/original/**/*.json.gz"]
+file_index = "/tmp/base/file_index.pth"
+
+[env]
+pts = [6.0, 4.0, 2.0, 0.0]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prepare_selfplay_finetune_experiments, "read_checkpoint_steps", lambda _checkpoint: 80000)
+
+    with pytest.raises(ValueError, match="target_steps must be greater than parent_steps"):
+        prepare_selfplay_finetune_experiments.write_experiment_configs(
+            base_config_path=base_config,
+            output_root=tmp_path / "selfplay",
+            experiment_ids=["A2_aggressive_lineage_continuation"],
+            checkpoint_paths={"70k": tmp_path / "70k.pth", "80k": tmp_path / "80k.pth"},
+            log_globs={"70k": "/logs/70k/**/*.json.gz", "80k": "/logs/80k/**/*.json.gz"},
+            train_steps=1000,
+            target_steps=71000,
+            copy_parent_checkpoint=False,
+            dry_run=True,
+        )
 
 
 def test_grp_audit_finalizers_export_calibration_and_reward_variance() -> None:

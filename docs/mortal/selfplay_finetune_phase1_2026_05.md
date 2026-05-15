@@ -85,6 +85,24 @@ uv run python scripts/run_mortal_dqn_offline.py \
 
 Do not treat this first round as a champion tournament. First ask whether the branches produce distinct, stable behavior.
 
+Runtime smoke and capacity probe, run on 2026-05-15:
+
+| Exp | Smoke target | 1k target attempt | Result | Last saved checkpoint |
+| --- | ---: | ---: | --- | ---: |
+| `S1_standard_selfplay` | 70100 | 71000 | single 500h 70k pool exhausted at 70714 | 70400 |
+| `A1_aggressive_data_transfer` | 70100 | 71000 | single 500h 80k pool exhausted at 70691 | 70400 |
+| `A2_aggressive_lineage_continuation` | 80100 | 81000 | single 500h 80k pool exhausted at 80691 | 80400 |
+| `M1_mixed_selfplay` | 70100 | 71000 | mixed 1000h pool reached target | 71000 |
+
+All four 100-step smoke runs succeeded: CUDA, dataloader, independent `file_index`, and checkpoint saving all worked. The single-pool exhaustion is a data-capacity finding, not an optimization failure. Do not force extra epochs without explicitly deciding to allow replay reuse.
+
+The current reusable checkpoints are:
+
+- `S1_standard_selfplay`: `artifacts/experiments/selfplay_finetune_2026_05/S1_standard_selfplay/mortal.pth@70400`
+- `A1_aggressive_data_transfer`: `artifacts/experiments/selfplay_finetune_2026_05/A1_aggressive_data_transfer/mortal.pth@70400`
+- `A2_aggressive_lineage_continuation`: `artifacts/experiments/selfplay_finetune_2026_05/A2_aggressive_lineage_continuation/mortal.pth@80400`
+- `M1_mixed_selfplay`: `artifacts/experiments/selfplay_finetune_2026_05/M1_mixed_selfplay/mortal.pth@71000`
+
 Primary style metrics:
 
 - fuuro rate

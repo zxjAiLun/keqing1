@@ -150,6 +150,11 @@ def write_experiment_configs(
         parent_checkpoint = checkpoint_paths[parent_label]
         parent_steps = read_checkpoint_steps(parent_checkpoint)
         effective_target = int(target_steps) if target_steps is not None else int(parent_steps) + int(train_steps)
+        if effective_target <= parent_steps:
+            raise ValueError(
+                f"target_steps must be greater than parent_steps for {experiment_id}: "
+                f"target_steps={effective_target}, parent_steps={parent_steps}"
+            )
         dataset_globs = [log_globs[label] for label in data_labels]
         config, exp_dir = prepare_config(
             base_config,
