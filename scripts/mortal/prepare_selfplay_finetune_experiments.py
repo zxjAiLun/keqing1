@@ -78,8 +78,21 @@ def checkpoint_map(checkpoint_70k: Path, checkpoint_80k: Path) -> dict[str, Path
     return {"70k": checkpoint_70k, "80k": checkpoint_80k}
 
 
-def log_glob_map(logs_70k: str, logs_80k: str) -> dict[str, str]:
-    return {"70k": logs_70k, "80k": logs_80k}
+def split_log_globs(value: str | Sequence[str]) -> list[str]:
+    if isinstance(value, str):
+        parts = value.split(",")
+    else:
+        parts = []
+        for item in value:
+            parts.extend(str(item).split(","))
+    globs = [part.strip() for part in parts if part.strip()]
+    if not globs:
+        raise ValueError("at least one log glob is required")
+    return globs
+
+
+def log_glob_map(logs_70k: str, logs_80k: str) -> dict[str, list[str]]:
+    return {"70k": split_log_globs(logs_70k), "80k": split_log_globs(logs_80k)}
 
 
 def prepare_config(
@@ -136,7 +149,7 @@ def write_experiment_configs(
     output_root: Path,
     experiment_ids: Sequence[str],
     checkpoint_paths: Mapping[str, Path],
-    log_globs: Mapping[str, str],
+    log_globs: Mapping[str, Sequence[str] | str],
     train_steps: int,
     target_steps: int | None,
     copy_parent_checkpoint: bool,
@@ -155,7 +168,7 @@ def write_experiment_configs(
                 f"target_steps must be greater than parent_steps for {experiment_id}: "
                 f"target_steps={effective_target}, parent_steps={parent_steps}"
             )
-        dataset_globs = [log_globs[label] for label in data_labels]
+        dataset_globs = [glob for label in data_labels for glob in split_log_globs(log_globs[label])]
         config, exp_dir = prepare_config(
             base_config,
             experiment_id=experiment_id,

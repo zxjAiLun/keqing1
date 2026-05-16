@@ -153,6 +153,109 @@ Readout interpretation:
 
 Current Phase 1.1 conclusion: behavior differences are already visible enough to justify building fair 1000h single-domain pools for S1/A1/A2. Do not run 1000h strength gates yet.
 
+## Phase 1.2 Fair Single-Domain Run
+
+Additional same-model arena selfplay pools were generated on 2026-05-16:
+
+| Pool | Checkpoint | Seed start | Seed key | Seed count | Hanchans | Output |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| 70k extra | `mortal_default_70k_promoted_candidate.pth` | `300125` | `8192` | `125` | `500` | `artifacts/experiments/selfplay_finetune_2026_05/pools/selfplay_70k_base_extra500_arena/logs/**/*.json.gz` |
+| 80k extra | `mortal_default_80k_rejected_gate.pth` | `300125` | `8192` | `125` | `500` | `artifacts/experiments/selfplay_finetune_2026_05/pools/selfplay_80k_base_extra500_arena/logs/**/*.json.gz` |
+
+The fair single-domain configs were generated under:
+
+`artifacts/experiments/selfplay_finetune_2026_05/phase1_2_fair_1000`
+
+They use:
+
+- 70k data: original 500h 70k pool + extra 500h 70k pool
+- 80k data: original 500h 80k pool + extra 500h 80k pool
+- same `mortal_default` reward `[6,4,2,0]`
+- no GRP/model/head/action-space changes
+
+Training completion:
+
+| Exp | Parent | Data | Target | Result | Checkpoint |
+| --- | --- | --- | ---: | --- | --- |
+| `S1_standard_selfplay` | 70k | 70k 1000h | 71000 | reached target | `phase1_2_fair_1000/S1_standard_selfplay/mortal.pth@71000` |
+| `A1_aggressive_data_transfer` | 70k | 80k 1000h | 71000 | reached target | `phase1_2_fair_1000/A1_aggressive_data_transfer/mortal.pth@71000` |
+| `A2_aggressive_lineage_continuation` | 80k | 80k 1000h | 81000 | reached target | `phase1_2_fair_1000/A2_aggressive_lineage_continuation/mortal.pth@81000` |
+
+All three runs crossed the old single-pool exhaustion points and saved final checkpoints at the intended targets.
+
+### Phase 1.2 Behavior Readout
+
+Low-cost 100h same-model arena samples were generated with the same seed set as Phase 1.1:
+
+- seed start: `310000`
+- seed key: `8192`
+- seed count: `25` (`100` half-games)
+- output root: `artifacts/experiments/selfplay_finetune_2026_05/phase1_2_fair_1000/readout_100h`
+
+This is still a behavior readout, not a strength gate.
+
+L2 all-seat behavior deltas versus 70k anchor:
+
+| Model | Rounds | Agari d | Houjuu d | Fuuro d | Riichi d | Post-fuuro agari d | Post-fuuro houjuu d | Dealer houjuu d | Rank-2 fuuro d | Rank-2 houjuu d |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `S1@71000` | 4368 | +0.55pp | -0.55pp | -1.73pp | -0.43pp | +3.38pp | -3.51pp | +1.61pp | -9.17pp | +3.64pp |
+| `A1@71000` | 4080 | +1.70pp | +1.27pp | +2.12pp | -1.13pp | -1.47pp | +0.41pp | -0.89pp | -0.67pp | +5.02pp |
+| `A2@81000` | 3908 | +0.99pp | +0.68pp | +1.09pp | -0.17pp | +2.12pp | -1.67pp | +2.51pp | -3.76pp | +3.34pp |
+
+L3 chosen-call deltas versus 70k anchor:
+
+| Model | Chosen-call count d | Avg margin d | Chosen-call agari d | Chosen-call houjuu d | Dealer call count d | Dealer call houjuu d | Rank-2 call count d | Rank-2 call houjuu d |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `S1@71000` | +36 | +4.3504 | +6.25pp | -6.13pp | -4 | -1.72pp | -88 | +6.43pp |
+| `A1@71000` | +244 | +4.3175 | +1.27pp | +0.51pp | +68 | -8.54pp | +68 | +13.89pp |
+| `A2@81000` | +136 | +4.5688 | +0.97pp | -3.46pp | +61 | -1.95pp | -26 | +7.82pp |
+
+Paired divergence export counts versus 70k anchor:
+
+| Model | Paired case counts |
+| --- | --- |
+| `S1@71000` | `paired_call_divergence=4`, `paired_dealer_call_divergence=4`, `paired_discard_divergence=10`, `paired_first_divergence=8`, `paired_reach_divergence=8` |
+| `A1@71000` | `paired_call_divergence=8`, `paired_dealer_call_divergence=10`, `paired_discard_divergence=10` |
+| `A2@81000` | `paired_call_divergence=4`, `paired_dealer_call_divergence=4`, `paired_discard_divergence=10` |
+
+Readout interpretation:
+
+- `S1@71000` is a viable standard-selfplay control: it does not become more aggressive overall, with lower fuuro (`-1.73pp`) and lower houjuu (`-0.55pp`) in this readout. It still has local pockets, especially start-rank-2 houjuu, so it should not be treated as behavior-identical to the 70k anchor.
+- `A1@71000` is the clearest data-transfer style shift: fuuro rises (`+2.12pp`) and chosen calls rise strongly (`+244`). The risk is concentrated in rank-2 chosen calls (`+13.89pp` houjuu), while dealer calls look healthier (`-8.54pp` houjuu). This branch is useful but needs gate screening before any larger claim.
+- `A2@81000` keeps an aggressive lineage signal with more fuuro (`+1.09pp`) and more chosen calls (`+136`) while overall chosen-call houjuu improves (`-3.46pp`). It still shows local risk in dealer/start-rank slices, so the branch should be screened rather than promoted.
+- Q-margin magnitude remains scale-sensitive after fine-tuning. Use chosen-call counts and downstream outcome deltas as the primary readout, and use margin primarily as a direction/diagnostic signal.
+
+Current Phase 1.2 conclusion: the fair +1000 single-domain runs completed successfully and produced coherent behavior separation. `A1` and `A2` are both worth 1000h screening versus the 70k anchor; `S1` can be screened as the standard-selfplay control if budget allows. Do not run a final 5000h bidirectional A/B until a branch passes 1000h screening.
+
+### Phase 1.2 1000h Screening
+
+`A1`, `A2`, and the existing `M1` mixed branch were screened against the 70k anchor with the same bidirectional seed set:
+
+- seed start: `320000`
+- seed key: `8192`
+- seed count: `250` (`1000` half-games per direction)
+- output root: `artifacts/experiments/selfplay_finetune_2026_05/phase1_2_fair_1000/gate_1000h`
+
+Screening results:
+
+| Direction | Challenger ranks | Avg rank | Tenhou pt | Gate read |
+| --- | --- | ---: | ---: | --- |
+| `A1@71000` vs `3x70k` | `[252,229,239,280]` | 2.547 | -4.815 | negative |
+| `70k` vs `3xA1@71000` | `[251,266,269,214]` | 2.446 | +5.670 | negative for A1 |
+| `A2@81000` vs `3x70k` | `[234,257,252,257]` | 2.532 | -2.070 | negative |
+| `70k` vs `3xA2@81000` | `[260,247,263,230]` | 2.463 | +3.465 | negative for A2 |
+| `M1@71000` vs `3x70k` | `[229,239,267,265]` | 2.568 | -4.410 | negative |
+| `70k` vs `3xM1@71000` | `[267,240,254,239]` | 2.465 | +2.565 | negative for M1 |
+
+Screening interpretation:
+
+- `A1` has the clearest aggressive data-transfer behavior signal, but it fails the 1000h bidirectional screen. Do not advance it to final A/B in its current +1000 form.
+- `A2` is behaviorally cleaner than `A1` in the 100h readout, but its 1000h screen is still negative in both directions. Do not advance it to final A/B in its current +1000 form.
+- `M1` is the mixed-data branch and looked more conservative in the behavior readout, but it also fails the 1000h bidirectional screen. Do not use this exact mixed recipe as a promotion candidate.
+- `S1` was not screened in this pass. It remains a standard-selfplay control/checkpoint-selection question, not a style candidate.
+
+Current Phase 1.2 gate conclusion: selfplay fine-tune can produce measurable behavior/style drift, but none of the screened +1000 branches clears the 1000h screening gate against the 70k anchor. The next useful step is not final A/B; it is to analyze why selfplay fine-tune drifts lose strength, then try a more conservative recipe such as shorter updates, mixed-original data, or curriculum weighting before re-screening.
+
 Primary style metrics:
 
 - fuuro rate

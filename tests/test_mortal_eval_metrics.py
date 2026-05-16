@@ -554,7 +554,7 @@ state_file = "/tmp/base/grp.pth"
         output_root=tmp_path / "selfplay",
         experiment_ids=["A1_aggressive_data_transfer"],
         checkpoint_paths={"70k": tmp_path / "70k.pth", "80k": tmp_path / "80k.pth"},
-        log_globs={"70k": "/logs/70k/**/*.json.gz", "80k": "/logs/80k/**/*.json.gz"},
+        log_globs={"70k": "/logs/70k/**/*.json.gz", "80k": "/logs/80k_a/**/*.json.gz,/logs/80k_b/**/*.json.gz"},
         train_steps=1000,
         target_steps=None,
         copy_parent_checkpoint=False,
@@ -564,7 +564,7 @@ state_file = "/tmp/base/grp.pth"
     row = report["experiments"][0]
     assert row["parent_label"] == "70k"
     assert row["training_data_labels"] == ["80k"]
-    assert row["training_data"] == ["/logs/80k/**/*.json.gz"]
+    assert row["training_data"] == ["/logs/80k_a/**/*.json.gz", "/logs/80k_b/**/*.json.gz"]
     assert row["target_steps"] == 71000
     assert row["effective_train_steps"] == 1000
     assert row["pt_table"] == [6.0, 4.0, 2.0, 0.0]
