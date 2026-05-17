@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--train-play-games", type=int, default=800)
     parser.add_argument("--server-capacity", type=int, default=1600)
+    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers for online trainer; default 0 avoids WSL/DrvFS multiprocessing socket failures")
     parser.add_argument("--save-every", type=int, default=400)
     parser.add_argument("--submit-every", type=int, default=400)
     parser.add_argument("--test-every", type=int, default=20000)
@@ -55,6 +56,7 @@ def prepare_online_config(
     port: int,
     train_play_games: int,
     server_capacity: int,
+    num_workers: int,
     save_every: int,
     submit_every: int,
     test_every: int,
@@ -63,6 +65,8 @@ def prepare_online_config(
         raise ValueError(f"train_play_games must be a positive multiple of 4, got {train_play_games}")
     if server_capacity <= 0:
         raise ValueError(f"server_capacity must be positive, got {server_capacity}")
+    if num_workers < 0:
+        raise ValueError(f"num_workers must be non-negative, got {num_workers}")
     if save_every <= 0 or submit_every <= 0 or test_every <= 0:
         raise ValueError("save_every, submit_every, and test_every must be positive")
     if test_every % save_every != 0:
@@ -90,6 +94,7 @@ def prepare_online_config(
 
     dataset = config.setdefault("dataset", {})
     dataset["file_index"] = str((exp_dir / "file_index.pth").resolve())
+    dataset["num_workers"] = int(num_workers)
 
     baseline = config.setdefault("baseline", {})
     for key in ("train", "test"):
@@ -119,6 +124,24 @@ def command_with_env(config_path: Path, script_path: str) -> list[str]:
     return ["env", f"MORTAL_CFG={config_path.resolve()}", "uv", "run", "python", script_path]
 
 
+def archive_command(*, state_file: Path, exp_dir: Path, read_points: list[int]) -> list[str]:
+    return [
+        "uv",
+        "run",
+        "python",
+        "scripts/mortal/archive_online_checkpoints.py",
+        "--state-file",
+        str(state_file.resolve()),
+        "--output-dir",
+        str((exp_dir / "checkpoints").resolve()),
+        "--read-points",
+        ",".join(str(point) for point in read_points),
+        "--manifest",
+        str((exp_dir / "checkpoint_archive_manifest.jsonl").resolve()),
+        "--watch",
+    ]
+
+
 def prepare_online_pilot(
     *,
     base_config_path: Path,
@@ -129,6 +152,7 @@ def prepare_online_pilot(
     port: int,
     train_play_games: int,
     server_capacity: int,
+    num_workers: int,
     save_every: int,
     submit_every: int,
     test_every: int,
@@ -146,11 +170,13 @@ def prepare_online_pilot(
         port=port,
         train_play_games=train_play_games,
         server_capacity=server_capacity,
+        num_workers=num_workers,
         save_every=save_every,
         submit_every=submit_every,
         test_every=test_every,
     )
     state_file = Path(config["control"]["state_file"])
+    checkpoints_to_read = [int(parent_steps), int(parent_steps) + 400, int(parent_steps) + 800, int(parent_steps) + 1200]
     manifest = {
         "schema": "keqing.mortal.online_pilot_config.v1",
         "experiment_id": experiment_id,
@@ -165,17 +191,26 @@ def prepare_online_pilot(
         "freeze_bn_mortal": True,
         "train_play_games": int(train_play_games),
         "server_capacity": int(server_capacity),
+        "num_workers": int(num_workers),
         "save_every": int(save_every),
         "submit_every": int(submit_every),
         "test_every": int(test_every),
-        "checkpoints_to_read": [int(parent_steps), int(parent_steps) + 400, int(parent_steps) + 800, int(parent_steps) + 1200],
+        "checkpoints_to_read": checkpoints_to_read,
+        "checkpoint_archive_dir": str((exp_dir / "checkpoints").resolve()),
         "commands": {
             "server": command_with_env(config_path, "third_party/Mortal/mortal/server.py"),
             "trainer": command_with_env(config_path, "third_party/Mortal/mortal/train.py"),
             "client": command_with_env(config_path, "third_party/Mortal/mortal/client.py"),
+            "archive_checkpoints": archive_command(
+                state_file=state_file,
+                exp_dir=exp_dir,
+                read_points=checkpoints_to_read[1:],
+            ),
         },
         "notes": [
             "Start server first, then trainer, then one or more clients.",
+            "Start archive_checkpoints before or alongside the trainer to preserve 70400/70800/71200 before mortal.pth is overwritten.",
+            "Online trainer DataLoader workers are set to 0 to avoid multiprocessing socket failures in the current environment.",
             "When switching an offline checkpoint into online mode, Mortal loads model weights but resets optimizer/scheduler state.",
             "The baseline train/test checkpoint is fixed to the 70k anchor.",
         ],
@@ -204,6 +239,7 @@ def main() -> None:
         port=int(args.port),
         train_play_games=int(args.train_play_games),
         server_capacity=int(args.server_capacity),
+        num_workers=int(args.num_workers),
         save_every=int(args.save_every),
         submit_every=int(args.submit_every),
         test_every=int(args.test_every),

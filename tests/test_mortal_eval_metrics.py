@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from scripts.mortal import ab_match
 from scripts.mortal import analyze_checkpoint_behavior_slices
 from scripts.mortal import analyze_checkpoint_decision_drift
+from scripts.mortal import archive_online_checkpoints
 from scripts.mortal import audit_grp_on_logs
 from scripts.mortal import compare_checkpoint_stat_reports
 from scripts.mortal import eval_metrics
@@ -716,6 +717,7 @@ state_file = "/tmp/base/baseline.pth"
         port=5017,
         train_play_games=40,
         server_capacity=80,
+        num_workers=0,
         save_every=400,
         submit_every=400,
         test_every=20000,
@@ -727,10 +729,39 @@ state_file = "/tmp/base/baseline.pth"
     assert manifest["parent_steps"] == 70000
     assert manifest["control_online"] is True
     assert manifest["freeze_bn_mortal"] is True
+    assert manifest["num_workers"] == 0
     assert manifest["baseline_checkpoint"].endswith("70k.pth")
     assert manifest["checkpoints_to_read"] == [70000, 70400, 70800, 71200]
     assert manifest["commands"]["server"][0:2] == ["env", f"MORTAL_CFG={(tmp_path / 'online' / 'O1_test' / 'config.toml').resolve()}"]
+    assert manifest["commands"]["archive_checkpoints"][0:3] == ["uv", "run", "python"]
+    assert manifest["commands"]["archive_checkpoints"][-1] == "--watch"
+    assert manifest["checkpoint_archive_dir"].endswith("O1_test/checkpoints")
     assert not (tmp_path / "online").exists()
+
+
+def test_archive_online_checkpoints_copies_available_read_points(tmp_path, monkeypatch) -> None:
+    state_file = tmp_path / "mortal.pth"
+    state_file.write_text("checkpoint bytes", encoding="utf-8")
+    output_dir = tmp_path / "checkpoints"
+    manifest = tmp_path / "archive.jsonl"
+    monkeypatch.setattr(archive_online_checkpoints, "read_checkpoint_steps", lambda _checkpoint: 70800)
+
+    archived = archive_online_checkpoints.archive_available_checkpoints(
+        state_file=state_file,
+        output_dir=output_dir,
+        read_points=[70400, 70800, 71200],
+        prefix="mortal_online",
+        overwrite=False,
+        manifest=manifest,
+    )
+
+    assert archived == [70400, 70800]
+    assert (output_dir / "mortal_online_70400.pth").read_text(encoding="utf-8") == "checkpoint bytes"
+    assert (output_dir / "mortal_online_70800.pth").read_text(encoding="utf-8") == "checkpoint bytes"
+    assert not (output_dir / "mortal_online_71200.pth").exists()
+    rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
+    assert [row["archived_step"] for row in rows] == [70400, 70800]
+    assert all(row["observed_state_step"] == 70800 for row in rows)
 
 
 def test_grp_audit_finalizers_export_calibration_and_reward_variance() -> None:

@@ -35,6 +35,7 @@ Can the upstream Mortal online actor-learner loop run from the 70k anchor and av
 | Training mode | upstream Mortal `online=true` |
 | CQL | not applied in Mortal online branch |
 | Batch norm | `freeze_bn.mortal=true` |
+| DataLoader workers | `dataset.num_workers=0` |
 | Reward | `mortal_default` `[6,4,2,0]` |
 | Initial read points | `70400`, `70800`, `71200` |
 
@@ -71,9 +72,43 @@ Output:
 
 The generated manifest records the exact server, trainer, and client commands.
 
+The generated online config sets `dataset.num_workers=0`. A first plumbing attempt with multiprocessing workers reached server/client replay transfer, but trainer hit the same environment-level `OSError: [Errno 95] Operation not supported` seen in earlier offline runs. Keeping workers at `0` is part of the O1 environment contract.
+
+## Checkpoint Archive
+
+Online training saves every `400` steps to the same `mortal.pth` path. Archive each read point before it is overwritten:
+
+```bash
+uv run python scripts/mortal/archive_online_checkpoints.py \
+  --state-file artifacts/experiments/online_phase2_2026_05/O1_70k_online_control/mortal.pth \
+  --output-dir artifacts/experiments/online_phase2_2026_05/O1_70k_online_control/checkpoints \
+  --read-points 70400,70800,71200 \
+  --manifest artifacts/experiments/online_phase2_2026_05/O1_70k_online_control/checkpoint_archive_manifest.jsonl \
+  --watch
+```
+
+Expected archived files:
+
+- `checkpoints/mortal_online_70400.pth`
+- `checkpoints/mortal_online_70800.pth`
+- `checkpoints/mortal_online_71200.pth`
+
+Start the archive watcher before or alongside the trainer.
+
 ## Run Order
 
 Start three processes with the generated `MORTAL_CFG`.
+
+Archive watcher:
+
+```bash
+uv run python scripts/mortal/archive_online_checkpoints.py \
+  --state-file /abs/path/to/O1_70k_online_control/mortal.pth \
+  --output-dir /abs/path/to/O1_70k_online_control/checkpoints \
+  --read-points 70400,70800,71200 \
+  --manifest /abs/path/to/O1_70k_online_control/checkpoint_archive_manifest.jsonl \
+  --watch
+```
 
 Server:
 
@@ -97,6 +132,7 @@ env MORTAL_CFG=/abs/path/to/config.toml \
 ```
 
 Start server first, trainer second, client third.
+The archive watcher can be started before trainer; it will wait until each read point appears.
 
 ## Phase 2.0 Plumbing Smoke
 
@@ -111,7 +147,8 @@ Required signals:
 - client submits replay
 - trainer drains replay
 - trainer performs training steps
-- checkpoint is saved
+- `mortal.pth` is saved at `70400`
+- `checkpoints/mortal_online_70400.pth` is archived
 
 Abort and fix plumbing before interpreting any model result if one of these fails.
 
@@ -151,4 +188,33 @@ If `+400`, `+800`, and `+1200` all look like static selfplay drift:
 
 ## Current Status
 
-Phase 2 has been prepared at the config/runbook level. The next operational step is Phase 2.0 plumbing smoke.
+Phase 2.0 plumbing smoke has passed.
+
+Observed on `2026-05-17`:
+
+- server listened on `127.0.0.1:5000`
+- trainer loaded the 70k checkpoint on `cuda:0`
+- trainer submitted idle params
+- client pulled params and generated trainee-vs-70k replay batches
+- client submitted replay logs
+- server transferred logs to trainer
+- trainer drained replay batches and performed online train steps
+- archive watcher preserved all read points
+
+Archived checkpoints:
+
+| Step | Path |
+| ---: | --- |
+| `70400` | `artifacts/experiments/online_phase2_2026_05/O1_70k_online_control/checkpoints/mortal_online_70400.pth` |
+| `70800` | `artifacts/experiments/online_phase2_2026_05/O1_70k_online_control/checkpoints/mortal_online_70800.pth` |
+| `71200` | `artifacts/experiments/online_phase2_2026_05/O1_70k_online_control/checkpoints/mortal_online_71200.pth` |
+
+Operational notes:
+
+- A first smoke attempt reached client replay submission and trainer drain, then failed in trainer DataLoader multiprocessing with `OSError: [Errno 95] Operation not supported`.
+- The config generator was updated to set `dataset.num_workers=0`; the second smoke passed with that setting.
+- Each `800` hanchan client batch produced roughly `245-250` train batches, so reaching `70400/70800/71200` required multiple replay batches.
+- Trainer and client sharing the same GPU caused visible throughput contention. This is acceptable for plumbing smoke, but future longer online runs should consider client/trainer device scheduling or multiple clients only after measuring the bottleneck.
+- Client-side trainee-vs-70k rankings during smoke are diagnostic logs only; they are not strength conclusions.
+
+Next step: run 100h behavior readout for `70400`, `70800`, and `71200`, then select at most one checkpoint for 1000h bidirectional screening against the 70k anchor.
