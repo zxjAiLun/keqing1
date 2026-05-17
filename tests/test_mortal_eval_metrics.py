@@ -610,6 +610,46 @@ pts = [6.0, 4.0, 2.0, 0.0]
         )
 
 
+def test_prepare_selfplay_finetune_short_update_alias(tmp_path, monkeypatch) -> None:
+    base_config = tmp_path / "config.toml"
+    base_config.write_text(
+        """
+[control]
+state_file = "/tmp/base/mortal.pth"
+
+[dataset]
+globs = ["/data/original/**/*.json.gz"]
+file_index = "/tmp/base/file_index.pth"
+
+[env]
+pts = [6.0, 4.0, 2.0, 0.0]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prepare_selfplay_finetune_experiments, "read_checkpoint_steps", lambda _checkpoint: 70000)
+
+    report = prepare_selfplay_finetune_experiments.write_experiment_configs(
+        base_config_path=base_config,
+        output_root=tmp_path / "selfplay",
+        experiment_ids=["S1_plus250"],
+        checkpoint_paths={"70k": tmp_path / "70k.pth", "80k": tmp_path / "80k.pth"},
+        log_globs={"70k": "/logs/70k_a/**/*.json.gz,/logs/70k_b/**/*.json.gz", "80k": "/logs/80k/**/*.json.gz"},
+        train_steps=250,
+        target_steps=None,
+        copy_parent_checkpoint=False,
+        dry_run=True,
+    )
+
+    row = report["experiments"][0]
+    assert row["experiment_id"] == "S1_plus250"
+    assert row["parent_label"] == "70k"
+    assert row["training_data_labels"] == ["70k"]
+    assert row["training_data"] == ["/logs/70k_a/**/*.json.gz", "/logs/70k_b/**/*.json.gz"]
+    assert row["target_steps"] == 70250
+    assert row["effective_train_steps"] == 250
+    assert "short update +250" in row["notes"]
+
+
 def test_grp_audit_finalizers_export_calibration_and_reward_variance() -> None:
     calibration = audit_grp_on_logs.finalize_calibration(
         [

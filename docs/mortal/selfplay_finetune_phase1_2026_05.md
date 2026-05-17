@@ -256,6 +256,101 @@ Screening interpretation:
 
 Current Phase 1.2 gate conclusion: selfplay fine-tune can produce measurable behavior/style drift, but none of the screened +1000 branches clears the 1000h screening gate against the 70k anchor. The next useful step is not final A/B; it is to analyze why selfplay fine-tune drifts lose strength, then try a more conservative recipe such as shorter updates, mixed-original data, or curriculum weighting before re-screening.
 
+## Phase 1.3 Static Selfplay Diagnostics
+
+Phase 1.3 tested whether the Phase 1.2 failures were caused by obvious offline-training mechanics rather than the static selfplay replay recipe itself.
+
+### Target Variance Diagnostic
+
+Script:
+
+`scripts/mortal/diagnose_target_variance.py`
+
+Artifacts:
+
+- `artifacts/experiments/selfplay_finetune_2026_05/phase1_3/diagnostics/target_variance_10g.json`
+- `artifacts/experiments/selfplay_finetune_2026_05/phase1_3/diagnostics/target_variance_200g.json`
+
+The 200-game diagnostic compared original training logs with the 70k selfplay pool:
+
+| Domain | Games | Steps | q_target std | q_target var | q_target p99 | steps/game |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| original | 200 | 34601 | 0.5047 | 0.2547 | 1.5290 | 173 |
+| 70k selfplay | 200 | 31012 | 0.5297 | 0.2806 | 2.0093 | 155 |
+
+Interpretation: selfplay target variance is slightly higher, but not enough to explain the consistent gate failures by itself. Target variance is not the primary blocker.
+
+### CQL Ablation
+
+Experiment:
+
+- parent: 70k
+- data: 70k selfplay 1000h
+- update: +1000
+- change: `cql.min_q_weight = 0`
+- artifact root: `artifacts/experiments/selfplay_finetune_2026_05/phase1_3/cql_ablation`
+
+1000h bidirectional screen:
+
+| Direction | Challenger ranks | Avg rank | Tenhou pt | Read |
+| --- | --- | ---: | ---: | --- |
+| `S1_CQL0@71000` vs `3x70k` | `[236,246,247,271]` | 2.553 | -4.275 | negative |
+| `70k` vs `3xS1_CQL0@71000` | `[252,248,245,255]` | 2.503 | -0.585 | near-neutral for 70k, still not positive for S1 |
+
+Interpretation: removing CQL does not recover the selfplay fine-tune. CQL is not the main cause.
+
+### Mixed Original/Selfplay 75:25
+
+Experiment:
+
+- parent: 70k
+- data: original logs + 70k selfplay 1000h
+- intended read: simple distribution repair with a majority original-data anchor
+- artifact root: `artifacts/experiments/selfplay_finetune_2026_05/phase1_3/mixed_original`
+
+1000h bidirectional screen:
+
+| Direction | Challenger ranks | Avg rank | Tenhou pt | Read |
+| --- | --- | ---: | ---: | --- |
+| `S1_O75_S25@71000` vs `3x70k` | `[236,242,263,259]` | 2.545 | -2.835 | negative |
+| `70k` vs `3xS1_O75_S25@71000` | `[260,259,257,224]` | 2.445 | +4.815 | negative for mixed branch |
+
+Interpretation: a simple original/selfplay mix does not repair the issue. Do not keep sweeping mix ratios before answering the shorter-update question.
+
+### S1 Short Update Control
+
+This test asks whether static selfplay fine-tune is inherently harmful, or whether +1000 updates overshoots a mature 70k checkpoint.
+
+Experiments:
+
+| Exp | Parent | Data | Target | Update | Artifact |
+| --- | --- | --- | ---: | ---: | --- |
+| `S1_plus250` | 70k | 70k selfplay 1000h | 70250 | +250 | `artifacts/experiments/selfplay_finetune_2026_05/phase1_3/short_update/S1_plus250` |
+| `S1_plus500` | 70k | 70k selfplay 1000h | 70500 | +500 | `artifacts/experiments/selfplay_finetune_2026_05/phase1_3/short_update/S1_plus500` |
+
+Both checkpoints trained successfully with the default config, including `cql.min_q_weight = 5`.
+
+1000h bidirectional screen, same protocol as Phase 1.2:
+
+- seed start: `320000`
+- seed key: `8192`
+- seed count: `250`
+
+| Direction | Challenger ranks | Avg rank | Tenhou pt | Read |
+| --- | --- | ---: | ---: | --- |
+| `S1_plus250@70250` vs `3x70k` | `[239,256,244,261]` | 2.527 | -2.205 | negative |
+| `70k` vs `3xS1_plus250@70250` | `[249,265,242,244]` | 2.481 | +1.395 | negative for +250 |
+| `S1_plus500@70500` vs `3x70k` | `[237,240,257,266]` | 2.552 | -3.780 | negative |
+| `70k` vs `3xS1_plus500@70500` | `[257,255,258,230]` | 2.461 | +3.555 | negative for +500 |
+
+Interpretation:
+
+- Shortening to +250 does not recover a neutral/positive signal.
+- +500 is more negative than +250 in this seed set.
+- Together with the CQL ablation, target variance diagnostic, and 75:25 mixed-original result, this argues against further static batch selfplay fine-tune expansion as the next step.
+
+Current Phase 1.3 conclusion: stop expanding static replay-based selfplay fine-tune recipes for now. The next experiment should be an online pilot, because the unresolved variable is now the data-generation loop itself: frozen batch pool versus continuously refreshed replay.
+
 Primary style metrics:
 
 - fuuro rate

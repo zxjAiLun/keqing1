@@ -33,6 +33,11 @@ DEFAULT_MATRIX: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("M1_mixed_selfplay", "70k", "mixed standard/aggressive selfplay", ("70k", "80k")),
 )
 
+OPTIONAL_MATRIX: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    ("S1_plus250", "70k", "standard selfplay short update +250", ("70k",)),
+    ("S1_plus500", "70k", "standard selfplay short update +500", ("70k",)),
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -56,7 +61,10 @@ def load_toml(path: Path) -> dict[str, Any]:
 
 
 def matrix_by_id() -> dict[str, tuple[str, str, tuple[str, ...]]]:
-    return {experiment_id: (parent_label, notes, data_labels) for experiment_id, parent_label, notes, data_labels in DEFAULT_MATRIX}
+    return {
+        experiment_id: (parent_label, notes, data_labels)
+        for experiment_id, parent_label, notes, data_labels in (*DEFAULT_MATRIX, *OPTIONAL_MATRIX)
+    }
 
 
 def parse_matrix(value: str) -> list[str]:
