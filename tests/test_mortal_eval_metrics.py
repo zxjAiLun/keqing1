@@ -15,6 +15,7 @@ from scripts.mortal import export_behavior_replay_cases
 from scripts.mortal import one_vs_three_smoke
 from scripts.mortal import prepare_reward_pt_experiments
 from scripts.mortal import prepare_selfplay_finetune_experiments
+from scripts.mortal import prepare_online_pilot
 from scripts.mortal import stat_report
 
 
@@ -648,6 +649,88 @@ pts = [6.0, 4.0, 2.0, 0.0]
     assert row["target_steps"] == 70250
     assert row["effective_train_steps"] == 250
     assert "short update +250" in row["notes"]
+
+
+def test_prepare_online_pilot_dry_run_is_isolated(tmp_path, monkeypatch) -> None:
+    base_config = tmp_path / "config.toml"
+    base_config.write_text(
+        """
+[control]
+version = 4
+online = false
+state_file = "/tmp/base/mortal.pth"
+best_state_file = "/tmp/base/mortal_best.pth"
+tensorboard_dir = "/tmp/base/tb_mortal"
+save_every = 400
+submit_every = 400
+test_every = 20000
+
+[train_play.default]
+games = 800
+log_dir = "/tmp/base/train_play"
+
+[test_play]
+log_dir = "/tmp/base/test_play"
+
+[dataset]
+globs = ["/data/original/**/*.json.gz"]
+file_index = "/tmp/base/file_index.pth"
+
+[baseline.train]
+state_file = "/tmp/base/baseline.pth"
+
+[baseline.test]
+state_file = "/tmp/base/baseline.pth"
+
+[online.remote]
+host = "127.0.0.1"
+port = 5000
+
+[online.server]
+buffer_dir = "/tmp/base/buffer"
+drain_dir = "/tmp/base/drain"
+capacity = 1600
+
+[freeze_bn]
+mortal = false
+
+[1v3]
+log_dir = "/tmp/base/1v3"
+
+[1v3.challenger]
+state_file = "/tmp/base/mortal.pth"
+
+[1v3.champion]
+state_file = "/tmp/base/baseline.pth"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prepare_online_pilot, "read_checkpoint_steps", lambda _checkpoint: 70000)
+
+    manifest = prepare_online_pilot.prepare_online_pilot(
+        base_config_path=base_config,
+        output_root=tmp_path / "online",
+        experiment_id="O1_test",
+        anchor_checkpoint=tmp_path / "70k.pth",
+        host="127.0.0.1",
+        port=5017,
+        train_play_games=40,
+        server_capacity=80,
+        save_every=400,
+        submit_every=400,
+        test_every=20000,
+        copy_parent_checkpoint=False,
+        dry_run=True,
+    )
+
+    assert manifest["experiment_id"] == "O1_test"
+    assert manifest["parent_steps"] == 70000
+    assert manifest["control_online"] is True
+    assert manifest["freeze_bn_mortal"] is True
+    assert manifest["baseline_checkpoint"].endswith("70k.pth")
+    assert manifest["checkpoints_to_read"] == [70000, 70400, 70800, 71200]
+    assert manifest["commands"]["server"][0:2] == ["env", f"MORTAL_CFG={(tmp_path / 'online' / 'O1_test' / 'config.toml').resolve()}"]
+    assert not (tmp_path / "online").exists()
 
 
 def test_grp_audit_finalizers_export_calibration_and_reward_variance() -> None:
