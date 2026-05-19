@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from scripts.mortal import archive_reviewer_reports
 from scripts.mortal import prepare_reviewer_teacher_probe
 from tools.mjai_jsonl_to_tenhou6 import convert_mjai_jsonl_to_tenhou6
 
@@ -119,3 +120,84 @@ def test_prepare_reviewer_teacher_probe_can_target_unique_player_name(tmp_path) 
     assert row["target_players"] == [1]
     assert row["target_player_name"] == "challenger"
     assert summary["source_count"] == 1
+
+
+def test_archive_reviewer_report_downloads_json_and_appends_manifest(tmp_path) -> None:
+    source = tmp_path / "input" / "0001_game.tenhou6.json"
+    source.parent.mkdir()
+    source.write_text('{"name":["A","B","C","D"],"log":[]}\n', encoding="utf-8")
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "source_log": "game.json.gz",
+                "tenhou6_path": str(source),
+                "target_players": [0],
+                "networks": ["3.0"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    seen_urls: list[str] = []
+
+    def fake_downloader(url: str) -> bytes:
+        seen_urls.append(url)
+        return json.dumps(
+            {
+                "review": [
+                    {
+                        "actual_action": "dahai",
+                        "details": [{"action": "dahai", "q_value": 0.25, "score": 0.7}],
+                    }
+                ]
+            }
+        ).encode("utf-8")
+
+    row = archive_reviewer_reports.archive_report(
+        source_manifest=manifest,
+        source_index=0,
+        source_tenhou6=None,
+        target_player=0,
+        network="3.0",
+        report="https://mjai.ekyu.moe/report/abc123",
+        output_dir=tmp_path / "external",
+        dry_run=False,
+        downloader=fake_downloader,
+    )
+
+    assert seen_urls == ["https://mjai.ekyu.moe/report/abc123.json"]
+    report_path = tmp_path / "external" / "reports" / "0001_game__3.0__p0.json"
+    assert report_path.exists()
+    assert row["report_id"] == "abc123"
+    assert row["report_json_path"] == str(report_path)
+    assert row["report_schema_summary"]["has_detail_like_key"] is True
+    assert row["report_schema_summary"]["has_q_or_score_like_key"] is True
+    assert row["report_schema_summary"]["has_action_like_key"] is True
+
+    report_manifest = tmp_path / "external" / "report_manifest.jsonl"
+    manifest_row = json.loads(report_manifest.read_text(encoding="utf-8"))
+    assert manifest_row["network"] == "3.0"
+    assert manifest_row["target_player"] == 0
+
+
+def test_archive_reviewer_report_dry_run_accepts_json_url(tmp_path) -> None:
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(json.dumps({"source_log": "g", "tenhou6_path": "x.tenhou6.json"}) + "\n", encoding="utf-8")
+
+    row = archive_reviewer_reports.archive_report(
+        source_manifest=manifest,
+        source_index=0,
+        source_tenhou6=None,
+        target_player=2,
+        network="4.1b",
+        report="https://mjai.ekyu.moe/report/report-id_42.json",
+        output_dir=tmp_path / "external",
+        dry_run=True,
+    )
+
+    assert row["dry_run"] is True
+    assert row["report_id"] == "report-id_42"
+    assert row["report_page_url"] == "https://mjai.ekyu.moe/report/report-id_42"
+    assert row["report_json_url"] == "https://mjai.ekyu.moe/report/report-id_42.json"

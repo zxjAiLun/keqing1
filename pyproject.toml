@@ -46,6 +46,7 @@ python_files = [
     "test_tenhou_bridge.py",
     "test_tenhou6_review_input.py",
     "test_tenhou_public_state_sync.py",
+    "test_reviewer_teacher_probe.py",
     "test_final_rank.py",
     "test_legal_actions_*.py",
     "test_normal_progress.py",

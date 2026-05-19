@@ -84,3 +84,54 @@ After a small manual/controlled upload confirms report JSON shape, R1 should par
 - local actual action probability under teacher distribution
 
 Use Q values only as ranking/margin metadata. The first training signal should be final action / soft preference, not raw-Q regression.
+
+## R0 External Smoke
+
+The reviewer site requires a valid Turnstile captcha response for `/review` submissions. A direct command-line POST is rejected by the server with `invalid captcha response`, so the upload step must go through the official browser page.
+
+Use the first R0-local input for the initial smoke:
+
+- source Tenhou6: `artifacts/experiments/reviewer_teacher_probe_2026_05/R0_reviewer_input_smoke/input/0001_320000_8192_a.tenhou6.json`
+- target player: `0`
+- networks: `3.0`, `4.1b`
+
+Browser upload settings:
+
+```text
+Game log input: Custom log (tenhou.net/6 JSON)
+Target player: 0
+Engine: Mortal
+Mortal network: 3.0 or 4.1b
+UI: KillerDucky
+Language: English
+```
+
+After each report page is generated, archive the JSON immediately:
+
+```bash
+PYTHONPATH=src uv run python scripts/mortal/archive_reviewer_reports.py \
+  --source-manifest artifacts/experiments/reviewer_teacher_probe_2026_05/R0_reviewer_input_smoke/manifest.jsonl \
+  --source-index 0 \
+  --target-player 0 \
+  --network 3.0 \
+  --report https://mjai.ekyu.moe/report/<REPORT_ID>
+
+PYTHONPATH=src uv run python scripts/mortal/archive_reviewer_reports.py \
+  --source-manifest artifacts/experiments/reviewer_teacher_probe_2026_05/R0_reviewer_input_smoke/manifest.jsonl \
+  --source-index 0 \
+  --target-player 0 \
+  --network 4.1b \
+  --report https://mjai.ekyu.moe/report/<REPORT_ID>
+```
+
+Archive output:
+
+```text
+artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_smoke/
+  reports/
+    0001_320000_8192_a__3.0__p0.json
+    0001_320000_8192_a__4.1b__p0.json
+  report_manifest.jsonl
+```
+
+`report_manifest.jsonl` records the source Tenhou6 path, target player, reviewer network, report id, page URL, JSON URL, local JSON path, download time, and a shallow schema summary showing whether detail/action/Q-or-score-like fields were detected.
