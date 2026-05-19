@@ -430,6 +430,8 @@ def test_submit_reviewer_teacher_probe_parses_windows_curl_and_start_index(tmp_p
     )
 
     assert summary["result_counts"] == {"dry_run": 1}
+    assert summary["requested_source_index"] is None
+    assert summary["start_index"] == 1
     assert summary["results"][0]["source_index"] == 1
     assert summary["results"][0]["source_tenhou6_path"] == str(second)
     assert summary["results"][0]["target_player"] == 1
@@ -471,6 +473,8 @@ def test_submit_reviewer_teacher_probe_source_index_selects_original_manifest_ro
     )
 
     assert len(summary["results"]) == 1
+    assert summary["requested_source_index"] == 1
+    assert summary["start_index"] == 0
     assert summary["results"][0]["source_index"] == 1
     assert summary["results"][0]["source_tenhou6_path"] == str(second)
     assert summary["results"][0]["network"] == "4.1b"

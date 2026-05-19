@@ -301,7 +301,7 @@ def submit_probe(
     existing = load_existing_keys(output_report_manifest_path(output_dir)) if skip_existing else set()
     submit_manifest = output_dir / "submit_manifest.jsonl"
     results: list[dict[str, Any]] = []
-    for source_index, row in indexed_rows:
+    for row_index, row in indexed_rows:
         tenhou6_path = Path(str(row["tenhou6_path"]))
         tenhou6_text = tenhou6_path.read_text(encoding="utf-8")
         networks = networks_override or list(row["networks"])
@@ -311,7 +311,7 @@ def submit_probe(
                 planned = {
                     "schema": "keqing.mortal.reviewer_teacher_submit.v1",
                     "source_manifest": str(input_manifest),
-                    "source_index": source_index,
+                    "source_index": row_index,
                     "source_log": row.get("source_log"),
                     "source_tenhou6_path": str(tenhou6_path),
                     "target_player": int(target_player),
@@ -345,7 +345,7 @@ def submit_probe(
                     report_id = submit_form(url=submit_template["url"], headers=submit_template["headers"], form=form)
                     archived = wait_for_report(
                         source_manifest=input_manifest,
-                        source_index=source_index,
+                        source_index=row_index,
                         target_player=int(target_player),
                         network=str(network),
                         report_id=report_id,
@@ -373,7 +373,7 @@ def submit_probe(
         "submit_manifest": str(submit_manifest),
         "report_manifest": str(output_report_manifest_path(output_dir)),
         "dry_run": dry_run,
-        "source_index": source_index,
+        "requested_source_index": source_index,
         "start_index": start_index,
         "limit": limit,
         "result_counts": dict(sorted(Counter(row["status"] for row in results).items())),
