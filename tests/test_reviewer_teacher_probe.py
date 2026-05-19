@@ -201,3 +201,22 @@ def test_archive_reviewer_report_dry_run_accepts_json_url(tmp_path) -> None:
     assert row["report_id"] == "report-id_42"
     assert row["report_page_url"] == "https://mjai.ekyu.moe/report/report-id_42"
     assert row["report_json_url"] == "https://mjai.ekyu.moe/report/report-id_42.json"
+
+
+def test_archive_reviewer_report_dry_run_accepts_killerducky_url(tmp_path) -> None:
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(json.dumps({"source_log": "g", "tenhou6_path": "x.tenhou6.json"}) + "\n", encoding="utf-8")
+
+    row = archive_reviewer_reports.archive_report(
+        source_manifest=manifest,
+        source_index=0,
+        source_tenhou6=None,
+        target_player=0,
+        network="4.1b",
+        report="https://mjai.ekyu.moe/killerducky/?data=/report/44cbfc905f0667fd.json",
+        output_dir=tmp_path / "external",
+        dry_run=True,
+    )
+
+    assert row["report_id"] == "44cbfc905f0667fd"
+    assert row["report_json_path"] == str(tmp_path / "external" / "reports" / "x__4.1b__p0.json")

@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import sys
 from typing import Any
+from urllib.request import Request
 from urllib.request import urlopen
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -20,7 +21,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 
 DEFAULT_OUTPUT_DIR = Path("artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_smoke")
-REPORT_URL_RE = re.compile(r"(?:^|/)report/([A-Za-z0-9_-]+)(?:\.json)?(?:[/?#].*)?$")
+REPORT_URL_RE = re.compile(r"(?:^|/)report/([A-Za-z0-9_-]+)(?:\.json)?(?:[/?#].*)?")
 
 
 def parse_args() -> argparse.Namespace:
@@ -78,7 +79,15 @@ def report_output_path(*, output_dir: Path, source_tenhou6: Path, network: str, 
 
 
 def default_downloader(url: str) -> bytes:
-    with urlopen(url, timeout=60) as response:  # nosec B310 - URL is constrained by report id.
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; keqing-reviewer-teacher-probe/1.0)",
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": "https://mjai.ekyu.moe/",
+        },
+    )
+    with urlopen(request, timeout=60) as response:  # nosec B310 - URL is constrained by report id.
         return response.read()
 
 

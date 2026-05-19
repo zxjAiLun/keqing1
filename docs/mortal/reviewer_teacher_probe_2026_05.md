@@ -135,3 +135,22 @@ artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_smoke/
 ```
 
 `report_manifest.jsonl` records the source Tenhou6 path, target player, reviewer network, report id, page URL, JSON URL, local JSON path, download time, and a shallow schema summary showing whether detail/action/Q-or-score-like fields were detected.
+
+R0 external smoke completed on the first generated input:
+
+| Network | Report id | Local JSON | total reviewed | matches |
+| --- | --- | --- | ---: | ---: |
+| `3.0` | `f531a830678058bd` | `artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_smoke/reports/0001_320000_8192_a__3.0__p0.json` | 119 | 113 |
+| `4.1b` | `44cbfc905f0667fd` | `artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_smoke/reports/0001_320000_8192_a__4.1b__p0.json` | 119 | 96 |
+
+Both reports use the same target player (`player_id=0`), `engine=Mortal`, `game_length=Hanchan`, `version=1.5.10`, and `temperature=0.1`. The useful decision schema is:
+
+```text
+review.kyokus[].entries[].actual
+review.kyokus[].entries[].expected
+review.kyokus[].entries[].details[].action
+review.kyokus[].entries[].details[].q_value
+review.kyokus[].entries[].details[].prob
+```
+
+This is sufficient to start R1 parser work for final-action agreement, high-confidence disagreement, action-family composition, and teacher probability/margin extraction.
