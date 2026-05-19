@@ -5,6 +5,7 @@ import json
 from scripts.mortal import archive_reviewer_reports
 from scripts.mortal import parse_reviewer_teacher_reports
 from scripts.mortal import prepare_reviewer_teacher_probe
+from scripts.mortal import submit_reviewer_teacher_probe
 from tools.mjai_jsonl_to_tenhou6 import convert_mjai_jsonl_to_tenhou6
 
 
@@ -328,3 +329,69 @@ def test_parse_reviewer_teacher_reports_outputs_decision_and_alignment_tables(tm
     assert aligned["teacher_agree"] is False
     assert top["network"] == "4.1b"
     assert top["expected_prob"] == 0.85
+
+
+def test_submit_reviewer_teacher_probe_parses_curl_and_dry_runs(tmp_path) -> None:
+    tenhou6 = tmp_path / "0001_game.tenhou6.json"
+    tenhou6.write_text('{"name":["A","B","C","D"],"log":[]}\n', encoding="utf-8")
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "source_log": "game.json.gz",
+                "tenhou6_path": str(tenhou6),
+                "target_players": [0],
+                "networks": ["3.0", "4.1b"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    curl_file = tmp_path / "submit.curl"
+    curl_file.write_text(
+        "curl 'https://mjai.ekyu.moe/review' "
+        "-H 'User-Agent: Mozilla/5.0' "
+        "-H 'Cookie: session=abc' "
+        "--data-raw 'input-method=tenhou6&player-id=0&engine=mortal&mortal-model-tag=3.0&ui=killerducky&lang=en&cf-turnstile-response=tok'",
+        encoding="utf-8",
+    )
+
+    parsed = submit_reviewer_teacher_probe.parse_curl_file(curl_file)
+    assert parsed["url"] == "https://mjai.ekyu.moe/review"
+    assert parsed["headers"]["Cookie"] == "session=abc"
+    assert parsed["form"]["cf-turnstile-response"] == "tok"
+
+    summary = submit_reviewer_teacher_probe.submit_probe(
+        input_manifest=manifest,
+        output_dir=tmp_path / "out",
+        submit_curl_file=curl_file,
+        networks_override=["4.1b"],
+        limit=1,
+        sleep_seconds=0,
+        poll_seconds=0,
+        poll_attempts=1,
+        skip_existing=True,
+        dry_run=True,
+    )
+
+    assert summary["result_counts"] == {"dry_run": 1}
+    row = summary["results"][0]
+    assert row["network"] == "4.1b"
+    assert row["target_player"] == 0
+    assert row["has_captcha_response"] is True
+    assert (tmp_path / "out" / "submit_manifest.jsonl").exists()
+
+
+def test_submit_reviewer_teacher_probe_extracts_redirect_report_id() -> None:
+    class Headers(dict):
+        def get(self, key, default=None):  # type: ignore[override]
+            return super().get(key, default)
+
+    assert (
+        submit_reviewer_teacher_probe.extract_report_id_from_response(
+            Headers({"Location": "/killerducky/?data=/report/44cbfc905f0667fd.json"}),
+            "",
+            "https://mjai.ekyu.moe/review",
+        )
+        == "44cbfc905f0667fd"
+    )

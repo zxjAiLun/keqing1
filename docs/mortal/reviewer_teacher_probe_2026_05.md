@@ -199,3 +199,52 @@ Aligned teacher summary:
 | teacher agreement | 97 / 119 = 81.51% |
 
 The first-report weak signal is consistent with `model_v4` looking closer to reviewer `3.0` than reviewer `4.1b`, but this remains a one-hanchan smoke result. R1 should next expand to the remaining prepared R0 inputs before drawing stable conclusions.
+
+## R1.5 Submission Automation
+
+Manual reviewer upload is now the bottleneck. The batch submitter is:
+
+```text
+scripts/mortal/submit_reviewer_teacher_probe.py
+```
+
+It reads the R0 input manifest, submits each Tenhou6 custom log for each requested network, extracts the generated report id, archives `/report/<id>.json` with the existing report archiver, and writes:
+
+```text
+artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_batch/
+  submit_manifest.jsonl
+  submit_summary.json
+  report_manifest.jsonl
+  reports/*.json
+```
+
+The script does not solve or bypass Turnstile. It replays a browser-captured successful submit request and replaces only the safe form fields:
+
+```text
+input-method=tenhou6
+tenhou6=<current JSON>
+player-id=<manifest target seat>
+engine=mortal
+mortal-model-tag=<network>
+ui=killerducky
+lang=en
+```
+
+To prepare it, manually submit one Custom log in the browser, then use DevTools Network -> the `/review` request -> Copy as cURL and save it locally, for example:
+
+```text
+artifacts/experiments/reviewer_teacher_probe_2026_05/reviewer_submit.curl
+```
+
+Dry-run the batch plan first:
+
+```bash
+PYTHONPATH=src uv run python scripts/mortal/submit_reviewer_teacher_probe.py \
+  --input-manifest artifacts/experiments/reviewer_teacher_probe_2026_05/R0_reviewer_input_smoke/manifest.jsonl \
+  --submit-curl-file artifacts/experiments/reviewer_teacher_probe_2026_05/reviewer_submit.curl \
+  --output-dir artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_batch \
+  --networks 3.0,4.1b \
+  --dry-run
+```
+
+Then run without `--dry-run`. If the captured Turnstile response is expired or single-use, the script will record a clear `reviewer submit failed captcha validation` failure in `submit_manifest.jsonl`; in that case, switch to browser-driven submission rather than trying to reuse stale tokens.
