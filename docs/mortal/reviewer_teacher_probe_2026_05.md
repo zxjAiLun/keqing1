@@ -154,3 +154,48 @@ review.kyokus[].entries[].details[].prob
 ```
 
 This is sufficient to start R1 parser work for final-action agreement, high-confidence disagreement, action-family composition, and teacher probability/margin extraction.
+
+## R1 Parser Smoke
+
+R1 parses archived reviewer reports into decision-level and aligned teacher tables:
+
+```bash
+PYTHONPATH=src uv run python scripts/mortal/parse_reviewer_teacher_reports.py \
+  --report-manifest artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_smoke/report_manifest.jsonl \
+  --output-dir artifacts/experiments/reviewer_teacher_probe_2026_05/R1_parser_smoke \
+  --top-k 20
+```
+
+Outputs:
+
+```text
+artifacts/experiments/reviewer_teacher_probe_2026_05/R1_parser_smoke/
+  decision_table.jsonl
+  decision_table.csv
+  aligned_decisions.jsonl
+  aligned_decisions.csv
+  top_disagreements.jsonl
+  summary.json
+```
+
+Smoke result on the first archived input:
+
+| Metric | `3.0` | `4.1b` |
+| --- | ---: | ---: |
+| decisions | 119 | 119 |
+| matches | 113 | 96 |
+| match rate | 94.96% | 80.67% |
+| high-confidence disagreements | 6 | 12 |
+| mean actual-action teacher prob | 0.9448 | 0.8019 |
+
+Aligned teacher summary:
+
+| Pattern | Count |
+| --- | ---: |
+| actual matches both teachers | 94 |
+| actual matches `3.0` only | 19 |
+| actual matches `4.1b` only | 2 |
+| actual matches neither | 4 |
+| teacher agreement | 97 / 119 = 81.51% |
+
+The first-report weak signal is consistent with `model_v4` looking closer to reviewer `3.0` than reviewer `4.1b`, but this remains a one-hanchan smoke result. R1 should next expand to the remaining prepared R0 inputs before drawing stable conclusions.

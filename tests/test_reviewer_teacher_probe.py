@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from scripts.mortal import archive_reviewer_reports
+from scripts.mortal import parse_reviewer_teacher_reports
 from scripts.mortal import prepare_reviewer_teacher_probe
 from tools.mjai_jsonl_to_tenhou6 import convert_mjai_jsonl_to_tenhou6
 
@@ -220,3 +221,110 @@ def test_archive_reviewer_report_dry_run_accepts_killerducky_url(tmp_path) -> No
 
     assert row["report_id"] == "44cbfc905f0667fd"
     assert row["report_json_path"] == str(tmp_path / "external" / "reports" / "x__4.1b__p0.json")
+
+
+def _fake_report(*, expected_pai: str, expected_prob: float, actual_prob: float, is_equal: bool) -> dict:
+    actual = {"type": "dahai", "actor": 0, "pai": "1m", "tsumogiri": False}
+    expected = {"type": "dahai", "actor": 0, "pai": expected_pai, "tsumogiri": False}
+    details = [
+        {"action": expected, "q_value": 0.5, "prob": expected_prob},
+        {"action": actual, "q_value": 0.2, "prob": actual_prob},
+    ]
+    return {
+        "engine": "Mortal",
+        "game_length": "Hanchan",
+        "version": "1.5.10",
+        "player_id": 0,
+        "review": {
+            "total_reviewed": 1,
+            "total_matches": 1 if is_equal else 0,
+            "temperature": 0.1,
+            "kyokus": [
+                {
+                    "kyoku": 0,
+                    "honba": 0,
+                    "entries": [
+                        {
+                            "junme": 3,
+                            "tiles_left": 60,
+                            "expected": expected,
+                            "actual": actual,
+                            "is_equal": is_equal,
+                            "details": details,
+                            "shanten": 2,
+                            "at_self_chi_pon": False,
+                            "at_self_riichi": False,
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+
+
+def test_parse_reviewer_teacher_reports_outputs_decision_and_alignment_tables(tmp_path) -> None:
+    source = tmp_path / "input" / "0001_game.tenhou6.json"
+    source.parent.mkdir()
+    source.write_text("{}", encoding="utf-8")
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    report_30 = reports / "game__3.0__p0.json"
+    report_41b = reports / "game__4.1b__p0.json"
+    report_30.write_text(json.dumps(_fake_report(expected_pai="1m", expected_prob=0.9, actual_prob=0.9, is_equal=True)))
+    report_41b.write_text(json.dumps(_fake_report(expected_pai="2m", expected_prob=0.85, actual_prob=0.10, is_equal=False)))
+
+    manifest = tmp_path / "report_manifest.jsonl"
+    manifest.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {
+                    "source_log": "game.json.gz",
+                    "source_tenhou6_path": str(source),
+                    "target_player": 0,
+                    "network": "3.0",
+                    "report_id": "r30",
+                    "report_json_path": str(report_30),
+                },
+                {
+                    "source_log": "game.json.gz",
+                    "source_tenhou6_path": str(source),
+                    "target_player": 0,
+                    "network": "4.1b",
+                    "report_id": "r41b",
+                    "report_json_path": str(report_41b),
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = parse_reviewer_teacher_reports.parse_reports(
+        report_manifest=manifest,
+        output_dir=tmp_path / "out",
+        high_confidence_prob=0.6,
+        high_confidence_margin=0.2,
+        top_k=10,
+    )
+
+    assert summary["decision_count"] == 2
+    assert summary["network_summaries"]["3.0"]["match_rate"] == 1.0
+    assert summary["network_summaries"]["4.1b"]["match_rate"] == 0.0
+    assert summary["network_summaries"]["4.1b"]["high_confidence_disagreement_count"] == 1
+    assert summary["aligned_summary"]["aligned_entry_count"] == 1
+    assert summary["aligned_summary"]["teacher_agreement_rate"] == 0.0
+    assert summary["aligned_summary"]["match_pattern_counts"] == {"matches_3_0_only": 1}
+
+    decisions = [
+        json.loads(line)
+        for line in (tmp_path / "out" / "decision_table.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    aligned = json.loads((tmp_path / "out" / "aligned_decisions.jsonl").read_text(encoding="utf-8"))
+    top = json.loads((tmp_path / "out" / "top_disagreements.jsonl").read_text(encoding="utf-8"))
+    assert len(decisions) == 2
+    assert aligned["match_actual_3_0"] is True
+    assert aligned["match_actual_4_1b"] is False
+    assert aligned["teacher_agree"] is False
+    assert top["network"] == "4.1b"
+    assert top["expected_prob"] == 0.85
