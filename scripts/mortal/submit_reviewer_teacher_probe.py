@@ -64,6 +64,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--submit-curl-file", type=Path, required=True, help="Browser Copy-as-cURL of one successful /review submit")
     parser.add_argument("--networks", default=None, help="Override comma-separated networks; default uses each manifest row")
+    parser.add_argument("--source-index", type=int, default=None, help="Submit exactly one 0-based source manifest row")
+    parser.add_argument("--start-index", type=int, default=0, help="Start from this 0-based source manifest row")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--sleep-seconds", type=float, default=1.0)
     parser.add_argument("--poll-seconds", type=float, default=2.0)
@@ -92,8 +94,27 @@ def parse_csv(value: str | None) -> list[str] | None:
     return parsed
 
 
+def normalize_curl_command(command: str) -> str:
+    stripped = command.strip()
+    if not stripped:
+        return stripped
+    # Chrome on Windows often copies cmd.exe syntax:
+    #   curl ^"https://...^" ^
+    #     -H ^"accept: */*^" ^
+    #     --data-raw ^"a=b^"
+    # Convert that form to something shlex can parse.
+    if "^" in stripped:
+        stripped = stripped.replace("^\r\n", " ")
+        stripped = stripped.replace("^\n", " ")
+        stripped = stripped.replace("^\"", "\"")
+        stripped = stripped.replace("^&", "&")
+        stripped = stripped.replace("^%", "%")
+        stripped = stripped.replace("^^", "^")
+    return stripped
+
+
 def parse_curl_file(path: Path) -> dict[str, Any]:
-    command = path.read_text(encoding="utf-8").strip()
+    command = normalize_curl_command(path.read_text(encoding="utf-8"))
     if not command:
         raise ValueError(f"empty curl file: {path}")
     tokens = shlex.split(command)
@@ -253,6 +274,8 @@ def submit_probe(
     output_dir: Path,
     submit_curl_file: Path,
     networks_override: list[str] | None,
+    source_index: int | None,
+    start_index: int,
     limit: int | None,
     sleep_seconds: float,
     poll_seconds: float,
@@ -261,16 +284,24 @@ def submit_probe(
     dry_run: bool,
 ) -> dict[str, Any]:
     submit_template = parse_curl_file(submit_curl_file)
-    rows = load_jsonl(input_manifest)
+    all_rows = list(enumerate(load_jsonl(input_manifest)))
+    if source_index is not None:
+        if source_index < 0 or source_index >= len(all_rows):
+            raise IndexError(f"source-index {source_index} out of range for {input_manifest} with {len(all_rows)} rows")
+        indexed_rows = [all_rows[source_index]]
+    else:
+        if start_index < 0:
+            raise ValueError(f"start-index must be non-negative, got {start_index}")
+        indexed_rows = all_rows[start_index:]
     if limit is not None:
         if limit <= 0:
             raise ValueError(f"limit must be positive, got {limit}")
-        rows = rows[:limit]
+        indexed_rows = indexed_rows[:limit]
 
     existing = load_existing_keys(output_report_manifest_path(output_dir)) if skip_existing else set()
     submit_manifest = output_dir / "submit_manifest.jsonl"
     results: list[dict[str, Any]] = []
-    for source_index, row in enumerate(rows):
+    for source_index, row in indexed_rows:
         tenhou6_path = Path(str(row["tenhou6_path"]))
         tenhou6_text = tenhou6_path.read_text(encoding="utf-8")
         networks = networks_override or list(row["networks"])
@@ -342,6 +373,9 @@ def submit_probe(
         "submit_manifest": str(submit_manifest),
         "report_manifest": str(output_report_manifest_path(output_dir)),
         "dry_run": dry_run,
+        "source_index": source_index,
+        "start_index": start_index,
+        "limit": limit,
         "result_counts": dict(sorted(Counter(row["status"] for row in results).items())),
         "results": results,
     }
@@ -357,6 +391,8 @@ def main() -> None:
         output_dir=args.output_dir,
         submit_curl_file=args.submit_curl_file,
         networks_override=parse_csv(args.networks),
+        source_index=args.source_index,
+        start_index=int(args.start_index),
         limit=args.limit,
         sleep_seconds=float(args.sleep_seconds),
         poll_seconds=float(args.poll_seconds),

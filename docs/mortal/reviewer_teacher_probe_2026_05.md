@@ -247,4 +247,18 @@ PYTHONPATH=src uv run python scripts/mortal/submit_reviewer_teacher_probe.py \
   --dry-run
 ```
 
+For a cleaner real-submit smoke on a not-yet-reviewed row, use `--source-index` or `--start-index`:
+
+```bash
+PYTHONPATH=src uv run python scripts/mortal/submit_reviewer_teacher_probe.py \
+  --input-manifest artifacts/experiments/reviewer_teacher_probe_2026_05/R0_reviewer_input_smoke/manifest.jsonl \
+  --submit-curl-file artifacts/experiments/reviewer_teacher_probe_2026_05/reviewer_submit.curl \
+  --output-dir artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_batch \
+  --source-index 1 \
+  --networks 3.0 \
+  --dry-run
+```
+
 Then run without `--dry-run`. If the captured Turnstile response is expired or single-use, the script will record a clear `reviewer submit failed captcha validation` failure in `submit_manifest.jsonl`; in that case, switch to browser-driven submission rather than trying to reuse stale tokens.
+
+Chrome on Windows may copy cURL in `cmd.exe` form with `^"` and line-continuation `^` characters. The submitter normalizes that form before parsing, so both bash-style and Windows cmd-style Copy-as-cURL are acceptable for dry-run validation.

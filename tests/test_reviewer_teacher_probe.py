@@ -366,6 +366,8 @@ def test_submit_reviewer_teacher_probe_parses_curl_and_dry_runs(tmp_path) -> Non
         output_dir=tmp_path / "out",
         submit_curl_file=curl_file,
         networks_override=["4.1b"],
+        source_index=None,
+        start_index=0,
         limit=1,
         sleep_seconds=0,
         poll_seconds=0,
@@ -380,6 +382,99 @@ def test_submit_reviewer_teacher_probe_parses_curl_and_dry_runs(tmp_path) -> Non
     assert row["target_player"] == 0
     assert row["has_captcha_response"] is True
     assert (tmp_path / "out" / "submit_manifest.jsonl").exists()
+
+
+def test_submit_reviewer_teacher_probe_parses_windows_curl_and_start_index(tmp_path) -> None:
+    first = tmp_path / "0001.tenhou6.json"
+    second = tmp_path / "0002.tenhou6.json"
+    first.write_text("{}", encoding="utf-8")
+    second.write_text("{}", encoding="utf-8")
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {"source_log": "a", "tenhou6_path": str(first), "target_players": [0], "networks": ["3.0"]},
+                {"source_log": "b", "tenhou6_path": str(second), "target_players": [1], "networks": ["3.0"]},
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    curl_file = tmp_path / "submit_windows.curl"
+    curl_file.write_text(
+        'curl ^"https://mjai.ekyu.moe/review^" ^\n'
+        '  -H ^"accept: */*^" ^\n'
+        '  --data-raw ^"input-method=tenhou6^&player-id=0^&engine=mortal^&mortal-model-tag=3.0^&cf-turnstile-response=tok^"',
+        encoding="utf-8",
+    )
+
+    parsed = submit_reviewer_teacher_probe.parse_curl_file(curl_file)
+    assert parsed["url"] == "https://mjai.ekyu.moe/review"
+    assert parsed["headers"]["accept"] == "*/*"
+    assert parsed["form"]["cf-turnstile-response"] == "tok"
+
+    summary = submit_reviewer_teacher_probe.submit_probe(
+        input_manifest=manifest,
+        output_dir=tmp_path / "out",
+        submit_curl_file=curl_file,
+        networks_override=None,
+        source_index=None,
+        start_index=1,
+        limit=1,
+        sleep_seconds=0,
+        poll_seconds=0,
+        poll_attempts=1,
+        skip_existing=True,
+        dry_run=True,
+    )
+
+    assert summary["result_counts"] == {"dry_run": 1}
+    assert summary["results"][0]["source_index"] == 1
+    assert summary["results"][0]["source_tenhou6_path"] == str(second)
+    assert summary["results"][0]["target_player"] == 1
+
+
+def test_submit_reviewer_teacher_probe_source_index_selects_original_manifest_row(tmp_path) -> None:
+    first = tmp_path / "0001.tenhou6.json"
+    second = tmp_path / "0002.tenhou6.json"
+    first.write_text("{}", encoding="utf-8")
+    second.write_text("{}", encoding="utf-8")
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {"source_log": "a", "tenhou6_path": str(first), "target_players": [0], "networks": ["3.0"]},
+                {"source_log": "b", "tenhou6_path": str(second), "target_players": [2], "networks": ["4.1b"]},
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    curl_file = tmp_path / "submit.curl"
+    curl_file.write_text("curl 'https://mjai.ekyu.moe/review' --data-raw 'cf-turnstile-response=tok'", encoding="utf-8")
+
+    summary = submit_reviewer_teacher_probe.submit_probe(
+        input_manifest=manifest,
+        output_dir=tmp_path / "out",
+        submit_curl_file=curl_file,
+        networks_override=None,
+        source_index=1,
+        start_index=0,
+        limit=None,
+        sleep_seconds=0,
+        poll_seconds=0,
+        poll_attempts=1,
+        skip_existing=True,
+        dry_run=True,
+    )
+
+    assert len(summary["results"]) == 1
+    assert summary["results"][0]["source_index"] == 1
+    assert summary["results"][0]["source_tenhou6_path"] == str(second)
+    assert summary["results"][0]["network"] == "4.1b"
+    assert summary["results"][0]["target_player"] == 2
 
 
 def test_submit_reviewer_teacher_probe_extracts_redirect_report_id() -> None:
