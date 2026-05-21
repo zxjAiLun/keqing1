@@ -37,6 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, default=400)
     parser.add_argument("--submit-every", type=int, default=400)
     parser.add_argument("--test-every", type=int, default=20000)
+    parser.add_argument("--peak-lr", type=float, default=None, help="Override optim.scheduler.peak; default keeps base config value")
+    parser.add_argument("--final-lr", type=float, default=None, help="Override optim.scheduler.final; default keeps base config value")
     parser.add_argument("--copy-parent-checkpoint", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -60,6 +62,8 @@ def prepare_online_config(
     save_every: int,
     submit_every: int,
     test_every: int,
+    peak_lr: float | None = None,
+    final_lr: float | None = None,
 ) -> dict[str, Any]:
     if train_play_games <= 0 or train_play_games % 4 != 0:
         raise ValueError(f"train_play_games must be a positive multiple of 4, got {train_play_games}")
@@ -95,6 +99,13 @@ def prepare_online_config(
     dataset = config.setdefault("dataset", {})
     dataset["file_index"] = str((exp_dir / "file_index.pth").resolve())
     dataset["num_workers"] = int(num_workers)
+
+    if peak_lr is not None or final_lr is not None:
+        scheduler = config.setdefault("optim", {}).setdefault("scheduler", {})
+        if peak_lr is not None:
+            scheduler["peak"] = float(peak_lr)
+        if final_lr is not None:
+            scheduler["final"] = float(final_lr)
 
     baseline = config.setdefault("baseline", {})
     for key in ("train", "test"):
@@ -156,6 +167,8 @@ def prepare_online_pilot(
     save_every: int,
     submit_every: int,
     test_every: int,
+    peak_lr: float | None = None,
+    final_lr: float | None = None,
     copy_parent_checkpoint: bool,
     dry_run: bool,
 ) -> dict[str, Any]:
@@ -174,6 +187,8 @@ def prepare_online_pilot(
         save_every=save_every,
         submit_every=submit_every,
         test_every=test_every,
+        peak_lr=peak_lr,
+        final_lr=final_lr,
     )
     state_file = Path(config["control"]["state_file"])
     checkpoints_to_read = [int(parent_steps), int(parent_steps) + 400, int(parent_steps) + 800, int(parent_steps) + 1200]
@@ -195,6 +210,8 @@ def prepare_online_pilot(
         "save_every": int(save_every),
         "submit_every": int(submit_every),
         "test_every": int(test_every),
+        "scheduler_peak_lr": peak_lr,
+        "scheduler_final_lr": final_lr,
         "checkpoints_to_read": checkpoints_to_read,
         "checkpoint_archive_dir": str((exp_dir / "checkpoints").resolve()),
         "commands": {
@@ -243,6 +260,8 @@ def main() -> None:
         save_every=int(args.save_every),
         submit_every=int(args.submit_every),
         test_every=int(args.test_every),
+        peak_lr=args.peak_lr,
+        final_lr=args.final_lr,
         copy_parent_checkpoint=bool(args.copy_parent_checkpoint),
         dry_run=bool(args.dry_run),
     )

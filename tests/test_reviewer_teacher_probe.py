@@ -50,7 +50,7 @@ def test_mjai_jsonl_to_tenhou6_converts_core_events() -> None:
     assert kyoku[4][4] == 51
     assert "r41" in kyoku[6]
     assert 60 in kyoku[9]
-    assert kyoku[-1] == [["和了", [8000, 0, 0, -8000], []]]
+    assert kyoku[-1] == ["和了", [8000, 0, 0, -8000], [0, 3, 0, "30符1飜8000点"]]
 
 
 def test_prepare_reviewer_teacher_probe_dry_run(tmp_path) -> None:

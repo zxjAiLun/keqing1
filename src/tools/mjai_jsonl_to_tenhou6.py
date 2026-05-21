@@ -30,7 +30,7 @@ class Tenhou6Kyoku:
             self.haipai.append([])
         self.takes: list[list[int | str]] = [[], [], [], []]
         self.discards: list[list[int | str]] = [[], [], [], []]
-        self.results: list[list[Any]] = []
+        self.results: list[Any] = []
         self.last_draw: list[int | None] = [None, None, None, None]
         self.reach_pending: list[bool] = [False, False, False, False]
 
@@ -126,6 +126,27 @@ def _kakan_meld(added: str, consumed: Sequence[str]) -> str:
     return f"k{tiles[0]}{tiles[1]}{tiles[2]}{tiles[3]}"
 
 
+def _score_label(event: dict[str, Any]) -> str:
+    actor = int(event.get("actor", 0))
+    target = int(event.get("target", actor))
+    deltas = [int(delta) for delta in event.get("deltas", [0, 0, 0, 0])]
+    if target == actor or event.get("tsumo"):
+        losses = sorted(abs(delta) for seat, delta in enumerate(deltas) if seat != actor and delta < 0)
+        if not losses:
+            return f"{max([0, *deltas])}点"
+        if len(set(losses)) == 1:
+            return f"30符1飜{losses[0]}点∀"
+        return f"30符1飜{losses[0]}-{losses[-1]}点"
+    payment = abs(deltas[target]) if 0 <= target < len(deltas) else max([0, *deltas])
+    return f"30符1飜{payment}点"
+
+
+def _hora_detail(event: dict[str, Any]) -> list[Any]:
+    actor = int(event.get("actor", 0))
+    target = int(event.get("target", actor))
+    return [actor, target, actor, _score_label(event)]
+
+
 def convert_mjai_jsonl_to_tenhou6(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     names = ["NoName", "NoName", "NoName", "NoName"]
     logs: list[list[Any]] = []
@@ -179,9 +200,12 @@ def convert_mjai_jsonl_to_tenhou6(events: Iterable[dict[str, Any]]) -> dict[str,
         elif event_type == "hora" and kyoku is not None:
             if event.get("ura_markers"):
                 kyoku.ura_indicators.extend(_tile_to_tenhou6(str(tile)) for tile in event.get("ura_markers", []))
-            kyoku.results.append(["和了", [int(delta) for delta in event.get("deltas", [0, 0, 0, 0])], []])
+            if not kyoku.results:
+                kyoku.results.append("和了")
+            kyoku.results.append([int(delta) for delta in event.get("deltas", [0, 0, 0, 0])])
+            kyoku.results.append(_hora_detail(event))
         elif event_type == "ryukyoku" and kyoku is not None:
-            kyoku.results.append(["流局", [int(delta) for delta in event.get("deltas", [0, 0, 0, 0])], []])
+            kyoku.results = ["流局", [int(delta) for delta in event.get("deltas", [0, 0, 0, 0])], []]
         elif event_type == "end_kyoku":
             if kyoku is not None:
                 logs.append(kyoku.as_tenhou6())
@@ -194,7 +218,7 @@ def convert_mjai_jsonl_to_tenhou6(events: Iterable[dict[str, Any]]) -> dict[str,
 
     return {
         "name": names,
-        "rule": {"disp": "Mortal arena hanchan", "aka": 1, "aka51": 1, "aka52": 1, "aka53": 1},
+        "rule": {"disp": "Mortal", "aka51": 1, "aka52": 1, "aka53": 1},
         "log": logs,
     }
 

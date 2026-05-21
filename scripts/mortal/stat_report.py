@@ -98,6 +98,7 @@ DISPLAY_ROWS = (
     ("Win rate", "agari_rate"),
     ("Deal-in rate", "houjuu_rate"),
     ("Call rate", "fuuro_rate"),
+    ("Avg fuuro/game", "avg_fuuro_num"),
     ("Riichi rate", "riichi_rate"),
     ("Ryukyoku rate", "ryukyoku_rate"),
     ("Avg winning delta score", "avg_point_per_agari"),
