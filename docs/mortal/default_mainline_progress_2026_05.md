@@ -16,6 +16,25 @@ Stable local archive copies:
 
 Naming note: the archive filenames reflect the earlier promotion-gate workflow. The current research framing is more neutral: 70k is the standard anchor, and 80k is an aggressive behavior anchor that did not pass this screening gate as an automatic replacement.
 
+## Current Weight Path Map
+
+Current as of 2026-05-23 local inspection:
+
+| Path | Step | Current use |
+| --- | ---: | --- |
+| `artifacts/mortal_training/mortal.pth` | 80000 | Training/current mainline artifact; default Mortal checkpoint for the local replay GUI import/review path. |
+| `artifacts/mortal_training/mortal_step80000_before_100k.pth` | 80000 | Stable snapshot identical to current `artifacts/mortal_training/mortal.pth` at inspection time. |
+| `artifacts/mortal_training/checkpoints/mortal_default_80k_rejected_gate.pth` | 80000 | Archived 80k behavior anchor; identical to current `artifacts/mortal_training/mortal.pth` at inspection time. |
+| `artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth` | 70000 | Archived 70k standard/balanced anchor used by gates, O-series parents/baselines, and casebook imports. |
+| `artifacts/mortal_serving/mortal.pth` | 41200 | Serving/online gateway default checkpoint; do not assume it matches the training/current mainline artifact. |
+| `artifacts/mortal_serving/backups/mortal_step30000_before_step41200_20260430_201553.pth` | 30000 | Old serving backup retained before the 41200 serving replacement. |
+
+Default path behavior:
+
+- Local replay GUI / review service defaults `mortal` to `artifacts/mortal_training/mortal.pth`.
+- Selfplay CLI paths that resolve model name `mortal`, and gateway/online bot defaults, use `artifacts/mortal_serving/mortal.pth` unless an explicit model path is passed.
+- Behavior casebook imports override the generic GUI default. They use `checkpoint_path` from the case manifest when present, otherwise the built-in 70k/80k archive mapping above.
+
 ## Gate Setup
 
 Both gates use `scripts/mortal/one_vs_three_smoke.py`, 250 seed blocks, 4 seat rotations per block, and therefore 1000 half-games. Rank point reporting should use Tenhou reference `[90,45,0,-135]` for readability; the `mortal_default` training point table `[6,4,2,0]` is only the training reward scalarization.

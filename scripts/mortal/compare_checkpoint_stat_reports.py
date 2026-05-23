@@ -12,7 +12,7 @@ from typing import Any
 METRICS: tuple[tuple[str, str, str, str], ...] = (
     ("Win rate", "derived", "agari_rate", "rate"),
     ("Deal-in rate", "derived", "houjuu_rate", "rate"),
-    ("Call rate", "derived", "fuuro_rate", "rate"),
+    ("Fuuro round rate", "derived", "fuuro_rate", "rate"),
     ("Riichi rate", "derived", "riichi_rate", "rate"),
     ("Ryukyoku rate", "derived", "ryukyoku_rate", "rate"),
     ("Avg winning delta score", "derived", "avg_point_per_agari", "score"),
@@ -23,7 +23,7 @@ METRICS: tuple[tuple[str, str, str, str], ...] = (
     ("Deal-in rate after call", "derived", "houjuu_rate_after_fuuro", "rate"),
     ("Avg riichi turn", "derived", "avg_riichi_jun", "turn"),
     ("Avg deal-in turn", "derived", "avg_houjuu_jun", "turn"),
-    ("Avg number of calls", "derived", "avg_fuuro_num", "count"),
+    ("Avg call events per game", "derived", "avg_fuuro_num", "count"),
     ("Chasing riichi rate", "derived", "chasing_riichi_rate", "rate"),
     ("Riichi chased rate", "derived", "riichi_chased_rate", "rate"),
     ("Avg rank", "derived", "avg_rank", "rank"),

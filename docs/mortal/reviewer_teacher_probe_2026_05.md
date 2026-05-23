@@ -200,6 +200,66 @@ Aligned teacher summary:
 
 The first-report weak signal is consistent with `model_v4` looking closer to reviewer `3.0` than reviewer `4.1b`, but this remains a one-hanchan smoke result. R1 should next expand to the remaining prepared R0 inputs before drawing stable conclusions.
 
+## T-Series Teacher Transfer Direction
+
+O-series online continuation has been closed as a local recipe search: O4@70800 is the best current online point, but it is only near-neutral and still does not approach `model_v4`. The next route should change the teacher signal instead of continuing LR/batch scalar sweeps.
+
+There are two different teacher sources:
+
+- Public reviewer networks (`4.1a/b/c`, `3.0`, `4.0`) are black-box reviewers. Without their weights, they cannot be used as local selfplay generators. Use them to label preferences on existing Tenhou6 logs.
+- Local checkpoints such as `model_v4` can be used as local data generators. They can produce replay logs at scale through local arenas.
+
+### T1: model_v4 Demonstration Replay Transfer
+
+T1 is the lowest-friction training route after O-series:
+
+| Item | Setting |
+| --- | --- |
+| Parent | `artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth` |
+| Teacher source | local `artifacts/model_v4_20240308_best_min.pth` |
+| Initial logs | `model_v4 vs 3x70k` |
+| Initial size | 500h to 1000h |
+| Training loss | existing offline DQN/CQL first |
+| Read points | `+400`, `+800` |
+| Gate | only gate the best short-readout checkpoint |
+
+The first T1 run should be framed as a teacher replay feasibility test. Existing DQN/CQL on model_v4 logs uses teacher trajectories plus later round reward; it is not direct imitation. A neutral or mildly positive result would justify adding an explicit teacher-action loss. A clear negative result means replay replacement alone is not enough.
+
+Useful follow-up data mixtures after the first smoke:
+
+```text
+model_v4 vs 3x70k
+model_v4 vs 3xmodel_v4
+70k vs 3xmodel_v4
+mixed model_v4 + 70k tables
+```
+
+Do not start with `70k trainee vs 3xmodel_v4` online rollout as the first structural experiment; it risks generating too many dominated states and noisy updates.
+
+### T2: Teacher Action Distillation
+
+If T1 is neutral or weak, T2 should add an explicit teacher action objective. For each `model_v4` decision state:
+
+```text
+state s
+teacher action a_teacher
+learner legal-action Q values q(s, .)
+```
+
+Train the learner so the teacher action ranks higher. Two simple objectives are acceptable first versions:
+
+```text
+loss = dqn_loss + cql_loss + lambda_bc * CE(masked_q_logits, teacher_action)
+```
+
+or:
+
+```text
+q(s, teacher_action) >= q(s, other_legal_actions) + margin
+```
+
+T2 should use reviewer `4.1b` only as sparse correction labels on selected states, not as a bulk generator. High-value labels are states where the actual 70k/model_v4 action differs from the reviewer top action with a large reviewer margin.
+
 ## R1.5 Submission Automation
 
 Manual reviewer upload is now the bottleneck. The batch submitter is:

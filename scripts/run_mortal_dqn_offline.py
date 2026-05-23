@@ -157,6 +157,7 @@ def train_to_target_steps(
         "next_rank_loss": 0.0,
         "total_loss": 0.0,
         "next_rank_acc": 0.0,
+        "teacher_ce_loss": 0.0,
         "q_mean": 0.0,
         "target_mean": 0.0,
         "q_abs_err": 0.0,
@@ -198,7 +199,7 @@ def train_to_target_steps(
         lr = float(scheduler.get_last_lr()[0])
         logging.info(
             "%s: steps=%s/%s window=%s "
-            "loss_total=%.6f dqn_loss=%.6f cql_loss=%.6f next_rank_loss=%.6f "
+            "loss_total=%.6f dqn_loss=%.6f cql_loss=%.6f next_rank_loss=%.6f teacher_ce_loss=%.6f "
             "next_rank_acc=%.4f q_mean=%.4f target_mean=%.4f q_abs_err=%.4f lr=%.8g",
             prefix,
             steps,
@@ -208,6 +209,7 @@ def train_to_target_steps(
             avg["dqn_loss"],
             avg["cql_loss"],
             avg["next_rank_loss"],
+            avg["teacher_ce_loss"],
             avg["next_rank_acc"],
             avg["q_mean"],
             avg["target_mean"],
@@ -218,6 +220,7 @@ def train_to_target_steps(
         writer.add_scalar("loss/dqn_window", avg["dqn_loss"], steps)
         writer.add_scalar("loss/cql_window", avg["cql_loss"], steps)
         writer.add_scalar("loss/next_rank_window", avg["next_rank_loss"], steps)
+        writer.add_scalar("loss/teacher_ce_window", avg["teacher_ce_loss"], steps)
         writer.add_scalar("acc/next_rank_window", avg["next_rank_acc"], steps)
         writer.add_scalar("q/q_mean_window", avg["q_mean"], steps)
         writer.add_scalar("q/target_mean_window", avg["target_mean"], steps)
@@ -255,7 +258,11 @@ def train_to_target_steps(
             cql_loss = q_out.logsumexp(-1).mean() - q.mean()
             (next_rank_logits,) = aux_net(phi)
             next_rank_loss = ce(next_rank_logits, player_ranks)
-            loss = dqn_loss + cql_loss * float(config["cql"]["min_q_weight"]) + next_rank_loss * float(config["aux"]["next_rank_weight"])
+            teacher_ce_loss = torch.tensor(0.0, device=device)
+            teacher_ce_weight = float(config.get("teacher", {}).get("ce_weight", 0))
+            if teacher_ce_weight > 0:
+                teacher_ce_loss = ce(q_out, actions)
+            loss = dqn_loss + cql_loss * float(config["cql"]["min_q_weight"]) + next_rank_loss * float(config["aux"]["next_rank_weight"]) + teacher_ce_loss * teacher_ce_weight
 
         scaler.scale(loss / opt_step_every).backward()
         with torch.inference_mode():
@@ -265,6 +272,7 @@ def train_to_target_steps(
                 "next_rank_loss": float(next_rank_loss.detach().cpu()),
                 "total_loss": float(loss.detach().cpu()),
                 "next_rank_acc": float((next_rank_logits.argmax(-1) == player_ranks).to(torch.float64).mean().detach().cpu()),
+                "teacher_ce_loss": float(teacher_ce_loss.detach().cpu()),
                 "q_mean": float(q.detach().to(torch.float32).mean().cpu()),
                 "target_mean": float(q_target_mc.detach().to(torch.float32).mean().cpu()),
                 "q_abs_err": float((q.detach().to(torch.float32) - q_target_mc.detach().to(torch.float32)).abs().mean().cpu()),
