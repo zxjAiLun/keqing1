@@ -33,6 +33,7 @@ from scripts.mortal import eval_metrics
 
 MORTAL_ACTION_SPACE = 46
 STYLE_BIAS_VERSION = "p1_handcrafted_v1"
+RIICHIENV_GAME_SEED_STRIDE = 1_000_003
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,19 @@ def parse_seed_key(value: Any) -> int:
         return value
     text = str(value).strip()
     return int(text, 16 if text.lower().startswith("0x") else 10)
+
+
+def derive_riichienv_game_seed(seed_start: int | None, game_id: int) -> int | None:
+    """Derive non-overlapping hanchan seeds for RiichiEnv.
+
+    RiichiEnv's per-kyoku wall generation advances from the hanchan seed. Using
+    consecutive hanchan seeds makes later kyoku in game N reappear as early
+    kyoku in game N+K. A large stride keeps deterministic reproducibility while
+    separating the per-game seed ranges.
+    """
+    if seed_start is None:
+        return None
+    return int(seed_start) + int(game_id) * RIICHIENV_GAME_SEED_STRIDE
 
 
 def parse_rank_points(value: str | Sequence[int | float]) -> tuple[float, float, float, float]:
@@ -916,7 +930,7 @@ def run_game(args: argparse.Namespace, *, game_id: int) -> dict[str, Any]:
         for seat, profile in seat_profiles.items()
     }
     collect_decision_traces = str(getattr(args, "artifact_mode", "full")) == "full"
-    game_seed = None if args.seed_start is None else int(args.seed_start) + int(game_id)
+    game_seed = derive_riichienv_game_seed(args.seed_start, int(game_id))
     env, seed_info = _make_env(game_mode=str(args.game_mode), seed=game_seed)
     bots = _new_bots(args)
     if seed_info.mode == "reset":

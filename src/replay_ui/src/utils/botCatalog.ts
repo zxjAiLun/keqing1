@@ -17,6 +17,20 @@ export const BOT_CATALOG: BotCatalogEntry[] = [
     description: 'Mortal 原生 Brain+DQN checkpoint，当前用于打牌、牌谱 review 和工具化主线。',
   },
   {
+    value: '70k',
+    label: '70k',
+    shortLabel: '70k',
+    badge: 'Anchor',
+    description: '70k 标准锚点权重，用于和当前主线或实验分支做稳定对照。',
+  },
+  {
+    value: 'weak_mortal',
+    label: 'weak mortal',
+    shortLabel: 'weak',
+    badge: 'Reference',
+    description: '本地 model_v4_20240308_best_min 权重，作为 weak mortal 参考模型。',
+  },
+  {
     value: 'rulebase',
     label: 'rulebase',
     shortLabel: '基线',
@@ -28,7 +42,9 @@ export const BOT_CATALOG: BotCatalogEntry[] = [
 export const DEFAULT_BOT_TYPE: BotType = 'mortal';
 
 export const BOT_CHECKPOINT_DEFAULTS: Record<BotType, string> = {
-  mortal: 'artifacts/mortal_training/mortal.pth',
+  mortal: 'artifacts/mortal_serving/gui_mortal.pth',
+  '70k': 'artifacts/mortal_serving/70k.pth',
+  weak_mortal: 'artifacts/mortal_serving/weak_mortal.pth',
   rulebase: '',
 };
 

@@ -202,28 +202,72 @@ The first-report weak signal is consistent with `model_v4` looking closer to rev
 
 ## T-Series Teacher Transfer Direction
 
-O-series online continuation has been closed as a local recipe search: O4@70800 is the best current online point, but it is only near-neutral and still does not approach `model_v4`. The next route should change the teacher signal instead of continuing LR/batch scalar sweeps.
+O-series online continuation has been closed as a local recipe search. T-series is now the active research route for training-method development, while `model_v4` remains the practical strongest local model.
+
+The distinction matters:
+
+- Practical model: use `model_v4` directly for play/review/strong baseline/teacher replay generation.
+- Research checkpoint: use `T1@71000` to study how teacher action preference transfers strength into a 70k-derived student.
 
 There are two different teacher sources:
 
 - Public reviewer networks (`4.1a/b/c`, `3.0`, `4.0`) are black-box reviewers. Without their weights, they cannot be used as local selfplay generators. Use them to label preferences on existing Tenhou6 logs.
 - Local checkpoints such as `model_v4` can be used as local data generators. They can produce replay logs at scale through local arenas.
 
-### T1: model_v4 Demonstration Replay Transfer
+### T1: model_v4 Teacher CE Transfer
 
-T1 is the lowest-friction training route after O-series:
+T1 is the first positive teacher-guided student result:
 
 | Item | Setting |
 | --- | --- |
 | Parent | `artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth` |
 | Teacher source | local `artifacts/model_v4_20240308_best_min.pth` |
-| Initial logs | `model_v4 vs 3x70k` |
-| Initial size | 500h to 1000h |
-| Training loss | existing offline DQN/CQL first |
-| Read points | `+400`, `+800` |
-| Gate | only gate the best short-readout checkpoint |
+| Training logs | `model_v4 vs 3x70k`, filtered to `challenger` samples |
+| Loss | offline DQN/CQL/Aux + teacher action CE |
+| `teacher_ce_weight` | `0.1` |
+| Student checkpoint | `artifacts/experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth` |
+| Step | `71000` |
 
-The first T1 run should be framed as a teacher replay feasibility test. Existing DQN/CQL on model_v4 logs uses teacher trajectories plus later round reward; it is not direct imitation. A neutral or mildly positive result would justify adding an explicit teacher-action loss. A clear negative result means replay replacement alone is not enough.
+T1 is not a replacement for `model_v4`. It proves that `model_v4` action preference can be converted into real student gate improvement.
+
+Current T1 gate summary:
+
+| Gate | Result |
+| --- | ---: |
+| `T1@71000 vs 3x70k`, final 5000h | +0.738 |
+| `70k vs 3xT1@71000`, final 5000h | -1.377 |
+| `T1@71000 vs 3x80k_game`, 1000h screen | -0.090 |
+| `80k_game vs 3xT1@71000`, 1000h screen | +0.045 |
+
+Interpretation:
+
+- T1 is the current best trained student / proof-of-mechanism checkpoint.
+- T1 is close to `80k_game` in the existing screen, but not clearly above it.
+- `model_v4` remains the strongest available local model and should be used directly for practical play/review.
+
+Near-term T-series priorities:
+
+1. Freeze T1@71000 as the positive reference student.
+2. Compare T1 against `80k_game` as needed; current 1000h evidence is near parity.
+3. Run behavior readout for `70k`, `80k_game`, `T1@71000`, and `model_v4`.
+4. Try `T1b_teacher_ce_005` before higher teacher CE weights.
+5. Try `T1c_teacher_ce_02` only after T1b/readout clarifies whether T1 is over- or under-imitation.
+
+Concrete variant preparation commands:
+
+```bash
+uv run python scripts/mortal/prepare_teacher_replay_transfer.py \
+  --experiment-id T1b_teacher_ce_005 \
+  --teacher-ce-weight 0.05 \
+  --copy-parent-checkpoint
+
+uv run python scripts/mortal/prepare_teacher_replay_transfer.py \
+  --experiment-id T1c_teacher_ce_02 \
+  --teacher-ce-weight 0.2 \
+  --copy-parent-checkpoint
+```
+
+Run `T1b_teacher_ce_005` first. Do not start `T1c_teacher_ce_02` until T1b and the behavior readout indicate that stronger imitation is still plausible.
 
 Useful follow-up data mixtures after the first smoke:
 
@@ -234,31 +278,17 @@ model_v4 vs 3xmodel_v4
 mixed model_v4 + 70k tables
 ```
 
-Do not start with `70k trainee vs 3xmodel_v4` online rollout as the first structural experiment; it risks generating too many dominated states and noisy updates.
+Do not start with `70k trainee vs 3xmodel_v4` online rollout as the next structural experiment; it risks generating too many dominated states and noisy updates.
 
-### T2: Teacher Action Distillation
+### Later: Stronger Teacher Correction
 
-If T1 is neutral or weak, T2 should add an explicit teacher action objective. For each `model_v4` decision state:
+The next correction route should not be named as if T1 lacked teacher CE. T1 already uses teacher action CE. Later variants should add stronger or more selective preference signals:
 
-```text
-state s
-teacher action a_teacher
-learner legal-action Q values q(s, .)
-```
+- teacher CE weight sweep (`0.05` first, then `0.2` if warranted)
+- model_v4 data distribution expansion (`model_v4 vs 3xmodel_v4`, `70k vs 3xmodel_v4`, mixed tables)
+- reviewer `4.1b` high-confidence disagreement correction set
 
-Train the learner so the teacher action ranks higher. Two simple objectives are acceptable first versions:
-
-```text
-loss = dqn_loss + cql_loss + lambda_bc * CE(masked_q_logits, teacher_action)
-```
-
-or:
-
-```text
-q(s, teacher_action) >= q(s, other_legal_actions) + margin
-```
-
-T2 should use reviewer `4.1b` only as sparse correction labels on selected states, not as a bulk generator. High-value labels are states where the actual 70k/model_v4 action differs from the reviewer top action with a large reviewer margin.
+Reviewer `4.1b` should remain a sparse black-box preference labeler, not a bulk data generator. High-value labels are states where the actual 70k/T1/model_v4 action differs from the reviewer top action with a large reviewer margin.
 
 ## R1.5 Submission Automation
 

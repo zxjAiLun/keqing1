@@ -1,6 +1,22 @@
 # Default Mortal Mainline Progress
 
-Status: 80k default checkpoint was screened against the 70k default reference. The gate blocks automatic mainline promotion of 80k, but it is not a final strength verdict. Four-domain GRP audit is complete and does not support GRP retraining yet.
+Status: split model roles clearly. `model_v4` is the strongest available local model and should be used for practical play/review/baseline/teacher data. `T1@71000` is the best trained student / proof-of-mechanism candidate, not the strongest practical model. The 80k default checkpoint remains an aggressive behavior anchor, not an automatic promotion.
+
+## Current Model Roles
+
+| Role | Checkpoint | Use |
+| --- | --- | --- |
+| Strongest available local model | `artifacts/model_v4_20240308_best_min.pth` | Practical play/review, strong baseline, upper reference, teacher replay generator |
+| Best trained student candidate | `artifacts/experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth` | Research checkpoint proving `70k + model_v4 teacher CE` can improve through training |
+| Standard anchor | `artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth` | Parent/baseline for O-series and T-series |
+| Aggressive behavior anchor | `artifacts/mortal_training/checkpoints/mortal_default_80k_rejected_gate.pth` | Game-log continuation comparison and fuuro-heavy behavior reference |
+
+Do not use "best model" without qualifying the axis:
+
+- practical strength: `model_v4`
+- trained student / transfer mechanism: `T1@71000`
+- standard reference: `70k`
+- aggressive continuation reference: `80k_game`
 
 ## Checkpoints
 
@@ -22,7 +38,11 @@ Current as of 2026-05-23 local inspection:
 
 | Path | Step | Current use |
 | --- | ---: | --- |
-| `artifacts/mortal_training/mortal.pth` | 80000 | Training/current mainline artifact; default Mortal checkpoint for the local replay GUI import/review path. |
+| `artifacts/mortal_training/mortal.pth` | 80000 | Training/current mainline artifact; source copy for the GUI mainline serving checkpoint below. |
+| `artifacts/mortal_serving/gui_mortal.pth` | 80000 | Local replay GUI / review service default for `mortal`. |
+| `artifacts/mortal_serving/70k.pth` | 70000 | Local replay GUI / review service preset shown as `70k`. |
+| `artifacts/mortal_serving/weak_mortal.pth` | unknown | Local replay GUI / review service preset shown as `weak mortal`; copied from `artifacts/model_v4_20240308_best_min.pth`, the current strongest available local model despite the legacy display label. |
+| `artifacts/experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth` | 71000 | Best trained student / teacher-transfer proof checkpoint; not a replacement for `model_v4` in practical use. |
 | `artifacts/mortal_training/mortal_step80000_before_100k.pth` | 80000 | Stable snapshot identical to current `artifacts/mortal_training/mortal.pth` at inspection time. |
 | `artifacts/mortal_training/checkpoints/mortal_default_80k_rejected_gate.pth` | 80000 | Archived 80k behavior anchor; identical to current `artifacts/mortal_training/mortal.pth` at inspection time. |
 | `artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth` | 70000 | Archived 70k standard/balanced anchor used by gates, O-series parents/baselines, and casebook imports. |
@@ -31,9 +51,28 @@ Current as of 2026-05-23 local inspection:
 
 Default path behavior:
 
-- Local replay GUI / review service defaults `mortal` to `artifacts/mortal_training/mortal.pth`.
+- Local replay GUI / review service defaults `mortal` to `artifacts/mortal_serving/gui_mortal.pth`.
+- Local replay GUI / review service also exposes `70k` and `weak_mortal`, displayed as `70k` and `weak mortal`, backed by `artifacts/mortal_serving/70k.pth` and `artifacts/mortal_serving/weak_mortal.pth`.
 - Selfplay CLI paths that resolve model name `mortal`, and gateway/online bot defaults, use `artifacts/mortal_serving/mortal.pth` unless an explicit model path is passed.
-- Behavior casebook imports override the generic GUI default. They use `checkpoint_path` from the case manifest when present, otherwise the built-in 70k/80k archive mapping above.
+- Behavior casebook imports override the generic GUI default. They use `checkpoint_path` from the case manifest when present, otherwise the built-in 70k/80k GUI serving mapping above.
+
+## T1 Teacher Transfer Result
+
+T1 demonstrates a training mechanism, not a new strongest practical model. It starts from the 70k parent, trains on `model_v4 vs 3x70k` challenger-only logs, and adds `teacher_ce_weight = 0.1` to the existing offline DQN/CQL/Aux objective.
+
+| Gate | Challenger | Champion | Games | Tenhou avg pt |
+| --- | --- | --- | ---: | ---: |
+| Final 5000h | `T1@71000` | `70k` | 5000 | +0.738 |
+| Final 5000h reverse | `70k` | `T1@71000` | 5000 | -1.377 |
+| 1000h screen | `T1@71000` | `80k_game` | 1000 | -0.090 |
+| 1000h reverse | `80k_game` | `T1@71000` | 1000 | +0.045 |
+
+Interpretation:
+
+- `T1@71000` is a verified positive student candidate against 70k.
+- `T1@71000` is near parity with `80k_game` in the current 1000h screen, not clearly above it.
+- `model_v4` remains the practical stronger model and teacher/reference.
+- The next research questions are teacher CE strength, behavior readout, and teacher data distribution, not whether T1 replaces model_v4.
 
 ## Gate Setup
 
@@ -209,10 +248,10 @@ This paired view is stricter than outcome-labeled single cases: it asks where th
 
 The integrated `/behavior-casebook` page now shows the paired casebook first. Each paired card exposes two buttons:
 
-- `打开 70k`: import the left replay under `mortal_default_70k_promoted_candidate.pth`
-- `打开 80k`: import the right replay under `mortal_default_80k_rejected_gate.pth`
+- `打开 70k`: import the left replay under `artifacts/mortal_serving/70k.pth`
+- `打开 80k`: import the right replay under `artifacts/mortal_serving/gui_mortal.pth`
 
-Both imports re-run review under the archived checkpoint and jump to the side-specific focus step. A future dual-pane viewer can synchronize the two sides, but the current two-button MVP is enough to inspect the same divergence from both model paths.
+Both imports re-run review under the copied GUI serving checkpoint and jump to the side-specific focus step. A future dual-pane viewer can synchronize the two sides, but the current two-button MVP is enough to inspect the same divergence from both model paths.
 
 Legacy single-case artifacts:
 
@@ -242,12 +281,12 @@ Each manifest row includes:
 - `outcome`: `agari`, `houjuu`, `ryukyoku`, or `not_agari`
 - `review_payload_path`: compact precomputed focus-event/Q payload
 
-The integrated service currently imports a case by re-running review with archived checkpoints:
+The integrated service currently imports a case by re-running review with copied GUI serving checkpoints:
 
-- `70k`: `artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth`
-- `80k`: `artifacts/mortal_training/checkpoints/mortal_default_80k_rejected_gate.pth`
+- `70k`: `artifacts/mortal_serving/70k.pth`
+- `80k`: `artifacts/mortal_serving/gui_mortal.pth`
 
-This prevents the `80k` casebook from drifting if `artifacts/mortal_training/mortal.pth` later becomes 90k or 100k. The replay view is therefore a fresh review under the archived checkpoint, not a zero-recompute rendering of the original L3 arena-Q payload. The original arena focus Q is preserved in `review_payload_path` and `margin`.
+This prevents the `80k` casebook from drifting if `artifacts/mortal_training/mortal.pth` later becomes 90k or 100k. The replay view is therefore a fresh review under the copied GUI serving checkpoint, not a zero-recompute rendering of the original L3 arena-Q payload. The original arena focus Q is preserved in `review_payload_path` and `margin`.
 
 The import API returns `focus_resolution`:
 

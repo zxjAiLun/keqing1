@@ -6,7 +6,12 @@ from typing import Any
 from inference.rulebase_bot import RulebaseBot
 from inference.mortal_bot import MortalReviewBot
 
-SUPPORTED_BOT_NAMES = {"rulebase", "mortal"}
+MORTAL_CHECKPOINTS = {
+    "mortal": "gui_mortal.pth",
+    "70k": "70k.pth",
+    "weak_mortal": "weak_mortal.pth",
+}
+SUPPORTED_BOT_NAMES = {"rulebase", *MORTAL_CHECKPOINTS.keys()}
 
 
 def create_runtime_bot(
@@ -23,11 +28,11 @@ def create_runtime_bot(
 ) -> Any:
     if bot_name == "rulebase":
         return RulebaseBot(player_id=player_id, verbose=verbose)
-    if bot_name == "mortal":
+    if bot_name in MORTAL_CHECKPOINTS:
         resolved_model_path = (
             Path(model_path)
             if model_path is not None
-            else Path(project_root) / "artifacts" / "mortal_serving" / "mortal.pth"
+            else Path(project_root) / "artifacts" / "mortal_serving" / MORTAL_CHECKPOINTS[bot_name]
         )
         return MortalReviewBot(
             player_id=player_id,

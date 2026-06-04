@@ -18,7 +18,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from inference.mortal_bot import MortalReviewBot
-from scripts.mortal.generate_riichienv_selfplay_replays import _make_env
+from scripts.mortal.generate_riichienv_selfplay_replays import _make_env, derive_riichienv_game_seed
 from scripts.mortal.eval_metrics import (
     add_rank_point_args,
     build_metrics_document,
@@ -397,7 +397,7 @@ def run(args):
         for game_id in range(total_games):
             if game_id in completed_ids:
                 continue
-            seed = int(args.seed_start) + game_id
+            seed = derive_riichienv_game_seed(int(args.seed_start), game_id)
             assignment = _random_assignment(seed)
 
             timing: dict[str, float] = Counter()

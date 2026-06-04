@@ -28,7 +28,7 @@ from scripts.mortal.eval_metrics import (
     summarize_rank_counts_with_references,
     write_metrics,
 )
-from scripts.mortal.generate_riichienv_selfplay_replays import _make_env
+from scripts.mortal.generate_riichienv_selfplay_replays import _make_env, derive_riichienv_game_seed
 
 
 def _parse_args() -> argparse.Namespace:
@@ -102,7 +102,7 @@ def _action_to_mjai(action: Any) -> str:
 
 
 def _run_game(args: argparse.Namespace, *, game_id: int) -> dict[str, Any]:
-    game_seed = int(args.seed) + int(game_id)
+    game_seed = derive_riichienv_game_seed(int(args.seed), int(game_id))
     env, seed_info = _make_env(game_mode=str(args.game_mode), seed=game_seed)
     obs_dict = env.reset(seed=game_seed) if seed_info.mode == "reset" else env.reset()
     assignment = seat_assignment(game_id, seat_mode=str(args.seat_mode))

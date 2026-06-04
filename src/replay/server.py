@@ -166,6 +166,10 @@ def _merge_terminal_event_details(decisions: dict, events: list[dict] | None) ->
 
 def _infer_player_bot_type(player_name: str | None, fallback: str | None = None) -> str:
     raw = (player_name or "").lower()
+    if "weak_mortal" in raw or "weak mortal" in raw:
+        return "weak_mortal"
+    if "70k" in raw:
+        return "70k"
     if "mortal" in raw:
         return "mortal"
     if "rulebase" in raw:
@@ -175,7 +179,9 @@ def _infer_player_bot_type(player_name: str | None, fallback: str | None = None)
 
 def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
     mapping = {
-        "mortal": BASE_DIR.parent.parent / "artifacts" / "mortal_training" / "mortal.pth",
+        "mortal": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "gui_mortal.pth",
+        "70k": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "70k.pth",
+        "weak_mortal": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "weak_mortal.pth",
     }
     return mapping[bot_type]
 
@@ -195,8 +201,8 @@ _DEFAULT_PAIRED_BEHAVIOR_CASEBOOK = (
     / "paired_behavior_cases"
 )
 _CASEBOOK_CHECKPOINTS = {
-    "70k": BASE_DIR.parent.parent / "artifacts" / "mortal_training" / "checkpoints" / "mortal_default_70k_promoted_candidate.pth",
-    "80k": BASE_DIR.parent.parent / "artifacts" / "mortal_training" / "checkpoints" / "mortal_default_80k_rejected_gate.pth",
+    "70k": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "70k.pth",
+    "80k": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "gui_mortal.pth",
 }
 
 

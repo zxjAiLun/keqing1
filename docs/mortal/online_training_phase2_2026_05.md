@@ -315,10 +315,10 @@ The best O-series read point found so far is `O4_70k_online_keep_optimizer_cql5_
 
 Do not continue O5/O6 as another scalar LR/batch sweep. The next useful changes are structural:
 
-1. **Reviewer Teacher Probe** (recommended priority): Use public reviewer networks such as `4.1b` as black-box preference labelers on already generated logs. They are not local rollout generators because their weights are not available.
+1. **T-series teacher transfer** (recommended research priority): T1 already showed that `70k + model_v4 teacher CE` can produce a stronger student. Continue by documenting T1, running behavior readout, and testing teacher CE variants.
 
-2. **model_v4 teacher replay transfer**: Use the local `model_v4` checkpoint as a local data generator, then test whether 70k can benefit from model_v4 demonstration logs. Treat the first pass as a feasibility test if it only uses the existing offline DQN/CQL loss.
+2. **Reviewer Teacher Probe**: Use public reviewer networks such as `4.1b` as black-box preference labelers on already generated logs. They are not local rollout generators because their weights are not available.
 
 3. **Opponent/Data Curriculum** (only after the teacher route is scoped): Replace the fixed 70k baseline rollout with a mixed opponent pool such as 70k + 80k_game + model_v4. This tests whether the fixed-baseline ecology limits the trainee's state distribution, but it is higher-risk than teacher replay transfer.
 
-The recommended next training route is documented in `docs/mortal/reviewer_teacher_probe_2026_05.md` as T-series teacher transfer. The immediate practical priority is T1, not another O-series scalar sweep.
+The practical strongest local model remains `model_v4`. T1 is not a replacement for it; T1 is the best trained student / proof that teacher action preference can be transferred into a 70k-derived checkpoint.

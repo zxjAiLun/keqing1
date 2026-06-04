@@ -70,7 +70,7 @@ export function DashboardPage() {
               onClick={() => navigate('/review')}
               icon={<BarChart2 size={20} />}
               title="牌谱分析"
-              description={<>上传天凤链接或 mjai JSON。<br />默认按 Mortal 工具链跑谱，也可切到 rulebase。</>}
+              description={<>上传天凤链接或 mjai JSON。<br />默认按 Mortal 工具链跑谱，也可切到 70k、weak mortal 或 rulebase。</>}
               gradient="linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%)"
               glow="0 4px 12px var(--accent-shadow)"
             />

@@ -34,14 +34,19 @@ from inference.mortal_bot import MortalReviewBot
 # bot 类型 → run_replay_from_source 内部创建 Bot 时用
 _BOT_CLASSES = {
     "mortal": MortalReviewBot,
+    "70k": MortalReviewBot,
+    "weak_mortal": MortalReviewBot,
     "rulebase": RulebaseBot,
 }
+_MORTAL_BOT_TYPES = {"mortal", "70k", "weak_mortal"}
 
 PLAYER_NAMES = ["East", "South", "West", "North"]
 
 # 默认 checkpoint 路径（按 bot 类型，相对于 PROJECT_ROOT）
 _DEFAULT_CHECKPOINTS = {
-    "mortal": _PROJECT_ROOT / "artifacts/mortal_training/mortal.pth",
+    "mortal": _PROJECT_ROOT / "artifacts/mortal_serving/gui_mortal.pth",
+    "70k": _PROJECT_ROOT / "artifacts/mortal_serving/70k.pth",
+    "weak_mortal": _PROJECT_ROOT / "artifacts/mortal_serving/weak_mortal.pth",
 }
 _REVIEW_EXPORTER = DefaultRuntimeReviewExporter()
 
@@ -174,7 +179,7 @@ def run_replay_from_source(
         输入内容类型："auto"（自动检测）、"tenhou6"（tenhou6 JSON）、"mjai"（mjai JSONL）。
         "url" 模式下 source 已是 mjai 事件列表。
     bot_type : str
-        Bot type: `mortal` / `rulebase`.
+        Bot type: `mortal` / `70k` / `weak_mortal` / `rulebase`.
         `rulebase` 不加载 checkpoint；其余模型在 checkpoint 为 None 时使用默认路径。
 
     Returns
@@ -200,7 +205,7 @@ def run_replay_from_source(
     bot_cls = _BOT_CLASSES[bot_type]
     if bot_type == "rulebase":
         bot = bot_cls(player_id=player_id)
-    elif bot_type == "mortal":
+    elif bot_type in _MORTAL_BOT_TYPES:
         bot = bot_cls(
             player_id=player_id,
             model_path=checkpoint,
@@ -567,8 +572,8 @@ def main():
     parser.add_argument(
         "--bot-type",
         default="mortal",
-        choices=["mortal", "rulebase"],
-        help="Bot 类型：mortal / rulebase",
+        choices=["mortal", "70k", "weak_mortal", "rulebase"],
+        help="Bot 类型：mortal / 70k / weak_mortal / rulebase",
     )
     parser.add_argument("--output", default=None, help="HTML 输出路径")
     parser.add_argument(
