@@ -39,11 +39,21 @@ export function GameBoardReplayPage() {
   const replayIdFromRoute = routeState?.replayId ?? params.get('id');
   const playerIdFromQuery = Number(params.get('player_id') ?? '0');
   const requestedPlayerId = Number.isFinite(playerIdFromQuery) ? playerIdFromQuery : 0;
+  const teacherReportFromQuery = params.get('teacher_report') || params.get('teacher_report_path');
   const focusEventIndexFromQuery = Number(params.get('focus_event_index') ?? '');
   const requestedFocusEventIndex = Number.isFinite(focusEventIndexFromQuery) ? focusEventIndexFromQuery : null;
   const focusStepFromQuery = Number(params.get('focus_step') ?? '');
   const requestedFocusStep = Number.isFinite(focusStepFromQuery) ? focusStepFromQuery : null;
+  const stepFromQuery = Number(params.get('step') ?? '');
+  const requestedStep = Number.isFinite(stepFromQuery) ? stepFromQuery : null;
+  const phaseFromQuery = params.get('phase');
+  const requestedPhase: ReplayBoardPhase | null =
+    phaseFromQuery === 'post' || phaseFromQuery === 'reach' || phaseFromQuery === 'pre'
+      ? phaseFromQuery
+      : null;
   const focusResolution = params.get('focus_resolution');
+  const routeReplayData = routeState?.replayData;
+  const routeReplayId = routeState?.replayId;
   const [data, setData] = useState<ReplayData | null>(null);
   const [events, setEvents] = useState<Record<string, unknown>[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -60,17 +70,17 @@ export function GameBoardReplayPage() {
 
   // 加载数据
   useEffect(() => {
-    if (routeState?.replayData && !replayIdFromRoute) {
-      setData(routeState.replayData);
+    if (routeReplayData && !replayIdFromRoute) {
+      setData(routeReplayData);
       setLoading(false);
-    } else if (routeState?.replayId) {
-      replayApi.get(routeState.replayId, requestedPlayerId)
+    } else if (routeReplayId) {
+      replayApi.get(routeReplayId, requestedPlayerId, teacherReportFromQuery)
         .then(d => { setData(d); setLoading(false); })
         .catch(e => { setError(String(e)); setLoading(false); });
     } else {
       const replayId = replayIdFromRoute;
       if (replayId) {
-        replayApi.get(replayId, requestedPlayerId)
+        replayApi.get(replayId, requestedPlayerId, teacherReportFromQuery)
           .then(d => { setData(d); setLoading(false); })
           .catch(e => { setError(String(e)); setLoading(false); });
       } else {
@@ -78,7 +88,7 @@ export function GameBoardReplayPage() {
         setLoading(false);
       }
     }
-  }, [location, replayIdFromRoute, requestedPlayerId, routeState]);
+  }, [replayIdFromRoute, requestedPlayerId, routeReplayData, routeReplayId, teacherReportFromQuery]);
 
   useEffect(() => {
     if (!replayIdFromRoute) return;
@@ -100,6 +110,7 @@ export function GameBoardReplayPage() {
 
   const currentHasPostPhase = hasReplayPostAction(currentEntry);
   const currentHasReachPhase = hasReplayReachPhase(currentEntry);
+  const viewPlayerId = data?.player_id ?? 0;
 
   const isRedundantResponseStep = useCallback((step: number) => {
     if (!data || step <= 0 || step >= data.log.length) return false;
@@ -115,16 +126,42 @@ export function GameBoardReplayPage() {
 
   useEffect(() => {
     if (!data) return;
-    let targetStep = requestedFocusStep;
+    let targetStep = requestedStep ?? requestedFocusStep;
     if (targetStep === null && requestedFocusEventIndex !== null) {
       targetStep = data.log.findIndex((entry) => entry.source_event_index === requestedFocusEventIndex);
     }
     if (typeof targetStep === 'number' && targetStep >= 0) {
-      resetBoardPhase();
+      const targetPhase = requestedPhase ?? 'pre';
+      if (targetStep === currentStep && targetPhase === boardPhase) return;
+      if (requestedPhase) setBoardPhase(requestedPhase);
+      else resetBoardPhase();
       setShowOpponentHands(false);
       goToStep(targetStep);
     }
-  }, [data, requestedFocusEventIndex, requestedFocusStep, goToStep, resetBoardPhase]);
+  }, [
+    boardPhase,
+    currentStep,
+    data,
+    requestedFocusEventIndex,
+    requestedFocusStep,
+    requestedStep,
+    requestedPhase,
+    goToStep,
+    resetBoardPhase,
+  ]);
+
+  useEffect(() => {
+    if (!data || !replayIdFromRoute) return;
+    const nextParams = new URLSearchParams(location.search);
+    nextParams.set('id', replayIdFromRoute);
+    nextParams.set('player_id', String(viewPlayerId));
+    nextParams.set('step', String(currentStep));
+    nextParams.set('phase', boardPhase);
+    const nextSearch = `?${nextParams.toString()}`;
+    if (nextSearch !== location.search) {
+      navigate({ pathname: location.pathname, search: nextSearch }, { replace: true });
+    }
+  }, [boardPhase, currentStep, data, location.pathname, location.search, navigate, replayIdFromRoute, viewPlayerId]);
 
   const moveBoardStep = useCallback((direction: 1 | -1) => {
     if (!data || !currentEntry) return;
@@ -280,10 +317,14 @@ export function GameBoardReplayPage() {
   // 优先使用后端返回的真实玩家名，fallback 到 P0/P1/P2/P3
   const playerNames = normalizeReplayPlayerNames(data);
 
-  const viewPlayerId = data?.player_id ?? 0;
   const switchPerspective = (nextPid: number) => {
     if (!replayIdFromRoute) return;
-    navigate(`/game-replay?id=${encodeURIComponent(replayIdFromRoute)}&player_id=${nextPid}`);
+    const nextParams = new URLSearchParams(location.search);
+    nextParams.set('id', replayIdFromRoute);
+    nextParams.set('player_id', String(nextPid));
+    nextParams.set('step', String(currentStep));
+    nextParams.set('phase', boardPhase);
+    navigate(`/game-replay?${nextParams.toString()}`);
   };
 
   // 适配数据

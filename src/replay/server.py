@@ -164,6 +164,169 @@ def _merge_terminal_event_details(decisions: dict, events: list[dict] | None) ->
             entry["gt_action"] = {**entry["gt_action"], **event}
     return decisions
 
+
+def _resolve_optional_project_path(raw_path: str | None) -> Path | None:
+    if not raw_path or not raw_path.strip():
+        return None
+    project_root = BASE_DIR.parent.parent.resolve()
+    path = Path(raw_path.strip())
+    if not path.is_absolute():
+        path = project_root / path
+    path = path.resolve()
+    if path != project_root and project_root not in path.parents:
+        raise ValueError(f"path is outside project root: {raw_path}")
+    if not path.exists():
+        raise FileNotFoundError(path)
+    return path
+
+
+def _float_or_none(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _ranked_teacher_candidates(details: list[dict]) -> list[dict]:
+    ranked = []
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        action = detail.get("action")
+        if not isinstance(action, dict):
+            continue
+        ranked.append(
+            {
+                "action": action,
+                "q_value": _float_or_none(detail.get("q_value")),
+                "prob": _float_or_none(detail.get("prob")),
+            }
+        )
+    ranked.sort(
+        key=lambda item: (
+            item["prob"] if item["prob"] is not None else float("-inf"),
+            item["q_value"] if item["q_value"] is not None else float("-inf"),
+        ),
+        reverse=True,
+    )
+    for idx, item in enumerate(ranked, start=1):
+        item["rank"] = idx
+    return ranked
+
+
+def _attach_teacher_report_overlay(decisions: dict, report_path: Path | None) -> dict:
+    if report_path is None or not isinstance(decisions, dict):
+        return decisions
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    review = report.get("review", {}) if isinstance(report, dict) else {}
+    kyokus = review.get("kyokus", []) if isinstance(review, dict) else []
+    model_tag = review.get("model_tag") or report.get("engine") or "teacher"
+    report_player_id = report.get("player_id")
+    decision_player_id = decisions.get("player_id")
+    if (
+        report_player_id is not None
+        and decision_player_id is not None
+        and int(report_player_id) != int(decision_player_id)
+    ):
+        raise ValueError(
+            f"teacher report player_id {report_player_id} does not match replay player_id {decision_player_id}"
+        )
+
+    teacher_entries: list[dict] = []
+    for kyoku_index, kyoku in enumerate(kyokus):
+        for entry_index, entry in enumerate(kyoku.get("entries", [])):
+            candidates = _ranked_teacher_candidates(list(entry.get("details", [])))
+            teacher_entries.append(
+                {
+                    "model": model_tag,
+                    "report_path": str(report_path),
+                    "report_player_id": report_player_id,
+                    "kyoku_index": kyoku_index,
+                    "entry_index": entry_index,
+                    "junme": entry.get("junme"),
+                    "tiles_left": entry.get("tiles_left"),
+                    "shanten": entry.get("shanten"),
+                    "actual_action": entry.get("actual"),
+                    "expected_action": entry.get("expected"),
+                    "is_equal": entry.get("is_equal"),
+                    "candidates": candidates,
+                    "top1": candidates[0] if candidates else None,
+                    "top2": candidates[1] if len(candidates) > 1 else None,
+                }
+            )
+
+    try:
+        from inference.review import same_action
+    except Exception:
+        same_action = None
+
+    def _same_action(local_action, teacher_action) -> bool:
+        if same_action:
+            try:
+                return bool(same_action(local_action, teacher_action))
+            except Exception:
+                pass
+        return local_action == teacher_action
+
+    def _attach_to_entry(entry: dict, teacher_entry: dict) -> None:
+        entry["teacher_review"] = {
+            key: value
+            for key, value in teacher_entry.items()
+            if key != "candidates"
+        }
+        entry["teacher_review"]["candidate_count"] = len(teacher_entry["candidates"])
+
+        for candidate in entry.get("candidates", []):
+            if not isinstance(candidate, dict):
+                continue
+            local_action = candidate.get("action")
+            match = None
+            for teacher_candidate in teacher_entry["candidates"]:
+                if _same_action(local_action, teacher_candidate.get("action")):
+                    match = teacher_candidate
+                    break
+            if match:
+                candidate["teacher"] = {
+                    "model": model_tag,
+                    "q_value": match.get("q_value"),
+                    "prob": match.get("prob"),
+                    "rank": match.get("rank"),
+                }
+
+    own_entries = [
+        entry
+        for entry in decisions.get("log", [])
+        if isinstance(entry, dict) and not entry.get("is_obs")
+    ]
+    attached = 0
+    own_index = 0
+    for teacher_entry in teacher_entries:
+        actual_action = teacher_entry.get("actual_action")
+        expected_action = teacher_entry.get("expected_action")
+        while own_index < len(own_entries):
+            entry = own_entries[own_index]
+            own_index += 1
+            if _same_action(entry.get("gt_action"), actual_action) or _same_action(entry.get("chosen"), actual_action):
+                _attach_to_entry(entry, teacher_entry)
+                attached += 1
+                break
+            if actual_action is None and _same_action(entry.get("gt_action"), expected_action):
+                _attach_to_entry(entry, teacher_entry)
+                attached += 1
+                break
+
+    decisions["teacher_review_overlay"] = {
+        "model": model_tag,
+        "report_path": str(report_path),
+        "report_player_id": report_player_id,
+        "teacher_decision_count": len(teacher_entries),
+        "attached_decision_count": attached,
+        "alignment": "actual_action_order",
+    }
+    return decisions
+
 def _infer_player_bot_type(player_name: str | None, fallback: str | None = None) -> str:
     raw = (player_name or "").lower()
     if "weak_mortal" in raw or "weak mortal" in raw:
@@ -491,7 +654,11 @@ async def list_replays():
 
 
 @app.get("/api/replay/{replay_id}", response_class=JSONResponse)
-async def get_replay(replay_id: str, player_id: int | None = None):
+async def get_replay(
+    replay_id: str,
+    player_id: int | None = None,
+    teacher_report: str | None = None,
+):
     """获取回放完整数据（decisions）。"""
     storage = get_storage()
     decisions = storage.load_decisions(replay_id)
@@ -526,6 +693,16 @@ async def get_replay(replay_id: str, player_id: int | None = None):
     if isinstance(decisions, dict):
         decisions = normalize_replay_decisions(decisions, meta=meta)
         decisions = _merge_terminal_event_details(decisions, events)
+        try:
+            decisions = _attach_teacher_report_overlay(
+                decisions,
+                _resolve_optional_project_path(teacher_report),
+            )
+        except Exception as e:
+            decisions["teacher_review_overlay"] = {
+                "error": str(e),
+                "report_path": teacher_report,
+            }
     return JSONResponse(content=_json_safe(decisions))
 
 

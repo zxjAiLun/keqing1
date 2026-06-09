@@ -38,10 +38,19 @@ function displayProbLabel(probability: number): string {
   return `${(probability * 100).toFixed(1)}%`;
 }
 
+function displayOptionalScore(value: number | null | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '—';
+}
+
+function displayOptionalProb(value: number | null | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? displayProbLabel(value) : '—';
+}
+
 function ensureVisibleCandidates(
   candidates: DecisionLogEntry['candidates'],
   chosen: DecisionLogEntry['chosen'],
   gtAction: DecisionLogEntry['gt_action'],
+  teacherReview?: DecisionLogEntry['teacher_review'],
   limit = 12,
 ): DecisionLogEntry['candidates'] {
   const sorted = [...candidates].sort((a, b) => displayScore(b) - displayScore(a));
@@ -59,6 +68,8 @@ function ensureVisibleCandidates(
 
   ensureAction(chosen);
   ensureAction(gtAction);
+  ensureAction(teacherReview?.expected_action ?? teacherReview?.top1?.action ?? null);
+  ensureAction(teacherReview?.top2?.action ?? null);
 
   return visible.sort((a, b) => displayScore(b) - displayScore(a));
 }
@@ -125,8 +136,13 @@ export function ReplayDecisionPanel({
 
   const { chosen, gt_action, candidates } = entry;
 
-  // 按显示分值降序排序；即使超出前 12，也强制展示 Bot 选择和实际动作。
-  const sorted = ensureVisibleCandidates(candidates, chosen, gt_action, 12);
+  const teacherReview = entry.teacher_review;
+  const teacherModel = teacherReview?.model ?? 'Teacher';
+  const teacherExpected = teacherReview?.expected_action ?? teacherReview?.top1?.action ?? null;
+  const hasTeacherReview = Boolean(teacherReview);
+
+  // 按显示分值降序排序；即使超出前 12，也强制展示 Bot、实际动作和 teacher 前排动作。
+  const sorted = ensureVisibleCandidates(candidates, chosen, gt_action, teacherReview, 12);
 
   const fallbackProbs = softmaxProbabilities(candidates.map((candidate) => displayScore(candidate)));
   const fallbackProbByCandidate = new Map<DecisionLogEntry['candidates'][number], number>(
@@ -170,6 +186,17 @@ export function ReplayDecisionPanel({
               {gt_action ? actionLabel(gt_action) : '—'}
             </span>
           </div>
+          {hasTeacherReview && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={badgeStyle('#f39c12')}>{teacherModel}</span>
+              <span style={{ fontSize: 13, fontWeight: 600, color: '#d68910', fontFamily: 'Menlo, monospace' }}>
+                {teacherExpected ? actionLabel(teacherExpected) : '—'}
+              </span>
+              {teacherReview?.candidate_count !== undefined && (
+                <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{teacherReview.candidate_count}候选</span>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -187,7 +214,8 @@ export function ReplayDecisionPanel({
         {/* 表头 */}
         <div style={tableHeaderStyle}>
           <div style={{ width: COL1_W }}>牌名</div>
-          <div style={{ flex: 1 }}>权重</div>
+          <div style={{ flex: 1 }}>本地</div>
+          {hasTeacherReview && <div style={{ width: 58, textAlign: 'right' }}>{teacherModel}</div>}
         </div>
 
         {/* 行 */}
@@ -195,17 +223,21 @@ export function ReplayDecisionPanel({
           {sorted.map((c, idx) => {
             const isChosen = sameReplayAction(c.action, chosen);
             const isGt = sameReplayAction(c.action, gt_action);
+            const isTeacher = teacherExpected ? sameReplayAction(c.action, teacherExpected) : false;
             const probability = probabilityOf(c);
             const pct = Math.max(8, Math.round(probability * 100));
+            const teacher = c.teacher;
 
             const barColor = isChosen && isGt ? '#8e44ad'
               : isChosen ? '#e74c3c'
               : isGt ? '#27ae60'
+              : isTeacher ? '#f39c12'
               : 'var(--accent)';
 
             const rowBg = isChosen && isGt ? 'rgba(142,68,173,0.08)'
               : isChosen ? 'rgba(231,76,60,0.07)'
               : isGt ? 'rgba(39,174,96,0.07)'
+              : isTeacher ? 'rgba(243,156,18,0.07)'
               : idx % 2 === 0 ? 'transparent' : 'rgba(0,0,0,0.02)';
 
             return (
@@ -219,16 +251,17 @@ export function ReplayDecisionPanel({
                 <div style={{
                   width: COL1_W, flexShrink: 0,
                   fontSize: 12, fontFamily: 'Menlo, monospace',
-                  fontWeight: isChosen || isGt ? 700 : 400,
+                  fontWeight: isChosen || isGt || isTeacher ? 700 : 400,
                   color: barColor,
                   display: 'flex', alignItems: 'center', gap: 3,
                 }}>
                   {shortLabel(c.action)}
                   {isChosen && <span style={{ fontSize: 9, color: '#e74c3c' }}>★</span>}
                   {isGt && !isChosen && <span style={{ fontSize: 9, color: '#27ae60' }}>●</span>}
+                  {isTeacher && <span style={{ fontSize: 9, color: '#d68910' }}>T</span>}
                 </div>
 
-                {/* 第二列：柱状图 + 数值 */}
+                {/* 第二列：本地模型柱状图 + 数值 */}
                 <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 4 }}>
                   <div style={{ flex: 1, height: 10, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
                     <div style={{
@@ -241,13 +274,28 @@ export function ReplayDecisionPanel({
                   <div style={{
                     width: 52, textAlign: 'right', flexShrink: 0,
                     fontSize: 11, fontFamily: 'Menlo, monospace',
-                    color: isChosen || isGt ? barColor : 'var(--text-muted)',
-                    fontWeight: isChosen || isGt ? 700 : 400,
+                    color: isChosen || isGt || isTeacher ? barColor : 'var(--text-muted)',
+                    fontWeight: isChosen || isGt || isTeacher ? 700 : 400,
                   }}>
                     <div>{displayScoreLabel(c)}</div>
                     <div style={{ fontSize: 10, opacity: 0.78 }}>P {displayProbLabel(probability)}</div>
                   </div>
                 </div>
+
+                {hasTeacherReview && (
+                  <div style={{
+                    width: 58,
+                    textAlign: 'right',
+                    flexShrink: 0,
+                    fontSize: 11,
+                    fontFamily: 'Menlo, monospace',
+                    color: teacher ? (isTeacher ? '#d68910' : 'var(--text-muted)') : 'rgba(127,127,127,0.48)',
+                    fontWeight: isTeacher ? 700 : 400,
+                  }}>
+                    <div>{displayOptionalScore(teacher?.q_value)}</div>
+                    <div style={{ fontSize: 10, opacity: 0.78 }}>P {displayOptionalProb(teacher?.prob)}</div>
+                  </div>
+                )}
               </div>
             );
           })}

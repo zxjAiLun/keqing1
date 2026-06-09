@@ -6,6 +6,21 @@ Phase R introduces official Mortal reviewer output as a sparse black-box teacher
 
 This is not weight distillation. The reviewer only gives preferences on states that appear in a full game log, and its detail table should be treated as action preference metadata rather than a precise value oracle.
 
+## Current R-Series Conclusions
+
+Current read as of 2026-06-09:
+
+- R0 validated the local conversion path from arena mjai JSONL to `tenhou.net/6` JSON and back through mjai-reviewer convlog. The prepared five-input smoke set is usable, and target-player handling is correct for rotated challenger seats.
+- R0 external smoke confirmed that official Mortal reviewer JSON is archiveable and parseable. The useful fields are `review.kyokus[].entries[].actual`, `expected`, and `details[].{action,q_value,prob}`.
+- R1 parser smoke is sufficient for sparse preference labeling: it extracts decision tables, high-confidence disagreements, teacher top-1/top-2 margins, and aligned `3.0`/`4.1b` comparisons.
+- On the first smoke hanchan, local `model_v4`-generated action choices look much closer to reviewer `3.0` than to `4.1b`: `3.0` matched 113/119 decisions, while `4.1b` matched 96/119.
+- The first browser-assisted `4.1b` expansion on source index 1 parsed 118 decisions, with 102 matches, 16 mismatches, and 13 high-confidence disagreements. This is consistent with `4.1b` being a stronger correction source rather than a drop-in imitation target.
+- Most high-confidence `4.1b` disagreements in the current two-report sample are discard-choice corrections, with only one call-family correction per parsed report. That makes the first reviewer correction set more about discard preference than fuuro policy.
+- Direct cURL replay is not a reliable submission path because Turnstile responses expire or are single-use. Browser-assisted form fill plus immediate archive is the current working R1.5 route.
+- Reviewer `4.1b` should remain a sparse black-box labeler for high-confidence disagreements. It should not be treated as a bulk selfplay generator or a raw-Q regression teacher.
+
+Practical implication: use R-series output to build a small `4.1b` high-confidence disagreement correction/evaluation set, especially for GUI side-by-side review against local weights. Do not start a large reviewer-driven training run until more browser-assisted reports are archived and parsed across multiple source logs/seats.
+
 ## External Constraints
 
 The reviewer Custom log input expects `tenhou.net/6` JSON. For custom logs, target player must be specified explicitly. Mortal reviewer supports four-player standard games, and only hanchan games are supported for the Mortal engine.
@@ -249,9 +264,9 @@ Near-term T-series priorities:
 
 1. Freeze T1@71000 as the positive reference student.
 2. Compare T1 against `80k_game` as needed; current 1000h evidence is near parity.
-3. Run behavior readout for `70k`, `80k_game`, `T1@71000`, and `model_v4`.
-4. Try `T1b_teacher_ce_005` before higher teacher CE weights.
-5. Try `T1c_teacher_ce_02` only after T1b/readout clarifies whether T1 is over- or under-imitation.
+3. Run behavior readout for `70k`, `80k_game`, `T1@71000`, and `model_v4`. Done at `artifacts/experiments/teacher_transfer_2026_05/behavior_readout_four_model_100h/readout/`.
+4. Try `T1b_teacher_ce_005` before higher teacher CE weights. Done; `T1b@71000` is at `artifacts/experiments/teacher_transfer_2026_05/T1b_teacher_ce_005/mortal.pth`.
+5. Keep `T1c_teacher_ce_02` paused unless T1b/readout evidence suggests stronger imitation is needed.
 
 Concrete variant preparation commands:
 
@@ -268,6 +283,60 @@ uv run python scripts/mortal/prepare_teacher_replay_transfer.py \
 ```
 
 Run `T1b_teacher_ce_005` first. Do not start `T1c_teacher_ce_02` until T1b and the behavior readout indicate that stronger imitation is still plausible.
+
+### T1/T1b Behavior Readout
+
+The first four-model behavior readout used a same-table 100h arena with `70k`, `80k_game`, `T1@71000`, and `model_v4`.
+
+Artifact: `artifacts/experiments/teacher_transfer_2026_05/behavior_readout_four_model_100h/readout/behavior_readout.md`
+
+| Metric | `70k` | `80k_game` | `T1@71000` | `model_v4` |
+| --- | ---: | ---: | ---: | ---: |
+| Agari | 21.81% | 21.62% | 23.86% | 20.16% |
+| Dealin | 15.77% | 13.44% | 11.78% | 12.17% |
+| Fuuro rate | 31.65% | 29.89% | 27.56% | 29.70% |
+| Riichi rate | 19.28% | 21.32% | 19.08% | 19.77% |
+| After-fuuro agari | 32.31% | 29.32% | 37.81% | 31.15% |
+| After-fuuro dealin | 17.23% | 16.61% | 13.78% | 16.07% |
+| After-riichi agari | 48.48% | 51.60% | 54.08% | 45.81% |
+| After-riichi dealin | 20.71% | 15.53% | 10.20% | 13.79% |
+| Avg winning delta score | 6634.4 | 6909.0 | 6953.1 | 6492.8 |
+| Avg open winning delta score | 4831.4 | 4907.8 | 4769.2 | 4296.8 |
+| Avg call delta score | 113.8 | 126.7 | 592.9 | 193.4 |
+
+T1 does not look like a simple aggressive imitation of `80k_game`: it calls less than all three references in this readout, has the lowest deal-in rate, and has the strongest after-fuuro / after-riichi outcome balance. Its mean absolute rate gap is almost identical to `80k_game` and `model_v4` in this 100h readout (`3.45pp` vs `3.46pp`), so the readout does not prove that T1 is stylistically closer to either one.
+
+T1b used `teacher_ce_weight = 0.05`, trained from the same 70k parent to step 71000, then received a 100h behavior readout.
+
+Artifacts:
+
+- `artifacts/experiments/teacher_transfer_2026_05/T1b_teacher_ce_005/manifest.json`
+- `artifacts/experiments/teacher_transfer_2026_05/behavior_readout_four_model_T1b_100h/readout/behavior_readout.md`
+- `artifacts/experiments/teacher_transfer_2026_05/T1b_teacher_ce_005/gate_1000h_chunked/Gate_T1b_vs_70k/aggregated_metrics.json`
+
+| Metric | `70k` | `80k_game` | `T1b@71000` | `model_v4` |
+| --- | ---: | ---: | ---: | ---: |
+| Agari | 22.67% | 19.72% | 22.86% | 23.23% |
+| Dealin | 12.72% | 15.67% | 12.72% | 11.06% |
+| Fuuro rate | 31.06% | 33.92% | 25.90% | 29.12% |
+| Riichi rate | 18.06% | 19.72% | 22.30% | 19.08% |
+| After-fuuro agari | 34.42% | 27.72% | 37.37% | 33.23% |
+| After-fuuro dealin | 14.54% | 16.85% | 13.17% | 10.13% |
+| After-riichi agari | 49.49% | 40.65% | 49.17% | 53.62% |
+| After-riichi dealin | 15.82% | 16.36% | 16.94% | 15.46% |
+| Avg winning delta score | 6424.0 | 6211.7 | 6309.7 | 6635.7 |
+| Avg open winning delta score | 4325.9 | 4702.0 | 4416.2 | 4495.2 |
+| Avg call delta score | 393.2 | 74.2 | 582.6 | 446.5 |
+
+T1b did not show an obvious behavior crash in the 100h readout: call frequency stayed lower than the references, deal-in matched 70k and stayed below 80k, and after-fuuro outcomes remained good. The 1000h challenger gate against 70k was only mildly positive:
+
+| Gate | Games | Rank counts | Tenhou avg pt |
+| --- | ---: | --- | ---: |
+| `T1b@71000 vs 3x70k`, chunked | 1000 | `[278, 229, 238, 255]` | +0.900 |
+| `T1@71000 vs 3x70k`, earlier 1000h screen | 1000 | `[262, 246, 250, 242]` | +1.980 |
+| `T1@71000 vs 3x70k`, final | 5000 | `[1331, 1239, 1157, 1273]` | +0.738 |
+
+Interpretation: `teacher_ce_weight = 0.05` preserves a weak positive transfer signal, but this screen does not show it is better than the original `0.1`. Do not start `T1c_teacher_ce_02` from this evidence alone; if expanding T1b, treat it as a confirmation run, not as a promotion path.
 
 Useful follow-up data mixtures after the first smoke:
 
@@ -352,3 +421,76 @@ PYTHONPATH=src uv run python scripts/mortal/submit_reviewer_teacher_probe.py \
 Then run without `--dry-run`. If the captured Turnstile response is expired or single-use, the script will record a clear `reviewer submit failed captcha validation` failure in `submit_manifest.jsonl`; in that case, switch to browser-driven submission rather than trying to reuse stale tokens.
 
 Chrome on Windows may copy cURL in `cmd.exe` form with `^"` and line-continuation `^` characters. The submitter normalizes that form before parsing, so both bash-style and Windows cmd-style Copy-as-cURL are acceptable for dry-run validation.
+
+Current R1.5 status as of 2026-06-09:
+
+- A browser-captured `/review` POST cURL was saved locally as `artifacts/experiments/reviewer_teacher_probe_2026_05/reviewer_submit.curl`.
+- Dry-run validation passed for `--source-index 0 --limit 1 --networks 4.1b`: the submitter parsed 14 form fields and found a captcha response.
+- Real-submit smoke attempts for `--source-index 1 --limit 1 --networks 4.1b` failed with `reviewer submit failed captcha validation; capture a fresh browser submit cURL`. This means the captured Turnstile token is expired or single-use, not that the submitter failed to parse the request.
+- The new preferred route is browser-assisted submission, not cURL replay.
+- Existing smoke reports remain parseable. A current parser resmoke against `R0_external_smoke/report_manifest.jsonl` wrote `artifacts/experiments/reviewer_teacher_probe_2026_05/R1_parser_resmoke_20260604/`.
+- The parser resmoke produced 238 decisions total and 119 aligned entries. For `4.1b`, it parsed 119 decisions, 96 matches, 23 mismatches, and 12 high-confidence disagreements.
+
+### R1.5 Browser-Assisted Submission
+
+Prepare browser tasks:
+
+```bash
+uv run python scripts/mortal/prepare_reviewer_browser_batch.py \
+  --input-manifest artifacts/experiments/reviewer_teacher_probe_2026_05/R0_reviewer_input_smoke/manifest.jsonl \
+  --output-dir artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_browser_batch \
+  --source-index 1 \
+  --limit 1 \
+  --networks 4.1b
+```
+
+This writes:
+
+```text
+artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_browser_batch/browser_tasks/browser_batch.html
+artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_browser_batch/browser_tasks/browser_tasks.jsonl
+artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_browser_batch/browser_tasks/fill_scripts/*.js
+```
+
+Manual browser flow:
+
+1. Open `browser_batch.html`.
+2. Open `https://mjai.ekyu.moe/`.
+3. Click `Copy fill JS` for one pending task.
+4. Paste the JS into DevTools Console on the mjai page. It fills the real review form with the task's Tenhou6 JSON, target player, and Mortal network.
+5. Complete Turnstile if shown and submit in the browser.
+6. Copy the resulting report URL.
+7. Run the task's archive command, replacing `REPORT_URL_OR_ID` with the report URL.
+
+Example archive command:
+
+```bash
+uv run python scripts/mortal/archive_reviewer_browser_batch.py \
+  --tasks artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_browser_batch/browser_tasks/browser_tasks.jsonl \
+  --task-index 0 \
+  --output-dir artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_browser_batch \
+  --report REPORT_URL_OR_ID
+```
+
+Then parse the browser-batch report manifest:
+
+```bash
+uv run python scripts/mortal/parse_reviewer_teacher_reports.py \
+  --report-manifest artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_browser_batch/report_manifest.jsonl \
+  --output-dir artifacts/experiments/reviewer_teacher_probe_2026_05/R1_browser_batch_parse
+```
+
+Current browser-assisted result:
+
+| Source | Network | Report id | Target player | Decisions | Matches | Mismatches | High-conf disagreements | Mean actual prob |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `0002_320000_8192_b` | `4.1b` | `8b2e56f7d0ca12d8` | 1 | 118 | 102 | 16 | 13 | 0.8244 |
+
+Artifacts:
+
+- Report manifest: `artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_browser_batch/report_manifest.jsonl`
+- Archived report: `artifacts/experiments/reviewer_teacher_probe_2026_05/R0_external_browser_batch/reports/0002_320000_8192_b__4.1b__p1.json`
+- Parser summary: `artifacts/experiments/reviewer_teacher_probe_2026_05/R1_browser_batch_parse/summary.json`
+- High-confidence disagreement list: `artifacts/experiments/reviewer_teacher_probe_2026_05/R1_browser_batch_parse/top_disagreements.jsonl`
+
+Read: browser-assisted submission/archive works. The first expanded `4.1b` report has a similar disagreement profile to the initial `4.1b` smoke: most high-confidence corrections are discard choices, with one call-family correction. This supports using `4.1b` first as a reviewer overlay and curated correction set, not as a broad raw-Q target.

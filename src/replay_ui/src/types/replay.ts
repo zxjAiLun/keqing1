@@ -68,6 +68,30 @@ export interface KyokuInfo {
   honba: number;
 }
 
+export interface TeacherCandidateValue {
+  model: string;
+  q_value?: number | null;
+  prob?: number | null;
+  rank?: number | null;
+}
+
+export interface TeacherReviewEntry {
+  model: string;
+  report_path: string;
+  report_player_id?: number | null;
+  kyoku_index: number;
+  entry_index: number;
+  junme?: number | null;
+  tiles_left?: number | null;
+  shanten?: number | null;
+  actual_action?: Action | null;
+  expected_action?: Action | null;
+  is_equal?: boolean | null;
+  top1?: { action: Action; q_value?: number | null; prob?: number | null; rank?: number | null } | null;
+  top2?: { action: Action; q_value?: number | null; prob?: number | null; rank?: number | null } | null;
+  candidate_count?: number;
+}
+
 /** /api/replay 返回的 decision_log 条目结构 */
 export interface DecisionLogEntry {
   step: number;
@@ -89,7 +113,14 @@ export interface DecisionLogEntry {
   /** 当前视角 Bot 的决策（obs 步为他家实际动作） */
   chosen: Action;
   /** 所有合法动作候选；prob 为 Q value 按 tau=1 softmax 后的概率，旧版本回放前端会补算 */
-  candidates: Array<{ action: Action; logit: number; beam_score?: number; final_score?: number; prob?: number }>;
+  candidates: Array<{
+    action: Action;
+    logit: number;
+    beam_score?: number;
+    final_score?: number;
+    prob?: number;
+    teacher?: TeacherCandidateValue;
+  }>;
   /** 当前视角 Bot 的 value loss 预测 */
   value?: number;
   /** ground truth：玩家实际动作 */
@@ -102,6 +133,8 @@ export interface DecisionLogEntry {
   source_event_index?: number;
   /** 供前端按小局过滤 */
   kyoku_key: KyokuInfo;
+  /** 可选 reviewer teacher overlay，例如 Mortal 4.1b 的 q/prob。 */
+  teacher_review?: TeacherReviewEntry;
 }
 
 export interface ReplayData {
@@ -114,6 +147,15 @@ export interface ReplayData {
   player_id: number;
   player_names?: string[];
   bot_type?: BotType;
+  teacher_review_overlay?: {
+    model?: string;
+    report_path?: string;
+    report_player_id?: number | null;
+    teacher_decision_count?: number;
+    attached_decision_count?: number;
+    alignment?: string;
+    error?: string;
+  };
 }
 
 export interface ReplayMeta {

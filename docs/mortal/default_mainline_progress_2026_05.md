@@ -74,6 +74,24 @@ Interpretation:
 - `model_v4` remains the practical stronger model and teacher/reference.
 - The next research questions are teacher CE strength, behavior readout, and teacher data distribution, not whether T1 replaces model_v4.
 
+## T1b Teacher CE 0.05 Screen
+
+T1b tests whether weaker teacher CE keeps the T1 benefit while reducing possible over-imitation. It uses the same 70k parent and teacher replay pool as T1, with `teacher_ce_weight = 0.05`, and trains to step 71000.
+
+Artifacts:
+
+- Config/manifest/checkpoint: `artifacts/experiments/teacher_transfer_2026_05/T1b_teacher_ce_005/`
+- T1 four-model behavior readout: `artifacts/experiments/teacher_transfer_2026_05/behavior_readout_four_model_100h/readout/behavior_readout.md`
+- T1b four-model behavior readout: `artifacts/experiments/teacher_transfer_2026_05/behavior_readout_four_model_T1b_100h/readout/behavior_readout.md`
+- T1b 1000h gate: `artifacts/experiments/teacher_transfer_2026_05/T1b_teacher_ce_005/gate_1000h_chunked/Gate_T1b_vs_70k/aggregated_metrics.json`
+
+| Checkpoint | Behavior readout | Gate vs 70k | Current read |
+| --- | --- | ---: | --- |
+| `T1@71000` | Lower deal-in, lower true fuuro than 70k/80k, strong after-fuuro and after-riichi outcomes | +0.738 over final 5000h; +1.980 in earlier 1000h screen | Positive reference student |
+| `T1b@71000` | No obvious behavior crash; true fuuro 25.90%, deal-in 12.72%, after-fuuro agari 37.37% | +0.900 over chunked 1000h | Weak positive, not clearly better than T1 |
+
+Interpretation: lowering teacher CE from 0.1 to 0.05 does not obviously damage behavior, but it also does not show a clear improvement over T1. Keep `T1c_teacher_ce_02` paused unless separate evidence shows the student is still under-imitation.
+
 ## Gate Setup
 
 Both gates use `scripts/mortal/one_vs_three_smoke.py`, 250 seed blocks, 4 seat rotations per block, and therefore 1000 half-games. Rank point reporting should use Tenhou reference `[90,45,0,-135]` for readability; the `mortal_default` training point table `[6,4,2,0]` is only the training reward scalarization.

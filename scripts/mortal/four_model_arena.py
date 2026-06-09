@@ -28,7 +28,7 @@ from scripts.mortal.eval_metrics import (
 )
 from src.tools.mjai_jsonl_to_tenhou6 import convert_mjai_jsonl_to_tenhou6
 
-MODELS = {
+DEFAULT_MODELS = {
     "70k": "artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth",
     "80k_game": "artifacts/mortal_training/checkpoints/mortal_default_80k_rejected_gate.pth",
     "O3_80k": "artifacts/experiments/online_phase2_2026_05/O3_70k_online_keep_optimizer_cql5/mortal.pth",
@@ -38,7 +38,6 @@ MODELS = {
 MORTAL_ROOT = Path("third_party/Mortal")
 GAME_MODE = "4p-red-half"
 
-MODEL_LABELS = list(MODELS.keys())
 BASIC_STAT_KEYS = (
     "seat_games",
     "rounds",
@@ -58,6 +57,36 @@ def _random_assignment(seed: int):
     return labels
 
 
+MODELS = dict(DEFAULT_MODELS)
+MODEL_LABELS = list(MODELS.keys())
+
+
+def _parse_model_specs(specs: Sequence[str] | None) -> dict[str, str]:
+    if not specs:
+        return dict(DEFAULT_MODELS)
+    models: dict[str, str] = {}
+    for spec in specs:
+        if "=" not in spec:
+            raise ValueError(f"--model must be LABEL=PATH, got: {spec}")
+        label, path = spec.split("=", 1)
+        label = label.strip()
+        path = path.strip()
+        if not label or not path:
+            raise ValueError(f"--model must be LABEL=PATH, got: {spec}")
+        if label in models:
+            raise ValueError(f"duplicate model label: {label}")
+        models[label] = path
+    if len(models) != 4:
+        raise ValueError(f"four_model_arena requires exactly 4 models, got {len(models)}")
+    return models
+
+
+def _set_models(models: Mapping[str, str]) -> None:
+    global MODELS, MODEL_LABELS
+    MODELS = dict(models)
+    MODEL_LABELS = list(MODELS.keys())
+
+
 def _parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--games", type=int, default=250, help="number of half-games to play")
@@ -67,6 +96,11 @@ def _parse_args():
     p.add_argument("--max-steps", type=int, default=10000)
     p.add_argument("--progress-interval", type=int, default=10)
     p.add_argument("--no-resume", action="store_true", help="ignore existing results.jsonl and start from game 0")
+    p.add_argument(
+        "--model",
+        action="append",
+        help="Model spec LABEL=PATH. Repeat exactly four times. Defaults to 70k/80k_game/O3_80k/v4.",
+    )
     add_rank_point_args(p)
     return p.parse_args()
 
@@ -366,6 +400,7 @@ def _print_timing_summary(results: Sequence[Mapping[str, Any]]) -> None:
 
 
 def run(args):
+    _set_models(_parse_model_specs(getattr(args, "model", None)))
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "replays").mkdir(exist_ok=True)
