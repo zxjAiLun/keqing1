@@ -23,7 +23,10 @@ def _with_default_title(payload: dict[str, Any]) -> dict[str, Any]:
 def _naga_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = _with_default_title(payload)
     rule = dict(normalized.get("rule") or {})
-    rule.pop("aka", None)
+    rule.pop("aka51", None)
+    rule.pop("aka52", None)
+    rule.pop("aka53", None)
+    rule.setdefault("aka", 1)
     if "disp" in rule and isinstance(rule["disp"], str):
         rule["disp"] = rule["disp"].replace(" ", "")
     return {**normalized, "rule": rule}

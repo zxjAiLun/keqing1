@@ -8,6 +8,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import time
 from typing import Any
 
 import torch
@@ -36,6 +37,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed-start", type=int, default=10000)
     parser.add_argument("--seed-key", type=int, default=0x2000)
     parser.add_argument("--seed-count", type=int, default=1, help="1 seed produces 4 hanchans")
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=0,
+        help="emit stderr progress every N seeds; 0 runs the native arena in one batch",
+    )
     parser.add_argument("--enable-amp", action="store_true")
     parser.add_argument("--challenger-label", default="challenger (x1)")
     parser.add_argument("--champion-label", default="champion (x3)")
@@ -110,14 +117,49 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     env = OneVsThree(disable_progress_bar=True, log_dir=str(log_dir))
-    rank_counts = list(
-        env.py_vs_py(
-            challenger=challenger,
-            champion=champion,
-            seed_start=(int(args.seed_start), int(args.seed_key)),
-            seed_count=int(args.seed_count),
+    total_seeds = int(args.seed_count)
+    progress_every = int(getattr(args, "progress_every", 0) or 0)
+    batch_size = total_seeds if progress_every <= 0 else max(1, progress_every)
+    rank_counts = [0, 0, 0, 0]
+    started_at = time.monotonic()
+    completed = 0
+    while completed < total_seeds:
+        count = min(batch_size, total_seeds - completed)
+        batch_seed_start = int(args.seed_start) + completed
+        if progress_every > 0:
+            print(
+                (
+                    f"[one_vs_three] seeds {completed + 1}-{completed + count}/"
+                    f"{total_seeds} start={batch_seed_start} device={args.device}"
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+        batch_rank_counts = list(
+            env.py_vs_py(
+                challenger=challenger,
+                champion=champion,
+                seed_start=(batch_seed_start, int(args.seed_key)),
+                seed_count=count,
+            )
         )
-    )
+        for i, value in enumerate(batch_rank_counts):
+            rank_counts[i] += int(value)
+        completed += count
+        if progress_every > 0:
+            elapsed = time.monotonic() - started_at
+            seeds_per_sec = completed / elapsed if elapsed > 0 else 0.0
+            remaining = (total_seeds - completed) / seeds_per_sec if seeds_per_sec > 0 else 0.0
+            print(
+                (
+                    f"[one_vs_three] completed {completed}/{total_seeds} seeds "
+                    f"({completed * 4}/{total_seeds * 4} games), "
+                    f"elapsed={elapsed:.1f}s eta={remaining:.1f}s "
+                    f"rank_counts={rank_counts}"
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
     document = build_metrics_document(
         run={
             "kind": "one_vs_three_smoke",

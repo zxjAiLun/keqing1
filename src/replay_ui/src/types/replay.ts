@@ -75,6 +75,16 @@ export interface TeacherCandidateValue {
   rank?: number | null;
 }
 
+export interface TeacherReviewOverlay {
+  model?: string;
+  report_path?: string;
+  report_player_id?: number | null;
+  teacher_decision_count?: number;
+  attached_decision_count?: number;
+  alignment?: string;
+  error?: string;
+}
+
 export interface TeacherReviewEntry {
   model: string;
   report_path: string;
@@ -87,6 +97,11 @@ export interface TeacherReviewEntry {
   actual_action?: Action | null;
   expected_action?: Action | null;
   is_equal?: boolean | null;
+  actual_q?: number | null;
+  expected_q?: number | null;
+  best_q?: number | null;
+  best_prob?: number | null;
+  q_loss?: number | null;
   top1?: { action: Action; q_value?: number | null; prob?: number | null; rank?: number | null } | null;
   top2?: { action: Action; q_value?: number | null; prob?: number | null; rank?: number | null } | null;
   candidate_count?: number;
@@ -119,6 +134,7 @@ export interface DecisionLogEntry {
     beam_score?: number;
     final_score?: number;
     prob?: number;
+    teachers?: TeacherCandidateValue[];
     teacher?: TeacherCandidateValue;
   }>;
   /** 当前视角 Bot 的 value loss 预测 */
@@ -133,7 +149,9 @@ export interface DecisionLogEntry {
   source_event_index?: number;
   /** 供前端按小局过滤 */
   kyoku_key: KyokuInfo;
-  /** 可选 reviewer teacher overlay，例如 Mortal 4.1b 的 q/prob。 */
+  /** 多个 reviewer teacher overlay，例如 Mortal 3.0 / 4.1b 的 q/prob。 */
+  teacher_reviews?: TeacherReviewEntry[];
+  /** 可选 reviewer teacher overlay，例如 Mortal 4.1b 的 q/prob。兼容旧字段。 */
   teacher_review?: TeacherReviewEntry;
 }
 
@@ -147,15 +165,15 @@ export interface ReplayData {
   player_id: number;
   player_names?: string[];
   bot_type?: BotType;
-  teacher_review_overlay?: {
-    model?: string;
-    report_path?: string;
-    report_player_id?: number | null;
-    teacher_decision_count?: number;
-    attached_decision_count?: number;
-    alignment?: string;
-    error?: string;
-  };
+  model_label?: string;
+  teacher_report_paths?: string[];
+  selected_teacher_models?: Array<{
+    type: BotType;
+    label: string;
+    checkpoint: string;
+  }>;
+  teacher_review_overlays?: TeacherReviewOverlay[];
+  teacher_review_overlay?: TeacherReviewOverlay;
 }
 
 export interface ReplayMeta {

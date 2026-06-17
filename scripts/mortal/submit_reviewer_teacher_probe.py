@@ -98,6 +98,8 @@ def normalize_curl_command(command: str) -> str:
     stripped = command.strip()
     if not stripped:
         return stripped
+    stripped = stripped.replace("\\\r\n", " ")
+    stripped = stripped.replace("\\\n", " ")
     # Chrome on Windows often copies cmd.exe syntax:
     #   curl ^"https://...^" ^
     #     -H ^"accept: */*^" ^

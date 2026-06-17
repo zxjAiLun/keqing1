@@ -218,6 +218,17 @@ type ReplayDecisionLike = {
   chosen?: ComparableAction | null;
   gt_action?: ComparableAction | null;
   candidates?: Array<{ action?: ComparableAction | null }>;
+  teacher_review?: TeacherReviewLike | null;
+  teacher_reviews?: TeacherReviewLike[];
+};
+
+type TeacherReviewLike = {
+  model?: string | null;
+  actual_action?: ComparableAction | null;
+  expected_action?: ComparableAction | null;
+  is_equal?: boolean | null;
+  q_loss?: number | null;
+  top1?: { action?: ComparableAction | null } | null;
 };
 
 function actionBelongsToPlayer(action: ComparableAction | null | undefined, playerId: number): boolean {
@@ -239,4 +250,34 @@ export function isReplayDiffForPlayer(entry: ReplayDecisionLike, playerId: numbe
     entry.gt_action !== undefined &&
     !sameReplayAction(entry.chosen, entry.gt_action)
   );
+}
+
+export function isReplayReviewDiffForPlayer(
+  entry: ReplayDecisionLike,
+  playerId: number,
+  activeTeacherModel?: string | null,
+): boolean {
+  if (!isReplayPlayerDecision(entry, playerId)) return false;
+
+  const teacherReviews = entry.teacher_reviews && entry.teacher_reviews.length > 0
+    ? entry.teacher_reviews
+    : entry.teacher_review ? [entry.teacher_review] : [];
+  if (teacherReviews.length === 0) {
+    return isReplayDiffForPlayer(entry, playerId);
+  }
+
+  const review = activeTeacherModel
+    ? teacherReviews.find((item) => item.model === activeTeacherModel) ?? teacherReviews[0]
+    : teacherReviews[0];
+  if (!review) return false;
+  if (review.is_equal === false) return true;
+  if (typeof review.q_loss === 'number' && Number.isFinite(review.q_loss) && review.q_loss > 1e-9) {
+    return true;
+  }
+
+  const expected = review.expected_action ?? review.top1?.action ?? null;
+  if (review.actual_action && expected) {
+    return !sameReplayAction(review.actual_action, expected);
+  }
+  return false;
 }

@@ -16,6 +16,7 @@ sys.path.insert(
 
 from gateway.battle import BattleConfig, BattleManager, BattleRoom, get_manager
 from gateway.bot_driver import BotDriver
+from gateway.rating import RatingStore, battle_player_identity
 from inference.bot_registry import SUPPORTED_BOT_NAMES, create_runtime_bot
 from mahjong_env.legal_actions import enumerate_legal_actions
 
@@ -81,6 +82,7 @@ def get_or_create_bot(bot_id: int) -> Any:
 
 bot_driver = BotDriver(manager, get_or_create_bot)
 _advance_lock = asyncio.Lock()
+rating_store = RatingStore()
 
 
 def _has_pending_post_call_discard(room: BattleRoom, actor: int) -> bool:
@@ -115,6 +117,28 @@ def _prepare_player_state(room: BattleRoom, player_id: int) -> Dict[str, Any]:
     return manager.get_state_for_player(room, player_id=player_id)
 
 
+def _record_rating_if_finished(room: BattleRoom) -> list[dict] | None:
+    if room.phase != "ended" or room.rating_recorded:
+        return None
+    players = [
+        battle_player_identity(
+            player.get("id"),
+            player.get("name"),
+            seat,
+        )
+        for seat, player in enumerate(room.config.players[:4])
+    ]
+    if len(players) != 4:
+        return None
+    result = rating_store.record_result(
+        players=players,
+        scores=room.state.scores,
+        initial_oya=0,
+    )
+    room.rating_recorded = True
+    return result
+
+
 class PlayerInfo(BaseModel):
     id: str
     name: str
@@ -126,11 +150,13 @@ class StartBattleRequest(BaseModel):
     bot_count: int = 3
     seed: Optional[int] = None
     bot_model: str = "mortal"
+    game_length: str = "hanchan"
 
 
 class Start4BotRequest(BaseModel):
     seed: Optional[int] = None
     bot_model: str = "mortal"
+    game_length: str = "hanchan"
 
 
 class StartBattleResponse(BaseModel):
@@ -151,6 +177,7 @@ class ActionResponse(BaseModel):
     success: bool
     state: Dict[str, Any]
     bot_action: Optional[Dict[str, Any]] = None
+    rating_updates: Optional[List[Dict[str, Any]]] = None
 
 
 @router.post("/start", response_model=StartBattleResponse)
@@ -174,7 +201,12 @@ async def start_battle(req: StartBattleRequest) -> StartBattleResponse:
             )
         )
 
-    config = BattleConfig(player_count=4, players=[p.model_dump() for p in players])
+    config = BattleConfig(
+        player_count=4,
+        players=[p.model_dump() for p in players],
+        game_length=req.game_length if req.game_length in {"tonpu", "hanchan"} else "hanchan",
+        allow_west_round=req.game_length != "tonpu",
+    )
 
     room = manager.create_room(config, seed=req.seed)
     room.human_player_id = 0
@@ -214,7 +246,12 @@ async def start_4bot(req: Start4BotRequest) -> Dict[str, Any]:
         for i in range(4)
     ]
 
-    config = BattleConfig(player_count=4, players=[p.model_dump() for p in players])
+    config = BattleConfig(
+        player_count=4,
+        players=[p.model_dump() for p in players],
+        game_length=req.game_length if req.game_length in {"tonpu", "hanchan"} else "hanchan",
+        allow_west_round=req.game_length != "tonpu",
+    )
     room = manager.create_room(config, seed=req.seed)
     room.human_player_id = -1  # 表示无人类玩家
     room.bot_event_cursor = {}
@@ -335,8 +372,9 @@ async def do_action(req: ActionRequest) -> ActionResponse:
         raise HTTPException(status_code=400, detail=error)
 
     human_player_id = room.human_player_id
+    rating_updates = _record_rating_if_finished(room)
     state = _prepare_player_state(room, player_id=human_player_id if human_player_id >= 0 else 0)
-    return ActionResponse(success=True, state=state, bot_action=None)
+    return ActionResponse(success=True, state=state, bot_action=None, rating_updates=rating_updates)
 
 
 @router.post("/advance/{game_id}", response_model=ActionResponse)
@@ -384,8 +422,19 @@ async def advance_bot(game_id: str) -> ActionResponse:
                 ):
                     last_bot_action = await bot_driver.take_turn(room, next_actor)
 
+    rating_updates = _record_rating_if_finished(room)
     state = _prepare_player_state(room, player_id=human_player_id if human_player_id >= 0 else 0)
-    return ActionResponse(success=True, state=state, bot_action=last_bot_action)
+    return ActionResponse(success=True, state=state, bot_action=last_bot_action, rating_updates=rating_updates)
+
+
+@router.get("/ratings")
+async def list_ratings() -> Dict[str, Any]:
+    return {"profiles": rating_store.list_profiles()}
+
+
+@router.get("/rating/{player_id}")
+async def get_rating(player_id: str, display_name: str | None = None) -> Dict[str, Any]:
+    return {"profile": rating_store.get_profile(player_id, display_name=display_name)}
 
 
 app.include_router(router)

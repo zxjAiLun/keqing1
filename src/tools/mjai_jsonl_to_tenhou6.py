@@ -217,8 +217,9 @@ def convert_mjai_jsonl_to_tenhou6(events: Iterable[dict[str, Any]]) -> dict[str,
         logs.append(kyoku.as_tenhou6())
 
     return {
+        "title": ["Mortal", ""],
         "name": names,
-        "rule": {"disp": "Mortal", "aka51": 1, "aka52": 1, "aka53": 1},
+        "rule": {"disp": "Mortal", "aka": 1},
         "log": logs,
     }
 

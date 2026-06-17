@@ -35,10 +35,11 @@ from inference.mortal_bot import MortalReviewBot
 _BOT_CLASSES = {
     "mortal": MortalReviewBot,
     "70k": MortalReviewBot,
+    "t1_71000": MortalReviewBot,
     "weak_mortal": MortalReviewBot,
     "rulebase": RulebaseBot,
 }
-_MORTAL_BOT_TYPES = {"mortal", "70k", "weak_mortal"}
+_MORTAL_BOT_TYPES = {"mortal", "70k", "t1_71000", "weak_mortal"}
 
 PLAYER_NAMES = ["East", "South", "West", "North"]
 
@@ -46,7 +47,8 @@ PLAYER_NAMES = ["East", "South", "West", "North"]
 _DEFAULT_CHECKPOINTS = {
     "mortal": _PROJECT_ROOT / "artifacts/mortal_serving/gui_mortal.pth",
     "70k": _PROJECT_ROOT / "artifacts/mortal_serving/70k.pth",
-    "weak_mortal": _PROJECT_ROOT / "artifacts/mortal_serving/weak_mortal.pth",
+    "t1_71000": _PROJECT_ROOT / "artifacts/experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth",
+    "weak_mortal": _PROJECT_ROOT / "artifacts/model_v4_20240308_best_min.pth",
 }
 _REVIEW_EXPORTER = DefaultRuntimeReviewExporter()
 

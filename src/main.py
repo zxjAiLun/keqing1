@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -89,7 +90,8 @@ def ensure_replay_ui_built(logger: logging.Logger) -> None:
     if dist_index.exists() and dist_index.stat().st_mtime >= newest_source_mtime:
         return
     logger.info("构建 ReplayUI 前端: npm run build")
-    subprocess.run(["npm", "run", "build"], cwd=ui_dir, check=True)
+    npm_cmd = "npm.cmd" if os.name == "nt" else "npm"
+    subprocess.run([npm_cmd, "run", "build"], cwd=ui_dir, check=True)
 
 
 def run_gateway_server(logger: logging.Logger) -> None:

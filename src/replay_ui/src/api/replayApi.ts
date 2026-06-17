@@ -68,10 +68,18 @@ export const replayApi = {
     api<ReplayMeta[]>('/replay/list'),
 
   /** 获取回放完整数据 */
-  get: (replayId: string, playerId?: number, teacherReport?: string | null): Promise<ReplayData> => {
+  get: (
+    replayId: string,
+    playerId?: number,
+    teacherReport?: string | null,
+    teacherReports: string[] = [],
+  ): Promise<ReplayData> => {
     const params = new URLSearchParams();
     if (playerId !== undefined) params.set('player_id', String(playerId));
     if (teacherReport) params.set('teacher_report', teacherReport);
+    for (const report of teacherReports) {
+      if (report.trim()) params.append('teacher_reports', report.trim());
+    }
     const query = params.toString();
     return api<ReplayData>(
       `/replay/${encodeURIComponent(replayId)}${query ? `?${query}` : ''}`

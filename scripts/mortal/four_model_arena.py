@@ -17,7 +17,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from inference.mortal_bot import MortalReviewBot
 from scripts.mortal.generate_riichienv_selfplay_replays import _make_env, derive_riichienv_game_seed
 from scripts.mortal.eval_metrics import (
     add_rank_point_args,
@@ -95,6 +94,13 @@ def _parse_args():
     p.add_argument("--seed-start", type=int, default=330000)
     p.add_argument("--max-steps", type=int, default=10000)
     p.add_argument("--progress-interval", type=int, default=10)
+    p.add_argument("--enable-amp", action="store_true")
+    p.add_argument(
+        "--bot-backend",
+        choices=("native", "review"),
+        default="native",
+        help="native uses libriichi.mjai.Bot directly; review keeps the older MortalReviewBot wrapper",
+    )
     p.add_argument("--no-resume", action="store_true", help="ignore existing results.jsonl and start from game 0")
     p.add_argument(
         "--model",
@@ -106,6 +112,8 @@ def _parse_args():
 
 
 def _bot(label, seat, path, device):
+    from inference.mortal_bot import MortalReviewBot
+
     return MortalReviewBot(
         player_id=seat,
         model_path=path,
@@ -117,6 +125,8 @@ def _bot(label, seat, path, device):
 
 
 def _shared_bot(label: str, seat: int, path: str | Path, device: str, shared: Mapping[str, Any]) -> MortalReviewBot:
+    from inference.mortal_bot import MortalReviewBot
+
     return MortalReviewBot(
         player_id=seat,
         model_path=path,
@@ -141,6 +151,83 @@ def _preload_models(device: str) -> dict[str, dict[str, Any]]:
         }
         print(f"  loaded {label:<8} in {shared[label]['load_time_sec']:.1f}s", flush=True)
     return shared
+
+
+def _load_mortal_engine(label: str, state_file: str | Path, device: str, *, enable_amp: bool = False):
+    mortal_python_dir = (MORTAL_ROOT / "mortal").resolve()
+    if str(mortal_python_dir) not in sys.path:
+        sys.path.insert(0, str(mortal_python_dir))
+
+    from engine import MortalEngine  # noqa: PLC0415
+    from model import Brain, DQN  # noqa: PLC0415
+
+    state = torch.load(state_file, weights_only=True, map_location=torch.device("cpu"))
+    cfg = state["config"]
+    version = int(cfg["control"].get("version", 4))
+    conv_channels = int(cfg["resnet"]["conv_channels"])
+    num_blocks = int(cfg["resnet"]["num_blocks"])
+
+    mortal = Brain(version=version, conv_channels=conv_channels, num_blocks=num_blocks).eval()
+    dqn = DQN(version=version).eval()
+    mortal.load_state_dict(state["mortal"])
+    dqn.load_state_dict(state["current_dqn"])
+    return MortalEngine(
+        mortal,
+        dqn,
+        is_oracle=False,
+        version=version,
+        device=torch.device(device),
+        enable_amp=bool(enable_amp),
+        enable_quick_eval=True,
+        enable_rule_based_agari_guard=True,
+        name=f"mortal-{label}",
+    )
+
+
+def _preload_native_engines(device: str, *, enable_amp: bool = False) -> dict[str, dict[str, Any]]:
+    shared: dict[str, dict[str, Any]] = {}
+    for label in MODEL_LABELS:
+        started = time.perf_counter()
+        shared[label] = {
+            "engine": _load_mortal_engine(label, MODELS[label], device, enable_amp=enable_amp),
+            "load_time_sec": time.perf_counter() - started,
+        }
+        print(f"  loaded {label:<8} in {shared[label]['load_time_sec']:.1f}s", flush=True)
+    return shared
+
+
+def _native_bot(engine: Any, seat: int):
+    mortal_python_dir = (MORTAL_ROOT / "mortal").resolve()
+    if str(mortal_python_dir) not in sys.path:
+        sys.path.insert(0, str(mortal_python_dir))
+    from libriichi.mjai import Bot  # noqa: PLC0415
+
+    return Bot(engine, int(seat))
+
+
+def _event_line_for_native_bot(raw_event: Any) -> str | None:
+    if isinstance(raw_event, str):
+        compact = raw_event.replace(" ", "")
+        if '"type":"kakan_accepted"' in compact:
+            return None
+        if '"type":"none"' in compact and '"actor":' in compact:
+            return None
+        return raw_event
+    event = dict(raw_event)
+    event_type = str(event.get("type", ""))
+    if event_type == "kakan_accepted":
+        return None
+    if event_type == "none" and "actor" in event:
+        return None
+    return json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+
+
+def _action_line_without_meta(reaction_line: str) -> str:
+    if '"meta"' not in reaction_line:
+        return reaction_line
+    reaction = json.loads(reaction_line)
+    reaction.pop("meta", None)
+    return json.dumps(reaction, ensure_ascii=False, separators=(",", ":"))
 
 
 def _load_existing_results(path: Path) -> list[dict[str, Any]]:
@@ -423,7 +510,10 @@ def run(args):
         print(f"resuming from {results_path}: {len(existing_results)} completed games", flush=True)
 
     print("loading models once...", flush=True)
-    shared_models = _preload_models(device)
+    if str(args.bot_backend) == "native":
+        shared_models = _preload_native_engines(device, enable_amp=bool(args.enable_amp))
+    else:
+        shared_models = _preload_models(device)
     model_load_times = {label: float(shared_models[label]["load_time_sec"]) for label in MODEL_LABELS}
 
     results_mode = "a" if existing_results and not args.no_resume else "w"
@@ -445,7 +535,10 @@ def run(args):
             started_part = time.perf_counter()
             bots = {}
             for seat, label in enumerate(assignment):
-                bots[seat] = _shared_bot(label, seat, MODELS[label], device, shared_models[label])
+                if str(args.bot_backend) == "native":
+                    bots[seat] = _native_bot(shared_models[label]["engine"], seat)
+                else:
+                    bots[seat] = _shared_bot(label, seat, MODELS[label], device, shared_models[label])
             timing["bot_setup"] += time.perf_counter() - started_part
 
             fallback_count = 0
@@ -464,6 +557,22 @@ def run(args):
                     timing["new_events"] += time.perf_counter() - started_part
                     for raw_event in new_events:
                         event_count += 1
+                        if str(args.bot_backend) == "native":
+                            started_part = time.perf_counter()
+                            line = _event_line_for_native_bot(raw_event)
+                            timing["event_prepare"] += time.perf_counter() - started_part
+                            if line is None:
+                                continue
+                            started_part = time.perf_counter()
+                            reaction_line = bots[seat].react(line)
+                            timing["bot_react"] += time.perf_counter() - started_part
+                            if reaction_line is None:
+                                continue
+                            reaction_count += 1
+                            started_part = time.perf_counter()
+                            mjai_action = _action_line_without_meta(reaction_line)
+                            timing["action_prepare"] += time.perf_counter() - started_part
+                            continue
                         started_part = time.perf_counter()
                         event = json.loads(raw_event) if isinstance(raw_event, str) else dict(raw_event)
                         timing["json_parse"] += time.perf_counter() - started_part
@@ -483,9 +592,11 @@ def run(args):
                         fallback_count += 1
                         continue
                     started_part = time.perf_counter()
-                    selected = obs.select_action_from_mjai(
-                        json.dumps(mjai_action, ensure_ascii=False, separators=(",", ":"))
-                    )
+                    if isinstance(mjai_action, str):
+                        action_line = mjai_action
+                    else:
+                        action_line = json.dumps(mjai_action, ensure_ascii=False, separators=(",", ":"))
+                    selected = obs.select_action_from_mjai(action_line)
                     timing["select_action"] += time.perf_counter() - started_part
                     if selected is None:
                         actions[seat] = legal_actions[0]

@@ -1,12 +1,12 @@
 // src/replay_ui/src/pages/BotBattlePage.tsx
 import { useState, useEffect, useRef } from "react";
+import type { CSSProperties } from "react";
 import { MahjongTable } from "../components/BattleBoard/MahjongTable";
 import { fetchWithTimeout } from "../api/battleApi";
-import { PageHeader, PageShell, SectionTitle } from "../components/Layout/PageScaffold";
-import { subtleButtonStyle } from "../components/Layout/layoutStyles";
+import { PageShell, SectionTitle } from "../components/Layout/PageScaffold";
 import type { BattleState } from "../types/battle";
 import type { BotType } from "../types/bot";
-import { BOT_CATALOG, DEFAULT_BOT_TYPE, getBotCatalogEntry } from "../utils/botCatalog";
+import { DEFAULT_BOT_TYPE, GUI_BOT_CATALOG, getBotCatalogEntry } from "../utils/botCatalog";
 
 export function BotBattlePage() {
   const [gameId, setGameId] = useState<string | null>(null);
@@ -80,59 +80,48 @@ export function BotBattlePage() {
 
   if (!state) {
     return (
-      <PageShell width={720}>
-        <PageHeader
-          eyebrow="Bot Arena"
-          title="4 Bot 对战"
-          description="用于观察当前活跃模型线之间的完整对局流程。适合快速回看回合推进、兼容面表现和导出实验牌谱。"
-        />
+      <PageShell width={1120}>
         <div
           style={{
-            background: "var(--page-bg)",
-            minHeight: "60vh",
             display: "flex",
-            flexDirection: "column",
+            justifyContent: "space-between",
             alignItems: "center",
-            justifyContent: "center",
-            gap: 24,
+            gap: 12,
+            flexWrap: "wrap",
+            marginBottom: 12,
           }}
         >
-        <div
-          style={{
-            width: 64,
-            height: 64,
-            borderRadius: 16,
-            background: "linear-gradient(135deg, #8e44ad 0%, #7d3c9e 100%)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            boxShadow: "0 8px 24px rgba(142,68,173,0.3)",
-            marginBottom: 8,
-          }}
-        >
-          <span style={{ color: "#fff", fontWeight: 700, fontSize: 24 }}>🤖</span>
+          <div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: "var(--text-primary)" }}>4 Bot 对战</div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>启动后牌桌占满主区域，导出放在顶部工具组。</div>
+          </div>
+          <button
+            onClick={startBotBattle}
+            disabled={loading}
+            className="btn-primary"
+            style={{ height: 34, padding: "0 16px", fontSize: 13, background: loading ? "var(--text-muted)" : "#8e44ad" }}
+          >
+            {loading ? "启动中..." : "开始对战"}
+          </button>
         </div>
-        <h1 style={{ fontSize: 28, fontWeight: 700, color: "var(--text-primary)" }}>
-          4 Bot 对战
-        </h1>
 
-        <div className="card" style={{ maxWidth: 320 }}>
-          <SectionTitle title="开始一局自动对战" description="启动后会持续轮询局面，结束后可导出实验结果。" />
+        <div className="card" style={{ padding: 12 }}>
+          <SectionTitle title="设置" description="选择同一组模型运行四家自动对战。" />
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
             <label style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}>
               Bot 类型
             </label>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {BOT_CATALOG.map((bot) => (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 6 }}>
+              {GUI_BOT_CATALOG.map((bot) => (
                 <button
                   key={bot.value}
                   onClick={() => setBotModel(bot.value)}
                   style={{
-                    padding: "10px 12px",
-                    borderRadius: 8,
+                    padding: "8px 10px",
+                    borderRadius: 7,
                     fontSize: 13,
                     fontWeight: 500,
-                    border: `2px solid ${botModel === bot.value ? "#8e44ad" : "var(--border-muted)"}`,
+                    border: `1px solid ${botModel === bot.value ? "#8e44ad" : "var(--border)"}`,
                     background: botModel === bot.value ? "rgba(142,68,173,0.08)" : "var(--surface-subtle)",
                     color: "var(--text-primary)",
                     cursor: "pointer",
@@ -152,24 +141,6 @@ export function BotBattlePage() {
               当前选择：{selectedBot.label}，{selectedBot.description}
             </div>
           </div>
-          <button
-            onClick={startBotBattle}
-            disabled={loading}
-            style={{
-              width: "100%",
-              padding: "10px",
-              borderRadius: "var(--radius-sm)",
-              border: "none",
-              background: loading ? "var(--text-muted)" : "#8e44ad",
-              color: "#fff",
-              fontSize: 15,
-              fontWeight: 600,
-              cursor: loading ? "not-allowed" : "pointer",
-              transition: "background var(--transition)",
-            }}
-          >
-            {loading ? "启动中..." : "开始对战"}
-          </button>
           {error && (
             <div style={{ fontSize: 13, textAlign: "center", color: "var(--error)", marginTop: 8 }}>
               {error}
@@ -177,83 +148,74 @@ export function BotBattlePage() {
           )}
         </div>
 
-        <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
-          默认观察 Mortal 主线；也可切到 70k、weak mortal 或 rulebase。
-        </p>
-        </div>
       </PageShell>
     );
   }
 
   return (
-    <PageShell width={1400}>
-      <PageHeader
-        eyebrow="Bot Arena"
-        title="4 Bot 对战"
-        description="实时观察自动对战流程。结束后可以直接导出 Mjai 或 Tenhou6 牌谱。当前默认模型线为 Mortal，也兼容 70k、weak mortal 和 rulebase。"
-      />
+    <div style={{ height: "100%", background: "var(--page-bg)", position: "relative", overflow: "hidden" }}>
+      <div
+        style={{
+          position: "absolute",
+          top: 10,
+          right: 10,
+          zIndex: 100,
+          display: "flex",
+          gap: 6,
+          flexWrap: "wrap",
+          justifyContent: "flex-end",
+        }}
+      >
+        <span style={botBattleStatusStyle}>{selectedBot.label} · {state.phase}</span>
+        <button onClick={() => downloadExport("mjai")} style={botBattleToolButtonStyle}>Mjai</button>
+        <button onClick={() => downloadExport("tenhou6")} style={botBattleToolButtonStyle}>Tenhou6</button>
+        {state.phase === "ended" && (
+          <button onClick={() => { setState(null); setGameId(null); }} style={botBattleToolButtonStyle}>再来一局</button>
+        )}
+      </div>
       {state.phase === "ended" && (
         <div
           style={{
-            display: "flex",
-            gap: 12,
-            marginBottom: 12,
-            justifyContent: "center",
-            flexWrap: "wrap",
+            position: "absolute",
+            left: 10,
+            top: 10,
+            zIndex: 100,
+            ...botBattleStatusStyle,
           }}
         >
-          <button
-            onClick={() => downloadExport("mjai")}
-            style={{
-              padding: "8px 16px",
-              borderRadius: "var(--radius-sm)",
-              border: "none",
-              background: "var(--accent)",
-              color: "#fff",
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: "pointer",
-              transition: "background var(--transition)",
-            }}
-          >
-            导出 Mjai Log
-          </button>
-          <button
-            onClick={() => downloadExport("tenhou6")}
-            style={{
-              padding: "8px 16px",
-              borderRadius: "var(--radius-sm)",
-              border: "none",
-              background: "var(--success)",
-              color: "#fff",
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: "pointer",
-              transition: "background var(--transition)",
-            }}
-          >
-            导出 Tenhou6
-          </button>
-          <button
-            onClick={() => { setState(null); setGameId(null); }}
-            style={subtleButtonStyle}
-          >
-            再来一局
-          </button>
+          对局结束，可导出牌谱
         </div>
       )}
-      <div style={{ height: "calc(100dvh - 180px)", minHeight: 640, background: "var(--page-bg)" }}>
-        <MahjongTable
-          state={state}
-          onAction={() => {}}
-          isMyTurn={false}
-          selectedTile={null}
-          onTileSelect={() => {}}
-          autoHora={false} setAutoHora={() => {}}
-          noMeld={false} setNoMeld={() => {}}
-          autoTsumogiri={false} setAutoTsumogiri={() => {}}
-        />
-      </div>
-    </PageShell>
+      <MahjongTable
+        state={state}
+        onAction={() => {}}
+        isMyTurn={false}
+        selectedTile={null}
+        onTileSelect={() => {}}
+        autoHora={false} setAutoHora={() => {}}
+        noMeld={false} setNoMeld={() => {}}
+        autoTsumogiri={false} setAutoTsumogiri={() => {}}
+      />
+    </div>
   );
 }
+
+const botBattleToolButtonStyle: CSSProperties = {
+  padding: "5px 9px",
+  borderRadius: 6,
+  border: "1px solid var(--overlay-border)",
+  background: "var(--overlay-bg)",
+  color: "var(--control-muted)",
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
+const botBattleStatusStyle: CSSProperties = {
+  padding: "5px 8px",
+  borderRadius: 6,
+  border: "1px solid var(--overlay-border)",
+  background: "var(--overlay-bg)",
+  color: "var(--control-muted)",
+  fontSize: 12,
+};

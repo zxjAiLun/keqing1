@@ -1,93 +1,136 @@
 // src/replay_ui/src/pages/ReviewPage.tsx
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CheckCircle2 } from 'lucide-react';
+import { GitCompareArrows } from 'lucide-react';
 import { UploadForm } from '../components/Upload/UploadForm';
 import type { ReplayData } from '../types/replay';
-import { MetricCard, PageHeader, PageShell, SectionTitle } from '../components/Layout/PageScaffold';
-import { isReplayPlayerDecision, sameReplayAction } from '../utils/tileUtils';
+import { PageHeader, PageShell, SectionTitle } from '../components/Layout/PageScaffold';
+
+function inferReportName(path: string, index: number) {
+  const normalized = path.replace(/\\/g, '/');
+  const file = normalized.split('/').pop() ?? path;
+  const match = file.match(/__([^_]+)__p\d+\.json$/);
+  if (match) return match[1];
+  return file.replace(/\.json$/i, '') || `model-${index + 1}`;
+}
 
 export function ReviewPage() {
   const navigate = useNavigate();
   const [uploadedData, setUploadedData] = useState<ReplayData | null>(null);
 
-  const handleDataLoaded = (data: unknown) => {
-    setUploadedData(data as ReplayData);
+  const buildReplaySearchForData = (data: ReplayData) => {
+    if (!data.replay_id) return '/game-replay';
+    const params = new URLSearchParams({
+      id: data.replay_id,
+      player_id: String(data.player_id ?? 0),
+    });
+    for (const report of data.teacher_report_paths ?? []) {
+      params.append('teacher_reports', report);
+    }
+    return `/game-replay?${params.toString()}`;
   };
 
-  const liveDecisionLog = uploadedData
-    ? uploadedData.log.filter((entry) => isReplayPlayerDecision(entry, uploadedData.player_id))
-    : [];
-  const liveMatchCount = liveDecisionLog.filter((entry) => sameReplayAction(entry.chosen, entry.gt_action)).length;
-  const liveTotalOps = liveDecisionLog.length;
+  const handleDataLoaded = (data: unknown) => {
+    const replayData = data as ReplayData;
+    setUploadedData(replayData);
+    if (replayData.replay_id) {
+      navigate(buildReplaySearchForData(replayData), { replace: true });
+    } else {
+      navigate('/game-replay', { state: { replayData }, replace: true });
+    }
+  };
+
+  const teacherReports = uploadedData?.teacher_report_paths ?? [];
 
   return (
-    <PageShell width={980}>
-      <PageHeader
-        eyebrow="Review"
-        title="牌谱分析"
-        description="支持天凤链接和 mjai JSON 输入。跑谱成功后可以直接切到牌桌回放或决策列表，不需要重复上传。"
-      />
+    <PageShell width={1180}>
+        <PageHeader
+          eyebrow="Review"
+          title="牌谱 Review"
+          description="选择 Mortal checkpoint 后运行 review，完成后直接进入牌桌。牌桌中当前模型用紫色显示，其它模型用灰色显示。"
+        />
 
-      <div className="card">
-        <SectionTitle title="跑谱输入" description="推荐先用天凤链接；本地 mjai 文件适合离线调试和异常复现。" />
-          <div style={{ marginBottom: 14 }}>
-            <UploadForm onDataLoaded={handleDataLoaded} />
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+          gap: 12,
+          alignItems: 'start',
+        }}
+      >
+        <section className="card" style={{ padding: 12 }}>
+          <SectionTitle title="牌谱输入" description="支持天凤链接和 mjai JSON。上传成功后直接进入牌桌 Review。" />
+          <UploadForm onDataLoaded={handleDataLoaded} />
+        </section>
+
+        <section className="card" style={{ padding: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <GitCompareArrows size={15} style={{ color: '#8e44ad' }} />
+            <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--text-primary)' }}>多模型权重</div>
           </div>
+          <div style={{ display: 'grid', gap: 6, marginTop: 10 }}>
+            {!uploadedData ? (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                在左侧选择 70k、T1@71000、v4 或 gui_mortal。运行后会在这里显示生成的 report 路径。
+              </div>
+            ) : (
+              (uploadedData.selected_teacher_models ?? teacherReports.map((report, index) => ({
+                type: 'mortal' as const,
+                label: inferReportName(report, index),
+                checkpoint: '',
+              }))).map((model, index) => {
+                const report = teacherReports[index] ?? '';
+                return (
+                <div
+                  key={`${model.label}-${index}`}
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '72px 1fr 44px',
+                    gap: 8,
+                    alignItems: 'center',
+                    minHeight: 30,
+                    border: '1px solid var(--border)',
+                    borderRadius: 7,
+                    padding: '4px 7px',
+                    fontSize: 11,
+                  }}
+                >
+                  <span
+                    style={{
+                      borderRadius: 5,
+                      background: index === 0 ? 'rgba(142,68,173,0.14)' : 'var(--button-bg)',
+                      color: index === 0 ? '#8e44ad' : 'var(--text-secondary)',
+                      fontWeight: 800,
+                      padding: '3px 6px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {model.label}
+                  </span>
+                  <span
+                    title={report}
+                    style={{
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      color: 'var(--text-secondary)',
+                      fontFamily: '"Menlo", "Consolas", monospace',
+                    }}
+                  >
+                    {report || model.checkpoint}
+                  </span>
+                  <span style={{ color: 'var(--success)', textAlign: 'right' }}>已生成</span>
+                </div>
+                );
+              })
+            )}
+          </div>
+        </section>
       </div>
 
-      {uploadedData && (
-        <div className="card">
-          <div className="flex items-center gap-2 mb-4">
-            <CheckCircle2 size={16} style={{ color: 'var(--success)' }} />
-            <div className="card-title" style={{ marginBottom: 0 }}>
-              数据已加载 · {liveTotalOps} 决策步 / {uploadedData.log.length} 总步
-            </div>
-          </div>
-
-          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 20 }}>
-            <MetricCard label="总决策数" value={liveTotalOps} />
-            <MetricCard label="匹配数" value={liveMatchCount} tone="success" />
-            <MetricCard label="小局数" value={uploadedData.kyoku_order?.length ?? 0} />
-            <MetricCard
-              label="匹配率"
-              value={
-                liveTotalOps > 0
-                  ? ((liveMatchCount / liveTotalOps) * 100).toFixed(1) + '%'
-                  : '0%'
-              }
-              tone="warning"
-            />
-          </div>
-
-          <SectionTitle title="进入视图" description="牌桌视图适合看局面演进，决策列表适合快速定位差异步。" />
-          <div className="flex gap-3" style={{ flexWrap: 'wrap' }}>
-            <button
-              onClick={() => uploadedData.replay_id
-                ? navigate(`/game-replay?id=${encodeURIComponent(uploadedData.replay_id)}&player_id=${uploadedData.player_id ?? 0}`)
-                : navigate('/game-replay', { state: { replayData: uploadedData } })}
-              className="btn-primary"
-              style={{ height: 40, padding: '0 24px', fontSize: 14 }}
-            >
-              ▶ 牌桌回放
-            </button>
-            <button
-              onClick={() => uploadedData.replay_id
-                ? navigate(`/replay?id=${encodeURIComponent(uploadedData.replay_id)}&player_id=${uploadedData.player_id ?? 0}`)
-                : navigate('/replay', { state: { replayData: uploadedData } })}
-              className="btn-primary"
-              style={{
-                height: 40,
-                padding: '0 24px',
-                fontSize: 14,
-                background: 'var(--success)',
-              }}
-            >
-              ▶ 决策列表
-            </button>
-          </div>
-        </div>
-      )}
     </PageShell>
   );
 }

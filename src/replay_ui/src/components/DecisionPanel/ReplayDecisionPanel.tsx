@@ -1,7 +1,7 @@
 // src/replay_ui/src/components/DecisionPanel/ReplayDecisionPanel.tsx
+import { useEffect, useMemo, useState } from 'react';
 import type { DecisionLogEntry } from '../../types/replay';
-import { actionLabel, sameReplayAction } from '../../utils/tileUtils';
-import { CN_BAKAZE } from '../../utils/constants';
+import { sameReplayAction } from '../../utils/tileUtils';
 
 interface ReplayDecisionPanelProps {
   entry: DecisionLogEntry | null;
@@ -11,6 +11,9 @@ interface ReplayDecisionPanelProps {
   playerNames?: string[];
   currentPlayerId?: number;
   onSwitchPlayer?: (playerId: number) => void;
+  localReviewerLabel?: string;
+  activeTeacherModel?: string | null;
+  onActiveTeacherModelChange?: (model: string | null) => void;
 }
 
 /** 候选动作的显示值：final_score（统一口径） */
@@ -46,11 +49,42 @@ function displayOptionalProb(value: number | null | undefined): string {
   return typeof value === 'number' && Number.isFinite(value) ? displayProbLabel(value) : '—';
 }
 
+function teacherAction(review: NonNullable<DecisionLogEntry['teacher_reviews']>[number] | undefined) {
+  return review?.expected_action ?? review?.top1?.action ?? null;
+}
+
+function candidateTeachers(candidate: DecisionLogEntry['candidates'][number]) {
+  return candidate.teachers ?? (candidate.teacher ? [candidate.teacher] : []);
+}
+
+function teacherValueFor(candidate: DecisionLogEntry['candidates'][number], model: string | null | undefined) {
+  if (!model) return null;
+  return candidateTeachers(candidate).find((teacher) => teacher.model === model) ?? null;
+}
+
+function sortCandidatesForReviewer(
+  candidates: DecisionLogEntry['candidates'],
+  activeModel: string | null | undefined,
+) {
+  const list = [...candidates];
+  if (!activeModel) {
+    return list.sort((a, b) => displayScore(b) - displayScore(a));
+  }
+  return list.sort((a, b) => {
+    const av = teacherValueFor(a, activeModel)?.q_value;
+    const bv = teacherValueFor(b, activeModel)?.q_value;
+    const aq = typeof av === 'number' && Number.isFinite(av) ? av : -Infinity;
+    const bq = typeof bv === 'number' && Number.isFinite(bv) ? bv : -Infinity;
+    if (bq !== aq) return bq - aq;
+    return displayScore(b) - displayScore(a);
+  });
+}
+
 function ensureVisibleCandidates(
   candidates: DecisionLogEntry['candidates'],
   chosen: DecisionLogEntry['chosen'],
   gtAction: DecisionLogEntry['gt_action'],
-  teacherReview?: DecisionLogEntry['teacher_review'],
+  teacherReviews: NonNullable<DecisionLogEntry['teacher_reviews']> = [],
   limit = 12,
 ): DecisionLogEntry['candidates'] {
   const sorted = [...candidates].sort((a, b) => displayScore(b) - displayScore(a));
@@ -68,8 +102,10 @@ function ensureVisibleCandidates(
 
   ensureAction(chosen);
   ensureAction(gtAction);
-  ensureAction(teacherReview?.expected_action ?? teacherReview?.top1?.action ?? null);
-  ensureAction(teacherReview?.top2?.action ?? null);
+  for (const teacherReview of teacherReviews) {
+    ensureAction(teacherReview?.expected_action ?? teacherReview?.top1?.action ?? null);
+    ensureAction(teacherReview?.top2?.action ?? null);
+  }
 
   return visible.sort((a, b) => displayScore(b) - displayScore(a));
 }
@@ -93,13 +129,41 @@ function shortLabel(action: { type: string; pai?: string; consumed?: string[] })
 
 export function ReplayDecisionPanel({
   entry,
-  step,
-  totalSteps,
   compact = false,
   playerNames = [],
   currentPlayerId,
   onSwitchPlayer,
+  activeTeacherModel: controlledActiveTeacherModel,
+  onActiveTeacherModelChange,
 }: ReplayDecisionPanelProps) {
+  const teacherReviews = useMemo(
+    () => entry
+      ? (entry.teacher_reviews && entry.teacher_reviews.length > 0
+        ? entry.teacher_reviews
+        : entry.teacher_review ? [entry.teacher_review] : [])
+      : [],
+    [entry],
+  );
+  const teacherModelsKey = teacherReviews.map((review) => review.model).join('\n');
+  const [activeTeacherModel, setActiveTeacherModel] = useState<string | null>(null);
+  const selectedTeacherModel = controlledActiveTeacherModel !== undefined
+    ? controlledActiveTeacherModel
+    : activeTeacherModel;
+  const updateTeacherModel = (model: string | null) => {
+    if (onActiveTeacherModelChange) onActiveTeacherModelChange(model);
+    else setActiveTeacherModel(model);
+  };
+
+  useEffect(() => {
+    if (teacherReviews.length === 0) {
+      if (selectedTeacherModel !== null) updateTeacherModel(null);
+      return;
+    }
+    if (!selectedTeacherModel || !teacherReviews.some((review) => review.model === selectedTeacherModel)) {
+      updateTeacherModel(teacherReviews[0].model);
+    }
+  }, [teacherModelsKey, selectedTeacherModel, teacherReviews]);
+
   if (!entry) {
     return (
       <div style={panelStyle(compact)}>
@@ -108,41 +172,21 @@ export function ReplayDecisionPanel({
     );
   }
 
-  const k = entry.kyoku_key ?? entry;
-  const kyokuLabel = `${CN_BAKAZE[k.bakaze] ?? k.bakaze}${k.kyoku}局 ${k.honba}本场`;
-
   // obs 步：其他家操作，无 bot 推理数据
   if (entry.is_obs) {
-    const actor = entry.actor_to_move;
     return (
-      <div style={panelStyle(compact)}>
-        <div style={sectionStyle}>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
-            Step {step + 1} / {totalSteps} · {kyokuLabel}
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>
-            {actor !== null && actor !== undefined ? (playerNames[actor] ?? `P${actor}`) : '未知玩家'} 的操作
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={badgeStyle('#3498db')}>动作</span>
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'Menlo, monospace' }}>
-              {actionLabel(entry.chosen)}
-            </span>
-          </div>
-        </div>
-      </div>
+      <div style={panelStyle(compact)} />
     );
   }
 
   const { chosen, gt_action, candidates } = entry;
 
-  const teacherReview = entry.teacher_review;
-  const teacherModel = teacherReview?.model ?? 'Teacher';
-  const teacherExpected = teacherReview?.expected_action ?? teacherReview?.top1?.action ?? null;
-  const hasTeacherReview = Boolean(teacherReview);
+  const activeTeacherReview = teacherReviews.find((review) => review.model === selectedTeacherModel) ?? teacherReviews[0];
+  const teacherExpected = teacherAction(activeTeacherReview);
 
-  // 按显示分值降序排序；即使超出前 12，也强制展示 Bot、实际动作和 teacher 前排动作。
-  const sorted = ensureVisibleCandidates(candidates, chosen, gt_action, teacherReview, 12);
+  // 按当前 reviewer 的 q 值降序排序；仍强制展示 Bot、实际动作和 teacher 前排动作。
+  const visibleCandidates = ensureVisibleCandidates(candidates, chosen, gt_action, teacherReviews, 12);
+  const sorted = sortCandidatesForReviewer(visibleCandidates, activeTeacherReview?.model);
 
   const fallbackProbs = softmaxProbabilities(candidates.map((candidate) => displayScore(candidate)));
   const fallbackProbByCandidate = new Map<DecisionLogEntry['candidates'][number], number>(
@@ -155,67 +199,45 @@ export function ReplayDecisionPanel({
       : fallbackProbByCandidate.get(candidate) ?? 0;
   };
 
-  const scoreTypeLabelShort = 'Final / P';
-
-  const chosenIsGt = chosen && gt_action && sameReplayAction(chosen, gt_action);
-
   return (
     <div style={panelStyle(compact)}>
-      {/* 步骤信息 */}
-      <div style={sectionStyle}>
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
-          Step {step + 1} / {totalSteps} · {kyokuLabel}
-        </div>
-
-        {/* Bot 选择 vs 实际 */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={badgeStyle('#e74c3c')}>Bot</span>
-            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'Menlo, monospace' }}>
-              {chosen ? actionLabel(chosen) : '—'}
-            </span>
-            {chosenIsGt && <span style={{ fontSize: 10, color: '#8e44ad' }}>✓ 一致</span>}
+      {teacherReviews.length > 0 && (
+        <div style={sectionStyle}>
+          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+            {teacherReviews.map((review) => {
+              const active = review.model === activeTeacherReview?.model;
+              return (
+                <button
+                  key={`${review.model}-${review.report_path}`}
+                  type="button"
+                  onClick={() => updateTeacherModel(review.model)}
+                  style={teacherChipStyle(active)}
+                  title={review.report_path}
+                >
+                  {review.model}
+                </button>
+              );
+            })}
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={badgeStyle('#27ae60')}>实际</span>
-            <span style={{
-              fontSize: 13, fontWeight: 600,
-              color: chosenIsGt ? 'var(--text-secondary)' : '#27ae60',
-              fontFamily: 'Menlo, monospace',
-            }}>
-              {gt_action ? actionLabel(gt_action) : '—'}
-            </span>
-          </div>
-          {hasTeacherReview && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={badgeStyle('#f39c12')}>{teacherModel}</span>
-              <span style={{ fontSize: 13, fontWeight: 600, color: '#d68910', fontFamily: 'Menlo, monospace' }}>
-                {teacherExpected ? actionLabel(teacherExpected) : '—'}
-              </span>
-              {teacherReview?.candidate_count !== undefined && (
-                <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{teacherReview.candidate_count}候选</span>
-              )}
-            </div>
-          )}
         </div>
-      </div>
-
-      <div style={dividerStyle} />
+      )}
 
       {/* 权重表格 */}
       <div style={{ ...sectionStyle, flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-          <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-            候选权重
+          <span style={{ fontSize: 12, fontWeight: 800, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            候选动作
           </span>
-          <span style={{ fontSize: 10, color: 'var(--text-muted)', opacity: 0.7 }}>{scoreTypeLabelShort}</span>
+          <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-muted)', opacity: 0.8 }}>
+            {activeTeacherReview ? activeTeacherReview.model : '本地'} Q / P
+          </span>
         </div>
 
         {/* 表头 */}
         <div style={tableHeaderStyle}>
-          <div style={{ width: COL1_W }}>牌名</div>
-          <div style={{ flex: 1 }}>本地</div>
-          {hasTeacherReview && <div style={{ width: 58, textAlign: 'right' }}>{teacherModel}</div>}
+          <div style={{ width: COL1_W }}>动作</div>
+          <div style={{ flex: 1, textAlign: 'right' }}>Q</div>
+          <div style={{ width: 66, textAlign: 'right' }}>P</div>
         </div>
 
         {/* 行 */}
@@ -225,19 +247,20 @@ export function ReplayDecisionPanel({
             const isGt = sameReplayAction(c.action, gt_action);
             const isTeacher = teacherExpected ? sameReplayAction(c.action, teacherExpected) : false;
             const probability = probabilityOf(c);
-            const pct = Math.max(8, Math.round(probability * 100));
-            const teacher = c.teacher;
+            const teacher = activeTeacherReview ? teacherValueFor(c, activeTeacherReview.model) : null;
+            const scoreLabel = activeTeacherReview ? displayOptionalScore(teacher?.q_value) : displayScoreLabel(c);
+            const probLabel = activeTeacherReview ? displayOptionalProb(teacher?.prob) : displayProbLabel(probability);
 
             const barColor = isChosen && isGt ? '#8e44ad'
               : isChosen ? '#e74c3c'
               : isGt ? '#27ae60'
-              : isTeacher ? '#f39c12'
+              : isTeacher ? '#8e44ad'
               : 'var(--accent)';
 
             const rowBg = isChosen && isGt ? 'rgba(142,68,173,0.08)'
               : isChosen ? 'rgba(231,76,60,0.07)'
               : isGt ? 'rgba(39,174,96,0.07)'
-              : isTeacher ? 'rgba(243,156,18,0.07)'
+              : isTeacher ? 'rgba(142,68,173,0.08)'
               : idx % 2 === 0 ? 'transparent' : 'rgba(0,0,0,0.02)';
 
             return (
@@ -250,7 +273,7 @@ export function ReplayDecisionPanel({
                 {/* 第一列：牌名 + 标记 */}
                 <div style={{
                   width: COL1_W, flexShrink: 0,
-                  fontSize: 12, fontFamily: 'Menlo, monospace',
+                  fontSize: 13, fontFamily: 'Menlo, monospace',
                   fontWeight: isChosen || isGt || isTeacher ? 700 : 400,
                   color: barColor,
                   display: 'flex', alignItems: 'center', gap: 3,
@@ -258,44 +281,30 @@ export function ReplayDecisionPanel({
                   {shortLabel(c.action)}
                   {isChosen && <span style={{ fontSize: 9, color: '#e74c3c' }}>★</span>}
                   {isGt && !isChosen && <span style={{ fontSize: 9, color: '#27ae60' }}>●</span>}
-                  {isTeacher && <span style={{ fontSize: 9, color: '#d68910' }}>T</span>}
+                  {isTeacher && <span style={{ fontSize: 9, color: '#8e44ad' }}>T</span>}
                 </div>
 
-                {/* 第二列：本地模型柱状图 + 数值 */}
-                <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <div style={{ flex: 1, height: 10, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
-                    <div style={{
-                      width: `${pct}%`, height: '100%',
-                      background: barColor,
-                      borderRadius: 2,
-                      transition: 'width 0.15s ease',
-                    }} />
-                  </div>
-                  <div style={{
-                    width: 52, textAlign: 'right', flexShrink: 0,
-                    fontSize: 11, fontFamily: 'Menlo, monospace',
-                    color: isChosen || isGt || isTeacher ? barColor : 'var(--text-muted)',
-                    fontWeight: isChosen || isGt || isTeacher ? 700 : 400,
-                  }}>
-                    <div>{displayScoreLabel(c)}</div>
-                    <div style={{ fontSize: 10, opacity: 0.78 }}>P {displayProbLabel(probability)}</div>
-                  </div>
+                <div style={{
+                  flex: 1,
+                  textAlign: 'right',
+                  fontSize: 13,
+                  fontFamily: 'Menlo, monospace',
+                  color: isChosen || isGt || isTeacher ? barColor : 'var(--text-muted)',
+                  fontWeight: isChosen || isGt || isTeacher ? 700 : 400,
+                }}>
+                  {scoreLabel}
                 </div>
-
-                {hasTeacherReview && (
-                  <div style={{
-                    width: 58,
-                    textAlign: 'right',
-                    flexShrink: 0,
-                    fontSize: 11,
-                    fontFamily: 'Menlo, monospace',
-                    color: teacher ? (isTeacher ? '#d68910' : 'var(--text-muted)') : 'rgba(127,127,127,0.48)',
-                    fontWeight: isTeacher ? 700 : 400,
-                  }}>
-                    <div>{displayOptionalScore(teacher?.q_value)}</div>
-                    <div style={{ fontSize: 10, opacity: 0.78 }}>P {displayOptionalProb(teacher?.prob)}</div>
-                  </div>
-                )}
+                <div style={{
+                  width: 66,
+                  textAlign: 'right',
+                  flexShrink: 0,
+                  fontSize: 13,
+                  fontFamily: 'Menlo, monospace',
+                  color: isChosen || isGt || isTeacher ? barColor : 'var(--text-muted)',
+                  fontWeight: isChosen || isGt || isTeacher ? 700 : 400,
+                }}>
+                  {probLabel}
+                </div>
               </div>
             );
           })}
@@ -343,21 +352,22 @@ export function ReplayDecisionPanel({
 // ---------------------------------------------------------------------------
 // 样式常量
 // ---------------------------------------------------------------------------
-const COL1_W = 52;
+const COL1_W = 56;
 
 const panelStyle = (compact: boolean): React.CSSProperties => ({
   width: '100%',
   minHeight: compact ? 240 : undefined,
   maxHeight: compact ? 300 : undefined,
-  flexShrink: 0,
-  height: compact ? 'auto' : '100%',
-  background: 'var(--sidepanel-bg)',
-  borderLeft: compact ? 'none' : '1px solid var(--sidepanel-border)',
+  flex: compact ? undefined : 1,
+  minWidth: 0,
+  flexShrink: compact ? 0 : 1,
+  height: compact ? 'auto' : undefined,
+  background: 'var(--card-bg)',
+  borderLeft: 'none',
   borderTop: compact ? '1px solid var(--sidepanel-border)' : 'none',
   display: 'flex',
   flexDirection: 'column',
   overflow: 'hidden',
-  backdropFilter: 'blur(6px)',
 });
 
 const sectionStyle: React.CSSProperties = {
@@ -383,14 +393,19 @@ const tableHeaderStyle: React.CSSProperties = {
   marginBottom: 4,
 };
 
-function badgeStyle(color: string): React.CSSProperties {
+function teacherChipStyle(active: boolean): React.CSSProperties {
+  const color = active ? '#8e44ad' : '#8a8f98';
   return {
-    fontSize: 10, fontWeight: 700,
-    padding: '1px 5px', borderRadius: 3,
-    background: color + '22',
+    minHeight: 22,
+    padding: '3px 8px',
+    borderRadius: 5,
+    border: `1px solid ${active ? 'rgba(142,68,173,0.55)' : 'rgba(127,127,127,0.26)'}`,
+    background: active ? 'rgba(142,68,173,0.16)' : 'rgba(127,127,127,0.10)',
     color,
-    border: `1px solid ${color}44`,
-    flexShrink: 0,
+    fontSize: 10,
+    fontWeight: active ? 800 : 650,
+    cursor: 'pointer',
+    lineHeight: 1.2,
   };
 }
 

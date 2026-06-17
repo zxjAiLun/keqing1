@@ -20,6 +20,13 @@ export interface LogitTileData {
   isChosen: boolean;
   isGt: boolean;
   isTsumo: boolean;
+  teacherBars?: Array<{
+    model: string;
+    qValue?: number | null;
+    prob?: number | null;
+    pct: number;
+    rank?: number | null;
+  }>;
 }
 
 function normalizedPercentages(scores: number[]): number[] {
@@ -43,11 +50,23 @@ export function buildLogitData(entry: DecisionLogEntry): LogitTileData[] {
   // 构建 pai → score 映射（final_score 优先，兼容 beam/logit）
   const scoreMap: Record<string, number> = {};
   const probMap: Record<string, number> = {};
+  const teacherMap: Record<string, LogitTileData['teacherBars']> = {};
   for (const c of entry.candidates ?? []) {
     if (c.action?.type === 'dahai' && c.action.pai) {
       scoreMap[c.action.pai] = c.final_score ?? c.beam_score ?? c.logit;
       if (typeof c.prob === 'number' && Number.isFinite(c.prob)) {
         probMap[c.action.pai] = c.prob;
+      }
+      if (c.teachers?.length) {
+        teacherMap[c.action.pai] = c.teachers.map((teacher) => ({
+          model: teacher.model,
+          qValue: teacher.q_value,
+          prob: teacher.prob,
+          pct: typeof teacher.prob === 'number' && Number.isFinite(teacher.prob)
+            ? teacher.prob * 100
+            : 0,
+          rank: teacher.rank,
+        }));
       }
     }
   }
@@ -66,7 +85,7 @@ export function buildLogitData(entry: DecisionLogEntry): LogitTileData[] {
     const score = scoreMap[pai];
     const prob = probMap[pai];
     const pct = score !== undefined
-      ? Math.max(6, prob !== undefined ? prob * 100 : scorePctMap[pai] ?? 0)
+      ? prob !== undefined ? prob * 100 : scorePctMap[pai] ?? 0
       : 0;
     return {
       pai,
@@ -76,6 +95,7 @@ export function buildLogitData(entry: DecisionLogEntry): LogitTileData[] {
       isChosen: pai === chosenPai,
       isGt: pai === gtPai,
       isTsumo: pai === tsumo,
+      teacherBars: teacherMap[pai],
     };
   });
 }

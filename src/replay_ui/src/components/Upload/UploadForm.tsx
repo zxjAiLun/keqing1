@@ -1,7 +1,7 @@
 // src/replay_ui/src/components/Upload/UploadForm.tsx
 import { useState, useRef } from 'react';
 import type { BotType } from '../../types/bot';
-import { BOT_CATALOG, DEFAULT_BOT_TYPE, getBotCatalogEntry } from '../../utils/botCatalog';
+import { GUI_BOT_CATALOG } from '../../utils/botCatalog';
 
 interface UploadFormProps {
   onDataLoaded: (data: unknown) => void;
@@ -14,24 +14,93 @@ const DEFAULT_TENHOU_URL = 'https://tenhou.net/3/?log=2021021820gm-00a9-0000-0b6
 const DEFAULT_MJAI_JSON = '[{"type":"start_game","names":["遊走","武田舞彩","九紋龍史進","Nemo"],"kyoku_first":0,"aka_flag":true},{"type":"start_kyoku","bakaze":"E","dora_marker":"9p","kyoku":1,"honba":0,"kyotaku":0,"oya":0,"scores":[25000,25000,25000,25000],"tehais":[["1m","3m","6m","7m","1p","3p","6p","1s","1s","1s","2s","3s","5s"],["1m","3m","5m","6m","9p","2s","2s","2s","8s","9s","E","N","P"],["4m","5m","5pr","6p","8p","4s","6s","7s","7s","8s","9s","9s","S"],["2m","5mr","7m","8m","8m","2p","3p","8p","9p","8s","E","W","W"]]}]';
 const DEFAULT_TENHOU6_JSON = '{"dan":["雀豪★2","雀聖★2","雀豪★1","雀豪★1"],"lobby":0,"log":[[[5,1,0],[22700,29300,35000,13000],[25],[18],[14,46,27,11,16,13,41,25,13,21,52,26,37],[41,41],[21,46],[33,21,38,16,28,36,35,34,39,29,31,18,16],[35,37,27],[21,18,"r35"],[24,32,12,24,38,43,29,46,22,26,15,17,34],[42,28,26],[43,29,32],[11,25,38,22,26,11,22,44,28,47,33,44,21],[16,14],[38,47],["和了",[0,13300,-12300,0],[1,2,1,"満貫12000点","一気通貫(2飜)","立直(1飜)","一発(1飜)","裏ドラ(0飜)"]]]],"name":["Aさん","Bさん","Cさん","Dさん"],"rate":[269.0,3644.0,1206.0,2300.0],"ratingc":"PF4","rule":{"aka":0,"aka51":1,"aka52":1,"aka53":1,"disp":"玉の間南喰赤"},"sx":["C","C","C","C"]}';
 
+const TENHOU6_JSON_MARKER = '#json=';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseTenhou6JsonPayload(payload: string): Record<string, unknown> {
+  const trimmed = payload.trim();
+  const candidates = [trimmed];
+  try {
+    const decoded = decodeURIComponent(trimmed);
+    if (decoded !== trimmed) candidates.push(decoded);
+  } catch {
+    // Keep the raw fragment; malformed percent escapes will be reported as JSON errors below.
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (isRecord(parsed) && Array.isArray(parsed.log)) return parsed;
+    } catch {
+      // Try the next representation.
+    }
+  }
+  throw new Error('tenhou6 链接中的 json 不是有效牌谱对象');
+}
+
+function parseTenhou6JsonLinks(text: string): Record<string, unknown> | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const payloads = lines
+    .map((line) => {
+      const idx = line.indexOf(TENHOU6_JSON_MARKER);
+      return idx >= 0 ? line.slice(idx + TENHOU6_JSON_MARKER.length) : null;
+    })
+    .filter((payload): payload is string => Boolean(payload?.trim()));
+
+  if (payloads.length === 0) return null;
+  if (payloads.length !== lines.length) {
+    throw new Error('检测到 tenhou6 json 链接时，请每行只放一个 tenhou.net/6/#json=... 链接');
+  }
+
+  const parsed = payloads.map(parseTenhou6JsonPayload);
+  if (parsed.length === 1) return parsed[0];
+
+  const [first, ...rest] = parsed;
+  return {
+    ...first,
+    log: [first, ...rest].flatMap((item) => Array.isArray(item.log) ? item.log : []),
+  };
+}
+
+function parseTenhou6TextInput(text: string): Record<string, unknown> {
+  const fromLinks = parseTenhou6JsonLinks(text);
+  if (fromLinks) return fromLinks;
+  const parsed = JSON.parse(text);
+  if (!isRecord(parsed) || !Array.isArray(parsed.log)) {
+    throw new Error('tenhou6 JSON 需要是包含 log 数组的对象');
+  }
+  return parsed;
+}
+
+function isTenhou6JsonLinkText(text: string): boolean {
+  return text.includes(TENHOU6_JSON_MARKER);
+}
+
 // ---------------------------------------------------------------------------
 // 子组件：天凤链接输入
 // ---------------------------------------------------------------------------
 function TenhouUrlInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   return (
     <div>
-      <input
-        type="text"
+      <textarea
         value={value}
         onChange={e => onChange(e.target.value)}
-        placeholder="https://tenhou.net/3/?log=...&tw=2"
+        placeholder="https://tenhou.net/3/?log=...&tw=2&#10;或每行一个 https://tenhou.net/6/#json={...}"
         style={{
           width: '100%',
+          height: 74,
           padding: '10px 12px',
           border: '1px solid var(--border)',
           borderRadius: 8,
           fontSize: 13,
           fontFamily: '"Menlo", "Consolas", monospace',
+          resize: 'vertical',
           color: 'var(--text-primary)',
           background: 'var(--card-bg)',
           outline: 'none',
@@ -39,7 +108,7 @@ function TenhouUrlInput({ value, onChange }: { value: string; onChange: (v: stri
         }}
       />
       <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-        视角将自动从链接的 <code>tw=</code> 参数解析，无需手动选择
+        支持普通天凤 <code>log=</code> 链接，也支持每行一个 <code>tenhou.net/6/#json=...</code> 链接
       </div>
     </div>
   );
@@ -150,10 +219,12 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
   const [tenhou6Text, setTenhou6Text] = useState(DEFAULT_TENHOU6_JSON);
   const [files, setFiles]         = useState<File[]>([]);
   const [playerId, setPlayerId]   = useState<string>('auto');
-  const [botModel, setBotModel]   = useState<BotType>(DEFAULT_BOT_TYPE);
+  const [selectedModels, setSelectedModels] = useState<BotType[]>(['70k', 't1_71000', 'weak_mortal']);
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState<string | null>(null);
   const [success, setSuccess]     = useState<string | null>(null);
+  const tenhouUrlIsTenhou6Json = inputType === 'tenhou_url' && isTenhou6JsonLinkText(tenhouUrl);
+  const playerIdValue = tenhouUrlIsTenhou6Json && playerId === 'auto' ? '0' : playerId;
 
   // 切换输入类型时重置视角默认值
   const switchInputType = (t: InputType) => {
@@ -175,6 +246,10 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
       setError('请填写链接或上传文件');
       return;
     }
+    if (selectedModels.length === 0) {
+      setError('至少选择一个 Mortal checkpoint');
+      return;
+    }
 
     setLoading(true);
     setError(null);
@@ -185,13 +260,19 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
       const formData = new FormData();
 
       if (inputType === 'tenhou_url') {
-        formData.append('json_text', text);
-        formData.append('input_type', 'url');
+        const linkedTenhou6 = parseTenhou6JsonLinks(text);
+        if (linkedTenhou6) {
+          formData.append('json_text', JSON.stringify(linkedTenhou6));
+          formData.append('input_type', 'tenhou6');
+        } else {
+          formData.append('json_text', text);
+          formData.append('input_type', 'url');
+        }
       } else if (inputType === 'tenhou6_json') {
         if (files.length === 0) {
-          let data;
+          let data: Record<string, unknown>;
           try {
-            data = JSON.parse(text);
+            data = parseTenhou6TextInput(text);
           } catch {
             throw new Error('tenhou6 JSON 格式错误，请检查输入');
           }
@@ -218,10 +299,12 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
         for (const f of files) formData.append('files', f);
       }
 
-      if (playerId !== 'auto') formData.append('player_id', playerId);
-      formData.append('bot_type', botModel);
+      if (playerIdValue !== 'auto') formData.append('player_id', playerIdValue);
+      for (const model of selectedModels) {
+        formData.append('model_types', model);
+      }
 
-      const res = await fetch('/api/replay', { method: 'POST', body: formData });
+      const res = await fetch('/api/replay/multi-teacher', { method: 'POST', body: formData });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || `请求失败: ${res.status}`);
@@ -260,7 +343,13 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
     color: 'var(--text-primary)',
   };
 
-  const selectedBot = getBotCatalogEntry(botModel);
+  const toggleModel = (model: BotType) => {
+    setSelectedModels((current) =>
+      current.includes(model)
+        ? current.filter((item) => item !== model)
+        : [...current, model],
+    );
+  };
 
   return (
     <form onSubmit={handleSubmit}>
@@ -302,8 +391,8 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
         {/* 视角座位 */}
         <div style={{ flex: 1, minWidth: 160 }}>
           <label style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, display: 'block' }}>视角座位</label>
-          <select value={playerId} onChange={e => setPlayerId(e.target.value)} style={selectStyle}>
-            {inputType === 'tenhou_url' && <option value="auto">自动（来自链接 tw=）</option>}
+          <select value={playerIdValue} onChange={e => setPlayerId(e.target.value)} style={selectStyle}>
+            {inputType === 'tenhou_url' && !tenhouUrlIsTenhou6Json && <option value="auto">自动（来自链接 tw=）</option>}
             <option value="0">东家</option>
             <option value="1">南家</option>
             <option value="2">西家</option>
@@ -312,17 +401,40 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
         </div>
 
         {/* 模型类型 */}
-        <div style={{ flex: 1, minWidth: 130 }}>
-          <label style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, display: 'block' }}>模型类型</label>
-          <select value={botModel} onChange={e => setBotModel(e.target.value as BotType)} style={selectStyle}>
-            {BOT_CATALOG.map((bot, idx) => (
-              <option key={bot.value} value={bot.value}>
-                {idx === 0 ? `${bot.label} · 当前主线` : `${bot.label} · ${bot.shortLabel}`}
-              </option>
-            ))}
-          </select>
+        <div style={{ flex: '2 1 360px', minWidth: 260 }}>
+          <label style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, display: 'block' }}>Mortal checkpoint 对比</label>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 6 }}>
+            {GUI_BOT_CATALOG.map((bot) => {
+              const active = selectedModels.includes(bot.value);
+              return (
+                <button
+                  key={bot.value}
+                  type="button"
+                  onClick={() => toggleModel(bot.value)}
+                  style={{
+                    minHeight: 52,
+                    padding: '7px 9px',
+                    borderRadius: 7,
+                    border: `1px solid ${active ? '#8e44ad' : 'var(--border)'}`,
+                    background: active ? 'rgba(142,68,173,0.10)' : 'var(--card-bg)',
+                    color: active ? '#8e44ad' : 'var(--text-primary)',
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+                    <span style={{ fontSize: 12, fontWeight: 800 }}>{bot.shortLabel}</span>
+                    <span style={{ fontSize: 10, color: active ? '#8e44ad' : 'var(--text-muted)' }}>{active ? '已选' : bot.badge}</span>
+                  </div>
+                  <div style={{ marginTop: 2, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.35 }}>
+                    {bot.description}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
           <div style={{ marginTop: 4, fontSize: 12, color: 'var(--text-muted)' }}>
-            {selectedBot.description}
+            运行后会分别生成 teacher report，并在牌桌候选表中以紫/灰模型权重条显示。
           </div>
         </div>
 
@@ -350,7 +462,7 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
         >
           {loading ? (
             <><span style={{ display: 'inline-block', width: 16, height: 16, border: '2px solid rgba(255,255,255,0.4)', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />处理中…</>
-          ) : '▶ 运行 Review'}
+          ) : '▶ 运行多模型 Review'}
         </button>
       </div>
 

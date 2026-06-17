@@ -10,7 +10,7 @@ export function PageShell({
   children,
   width,
   maxWidth = 1120,
-  padding = 24,
+  padding = 14,
 }: {
   children: ReactNode;
   /** @deprecated Use maxWidth */
@@ -19,7 +19,7 @@ export function PageShell({
   padding?: number;
 }) {
   return (
-    <div style={{ minHeight: '100%', padding }}>
+    <div style={{ height: '100%', overflow: 'auto', padding }}>
       <div style={{ maxWidth: width ?? maxWidth, margin: '0 auto' }}>{children}</div>
     </div>
   );
@@ -45,9 +45,9 @@ export function PageHeader({
         display: 'flex',
         justifyContent: 'space-between',
         alignItems: 'flex-end',
-        gap: 16,
+        gap: 12,
         flexWrap: 'wrap',
-        marginBottom: 24,
+        marginBottom: 12,
       }}
     >
       <div style={{ minWidth: 0 }}>
@@ -56,20 +56,19 @@ export function PageHeader({
             style={{
               fontSize: 11,
               fontWeight: 700,
-              letterSpacing: '0.08em',
               textTransform: 'uppercase',
               color: 'var(--text-muted)',
-              marginBottom: 8,
+              marginBottom: 4,
             }}
           >
             {eyebrow}
           </div>
         )}
-        <h1 style={{ fontSize: 28, fontWeight: 800, color: 'var(--text-primary)', marginBottom: 8 }}>
+        <h1 style={{ fontSize: 20, fontWeight: 800, color: 'var(--text-primary)', marginBottom: 4 }}>
           {title}
         </h1>
         {description && (
-          <div style={{ maxWidth: 760, fontSize: 14, lineHeight: 1.6, color: 'var(--text-secondary)' }}>
+          <div style={{ maxWidth: 720, fontSize: 12, lineHeight: 1.5, color: 'var(--text-secondary)' }}>
             {description}
           </div>
         )}
@@ -92,18 +91,18 @@ export function SectionTitle({
   description?: ReactNode;
 }) {
   return (
-    <div style={{ marginBottom: 14 }}>
+    <div style={{ marginBottom: 8 }}>
       <div
         style={{
-          fontSize: 16,
+          fontSize: 13,
           fontWeight: 700,
           color: 'var(--text-primary)',
-          marginBottom: description ? 4 : 0,
+          marginBottom: description ? 2 : 0,
         }}
       >
         {title}
       </div>
-      {description && <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{description}</div>}
+      {description && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{description}</div>}
     </div>
   );
 }
@@ -125,7 +124,7 @@ export function MetricCard({
       label={label}
       value={value as string | number}
       tone={tone}
-      style={{ minWidth: 120 }}
+      style={{ minWidth: 96 }}
     />
   );
 }

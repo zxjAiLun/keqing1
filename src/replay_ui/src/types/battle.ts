@@ -102,6 +102,7 @@ export interface StartBattleRequest {
   bot_count?: number;
   seed?: number;
   bot_model?: BotType;
+  game_length?: "tonpu" | "hanchan";
 }
 
 export interface StartBattleResponse {
@@ -118,4 +119,14 @@ export interface ActionResponse {
   success: boolean;
   state: BattleState;
   bot_action?: Action;
+  rating_updates?: Array<{
+    player_id: string;
+    display_name: string;
+    rating: number;
+    rating_delta: number;
+    games: number;
+    average_rank: number;
+    rank: number;
+    score: number;
+  }>;
 }

@@ -11,24 +11,31 @@ export interface BotCatalogEntry {
 export const BOT_CATALOG: BotCatalogEntry[] = [
   {
     value: 'mortal',
-    label: 'mortal',
-    shortLabel: '主线',
-    badge: 'Mainline',
-    description: 'Mortal 原生 Brain+DQN checkpoint，当前用于打牌、牌谱 review 和工具化主线。',
+    label: 'Mortal gui_mortal.pth',
+    shortLabel: 'gui_mortal',
+    badge: '当前训练导出',
+    description: 'artifacts/mortal_serving/gui_mortal.pth。当前 GUI 默认使用的 Mortal checkpoint。',
   },
   {
     value: '70k',
-    label: '70k',
+    label: 'Mortal 70k.pth',
     shortLabel: '70k',
-    badge: 'Anchor',
-    description: '70k 标准锚点权重，用于和当前主线或实验分支做稳定对照。',
+    badge: '70k 锚点',
+    description: 'artifacts/mortal_serving/70k.pth。固定 70k 训练步锚点权重。',
+  },
+  {
+    value: 't1_71000',
+    label: 'Mortal T1@71000',
+    shortLabel: 'T1@71000',
+    badge: 'baseline',
+    description: 'artifacts/experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth。基于 70k + v4 teacher CE 的 71000 step baseline。',
   },
   {
     value: 'weak_mortal',
-    label: 'weak mortal',
-    shortLabel: 'weak',
-    badge: 'Reference',
-    description: '本地 model_v4_20240308_best_min 权重，作为 weak mortal 参考模型。',
+    label: 'Mortal v4',
+    shortLabel: 'v4',
+    badge: '外部 v4',
+    description: 'artifacts/model_v4_20240308_best_min.pth。外部 v4 参考权重。',
   },
   {
     value: 'rulebase',
@@ -39,12 +46,15 @@ export const BOT_CATALOG: BotCatalogEntry[] = [
   },
 ];
 
+export const GUI_BOT_CATALOG: BotCatalogEntry[] = BOT_CATALOG.filter((entry) => entry.value !== 'rulebase');
+
 export const DEFAULT_BOT_TYPE: BotType = 'mortal';
 
 export const BOT_CHECKPOINT_DEFAULTS: Record<BotType, string> = {
   mortal: 'artifacts/mortal_serving/gui_mortal.pth',
   '70k': 'artifacts/mortal_serving/70k.pth',
-  weak_mortal: 'artifacts/mortal_serving/weak_mortal.pth',
+  t1_71000: 'artifacts/experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth',
+  weak_mortal: 'artifacts/model_v4_20240308_best_min.pth',
   rulebase: '',
 };
 

@@ -61,6 +61,8 @@ def _shuffle_wall(seed: Optional[int] = None) -> List[str]:
 class BattleConfig:
     player_count: int = 4
     players: List[Dict] = field(default_factory=list)  # [{id, name, type}]
+    game_length: str = "hanchan"  # hanchan | tonpu
+    initial_score: int = 25000
     target_score: int = 30000
     allow_west_round: bool = True
     allow_agari_yame: bool = True
@@ -86,6 +88,7 @@ class BattleRoom:
     pending_kakan: Optional[Dict] = None
     replay_draw_actor: Optional[int] = None  # 当前展示中的“摸到第14张”状态
     bot_event_cursor: Dict[int, int] = field(default_factory=dict)
+    rating_recorded: bool = False
     last_heartbeat: float = field(
         default_factory=lambda: __import__("time").time()
     )  # 最后心跳时间

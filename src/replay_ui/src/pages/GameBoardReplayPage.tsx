@@ -1,7 +1,7 @@
 // src/replay_ui/src/pages/GameBoardReplayPage.tsx
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Loader2, ChevronLeft, ChevronRight, SkipBack, SkipForward, PanelLeftClose, PanelLeftOpen, ChevronsUp, ChevronsDown } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { MahjongTable } from '../components/BattleBoard/MahjongTable';
 import { Tile } from '../components/BattleBoard/Tile';
 import { ReplayDecisionPanel } from '../components/DecisionPanel/ReplayDecisionPanel';
@@ -10,25 +10,16 @@ import { entryToBattleState, buildLogitData, hasReplayPostAction, hasReplayReach
 import { useReplayPlayer } from '../hooks/useReplayPlayer';
 import { replayApi } from '../api/replayApi';
 import { CN_BAKAZE } from '../utils/constants';
-import { isReplayDiffForPlayer, TILE_ORDER } from '../utils/tileUtils';
+import { isReplayReviewDiffForPlayer, TILE_ORDER } from '../utils/tileUtils';
 import { normalizeReplayPlayerNames, replayPlayerDisplayName } from '../utils/replayNames';
 import type { Action, ReplayData } from '../types/replay';
 import {
   backLinkButtonStyle,
   centeredStatusStyle,
   errorStatusTextStyle,
-  floatingPerspectiveStyle,
-  floatingSwitchBtnStyle,
-  floatingTopBarStyle,
-  floatingTopBarWrapStyle,
   gameReplayRootStyle,
-  iconBtnStyle,
   mutedStatusTextStyle,
-  perspectiveDrawerStyle,
-  perspectiveToggleStyle,
   sidePanelContainerStyle,
-  smallBtnStyle,
-  toolbarToggleStyle,
 } from './gameReplayStyles';
 
 export function GameBoardReplayPage() {
@@ -40,6 +31,15 @@ export function GameBoardReplayPage() {
   const playerIdFromQuery = Number(params.get('player_id') ?? '0');
   const requestedPlayerId = Number.isFinite(playerIdFromQuery) ? playerIdFromQuery : 0;
   const teacherReportFromQuery = params.get('teacher_report') || params.get('teacher_report_path');
+  const teacherReportsFromQuery = useMemo(
+    () => new URLSearchParams(location.search)
+      .getAll('teacher_reports')
+      .flatMap((value) => value.split(','))
+      .map((value) => value.trim())
+      .filter(Boolean),
+    [location.search],
+  );
+  const teacherReportsKey = teacherReportsFromQuery.join('\n');
   const focusEventIndexFromQuery = Number(params.get('focus_event_index') ?? '');
   const requestedFocusEventIndex = Number.isFinite(focusEventIndexFromQuery) ? focusEventIndexFromQuery : null;
   const focusStepFromQuery = Number(params.get('focus_step') ?? '');
@@ -65,22 +65,24 @@ export function GameBoardReplayPage() {
   const [narrowLayout, setNarrowLayout] = useState(false);
   const [boardPhase, setBoardPhase] = useState<ReplayBoardPhase>('pre');
   const [showOpponentHands, setShowOpponentHands] = useState(false);
-  const [showPerspectiveDrawer, setShowPerspectiveDrawer] = useState(false);
-  const [showTopToolbar, setShowTopToolbar] = useState(true);
+  const [activeTeacherModel, setActiveTeacherModel] = useState<string | null>(null);
+  const lastAppliedReplaySearchRef = useRef<string | null>(null);
 
   // 加载数据
   useEffect(() => {
+    setLoading(true);
+    setError(null);
     if (routeReplayData && !replayIdFromRoute) {
       setData(routeReplayData);
       setLoading(false);
     } else if (routeReplayId) {
-      replayApi.get(routeReplayId, requestedPlayerId, teacherReportFromQuery)
+      replayApi.get(routeReplayId, requestedPlayerId, teacherReportFromQuery, teacherReportsFromQuery)
         .then(d => { setData(d); setLoading(false); })
         .catch(e => { setError(String(e)); setLoading(false); });
     } else {
       const replayId = replayIdFromRoute;
       if (replayId) {
-        replayApi.get(replayId, requestedPlayerId, teacherReportFromQuery)
+        replayApi.get(replayId, requestedPlayerId, teacherReportFromQuery, teacherReportsFromQuery)
           .then(d => { setData(d); setLoading(false); })
           .catch(e => { setError(String(e)); setLoading(false); });
       } else {
@@ -88,7 +90,7 @@ export function GameBoardReplayPage() {
         setLoading(false);
       }
     }
-  }, [replayIdFromRoute, requestedPlayerId, routeReplayData, routeReplayId, teacherReportFromQuery]);
+  }, [replayIdFromRoute, requestedPlayerId, routeReplayData, routeReplayId, teacherReportFromQuery, teacherReportsKey]);
 
   useEffect(() => {
     if (!replayIdFromRoute) return;
@@ -105,7 +107,7 @@ export function GameBoardReplayPage() {
     currentStep, totalSteps,
     currentEntry, currentKyoku, totalKyoku,
     stepForward, stepBackward,
-    goToStart, goToEnd, goToStep, goToKyoku,
+    goToStep, goToKyoku,
   } = useReplayPlayer(data);
 
   const currentHasPostPhase = hasReplayPostAction(currentEntry);
@@ -132,26 +134,53 @@ export function GameBoardReplayPage() {
     }
     if (typeof targetStep === 'number' && targetStep >= 0) {
       const targetPhase = requestedPhase ?? 'pre';
-      if (targetStep === currentStep && targetPhase === boardPhase) return;
+      if (targetStep === currentStep && targetPhase === boardPhase) {
+        lastAppliedReplaySearchRef.current = location.search;
+        return;
+      }
       if (requestedPhase) setBoardPhase(requestedPhase);
       else resetBoardPhase();
       setShowOpponentHands(false);
       goToStep(targetStep);
     }
+  }, [data, location.search, goToStep, resetBoardPhase]);
+
+  useEffect(() => {
+    if (!data) return;
+    let targetStep = requestedStep ?? requestedFocusStep;
+    if (targetStep === null && requestedFocusEventIndex !== null) {
+      targetStep = data.log.findIndex((entry) => entry.source_event_index === requestedFocusEventIndex);
+    }
+    const targetPhase = requestedPhase ?? 'pre';
+    if (typeof targetStep === 'number' && targetStep >= 0 && targetStep === currentStep && targetPhase === boardPhase) {
+      lastAppliedReplaySearchRef.current = location.search;
+    }
   }, [
     boardPhase,
     currentStep,
     data,
+    location.search,
     requestedFocusEventIndex,
     requestedFocusStep,
     requestedStep,
     requestedPhase,
-    goToStep,
-    resetBoardPhase,
   ]);
 
   useEffect(() => {
     if (!data || !replayIdFromRoute) return;
+    if (data.player_id !== requestedPlayerId) return;
+    let targetStep = requestedStep ?? requestedFocusStep;
+    if (targetStep === null && requestedFocusEventIndex !== null) {
+      targetStep = data.log.findIndex((entry) => entry.source_event_index === requestedFocusEventIndex);
+    }
+    const targetPhase = requestedPhase ?? 'pre';
+    const hasUnappliedUrlTarget =
+      typeof targetStep === 'number'
+      && targetStep >= 0
+      && location.search !== lastAppliedReplaySearchRef.current
+      && (targetStep !== currentStep || targetPhase !== boardPhase);
+    if (hasUnappliedUrlTarget) return;
+
     const nextParams = new URLSearchParams(location.search);
     nextParams.set('id', replayIdFromRoute);
     nextParams.set('player_id', String(viewPlayerId));
@@ -161,7 +190,7 @@ export function GameBoardReplayPage() {
     if (nextSearch !== location.search) {
       navigate({ pathname: location.pathname, search: nextSearch }, { replace: true });
     }
-  }, [boardPhase, currentStep, data, location.pathname, location.search, navigate, replayIdFromRoute, viewPlayerId]);
+  }, [boardPhase, currentStep, data, location.pathname, location.search, navigate, replayIdFromRoute, requestedPlayerId, viewPlayerId]);
 
   const moveBoardStep = useCallback((direction: 1 | -1) => {
     if (!data || !currentEntry) return;
@@ -225,18 +254,6 @@ export function GameBoardReplayPage() {
     stepBackward();
   }, [resetBoardPhase, stepBackward]);
 
-  const handleGoToStart = useCallback(() => {
-    resetBoardPhase();
-    setShowOpponentHands(false);
-    goToStart();
-  }, [goToStart, resetBoardPhase]);
-
-  const handleGoToEnd = useCallback(() => {
-    resetBoardPhase();
-    setShowOpponentHands(false);
-    goToEnd();
-  }, [goToEnd, resetBoardPhase]);
-
   const handleGoToStep = useCallback((step: number) => {
     resetBoardPhase();
     setShowOpponentHands(false);
@@ -253,27 +270,55 @@ export function GameBoardReplayPage() {
     if (!data) return;
     const pid = data.player_id;
     for (let i = currentStep - 1; i >= 0; i--) {
-      if (isReplayDiffForPlayer(data.log[i], pid)) {
+      if (isReplayReviewDiffForPlayer(data.log[i], pid, activeTeacherModel)) {
         resetBoardPhase();
         setShowOpponentHands(false);
         goToStep(i);
         return;
       }
     }
-  }, [data, currentStep, goToStep, resetBoardPhase]);
+  }, [activeTeacherModel, data, currentStep, goToStep, resetBoardPhase]);
 
   const jumpToNextDiff = useCallback(() => {
     if (!data) return;
     const pid = data.player_id;
     for (let i = currentStep + 1; i < data.log.length; i++) {
-      if (isReplayDiffForPlayer(data.log[i], pid)) {
+      if (isReplayReviewDiffForPlayer(data.log[i], pid, activeTeacherModel)) {
         resetBoardPhase();
         setShowOpponentHands(false);
         goToStep(i);
         return;
       }
     }
-  }, [data, currentStep, goToStep, resetBoardPhase]);
+  }, [activeTeacherModel, data, currentStep, goToStep, resetBoardPhase]);
+
+  const isOwnDiscardStep = useCallback((step: number) => {
+    if (!data || step < 0 || step >= data.log.length) return false;
+    const action = data.log[step]?.gt_action ?? data.log[step]?.chosen;
+    return action?.type === 'dahai' && action.actor === viewPlayerId;
+  }, [data, viewPlayerId]);
+
+  const jumpToPrevOwnDiscard = useCallback(() => {
+    if (!data) return;
+    for (let i = currentStep - 1; i >= 0; i--) {
+      if (!isOwnDiscardStep(i)) continue;
+      resetBoardPhase();
+      setShowOpponentHands(false);
+      goToStep(i);
+      return;
+    }
+  }, [data, currentStep, goToStep, isOwnDiscardStep, resetBoardPhase]);
+
+  const jumpToNextOwnDiscard = useCallback(() => {
+    if (!data) return;
+    for (let i = currentStep + 1; i < data.log.length; i++) {
+      if (!isOwnDiscardStep(i)) continue;
+      resetBoardPhase();
+      setShowOpponentHands(false);
+      goToStep(i);
+      return;
+    }
+  }, [data, currentStep, goToStep, isOwnDiscardStep, resetBoardPhase]);
 
   // 键盘快捷键
   useEffect(() => {
@@ -327,6 +372,16 @@ export function GameBoardReplayPage() {
     navigate(`/game-replay?${nextParams.toString()}`);
   };
 
+  const currentAction = (currentEntry?.gt_action ?? currentEntry?.chosen) as Action | null | undefined;
+  const isForcedRiichiTsumogiri = Boolean(
+    currentEntry
+    && !currentEntry.is_obs
+    && currentAction?.type === 'dahai'
+    && currentAction.tsumogiri
+    && currentAction.actor !== undefined
+    && currentEntry.reached?.[currentAction.actor],
+  );
+
   // 适配数据
   const battleState = useMemo(
     () => {
@@ -336,25 +391,47 @@ export function GameBoardReplayPage() {
     },
     [currentEntry, data, currentStep, playerNames, viewPlayerId, boardPhase],
   );
-  // obs 步不显示柱状图
-  const logitData = currentEntry && !currentEntry.is_obs ? buildLogitData(currentEntry) : undefined;
+  // 只在打出前显示权重条；打出后/立直展示阶段不再显示。
+  const logitData = currentEntry && !currentEntry.is_obs && boardPhase === 'pre' && !isForcedRiichiTsumogiri
+    ? buildLogitData(currentEntry)
+    : undefined;
+  const teacherModelsForStep = useMemo(() => {
+    if (!currentEntry) return [];
+    const reviews = currentEntry.teacher_reviews && currentEntry.teacher_reviews.length > 0
+      ? currentEntry.teacher_reviews
+      : currentEntry.teacher_review ? [currentEntry.teacher_review] : [];
+    return reviews.map((review) => review.model);
+  }, [currentEntry]);
+  const teacherModelsForStepKey = teacherModelsForStep.join('\n');
+
+  useEffect(() => {
+    if (teacherModelsForStep.length === 0) {
+      if (activeTeacherModel !== null) setActiveTeacherModel(null);
+      return;
+    }
+    if (!activeTeacherModel || !teacherModelsForStep.includes(activeTeacherModel)) {
+      setActiveTeacherModel(teacherModelsForStep[0]);
+    }
+  }, [teacherModelsForStepKey, activeTeacherModel, teacherModelsForStep]);
 
   const entry = currentEntry;
   const k = entry?.kyoku_key;
   const kyokuLabel = k ? `${CN_BAKAZE[k.bakaze] ?? k.bakaze}${k.kyoku}局 ${k.honba}本场` : '';
+  const localReviewerLabel = displayReviewerModelLabel(
+    data?.selected_teacher_models?.[0]?.label
+    ?? data?.model_label
+    ?? data?.bot_type
+    ?? replayPlayerDisplayName(playerNames, viewPlayerId),
+  );
 
   // 当前步 bot 选择和实际打出
   const chosenPai = entry?.chosen?.type === 'dahai' ? entry.chosen.pai ?? null : null;
-  const currentResultAction = (currentEntry?.gt_action ?? currentEntry?.chosen) as Action | undefined;
   const resultSummary = useMemo(
     () => {
       if (!currentEntry) return null;
-      if ((currentResultAction?.type === 'hora' || currentResultAction?.type === 'ryukyoku') && boardPhase !== 'post') {
-        return null;
-      }
       return buildReplayResultSummary(events, currentEntry, playerNames);
     },
-    [events, currentEntry, currentResultAction, playerNames, boardPhase],
+    [events, currentEntry, playerNames],
   );
   const replayHands = useMemo(
     () => buildReplayHandsForBoard(events as ReplayEvent[] | null, data, currentStep, currentEntry ?? null, boardPhase),
@@ -400,6 +477,7 @@ export function GameBoardReplayPage() {
               autoTsumogiri={autoTsumogiri} setAutoTsumogiri={setAutoTsumogiri}
               mode="replay"
               logitData={logitData}
+              activeTeacherModel={activeTeacherModel}
               revealedOpponentHands={showOpponentHands ? replayHands : null}
               onToggleOpponentHands={() => setShowOpponentHands((v) => !v)}
             />
@@ -424,109 +502,98 @@ export function GameBoardReplayPage() {
               </div>
             )}
 
-            <div style={floatingTopBarWrapStyle}>
-              <button
-                onClick={() => setShowTopToolbar((v) => !v)}
-                style={toolbarToggleStyle}
-                title={showTopToolbar ? '收起顶部工具栏' : '展开顶部工具栏'}
-              >
-                {showTopToolbar ? <ChevronsUp size={14} /> : <ChevronsDown size={14} />}
-                <span>{showTopToolbar ? '收起' : '展开'}</span>
-              </button>
-              {showTopToolbar && (
-                <div style={floatingTopBarStyle}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    <button onClick={() => navigate('/')} style={iconBtnStyle} title="返回">←</button>
-                    {totalKyoku > 1 ? (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                        <button onClick={() => handleGoToKyoku(Math.max(0, currentKyoku - 1))} disabled={currentKyoku === 0} style={smallBtnStyle}>◀</button>
-                        <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.78)' }}>{kyokuLabel} · {currentKyoku + 1}/{totalKyoku}</span>
-                        <button onClick={() => handleGoToKyoku(Math.min(totalKyoku - 1, currentKyoku + 1))} disabled={currentKyoku === totalKyoku - 1} style={smallBtnStyle}>▶</button>
-                      </div>
-                    ) : (
-                      <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.78)' }}>{kyokuLabel}</span>
-                    )}
-                  </div>
-
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 180 }}>
-                    <input
-                      type="range"
-                      min={0}
-                      max={totalSteps - 1}
-                      value={currentStep}
-                      onChange={e => handleGoToStep(parseInt(e.target.value))}
-                      style={{ width: '100%', accentColor: 'var(--accent)' }}
-                    />
-                    <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.72)', fontFamily: 'Menlo, monospace', whiteSpace: 'nowrap' }}>
-                      {currentStep + 1}/{totalSteps}{boardPhase === 'post' ? ' · 后' : boardPhase === 'reach' ? ' · 立直' : ' · 前'}
-                    </span>
-                  </div>
-
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <button onClick={handleGoToStart} disabled={currentStep === 0 && boardPhase === 'pre'} style={smallBtnStyle} title="第一步"><SkipBack size={13} /></button>
-                    <button onClick={handleStepBackward} disabled={currentStep === 0 && boardPhase === 'pre'} style={smallBtnStyle} title="上一步 (←)"><ChevronLeft size={13} /></button>
-                    <button onClick={handleStepForward} disabled={currentStep === totalSteps - 1 && !currentHasPostPhase && !currentHasReachPhase} style={smallBtnStyle} title="下一步 (→)"><ChevronRight size={13} /></button>
-                    <button onClick={handleGoToEnd} disabled={currentStep === totalSteps - 1 && boardPhase === 'pre'} style={smallBtnStyle} title="最后一步"><SkipForward size={13} /></button>
-
-                    <button onClick={() => setShowStats(true)} style={iconBtnStyle} title="统计">📊</button>
-                    <button onClick={jumpToPrevDiff} style={iconBtnStyle} title="上一个与Bot不同的决策">⏮差异</button>
-                    <button onClick={jumpToNextDiff} style={iconBtnStyle} title="下一个与Bot不同的决策">差异⏭</button>
-                    <button
-                      onClick={() => replayIdFromRoute
-                        ? navigate(`/replay?id=${encodeURIComponent(replayIdFromRoute)}&player_id=${viewPlayerId}`)
-                        : navigate('/replay', { state: { replayData: data } })}
-                      style={iconBtnStyle}
-                      title="切换到决策列表"
-                    >
-                      📋列表
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div style={floatingPerspectiveStyle}>
-              <button
-                onClick={() => setShowPerspectiveDrawer((v) => !v)}
-                style={perspectiveToggleStyle}
-                title="切换主视角"
-              >
-                {showPerspectiveDrawer ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
-                <span>主视角</span>
-              </button>
-              {showPerspectiveDrawer && (
-                <div style={perspectiveDrawerStyle}>
-                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.72)' }}>切换主视角</div>
-                  {playerNames.map((name, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => switchPerspective(idx)}
-                      disabled={!replayIdFromRoute || idx === viewPlayerId}
-                      style={{
-                        ...floatingSwitchBtnStyle,
-                        borderColor: idx === viewPlayerId ? 'var(--accent)' : 'rgba(255,255,255,0.12)',
-                        background: idx === viewPlayerId ? 'rgba(52, 152, 219, 0.16)' : 'rgba(255,255,255,0.04)',
-                        color: idx === viewPlayerId ? '#d6ebff' : '#f3f4f6',
-                        cursor: idx === viewPlayerId ? 'default' : 'pointer',
-                      }}
-                      title={`切换到 ${name}`}
-                    >
-                      {name}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
           </div>
 
           {!narrowLayout && (
             <div style={sidePanelContainerStyle}>
+              <div style={replaySideControlsStyle}>
+                <div style={replaySideHeaderStyle}>
+                  <button onClick={() => navigate('/')} style={replaySideUtilityButtonStyle}>返回</button>
+                  <button
+                    onClick={() => setShowStats(true)}
+                    style={replaySideUtilityButtonStyle}
+                    title="统计"
+                  >
+                    统计
+                  </button>
+                </div>
+
+                <div style={replaySideMetaStyle}>
+                  <span>{kyokuLabel || '回放'}</span>
+                  <span>{currentStep + 1}/{totalSteps}{boardPhase === 'post' ? ' 后' : boardPhase === 'reach' ? ' 立直' : ' 前'}</span>
+                </div>
+
+                <input
+                  type="range"
+                  min={0}
+                  max={totalSteps - 1}
+                  value={currentStep}
+                  onChange={e => handleGoToStep(parseInt(e.target.value))}
+                  style={replaySideSliderStyle}
+                />
+
+                <div style={replaySideButtonGridStyle}>
+                  <button
+                    onClick={() => handleGoToKyoku(Math.max(0, currentKyoku - 1))}
+                    disabled={currentKyoku === 0}
+                    style={replaySideButtonStyle(currentKyoku === 0)}
+                  >
+                    &lt; 上局
+                  </button>
+                  <button
+                    onClick={() => handleGoToKyoku(Math.min(totalKyoku - 1, currentKyoku + 1))}
+                    disabled={currentKyoku === totalKyoku - 1}
+                    style={replaySideButtonStyle(currentKyoku === totalKyoku - 1)}
+                  >
+                    下局 &gt;
+                  </button>
+                  <button onClick={handleStepBackward} disabled={currentStep === 0 && boardPhase === 'pre'} style={replaySideButtonStyle(currentStep === 0 && boardPhase === 'pre')} title="上一步">
+                    &lt; 上一步
+                  </button>
+                  <button onClick={handleStepForward} disabled={currentStep === totalSteps - 1 && !currentHasPostPhase && !currentHasReachPhase} style={replaySideButtonStyle(currentStep === totalSteps - 1 && !currentHasPostPhase && !currentHasReachPhase)} title="下一步">
+                    下一步 &gt;
+                  </button>
+                  <button onClick={jumpToPrevOwnDiscard} style={replaySideButtonStyle(false)} title="上一自己打牌">
+                    &lt; 上一自己
+                  </button>
+                  <button onClick={jumpToNextOwnDiscard} style={replaySideButtonStyle(false)} title="下一自己打牌">
+                    下一自己 &gt;
+                  </button>
+                  <button onClick={jumpToPrevDiff} style={replaySideButtonStyle(false)}>
+                    &lt; 上错
+                  </button>
+                  <button onClick={jumpToNextDiff} style={replaySideButtonStyle(false)}>
+                    下错 &gt;
+                  </button>
+                </div>
+
+                <div style={replayPerspectiveGridStyle}>
+                  {playerNames.map((name, idx) => {
+                    const active = idx === viewPlayerId;
+                    return (
+                      <button
+                        key={idx}
+                        onClick={() => switchPerspective(idx)}
+                        disabled={!replayIdFromRoute || active}
+                        style={replayPerspectiveButtonStyle(active, !replayIdFromRoute || active)}
+                        title={`切换到 ${name}`}
+                      >
+                        P{idx} {replayPlayerDisplayName(playerNames, idx)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <ReplayDecisionPanel
-                entry={currentEntry}
+                entry={isForcedRiichiTsumogiri ? null : currentEntry}
                 step={currentStep}
                 totalSteps={totalSteps}
                 compact={false}
                 playerNames={playerNames}
+                currentPlayerId={viewPlayerId}
+                localReviewerLabel={localReviewerLabel}
+                activeTeacherModel={activeTeacherModel}
+                onActiveTeacherModelChange={setActiveTeacherModel}
               />
             </div>
           )}
@@ -541,7 +608,99 @@ export function GameBoardReplayPage() {
   );
 }
 
+const replaySideControlsStyle: CSSProperties = {
+  flexShrink: 0,
+  padding: 10,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 8,
+  background: 'var(--card-bg)',
+  borderBottom: '1px solid var(--sidepanel-border)',
+};
+
+const replaySideHeaderStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 1fr',
+  gap: 6,
+};
+
+const replaySideMetaStyle: CSSProperties = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  gap: 8,
+  color: 'var(--text-primary)',
+  fontSize: 12,
+  fontWeight: 700,
+  fontFamily: 'Menlo, Consolas, monospace',
+};
+
+const replaySideSliderStyle: CSSProperties = {
+  width: '100%',
+  accentColor: 'var(--accent)',
+};
+
+const replaySideButtonGridStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 1fr',
+  gap: 6,
+};
+
+const replayPerspectiveGridStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 1fr',
+  gap: 5,
+};
+
+const replaySideUtilityButtonStyle: CSSProperties = {
+  minHeight: 28,
+  border: '1px solid var(--border)',
+  background: 'var(--page-bg)',
+  color: 'var(--text-primary)',
+  borderRadius: 3,
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: 'pointer',
+};
+
+function replaySideButtonStyle(disabled: boolean): CSSProperties {
+  return {
+    minHeight: 34,
+    border: '1px solid var(--border)',
+    background: disabled ? 'var(--card-bg)' : 'var(--page-bg)',
+    color: disabled ? 'var(--text-muted)' : 'var(--text-primary)',
+    borderRadius: 3,
+    fontSize: 13,
+    fontWeight: 800,
+    cursor: disabled ? 'default' : 'pointer',
+  };
+}
+
+function replayPerspectiveButtonStyle(active: boolean, disabled: boolean): CSSProperties {
+  return {
+    minHeight: 26,
+    border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+    background: active ? 'rgba(52, 152, 219, 0.12)' : 'var(--page-bg)',
+    color: active ? 'var(--accent)' : 'var(--text-secondary)',
+    borderRadius: 3,
+    fontSize: 11,
+    fontWeight: active ? 800 : 650,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    cursor: disabled ? 'default' : 'pointer',
+  };
+}
+
 type ReplayEvent = Record<string, unknown>;
+
+function displayReviewerModelLabel(raw: string | undefined): string {
+  const label = (raw || '主视角模型').trim();
+  if (label === '70k.pth') return '70k';
+  if (label === 'gui_mortal.pth') return 'mortal';
+  return label.endsWith('.pth') ? label.slice(0, -4) : label;
+}
+
 type ResultSummary = {
   type: 'hora' | 'ryukyoku';
   title: string;
@@ -1028,6 +1187,7 @@ function buildReplayResultSummary(
 }
 
 function ReplayResultOverlay({ summary, playerNames }: { summary: ResultSummary; playerNames: string[] }) {
+  const winnerName = summary.winner !== null ? replayPlayerDisplayName(playerNames, summary.winner) : null;
   return (
     <div
       style={{
@@ -1038,63 +1198,58 @@ function ReplayResultOverlay({ summary, playerNames }: { summary: ResultSummary;
         justifyContent: 'center',
         pointerEvents: 'none',
         zIndex: 40,
-        background: 'var(--result-overlay-bg)',
+        background: 'rgba(0, 0, 0, 0.34)',
       }}
     >
       <div
         style={{
-          width: 900,
-          maxWidth: '92%',
-          background: 'var(--result-panel-bg)',
-          border: '1px solid var(--result-panel-border)',
-          borderRadius: 8,
-          boxShadow: 'var(--result-panel-shadow)',
-          padding: '18px 22px 16px',
-          color: 'var(--result-title)',
+          width: 640,
+          maxWidth: '78%',
+          minHeight: 360,
+          background: 'rgba(2, 8, 14, 0.86)',
+          border: '2px solid rgba(230, 237, 245, 0.65)',
+          boxShadow: '0 24px 80px rgba(0,0,0,0.45)',
+          padding: '30px 42px 28px',
+          color: '#f8fafc',
           display: 'grid',
-          gridTemplateRows: 'auto auto auto auto',
-          gap: 12,
+          gridTemplateRows: 'auto auto auto 1fr',
+          gap: 18,
         }}
       >
-        {/* 标题行：本场 / 供托内联在右侧 */}
-        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
-          <div>
-            <div style={{ fontSize: 18, fontWeight: 800, color: 'var(--result-title)', lineHeight: 1.1 }}>{summary.title}</div>
-            <div style={{ marginTop: 4, fontSize: 13, color: 'var(--result-subtitle)' }}>{summary.subtitle}</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', alignItems: 'start', gap: 18 }}>
+          <div style={{ fontSize: 40, fontWeight: 500, lineHeight: 1.08, letterSpacing: 0 }}>
+            {summary.title}
           </div>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexShrink: 0 }}>
-            <span style={{ fontSize: 12, color: 'var(--result-muted)' }}>{summary.honba}本场</span>
-            <span style={{ fontSize: 12, color: 'var(--result-muted)' }}>{summary.kyotaku}供托</span>
+          <div style={{ textAlign: 'right', color: 'rgba(226,232,240,0.82)', fontSize: 15, lineHeight: 1.5, paddingTop: 5 }}>
+            <div>{summary.honba}本場</div>
+            <div>供託:{summary.kyotaku}</div>
           </div>
         </div>
 
-        {/* 宝牌行 */}
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <span style={{ fontSize: 11, color: 'var(--result-muted)', width: 80, flexShrink: 0 }}>宝牌</span>
-          <div style={{ display: 'flex', gap: 4 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center', minWidth: 0 }}>
+            <span style={{ fontSize: 18, color: '#f8fafc', marginRight: 2 }}>ドラ</span>
             {summary.doraMarkers.length > 0
               ? summary.doraMarkers.map((tile, idx) => <Tile key={`d-${tile}-${idx}`} tile={tile} size="small" />)
-              : <span style={{ fontSize: 11, color: 'var(--result-muted)' }}>—</span>
+              : <span style={{ fontSize: 16, color: 'rgba(226,232,240,0.72)' }}>-</span>
             }
           </div>
-          <span style={{ fontSize: 11, color: 'var(--result-muted)', width: 80, flexShrink: 0, marginLeft: 12 }}>里宝牌</span>
-          <div style={{ display: 'flex', gap: 4 }}>
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center', minWidth: 0 }}>
+            <span style={{ fontSize: 18, color: '#f8fafc', marginRight: 2 }}>裏</span>
             {summary.uraMarkers.length > 0
               ? summary.uraMarkers.map((tile, idx) => <Tile key={`u-${tile}-${idx}`} tile={tile} size="small" />)
-              : <span style={{ fontSize: 11, color: 'var(--result-muted)' }}>—</span>
+              : <span style={{ fontSize: 16, color: 'rgba(226,232,240,0.72)' }}>-</span>
             }
           </div>
         </div>
 
-        {/* 手牌 + 役种 明细 */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, alignItems: 'start' }}>
-          {/* 左：和牌手牌 */}
-          <div>
-            <div style={{ fontSize: 12, color: 'var(--result-muted)', marginBottom: 6 }}>
-              {summary.winner !== null ? `和牌 · ${replayPlayerDisplayName(playerNames, summary.winner)}` : '局结果'}
+        <div style={{ display: 'grid', gridTemplateColumns: '1.05fr 1fr', gap: 20, alignItems: 'start' }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 22, color: '#f8fafc', marginBottom: 8 }}>
+              {winnerName ? `${winnerName}` : summary.subtitle}
             </div>
             {summary.winner !== null ? (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
                 {summary.winnerHand.map((tile, idx) => (
                   <Tile
                     key={`h-${tile}-${idx}`}
@@ -1105,47 +1260,45 @@ function ReplayResultOverlay({ summary, playerNames }: { summary: ResultSummary;
                 ))}
               </div>
             ) : (
-              <div style={{ fontSize: 12, color: 'var(--result-muted)' }}>流局</div>
+              <div style={{ fontSize: 24, color: '#f8fafc' }}>流局</div>
             )}
           </div>
-          {/* 右：役种列表 */}
           <div>
-            <div style={{ fontSize: 12, color: 'var(--result-muted)', marginBottom: 6 }}>役种</div>
             {summary.yakuLines.length > 0 ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+              <div style={{ display: 'grid', gap: 4 }}>
                 {summary.yakuLines.map((line, idx) => (
-                  <div key={`y-${idx}`} style={{ fontSize: 12, color: 'var(--result-title)' }}>{line}</div>
+                  <div key={`y-${idx}`} style={{ fontSize: 20, color: '#f8fafc', lineHeight: 1.15 }}>{line}</div>
                 ))}
               </div>
             ) : (
-              <div style={{ fontSize: 12, color: 'var(--result-muted)' }}>—</div>
+              <div style={{ fontSize: 20, color: 'rgba(226,232,240,0.72)' }}>-</div>
             )}
           </div>
         </div>
 
-        {/* 分差列表 — 天凤风格扁平行 */}
-        <div style={{ borderTop: '1px solid var(--result-panel-border)', paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <div style={{ display: 'grid', gap: 6, alignSelf: 'end' }}>
           {summary.scoreLines.map((row) => (
             <div key={row.pid} style={{
-              display: 'flex',
+              display: 'grid',
+              gridTemplateColumns: '44px minmax(120px, 1fr) 110px 110px',
               alignItems: 'center',
-              justifyContent: 'space-between',
-              padding: '4px 8px',
-              borderRadius: 4,
-              background: 'var(--result-row-bg)',
-              gap: 8,
+              gap: 10,
+              fontSize: 24,
+              lineHeight: 1.1,
             }}>
-              <span style={{ fontSize: 12, color: 'var(--result-muted)', minWidth: 80 }}>
-                {row.label} {row.name}
+              <span style={{ color: 'rgba(226,232,240,0.82)', textAlign: 'right' }}>{row.label}</span>
+              <span style={{ color: '#f8fafc', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {row.name}
               </span>
-              <span style={{ fontFamily: 'Menlo, monospace', fontSize: 12, color: 'var(--result-title)' }}>
-                {row.before.toLocaleString()}
+              <span style={{ fontFamily: 'Menlo, Consolas, monospace', color: '#f8fafc', textAlign: 'right' }}>
+                {row.after.toLocaleString()}
               </span>
-              <span style={{ fontFamily: 'Menlo, monospace', fontSize: 12, color: row.delta >= 0 ? 'var(--result-positive)' : 'var(--result-negative)', minWidth: 70, textAlign: 'right' }}>
+              <span style={{
+                fontFamily: 'Menlo, Consolas, monospace',
+                color: row.delta > 0 ? '#22d3ee' : row.delta < 0 ? '#ff2b2b' : 'rgba(226,232,240,0.64)',
+                textAlign: 'right',
+              }}>
                 {row.delta >= 0 ? '+' : ''}{row.delta.toLocaleString()}
-              </span>
-              <span style={{ fontFamily: 'Menlo, monospace', fontSize: 12, color: 'var(--result-muted)', minWidth: 80, textAlign: 'right' }}>
-                → {row.after.toLocaleString()}
               </span>
             </div>
           ))}

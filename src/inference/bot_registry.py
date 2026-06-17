@@ -9,7 +9,8 @@ from inference.mortal_bot import MortalReviewBot
 MORTAL_CHECKPOINTS = {
     "mortal": "gui_mortal.pth",
     "70k": "70k.pth",
-    "weak_mortal": "weak_mortal.pth",
+    "t1_71000": "../experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth",
+    "weak_mortal": "../model_v4_20240308_best_min.pth",
 }
 SUPPORTED_BOT_NAMES = {"rulebase", *MORTAL_CHECKPOINTS.keys()}
 
@@ -34,6 +35,7 @@ def create_runtime_bot(
             if model_path is not None
             else Path(project_root) / "artifacts" / "mortal_serving" / MORTAL_CHECKPOINTS[bot_name]
         )
+        resolved_model_path = resolved_model_path.resolve()
         return MortalReviewBot(
             player_id=player_id,
             model_path=resolved_model_path,

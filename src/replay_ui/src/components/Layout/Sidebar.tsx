@@ -1,22 +1,17 @@
 import { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
-  LayoutDashboard,
-  Users,
   BarChart2,
-  AlertTriangle,
-  BrainCircuit,
-  BookOpen,
+  LayoutDashboard,
   Menu,
-  X,
-  Bot,
   PanelLeftClose,
   PanelLeftOpen,
+  Settings,
+  Table2,
+  Users,
+  X,
 } from 'lucide-react';
 import { ThemeToggle } from './ThemeToggle';
-import { Button } from '../ui/Button';
-import { t } from '../ui/tokens';
-import { useTheme } from '../../context/themeStore';
 import { TABLECLOTH_OPTIONS } from '../BattleBoard/tableclothOptions';
 import type { TableclothId } from '../BattleBoard/tableclothOptions';
 
@@ -26,31 +21,28 @@ const NAV_ITEMS: Array<{
   label: string;
   exact?: boolean;
 }> = [
-  { path: '/', icon: LayoutDashboard, label: '仪表盘', exact: true },
+  { path: '/', icon: LayoutDashboard, label: '总览', exact: true },
+  { path: '/review', icon: BarChart2, label: '牌谱 Review' },
   { path: '/battle', icon: Users, label: '人机对战' },
-  { path: '/bot-battle', icon: Bot, label: '4 Bot 对战' },
-  { path: '/review', icon: BarChart2, label: '牌谱分析' },
-  { path: '/mortal-review', icon: BrainCircuit, label: 'Mortal审阅' },
-  { path: '/selfplay-anomalies', icon: AlertTriangle, label: '对局回放' },
-  { path: '/behavior-casebook', icon: BookOpen, label: '行为案例' },
 ];
+
+const SIDEBAR_WIDTH = 176;
+const SIDEBAR_COLLAPSED = 56;
 
 export function Sidebar() {
   const [isMobile, setIsMobile] = useState(false);
   const [open, setOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState(
-    () => {
-      const stored =
-        window.localStorage.getItem('keqing1.sidebar.collapsed')
-        ?? window.localStorage.getItem('keqing.sidebar.collapsed');
-      return stored === 'true';
-    },
-  );
+  const [collapsed, setCollapsed] = useState(() => {
+    const stored =
+      window.localStorage.getItem('keqing1.sidebar.collapsed')
+      ?? window.localStorage.getItem('keqing.sidebar.collapsed');
+    return stored === 'true';
+  });
   const [tablecloth, setTablecloth] = useState<TableclothId>(() => {
     const stored =
       window.localStorage.getItem('keqing1.tablecloth')
       ?? window.localStorage.getItem('keqing.tablecloth');
-    if (stored && TABLECLOTH_OPTIONS.some((o) => o.id === stored)) {
+    if (stored && TABLECLOTH_OPTIONS.some((item) => item.id === stored)) {
       return stored as TableclothId;
     }
     return 'default';
@@ -62,14 +54,14 @@ export function Sidebar() {
   }, [collapsed]);
 
   useEffect(() => {
-    const update = () => setIsMobile(window.innerWidth < 1024);
+    const update = () => setIsMobile(window.innerWidth < 900);
     update();
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
   }, []);
 
   useEffect(() => {
-    document.documentElement.style.setProperty('--mobile-shell-offset', isMobile ? '56px' : '0px');
+    document.documentElement.style.setProperty('--mobile-shell-offset', isMobile ? '44px' : '0px');
     return () => document.documentElement.style.setProperty('--mobile-shell-offset', '0px');
   }, [isMobile]);
 
@@ -81,356 +73,219 @@ export function Sidebar() {
     window.dispatchEvent(new StorageEvent('storage', { key: 'keqing.tablecloth', newValue: next }));
   };
 
-  // ── Table Cloth RGB Editor ─────────────────────────────────────────────────
-  const { tableCloth, setTableCloth } = useTheme();
-
-  const rgbPreview = `rgb(${tableCloth.r},${tableCloth.g},${tableCloth.b})`;
-
-  const handleRgbChange = (channel: 'r' | 'g' | 'b', raw: string) => {
-    const val = parseInt(raw, 10);
-    if (isNaN(val)) return;
-    setTableCloth({ ...tableCloth, [channel]: Math.max(0, Math.min(255, val)) });
-  };
-
-  const tableClothEditor = (
-    <div style={{ display: 'grid', gap: 6, width: '100%' }}>
-      <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>桌布颜色</div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        {/* 颜色预览 */}
-        <div
-          style={{
-            width: 28,
-            height: 20,
-            borderRadius: 4,
-            background: rgbPreview,
-            border: '1px solid rgba(255,255,255,0.15)',
-            flexShrink: 0,
-            boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
-            transition: 'background 0.15s',
-          }}
-        />
-        {/* RGB 数值输入 */}
-        {(['r', 'g', 'b'] as const).map((ch) => (
-          <div key={ch} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-            <span style={{ fontSize: 9, fontWeight: 700, color: ch === 'r' ? '#f87171' : ch === 'g' ? '#4ade80' : '#60a5fa', textTransform: 'uppercase' }}>
-              {ch}
-            </span>
-            <input
-              type="number"
-              min={0}
-              max={255}
-              value={tableCloth[ch]}
-              onChange={(e) => handleRgbChange(ch, e.target.value)}
-              style={{
-                width: 38,
-                padding: '2px 4px',
-                borderRadius: 4,
-                border: '1px solid var(--border)',
-                background: 'var(--card-bg)',
-                color: 'var(--text-primary)',
-                fontSize: 11,
-                fontFamily: 'Menlo, monospace',
-                textAlign: 'center',
-              }}
-            />
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-
-  // ── Tablecloth selector (shared between mobile/desktop) ──────────────────
-  const tableclothSelector = (
-    <div style={{ display: 'grid', gap: 8, width: '100%' }}>
-      <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>桌布</div>
-      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-        {TABLECLOTH_OPTIONS.map((opt) => (
-          <button
-            key={opt.id}
-            onClick={() => updateTablecloth(opt.id)}
-            title={opt.color}
-            style={{
-              padding: '3px 8px',
-              borderRadius: 5,
-              border: `1px solid ${tablecloth === opt.id ? 'rgba(212,168,83,0.5)' : 'rgba(255,255,255,0.08)'}`,
-              background: tablecloth === opt.id ? 'rgba(212,168,83,0.12)' : 'rgba(255,255,255,0.04)',
-              color: tablecloth === opt.id ? 'rgba(212,168,83,0.95)' : 'var(--sidebar-text-muted)',
-              fontSize: 11,
-              cursor: 'pointer',
-              transition: 'all var(--transition)',
-              fontWeight: tablecloth === opt.id ? 600 : 400,
-            }}
-          >
-            {opt.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-
-  // ── Nav Link ─────────────────────────────────────────────────────────────
   const navLink = ({ path, icon: Icon, label, exact }: (typeof NAV_ITEMS)[number]) => (
     <NavLink
       key={path}
       to={path}
       end={exact}
       onClick={() => setOpen(false)}
-      className={({ isActive }) =>
-        `nav-link-item${isActive ? ' nav-link-active' : ''}`
-      }
-      style={{ transition: 'background var(--transition), color var(--transition)' }}
+      className={({ isActive }) => `nav-link-item${isActive ? ' nav-link-active' : ''}`}
       title={label}
+      style={{
+        height: 34,
+        padding: collapsed && !isMobile ? '0 10px' : '0 10px',
+        justifyContent: collapsed && !isMobile ? 'center' : 'flex-start',
+      }}
     >
-      <Icon size={18} />
-      {!collapsed && <span>{label}</span>}
+      <Icon size={17} />
+      {(!collapsed || isMobile) && <span>{label}</span>}
     </NavLink>
   );
 
-  // ── Logo ────────────────────────────────────────────────────────────────
-  const logo = (
-    <div
-      style={{
-        width: 36,
-        height: 36,
-        borderRadius: 'var(--radius-md)',
-        background: 'linear-gradient(135deg, var(--accent) 0%, var(--accent-hover) 100%)',
-        boxShadow: '0 4px 12px var(--accent-shadow)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        flexShrink: 0,
-      }}
-    >
-      <span style={{ color: 'var(--btn-primary-text)', fontWeight: 700, fontSize: 14 }}>麻</span>
+  const settings = (
+    <div style={{ display: 'grid', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--sidebar-text-muted)', fontSize: 11 }}>
+        <Settings size={13} />
+        {(!collapsed || isMobile) && <span>设置</span>}
+      </div>
+      {(!collapsed || isMobile) && (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            <span style={{ color: 'var(--sidebar-text-muted)', fontSize: 11 }}>主题</span>
+            <ThemeToggle />
+          </div>
+          <div style={{ display: 'grid', gap: 5 }}>
+            <span style={{ color: 'var(--sidebar-text-muted)', fontSize: 11 }}>桌布</span>
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              {TABLECLOTH_OPTIONS.map((item) => (
+                <button
+                  key={item.id}
+                  onClick={() => updateTablecloth(item.id)}
+                  title={item.label}
+                  style={{
+                    width: 22,
+                    height: 22,
+                    borderRadius: 5,
+                    border: tablecloth === item.id
+                      ? '2px solid var(--accent)'
+                      : '1px solid rgba(255,255,255,0.18)',
+                    background: item.color,
+                    cursor: 'pointer',
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 
-  // ─────────────────────────────────────────────────────────────────────
+  const body = (
+    <aside
+      style={{
+        width: isMobile ? 236 : collapsed ? SIDEBAR_COLLAPSED : SIDEBAR_WIDTH,
+        height: '100%',
+        background: 'var(--sidebar-bg)',
+        borderRight: '1px solid var(--sidebar-border)',
+        color: 'var(--sidebar-text)',
+        display: 'flex',
+        flexDirection: 'column',
+        transition: 'width var(--transition), transform var(--transition)',
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        style={{
+          height: 48,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: collapsed && !isMobile ? 'center' : 'space-between',
+          padding: collapsed && !isMobile ? '0' : '0 10px',
+          borderBottom: '1px solid var(--sidebar-border)',
+          gap: 8,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <div
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: 7,
+              background: 'var(--accent)',
+              color: 'var(--btn-primary-text)',
+              display: 'grid',
+              placeItems: 'center',
+              fontWeight: 800,
+              flexShrink: 0,
+            }}
+          >
+            K
+          </div>
+          {(!collapsed || isMobile) && (
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, whiteSpace: 'nowrap' }}>Keqing1</div>
+              <div style={{ fontSize: 10, color: 'var(--sidebar-text-muted)' }}>review workbench</div>
+            </div>
+          )}
+        </div>
+        {!isMobile && (
+          <button
+            onClick={() => setCollapsed((value) => !value)}
+            title={collapsed ? '展开' : '收起'}
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: 6,
+              border: '1px solid rgba(255,255,255,0.12)',
+              background: 'rgba(255,255,255,0.04)',
+              color: 'var(--sidebar-text-muted)',
+              display: 'grid',
+              placeItems: 'center',
+              cursor: 'pointer',
+            }}
+          >
+            {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+          </button>
+        )}
+      </div>
+
+      <nav style={{ display: 'grid', gap: 4, padding: '10px 8px', flex: 1, overflow: 'auto' }}>
+        {NAV_ITEMS.map(navLink)}
+      </nav>
+
+      <div style={{ padding: 10, borderTop: '1px solid var(--sidebar-border)' }}>{settings}</div>
+    </aside>
+  );
+
   if (isMobile) {
     return (
       <>
-        {/* Mobile header bar */}
         <div
           style={{
             position: 'fixed',
             top: 0,
             left: 0,
             right: 0,
-            height: 56,
+            height: 44,
             zIndex: 120,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            padding: '0 14px',
+            padding: '0 10px',
             background: 'var(--sidebar-bg)',
             borderBottom: '1px solid var(--sidebar-border)',
-            backdropFilter: 'blur(12px)',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setOpen((v) => !v)}
-              title="菜单"
-              style={{ width: 36, height: 36, padding: 0 }}
-            >
-              {open ? <X size={18} /> : <Menu size={18} />}
-            </Button>
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--text-primary)' }}>Keqing1</div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Mortal 主线工作台</div>
-            </div>
+          <button
+            onClick={() => setOpen(true)}
+            aria-label="打开导航"
+            style={{
+              width: 32,
+              height: 32,
+              border: '1px solid rgba(255,255,255,0.12)',
+              background: 'rgba(255,255,255,0.04)',
+              color: 'var(--sidebar-text)',
+              borderRadius: 6,
+              display: 'grid',
+              placeItems: 'center',
+            }}
+          >
+            <Menu size={18} />
+          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--sidebar-text)' }}>
+            <Table2 size={16} />
+            <span style={{ fontSize: 13, fontWeight: 800 }}>Keqing1</span>
           </div>
           <ThemeToggle />
         </div>
-
-        {/* Backdrop */}
         {open && (
           <div
             onClick={() => setOpen(false)}
             style={{
               position: 'fixed',
               inset: 0,
-              background: 'rgba(0,0,0,0.35)',
-              zIndex: 118,
-            }}
-          />
-        )}
-
-        {/* Drawer panel */}
-        <aside
-          style={{
-            position: 'fixed',
-            top: 56,
-            left: 0,
-            bottom: 0,
-            width: 268,
-            maxWidth: '82vw',
-            background: 'var(--sidebar-bg)',
-            borderRight: '1px solid var(--sidebar-border)',
-            backdropFilter: 'blur(12px)',
-            transform: open ? 'translateX(0)' : 'translateX(-100%)',
-            transition: 'transform 0.22s ease',
-            zIndex: 119,
-            display: 'flex',
-            flexDirection: 'column',
-          }}
-        >
-          {/* Header */}
-          <div
-            style={{
-              padding: 16,
-              borderBottom: '1px solid var(--sidebar-border)',
+              zIndex: 130,
+              background: 'rgba(0,0,0,0.42)',
               display: 'flex',
-              alignItems: 'center',
-              gap: 12,
             }}
           >
-            {logo}
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--sidebar-text)' }}>Keqing1</div>
-              <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>Mortal 主线工作台</div>
+            <div onClick={(event) => event.stopPropagation()} style={{ height: '100%' }}>
+              <div style={{ position: 'absolute', top: 8, left: 242, zIndex: 140 }}>
+                <button
+                  onClick={() => setOpen(false)}
+                  aria-label="关闭导航"
+                  style={{
+                    width: 32,
+                    height: 32,
+                    border: 'none',
+                    borderRadius: 6,
+                    background: 'rgba(255,255,255,0.9)',
+                    color: '#111827',
+                    display: 'grid',
+                    placeItems: 'center',
+                  }}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              {body}
             </div>
           </div>
-
-          {/* Nav */}
-          <nav style={{ flex: 1, padding: 12, display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {NAV_ITEMS.map(navLink)}
-          </nav>
-
-          {/* Footer */}
-          <div
-            style={{
-              padding: 16,
-              borderTop: '1px solid var(--sidebar-border)',
-              display: 'grid',
-              gap: 12,
-            }}
-          >
-            {tableclothSelector}
-            {tableClothEditor}
-            <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>v2.0</div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-              <ThemeToggle />
-            </div>
-          </div>
-        </aside>
+        )}
       </>
     );
   }
 
-  // ── Desktop ────────────────────────────────────────────────────────────
-  return (
-    <aside
-      style={{
-        width: collapsed ? t.sidebar.widthCollapsed : t.sidebar.width,
-        background: 'var(--sidebar-bg)',
-        borderRight: '1px solid var(--sidebar-border)',
-        backdropFilter: 'blur(12px)',
-        transition: `width 0.18s ease, background var(--transition), border-color var(--transition)`,
-        display: 'flex',
-        flexDirection: 'column',
-        flexShrink: 0,
-        overflow: 'hidden',
-      }}
-    >
-      {/* Header */}
-      <div
-        style={{
-          padding: collapsed ? '16px 8px' : '16px',
-          borderBottom: '1px solid var(--sidebar-border)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: collapsed ? 'center' : 'space-between',
-          gap: 8,
-        }}
-      >
-        {!collapsed && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
-            {logo}
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--sidebar-text)' }}>Keqing1</div>
-              <div style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>Mortal 主线工作台</div>
-            </div>
-          </div>
-        )}
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={() => setCollapsed((v) => !v)}
-          title={collapsed ? '展开侧栏' : '收起侧栏'}
-          style={{ width: 34, height: 34, padding: 0, flexShrink: 0 }}
-        >
-          {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
-        </Button>
-      </div>
-
-      {/* Nav */}
-      <nav
-        style={{
-          flex: 1,
-          padding: 12,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 2,
-          overflowY: 'auto',
-        }}
-      >
-        {NAV_ITEMS.map((item) => (
-          <NavLink
-            key={item.path}
-            to={item.path}
-            end={item.exact}
-            className={({ isActive }) =>
-              `nav-link-item${collapsed ? ' justify-center' : ''}${isActive ? ' nav-link-active' : ''}`
-            }
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 12,
-              padding: '10px 12px',
-              borderRadius: 'var(--radius-sm)',
-              color: 'var(--sidebar-text)',
-              textDecoration: 'none',
-              fontSize: 14,
-              fontWeight: 500,
-              transition: 'background var(--transition), color var(--transition)',
-              justifyContent: collapsed ? 'center' : 'flex-start',
-            }}
-            title={item.label}
-          >
-            <item.icon size={18} />
-            {!collapsed && <span>{item.label}</span>}
-          </NavLink>
-        ))}
-      </nav>
-
-      {/* Footer */}
-      <div
-        style={{
-          padding: collapsed ? '10px 6px' : '12px 10px',
-          borderTop: '1px solid var(--sidebar-border)',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: collapsed ? 6 : 10,
-        }}
-      >
-        {!collapsed && tableclothSelector}
-        {!collapsed && tableClothEditor}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: collapsed ? 'center' : 'space-between',
-          }}
-        >
-          {!collapsed && (
-            <span style={{ fontSize: 11, color: 'var(--sidebar-text-muted)' }}>v2.0</span>
-          )}
-          <ThemeToggle />
-        </div>
-      </div>
-    </aside>
-  );
+  return body;
 }

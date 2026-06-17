@@ -5,7 +5,7 @@ import { Loader2 } from 'lucide-react';
 import type { ReplayData } from '../types/replay';
 import type { DecisionLogEntry } from '../types/replay';
 import { replayApi } from '../api/replayApi';
-import { actionLabel, isReplayDiffForPlayer, isReplayPlayerDecision, sameReplayAction } from '../utils/tileUtils';
+import { actionLabel, isReplayPlayerDecision, isReplayReviewDiffForPlayer, sameReplayAction } from '../utils/tileUtils';
 import { CN_BAKAZE, SEAT_NAMES_CN } from '../utils/constants';
 import { normalizeReplayPlayerNames, replayPlayerDisplayName } from '../utils/replayNames';
 
@@ -175,29 +175,81 @@ function CandidateTable({
 // ---------------------------------------------------------------------------
 export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () => void }) {
   const log = data.log.filter(e => isReplayPlayerDecision(e, data.player_id));
-  const total = log.length;
-  const match = log.filter((e) => sameReplayAction(e.chosen, e.gt_action)).length;
-  const pct = total ? (match / total * 100).toFixed(1) : '0.0';
-  const dahaiCount = log.filter(e => e.chosen?.type === 'dahai').length;
-  const dahaiRate = total ? ((dahaiCount / total) * 100).toFixed(0) : '0';
+  const fallbackTotal = log.length;
+  const fallbackMatch = log.filter((e) => sameReplayAction(e.chosen, e.gt_action)).length;
+  const teacherStats = (() => {
+    const stats = new Map<string, {
+      model: string;
+      total: number;
+      match: number;
+      ratingScores: number[];
+    }>();
 
-  const byType: Record<string, { total: number; match: number }> = {};
-  log.forEach(e => {
-    const t = e.chosen?.type || '?';
-    if (!byType[t]) byType[t] = { total: 0, match: 0 };
-    byType[t].total++;
-    if (sameReplayAction(e.chosen, e.gt_action)) byType[t].match++;
-  });
-  const labels: Record<string, string> = { dahai:'打牌', none:'过', reach:'立直', chi:'吃', pon:'碰', daiminkan:'大明杠', ankan:'暗杠', kakan:'加杠', hora:'胡', ryukyoku:'流局' };
+    const ensure = (model: string) => {
+      const key = model || 'model';
+      let item = stats.get(key);
+      if (!item) {
+        item = { model: key, total: 0, match: 0, ratingScores: [] };
+        stats.set(key, item);
+      }
+      return item;
+    };
 
-  const byTile: Record<string, { total: number; match: number }> = {};
-  log.forEach(e => {
-    if (e.chosen?.type !== 'dahai') return;
-    const t = e.chosen?.pai || '?';
-    if (!byTile[t]) byTile[t] = { total: 0, match: 0 };
-    byTile[t].total++;
-    if (e.gt_action?.type === 'dahai' && sameReplayAction(e.chosen, e.gt_action)) byTile[t].match++;
-  });
+    const finite = (value: unknown): number | null =>
+      typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+    for (const entry of log) {
+      const reviews = entry.teacher_reviews && entry.teacher_reviews.length > 0
+        ? entry.teacher_reviews
+        : entry.teacher_review ? [entry.teacher_review] : [];
+      for (const review of reviews) {
+        const model = review.model || 'model';
+        const item = ensure(model);
+        const actual = review.actual_action ?? entry.gt_action;
+        const expected = review.expected_action ?? review.top1?.action ?? null;
+        if (actual && expected) {
+          item.total += 1;
+          if (sameReplayAction(expected, actual)) item.match += 1;
+        }
+
+        if (!actual) continue;
+        const qValues: number[] = [];
+        let actualQ = finite(review.actual_q);
+        for (const candidate of entry.candidates ?? []) {
+          const teachers = candidate.teachers ?? (candidate.teacher ? [candidate.teacher] : []);
+          const teacher = teachers.find((value) => value.model === model);
+          const q = finite(teacher?.q_value);
+          if (q === null) continue;
+          qValues.push(q);
+          if (actualQ === null && sameReplayAction(candidate.action, actual)) {
+            actualQ = q;
+          }
+        }
+        if (actualQ === null || qValues.length < 2) continue;
+        if (!qValues.some((value) => value === actualQ)) qValues.push(actualQ);
+        const minQ = Math.min(...qValues);
+        const maxQ = Math.max(...qValues);
+        const range = maxQ - minQ;
+        if (range <= 0) continue;
+        item.ratingScores.push((actualQ - minQ) / range);
+      }
+    }
+
+    return Array.from(stats.values()).map((item) => {
+      const pct = item.total ? item.match / item.total * 100 : 0;
+      const rating = item.ratingScores.length
+        ? Math.round(1000 * 100 * Math.pow(item.ratingScores.reduce((sum, value) => sum + value, 0) / item.ratingScores.length, 2)) / 1000
+        : null;
+      return {
+        ...item,
+        pct,
+        rating: rating === null ? null : Math.round(rating * 10) / 10,
+      };
+    });
+  })();
+
+  const hasTeacherStats = teacherStats.length > 0;
+  const fallbackPct = fallbackTotal ? fallbackMatch / fallbackTotal * 100 : 0;
 
   return (
     <>
@@ -208,27 +260,11 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
           <button className="stats-close" onClick={onClose}>×</button>
         </div>
         <div className="stats-body">
-          <div className="match-rate-bar">
-            <div className="pct">{pct}%</div>
-            <div className="sub">Bot 与玩家一致率 ({match} / {total})</div>
-          </div>
-
-          {data.rating !== null && data.rating !== undefined && (
-            <div style={{ textAlign: 'center', margin: '8px 0 4px' }}>
-              <span style={{ fontSize: 28, fontWeight: 700, color: data.rating >= 80 ? '#27ae60' : data.rating >= 60 ? '#3498db' : '#e74c3c' }}>
-                {data.rating.toFixed(1)}
-              </span>
-              <span style={{ fontSize: 13, color: '#64748b', marginLeft: 4 }}>/ 100 Rating</span>
-              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>按 Mortal FAQ 的 Q 值 min-max 公式计算</div>
-            </div>
-          )}
-
           <div className="stats-summary">
             {[
-              { val: total, lbl: '总决策数' },
-              { val: match, lbl: '匹配数' },
+              { val: hasTeacherStats ? teacherStats.length : 1, lbl: 'Review 模型数' },
+              { val: fallbackTotal, lbl: '总决策数' },
               { val: data.kyoku_order?.length || 0, lbl: '总局数' },
-              { val: `${dahaiRate}%`, lbl: '打牌占比' },
             ].map(item => (
               <div key={item.lbl} className="stats-card">
                 <div className="val">{item.val}</div>
@@ -237,44 +273,64 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
             ))}
           </div>
 
-          {Object.entries(byType).length > 0 && (
-            <div className="stats-section-title">各动作准确率</div>
-          )}
-          {Object.entries(byType).map(([t, v]) => {
-            const p = v.total ? Math.round(v.match / v.total * 100) : 0;
-            const barClr = p > 70 ? '#27ae60' : p > 40 ? '#3498db' : '#e74c3c';
-            return (
-              <div key={t} className="stats-row">
-                <span className="lbl">{labels[t] || t}</span>
-                <div className="stats-bar-bg">
-                  <div className="stats-bar-fg" style={{ width: `${p}%`, background: barClr }}>{p}%</div>
-                </div>
-                <span className="val">{v.match}/{v.total}</span>
-              </div>
-            );
-          })}
-
-          {Object.keys(byTile).length > 0 && (
-            <div className="stats-section-title">打牌详情 Top10</div>
-          )}
-          {Object.entries(byTile).sort((a, b) => b[1].total - a[1].total).slice(0, 10).map(([t, v]) => {
-            const p = v.total ? Math.round(v.match / v.total * 100) : 0;
-            const barClr = p > 70 ? '#27ae60' : p > 40 ? '#3498db' : '#e74c3c';
-            return (
-              <div key={t} className="stats-row">
-                <span className="lbl">{t}</span>
-                <div className="stats-bar-bg">
-                  <div className="stats-bar-fg" style={{ width: `${p}%`, background: barClr }}>{p}%</div>
-                </div>
-                <span className="val">{v.match}/{v.total}</span>
-              </div>
-            );
-          })}
+          <div className="stats-section-title">模型 Review 统计</div>
+          <table style={{
+            width: '100%',
+            borderCollapse: 'collapse',
+            fontSize: 13,
+          }}>
+            <thead>
+              <tr style={{ color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' }}>
+                <th style={statsThStyle}>模型</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>Match</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>Total</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>一致率</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>Rating</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(hasTeacherStats ? teacherStats : [{
+                model: data.model_label || data.bot_type || 'Bot',
+                total: fallbackTotal,
+                match: fallbackMatch,
+                pct: fallbackPct,
+                rating: data.rating,
+                ratingScores: [],
+              }]).map((item) => {
+                const pct = item.total ? item.match / item.total * 100 : 0;
+                return (
+                  <tr key={item.model} style={{ borderBottom: '1px solid var(--border)' }}>
+                    <td style={statsTdStyle} title={item.model}>{item.model}</td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>{item.match}</td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>{item.total}</td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>{pct.toFixed(1)}%</td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>
+                      {item.rating === null || item.rating === undefined ? '—' : item.rating.toFixed(1)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
     </>
   );
 }
+
+const statsThStyle: React.CSSProperties = {
+  padding: '7px 8px',
+  fontSize: 11,
+  fontWeight: 800,
+  textTransform: 'uppercase',
+  letterSpacing: '0.04em',
+};
+
+const statsTdStyle: React.CSSProperties = {
+  padding: '8px',
+  color: 'var(--text-primary)',
+  fontWeight: 700,
+};
 
 // ---------------------------------------------------------------------------
 // 单步卡片
@@ -450,6 +506,13 @@ export function ReplayViewPage() {
   const replayId = replayIdFromRoute ?? replayIdFromQuery;
   const playerIdFromQuery = Number(params.get('player_id') ?? '0');
   const requestedPlayerId = Number.isFinite(playerIdFromQuery) ? playerIdFromQuery : 0;
+  const teacherReportFromQuery = params.get('teacher_report') || params.get('teacher_report_path');
+  const teacherReportsFromQuery = params
+    .getAll('teacher_reports')
+    .flatMap((value) => value.split(','))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const teacherReportsKey = teacherReportsFromQuery.join('\n');
   const initialData = routeState?.replayData && !replayIdFromQuery ? routeState.replayData : null;
   const initialError = initialData || replayId ? null : '未找到回放数据，请从首页上传牌谱';
 
@@ -467,7 +530,7 @@ export function ReplayViewPage() {
     let cancelled = false;
     const loadReplay = async () => {
       try {
-        const loaded = await replayApi.get(replayId, requestedPlayerId);
+        const loaded = await replayApi.get(replayId, requestedPlayerId, teacherReportFromQuery, teacherReportsFromQuery);
         if (!cancelled) {
           setData(loaded);
           setError(null);
@@ -484,7 +547,7 @@ export function ReplayViewPage() {
     return () => {
       cancelled = true;
     };
-  }, [data, replayId, requestedPlayerId]);
+  }, [data, replayId, requestedPlayerId, teacherReportFromQuery, teacherReportsKey]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -504,7 +567,7 @@ export function ReplayViewPage() {
   }) : [];
 
   const isDiff = useCallback((e: DecisionLogEntry) =>
-    data !== null && isReplayDiffForPlayer(e, data.player_id)
+    data !== null && isReplayReviewDiffForPlayer(e, data.player_id)
   , [data]);
 
   const jumpToPrevDiff = useCallback(() => {

@@ -12,7 +12,7 @@ from typing import Annotated
 from urllib.request import urlopen, Request
 from urllib.parse import urlparse, parse_qs
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from replay.normalize import normalize_replay_decisions
 
@@ -77,6 +77,7 @@ def _normalize_replay_events(events: list[dict] | None) -> list[dict]:
         return events or []
 
     from mahjong_env.replay_normalizer import normalize_replay_events
+    from mahjong_env.legal_actions import enumerate_legal_action_specs
     from mahjong_env.scoring import score_hora
     from mahjong_env.state import GameState, apply_event
 
@@ -88,6 +89,38 @@ def _normalize_replay_events(events: list[dict] | None) -> list[dict]:
             continue
 
         event_type = event.get("type")
+        if event_type == "dahai":
+            try:
+                actor = int(event.get("actor", -1))
+                snapshot = state.snapshot(actor) if 0 <= actor < 4 else None
+                pending_reach = bool(snapshot and snapshot.get("pending_reach", [False] * 4)[actor])
+                if pending_reach:
+                    pending_dahai = [
+                        spec for spec in enumerate_legal_action_specs(snapshot, actor)
+                        if spec.type == "dahai"
+                    ]
+                    current_pai = str(event.get("pai", ""))
+                    current_tsumogiri = bool(event.get("tsumogiri", False))
+                    matches = any(
+                        spec.pai == current_pai and bool(spec.tsumogiri) == current_tsumogiri
+                        for spec in pending_dahai
+                    )
+                    if not matches and len(pending_dahai) == 1:
+                        fixed = pending_dahai[0]
+                        normalized[idx] = {
+                            **event,
+                            "pai": fixed.pai,
+                            "tsumogiri": bool(fixed.tsumogiri),
+                            "legacy_reach_discard_repaired": True,
+                            "legacy_reach_discard_original": {
+                                "pai": event.get("pai"),
+                                "tsumogiri": event.get("tsumogiri"),
+                            },
+                        }
+                        event = normalized[idx]
+            except Exception:
+                pass
+
         if event_type == "hora":
             actor = int(event.get("actor", 0))
             target = int(event.get("target", actor))
@@ -155,13 +188,11 @@ def _merge_terminal_event_details(decisions: dict, events: list[dict] | None) ->
         event = event_lookup.get(int(source_event_index))
         if not event:
             continue
-        action = entry.get("gt_action") or entry.get("chosen") or {}
-        if action.get("type") not in {"hora", "ryukyoku"}:
-            continue
-        if entry.get("chosen"):
-            entry["chosen"] = {**entry["chosen"], **event}
-        if entry.get("gt_action"):
-            entry["gt_action"] = {**entry["gt_action"], **event}
+        event_type = event.get("type")
+        for action_key in ("chosen", "gt_action"):
+            action = entry.get(action_key)
+            if isinstance(action, dict) and action.get("type") == event_type:
+                entry[action_key] = {**action, **event}
     return decisions
 
 
@@ -169,11 +200,14 @@ def _resolve_optional_project_path(raw_path: str | None) -> Path | None:
     if not raw_path or not raw_path.strip():
         return None
     project_root = BASE_DIR.parent.parent.resolve()
+    attachment_root = (Path.home() / ".codex" / "attachments").resolve()
     path = Path(raw_path.strip())
     if not path.is_absolute():
         path = project_root / path
     path = path.resolve()
-    if path != project_root and project_root not in path.parents:
+    is_project_path = path == project_root or project_root in path.parents
+    is_attachment_path = path == attachment_root or attachment_root in path.parents
+    if not is_project_path and not is_attachment_path:
         raise ValueError(f"path is outside project root: {raw_path}")
     if not path.exists():
         raise FileNotFoundError(path)
@@ -215,14 +249,28 @@ def _ranked_teacher_candidates(details: list[dict]) -> list[dict]:
     return ranked
 
 
-def _attach_teacher_report_overlay(decisions: dict, report_path: Path | None) -> dict:
-    if report_path is None or not isinstance(decisions, dict):
-        return decisions
+def _infer_teacher_model_tag(report: dict, report_path: Path) -> str:
+    review = report.get("review", {}) if isinstance(report, dict) else {}
+    model_tag = review.get("model_tag") if isinstance(review, dict) else None
+    if model_tag:
+        return str(model_tag)
+    for key in ("network", "model_tag", "mortal_model_tag", "engine"):
+        value = report.get(key) if isinstance(report, dict) else None
+        if value:
+            return str(value)
+    stem = report_path.stem
+    if "__" in stem:
+        parts = [part for part in stem.split("__") if part]
+        if len(parts) >= 2:
+            return parts[-2] if parts[-1].startswith("p") else parts[-1]
+    return stem or "teacher"
 
+
+def _load_teacher_report_entries(report_path: Path, decisions: dict) -> tuple[str, int | None, list[dict]]:
     report = json.loads(report_path.read_text(encoding="utf-8"))
     review = report.get("review", {}) if isinstance(report, dict) else {}
     kyokus = review.get("kyokus", []) if isinstance(review, dict) else []
-    model_tag = review.get("model_tag") or report.get("engine") or "teacher"
+    model_tag = _infer_teacher_model_tag(report, report_path)
     report_player_id = report.get("player_id")
     decision_player_id = decisions.get("player_id")
     if (
@@ -238,6 +286,24 @@ def _attach_teacher_report_overlay(decisions: dict, report_path: Path | None) ->
     for kyoku_index, kyoku in enumerate(kyokus):
         for entry_index, entry in enumerate(kyoku.get("entries", [])):
             candidates = _ranked_teacher_candidates(list(entry.get("details", [])))
+            actual_action = entry.get("actual")
+            expected_action = entry.get("expected")
+            actual_candidate = None
+            expected_candidate = None
+            for candidate in candidates:
+                action = candidate.get("action")
+                if actual_candidate is None and _teacher_same_action(action, actual_action):
+                    actual_candidate = candidate
+                if expected_candidate is None and _teacher_same_action(action, expected_action):
+                    expected_candidate = candidate
+                if actual_candidate is not None and expected_candidate is not None:
+                    break
+            best_candidate = candidates[0] if candidates else None
+            actual_q = actual_candidate.get("q_value") if actual_candidate else None
+            best_q = best_candidate.get("q_value") if best_candidate else None
+            q_loss = None
+            if actual_q is not None and best_q is not None:
+                q_loss = max(0.0, float(best_q) - float(actual_q))
             teacher_entries.append(
                 {
                     "model": model_tag,
@@ -248,35 +314,62 @@ def _attach_teacher_report_overlay(decisions: dict, report_path: Path | None) ->
                     "junme": entry.get("junme"),
                     "tiles_left": entry.get("tiles_left"),
                     "shanten": entry.get("shanten"),
-                    "actual_action": entry.get("actual"),
-                    "expected_action": entry.get("expected"),
+                    "actual_action": actual_action,
+                    "expected_action": expected_action,
                     "is_equal": entry.get("is_equal"),
+                    "actual_q": actual_q,
+                    "expected_q": expected_candidate.get("q_value") if expected_candidate else None,
+                    "best_q": best_q,
+                    "best_prob": best_candidate.get("prob") if best_candidate else None,
+                    "q_loss": q_loss,
                     "candidates": candidates,
-                    "top1": candidates[0] if candidates else None,
+                    "top1": best_candidate,
                     "top2": candidates[1] if len(candidates) > 1 else None,
                 }
             )
+    return model_tag, report_player_id, teacher_entries
 
+
+def _teacher_same_action(local_action, teacher_action) -> bool:
     try:
         from inference.review import same_action
     except Exception:
         same_action = None
 
-    def _same_action(local_action, teacher_action) -> bool:
-        if same_action:
-            try:
-                return bool(same_action(local_action, teacher_action))
-            except Exception:
-                pass
-        return local_action == teacher_action
+    if same_action:
+        try:
+            return bool(same_action(local_action, teacher_action))
+        except Exception:
+            pass
+    return local_action == teacher_action
+
+
+def _attach_teacher_report_overlay(decisions: dict, report_path: Path | None) -> dict:
+    if report_path is None or not isinstance(decisions, dict):
+        return decisions
+    return _attach_teacher_report_overlays(decisions, [report_path])
+
+
+def _attach_teacher_report_overlays(decisions: dict, report_paths: list[Path]) -> dict:
+    if not report_paths or not isinstance(decisions, dict):
+        return decisions
+
+    own_entries = [
+        entry
+        for entry in decisions.get("log", [])
+        if isinstance(entry, dict) and not entry.get("is_obs")
+    ]
+    overlays: list[dict] = []
 
     def _attach_to_entry(entry: dict, teacher_entry: dict) -> None:
-        entry["teacher_review"] = {
+        review_entry = {
             key: value
             for key, value in teacher_entry.items()
             if key != "candidates"
         }
-        entry["teacher_review"]["candidate_count"] = len(teacher_entry["candidates"])
+        review_entry["candidate_count"] = len(teacher_entry["candidates"])
+        entry.setdefault("teacher_reviews", []).append(review_entry)
+        entry.setdefault("teacher_review", review_entry)
 
         for candidate in entry.get("candidates", []):
             if not isinstance(candidate, dict):
@@ -284,47 +377,54 @@ def _attach_teacher_report_overlay(decisions: dict, report_path: Path | None) ->
             local_action = candidate.get("action")
             match = None
             for teacher_candidate in teacher_entry["candidates"]:
-                if _same_action(local_action, teacher_candidate.get("action")):
+                if _teacher_same_action(local_action, teacher_candidate.get("action")):
                     match = teacher_candidate
                     break
             if match:
-                candidate["teacher"] = {
-                    "model": model_tag,
+                teacher_value = {
+                    "model": teacher_entry["model"],
                     "q_value": match.get("q_value"),
                     "prob": match.get("prob"),
                     "rank": match.get("rank"),
                 }
+                candidate.setdefault("teachers", []).append(teacher_value)
+                candidate.setdefault("teacher", teacher_value)
 
-    own_entries = [
-        entry
-        for entry in decisions.get("log", [])
-        if isinstance(entry, dict) and not entry.get("is_obs")
-    ]
-    attached = 0
-    own_index = 0
-    for teacher_entry in teacher_entries:
-        actual_action = teacher_entry.get("actual_action")
-        expected_action = teacher_entry.get("expected_action")
-        while own_index < len(own_entries):
-            entry = own_entries[own_index]
-            own_index += 1
-            if _same_action(entry.get("gt_action"), actual_action) or _same_action(entry.get("chosen"), actual_action):
-                _attach_to_entry(entry, teacher_entry)
-                attached += 1
-                break
-            if actual_action is None and _same_action(entry.get("gt_action"), expected_action):
-                _attach_to_entry(entry, teacher_entry)
-                attached += 1
-                break
+    for report_path in report_paths:
+        try:
+            model_tag, report_player_id, teacher_entries = _load_teacher_report_entries(report_path, decisions)
+            attached = 0
+            own_index = 0
+            for teacher_entry in teacher_entries:
+                actual_action = teacher_entry.get("actual_action")
+                expected_action = teacher_entry.get("expected_action")
+                while own_index < len(own_entries):
+                    entry = own_entries[own_index]
+                    own_index += 1
+                    if _teacher_same_action(entry.get("gt_action"), actual_action) or _teacher_same_action(entry.get("chosen"), actual_action):
+                        _attach_to_entry(entry, teacher_entry)
+                        attached += 1
+                        break
+                    if actual_action is None and _teacher_same_action(entry.get("gt_action"), expected_action):
+                        _attach_to_entry(entry, teacher_entry)
+                        attached += 1
+                        break
+            overlays.append(
+                {
+                    "model": model_tag,
+                    "report_path": str(report_path),
+                    "report_player_id": report_player_id,
+                    "teacher_decision_count": len(teacher_entries),
+                    "attached_decision_count": attached,
+                    "alignment": "actual_action_order",
+                }
+            )
+        except Exception as e:
+            overlays.append({"error": str(e), "report_path": str(report_path)})
 
-    decisions["teacher_review_overlay"] = {
-        "model": model_tag,
-        "report_path": str(report_path),
-        "report_player_id": report_player_id,
-        "teacher_decision_count": len(teacher_entries),
-        "attached_decision_count": attached,
-        "alignment": "actual_action_order",
-    }
+    decisions["teacher_review_overlays"] = overlays
+    if overlays:
+        decisions["teacher_review_overlay"] = overlays[0]
     return decisions
 
 def _infer_player_bot_type(player_name: str | None, fallback: str | None = None) -> str:
@@ -344,9 +444,170 @@ def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
     mapping = {
         "mortal": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "gui_mortal.pth",
         "70k": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "70k.pth",
-        "weak_mortal": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "weak_mortal.pth",
+        "t1_71000": BASE_DIR.parent.parent / "artifacts" / "experiments" / "teacher_transfer_2026_05" / "T1_teacher_ce_01" / "mortal.pth",
+        "weak_mortal": BASE_DIR.parent.parent / "artifacts" / "model_v4_20240308_best_min.pth",
     }
     return mapping[bot_type]
+
+
+_GUI_MORTAL_MODEL_LABELS = {
+    "mortal": "gui_mortal.pth",
+    "70k": "70k.pth",
+    "t1_71000": "T1@71000",
+    "weak_mortal": "v4",
+}
+
+
+async def _events_from_replay_form(
+    *,
+    files: list[UploadFile],
+    json_text: str,
+    input_type: str,
+) -> list[dict]:
+    has_files = files and any(f.filename for f in files if f.filename)
+    if has_files:
+        valid_files = [f for f in files if f.filename]
+        if len(valid_files) > 1:
+            raise ValueError("暂不支持多文件跑谱，请一次上传一个文件")
+        text = (await valid_files[0].read()).decode("utf-8", errors="replace").strip()
+        if not text:
+            raise ValueError("上传文件为空")
+    elif json_text.strip():
+        text = json_text.strip()
+    else:
+        raise ValueError("请上传文件或粘贴 JSON 文本")
+
+    if input_type == "url":
+        parsed = urlparse(text)
+        qs = parse_qs(parsed.query)
+        ids = qs.get("log", [])
+        if not ids:
+            raise ValueError("天凤链接中未找到 log 参数")
+        log_id = ids[0]
+        xml_url = f"https://tenhou.net/0/log/?{log_id}"
+        req = Request(xml_url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; mahjong-research-bot/1.0)",
+            "Referer": "https://tenhou.net/",
+        })
+        with urlopen(req, timeout=30) as resp:
+            xml_str = resp.read().decode("utf-8", errors="replace")
+        if "<mjloggm" not in xml_str and "<mjlog" not in xml_str.lower():
+            raise ValueError("XML 内容异常，可能牌谱不存在或需要权限")
+        root = ET.fromstring(xml_str)
+        mjson_str = parse_mjlog_to_mjai(root)
+        return [json.loads(line) for line in mjson_str.splitlines() if line.strip()]
+
+    if input_type == "tenhou6":
+        from replay.bot import _load_events_from_source
+
+        return _load_events_from_source(json.loads(text), input_type="tenhou6")
+
+    if input_type == "mjai":
+        lines = text.splitlines()
+        if len(lines) > 1:
+            return [json.loads(line) for line in lines if line.strip()]
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, list) else [parsed]
+
+    raise ValueError(f"未知的 input_type：{input_type}")
+
+
+def _candidate_q_value(candidate: dict) -> float | None:
+    for key in ("final_score", "beam_score", "logit"):
+        value = _float_or_none(candidate.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _build_runtime_teacher_report(
+    *,
+    replay_id: str,
+    model_type: str,
+    player_id: int,
+    checkpoint: Path,
+    decisions: dict,
+) -> dict:
+    kyoku_map: dict[tuple, dict] = {}
+    for entry in decisions.get("log", []):
+        if not isinstance(entry, dict) or entry.get("is_obs"):
+            continue
+        key = (
+            entry.get("bakaze", ""),
+            int(entry.get("kyoku", 0)),
+            int(entry.get("honba", 0)),
+        )
+        kyoku = kyoku_map.setdefault(
+            key,
+            {
+                "bakaze": key[0],
+                "kyoku": key[1],
+                "honba": key[2],
+                "entries": [],
+            },
+        )
+        details = []
+        for candidate in entry.get("candidates", []):
+            if not isinstance(candidate, dict) or not isinstance(candidate.get("action"), dict):
+                continue
+            details.append(
+                {
+                    "action": candidate.get("action"),
+                    "q_value": _candidate_q_value(candidate),
+                    "prob": _float_or_none(candidate.get("prob")),
+                }
+            )
+        kyoku["entries"].append(
+            {
+                "step": entry.get("step"),
+                "junme": entry.get("junme"),
+                "tiles_left": entry.get("tiles_left"),
+                "shanten": entry.get("shanten"),
+                "actual": entry.get("gt_action"),
+                "expected": entry.get("chosen"),
+                "is_equal": _teacher_same_action(entry.get("gt_action"), entry.get("chosen")),
+                "details": details,
+            }
+        )
+    return {
+        "schema": "keqing1.runtime_teacher_report.v1",
+        "replay_id": replay_id,
+        "player_id": player_id,
+        "bot_type": model_type,
+        "checkpoint": str(checkpoint),
+        "review": {
+            "model_tag": _GUI_MORTAL_MODEL_LABELS.get(model_type, model_type),
+            "kyokus": list(kyoku_map.values()),
+        },
+    }
+
+
+def _write_runtime_teacher_report(
+    *,
+    replay_id: str,
+    model_type: str,
+    player_id: int,
+    checkpoint: Path,
+    decisions: dict,
+) -> Path:
+    project_root = BASE_DIR.parent.parent
+    out_dir = project_root / "artifacts" / "gui_teacher_reports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    safe_model = _GUI_MORTAL_MODEL_LABELS.get(model_type, model_type)
+    safe_model = safe_model.replace("@", "_").replace("/", "_").replace("\\", "_").replace(" ", "_")
+    report_path = out_dir / f"{replay_id}__{safe_model}__p{player_id}.json"
+    report = _build_runtime_teacher_report(
+        replay_id=replay_id,
+        model_type=model_type,
+        player_id=player_id,
+        checkpoint=checkpoint,
+        decisions=decisions,
+    )
+    report_path.write_text(
+        json.dumps(_json_safe(report), cls=_NumpyEncoder, ensure_ascii=False, allow_nan=False, indent=2),
+        encoding="utf-8",
+    )
+    return report_path
 
 
 _DEFAULT_BEHAVIOR_CASEBOOK = (
@@ -622,6 +883,100 @@ async def replay(
         return JSONResponse(status_code=500, content={"error": str(e), "detail": traceback.format_exc()})
 
 
+@app.post("/api/replay/multi-teacher")
+async def replay_multi_teacher(
+    player_id: Annotated[int, Form()] = 0,
+    model_types: Annotated[list[str], Form()] = [],
+    files: Annotated[list[UploadFile], File()] = [],
+    json_text: Annotated[str, Form()] = "",
+    input_type: Annotated[str, Form()] = "url",
+):
+    """Run one replay with several Mortal checkpoints and attach NAGA-style teacher overlays."""
+    from replay.api import run_replay_single_raw
+    from replay.bot import render_replay_json
+
+    selected_models = [model.strip() for model in model_types if model and model.strip()]
+    if not selected_models:
+        selected_models = ["mortal", "70k"]
+    allowed_models = set(_GUI_MORTAL_MODEL_LABELS)
+    invalid = [model for model in selected_models if model not in allowed_models]
+    if invalid:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"GUI review 只支持 Mortal checkpoint：{', '.join(sorted(allowed_models))}"},
+        )
+
+    try:
+        events = await _events_from_replay_form(files=files, json_text=json_text, input_type=input_type)
+        normalized_events = _normalize_replay_events(events)
+        storage = get_storage()
+        decisions_by_model: dict[str, dict] = {}
+        checkpoints: dict[str, Path] = {}
+
+        for model_type in selected_models:
+            checkpoint = _default_checkpoint_for_bot_type(model_type)
+            bot = run_replay_single_raw(
+                events,
+                player_id=player_id,
+                checkpoint=str(checkpoint),
+                input_type="url",
+                bot_type=model_type,
+            )
+            decisions = normalize_replay_decisions(render_replay_json(bot))
+            decisions = _merge_terminal_event_details(decisions, normalized_events)
+            decisions["bot_type"] = model_type
+            decisions["model_label"] = _GUI_MORTAL_MODEL_LABELS.get(model_type, model_type)
+            decisions_by_model[model_type] = decisions
+            checkpoints[model_type] = checkpoint
+
+        base_model = selected_models[0]
+        base_decisions = decisions_by_model[base_model]
+        replay_id = storage.save(
+            events=normalized_events,
+            decisions=base_decisions,
+            bot_type=base_model,
+            player_names=base_decisions.get("player_names"),
+            checkpoint=str(checkpoints[base_model]),
+        )
+        base_decisions["replay_id"] = replay_id
+
+        report_paths = []
+        for model_type in selected_models:
+            report_path = _write_runtime_teacher_report(
+                replay_id=replay_id,
+                model_type=model_type,
+                player_id=player_id,
+                checkpoint=checkpoints[model_type],
+                decisions=decisions_by_model[model_type],
+            )
+            report_paths.append(report_path)
+
+        attached = _attach_teacher_report_overlays(base_decisions, report_paths)
+        project_root = BASE_DIR.parent.parent.resolve()
+        attached["teacher_report_paths"] = [
+            path.resolve().relative_to(project_root).as_posix()
+            for path in report_paths
+        ]
+        attached["selected_teacher_models"] = [
+            {
+                "type": model_type,
+                "label": _GUI_MORTAL_MODEL_LABELS.get(model_type, model_type),
+                "checkpoint": str(checkpoints[model_type]),
+            }
+            for model_type in selected_models
+        ]
+        return Response(
+            content=json.dumps(_json_safe(attached), cls=_NumpyEncoder, ensure_ascii=False, allow_nan=False),
+            media_type="application/json",
+        )
+    except json.JSONDecodeError as e:
+        return JSONResponse(status_code=400, content={"error": f"JSON 解析失败: {e}"})
+    except Exception as e:
+        import traceback
+
+        return JSONResponse(status_code=500, content={"error": str(e), "detail": traceback.format_exc()})
+
+
 # ========== 持久化存储 API（新增） ==========
 
 @app.post("/api/replay/save", response_class=JSONResponse)
@@ -658,6 +1013,7 @@ async def get_replay(
     replay_id: str,
     player_id: int | None = None,
     teacher_report: str | None = None,
+    teacher_reports: list[str] = Query(default=[]),
 ):
     """获取回放完整数据（decisions）。"""
     storage = get_storage()
@@ -693,16 +1049,28 @@ async def get_replay(
     if isinstance(decisions, dict):
         decisions = normalize_replay_decisions(decisions, meta=meta)
         decisions = _merge_terminal_event_details(decisions, events)
-        try:
-            decisions = _attach_teacher_report_overlay(
-                decisions,
-                _resolve_optional_project_path(teacher_report),
-            )
-        except Exception as e:
-            decisions["teacher_review_overlay"] = {
-                "error": str(e),
-                "report_path": teacher_report,
-            }
+        raw_teacher_reports = list(teacher_reports or [])
+        if teacher_report:
+            raw_teacher_reports.insert(0, teacher_report)
+        report_paths: list[Path] = []
+        report_errors: list[dict] = []
+        for raw_report in raw_teacher_reports:
+            for item in str(raw_report).split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                try:
+                    resolved = _resolve_optional_project_path(item)
+                    if resolved is not None:
+                        report_paths.append(resolved)
+                except Exception as e:
+                    report_errors.append({"error": str(e), "report_path": item})
+        if report_paths:
+            decisions = _attach_teacher_report_overlays(decisions, report_paths)
+        if report_errors:
+            overlays = list(decisions.get("teacher_review_overlays", [])) + report_errors
+            decisions["teacher_review_overlays"] = overlays
+            decisions["teacher_review_overlay"] = overlays[0]
     return JSONResponse(content=_json_safe(decisions))
 
 

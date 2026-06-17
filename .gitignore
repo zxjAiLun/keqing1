@@ -141,3 +141,10 @@ AGENTS.md
 # Preprocess artifacts
 processed*/
 processed_*/
+
+# Playwright browser automation
+.playwright-reviewer-profile/
+.edge-reviewer-cdp-profile/
+node_modules/
+scripts/mortal/reviewer_browser_auto.mjs
+start_reviewer_browser_auto_game00000.cmd

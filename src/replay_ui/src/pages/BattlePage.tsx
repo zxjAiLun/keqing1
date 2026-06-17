@@ -1,5 +1,6 @@
 // src/replay_ui/src/pages/BattlePage.tsx
 import { useState, useCallback, useEffect, useRef } from "react";
+import type { CSSProperties } from "react";
 import { MahjongTable } from "../components/BattleBoard/MahjongTable";
 import { startBattle, doAction, closeBattle, fetchWithTimeout } from "../api/battleApi";
 import { useAutoActions } from "../hooks/useAutoActions";
@@ -7,7 +8,7 @@ import { useBattlePolling } from "../hooks/useBattlePolling";
 import { useConnectionManager } from "../hooks/useConnectionManager";
 import type { BattleState, Action, StartBattleRequest } from "../types/battle";
 import type { BotType } from "../types/bot";
-import { BOT_CATALOG, DEFAULT_BOT_TYPE, getBotCatalogEntry } from "../utils/botCatalog";
+import { DEFAULT_BOT_TYPE, GUI_BOT_CATALOG, getBotCatalogEntry } from "../utils/botCatalog";
 
 export function BattlePage() {
   const [gameId, setGameId] = useState<string | null>(null);
@@ -153,42 +154,46 @@ export function BattlePage() {
     return (
       <div
         style={{
-          background: '#f0f2f5',
-          minHeight: '100%',
+          background: 'var(--page-bg)',
+          height: '100%',
+          overflow: 'auto',
+          padding: 14,
           display: 'flex',
           flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 24,
+          gap: 12,
         }}
       >
-        {/* 麻将图标 + 旋转动画 */}
         <div
           style={{
-            width: 64,
-            height: 64,
-            borderRadius: 16,
-            background: 'linear-gradient(135deg, #1e4a7a 0%, #0f2d4a 100%)',
             display: 'flex',
+            justifyContent: 'space-between',
             alignItems: 'center',
-            justifyContent: 'center',
-            boxShadow: '0 8px 24px rgba(30,74,122,0.3)',
-            marginBottom: 8,
-            animation: loading ? "spinIcon 1.5s linear infinite" : "floatIcon 3s ease-in-out infinite",
+            gap: 12,
+            flexWrap: 'wrap',
           }}
         >
-          <span style={{ color: '#fff', fontWeight: 700, fontSize: 24 }}>麻</span>
+          <div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: 'var(--text-primary)' }}>人机对战</div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>紧凑设置栏，启动后牌桌占满工作区。</div>
+          </div>
+          <button
+            onClick={startNewGame}
+            disabled={loading}
+            className="btn-primary"
+            style={{ height: 34, padding: '0 16px', fontSize: 13 }}
+          >
+            {loading ? '启动中...' : '开始对战'}
+          </button>
         </div>
-        <h1 style={{ fontSize: 28, fontWeight: 700, color: '#1f2937' }}>Keqing1 人机对战</h1>
 
         <div
+          className="card"
           style={{
-            background: '#fff',
-            border: '1px solid #e5e7eb',
-            borderRadius: 12,
-            padding: 20,
-            width: 320,
-            boxShadow: '0 4px 16px rgba(0,0,0,0.07)',
+            padding: 12,
+            display: 'grid',
+            gridTemplateColumns: 'minmax(180px, 240px) 1fr',
+            gap: 12,
+            alignItems: 'start',
           }}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -200,78 +205,49 @@ export function BattlePage() {
               style={{
                 width: '100%',
                 padding: '9px 12px',
-                border: '1px solid #d1d5db',
-                borderRadius: 8,
-                fontSize: 14,
-                background: '#f9fafb',
-                color: '#1f2937',
+                border: '1px solid var(--border)',
+                borderRadius: 7,
+                fontSize: 13,
+                background: 'var(--card-bg)',
+                color: 'var(--text-primary)',
                 outline: 'none',
-                transition: 'border-color 0.15s',
               }}
-              onFocus={(e) => (e.target.style.borderColor = '#3498db')}
-              onBlur={(e) => (e.target.style.borderColor = '#d1d5db')}
             />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <label style={{ fontSize: 12, color: '#6b7280', fontWeight: 500 }}>对手模型</label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {BOT_CATALOG.map((bot) => (
+              <label style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 700 }}>对手模型</label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 6 }}>
+                {GUI_BOT_CATALOG.map((bot) => (
                   <button
                     key={bot.value}
                     onClick={() => setBotModel(bot.value)}
                     style={{
-                      padding: '10px 12px',
-                      borderRadius: 8,
+                      padding: '8px 10px',
+                      borderRadius: 7,
                       fontSize: 13,
                       fontWeight: 500,
-                      border: `2px solid ${botModel === bot.value ? '#1e4a7a' : '#d1d5db'}`,
-                      background: botModel === bot.value ? '#eff6ff' : '#f9fafb',
-                      color: '#374151',
-                      cursor: 'pointer', transition: 'all 0.15s',
+                      border: `1px solid ${botModel === bot.value ? 'var(--accent)' : 'var(--border)'}`,
+                      background: botModel === bot.value ? 'rgba(52,152,219,0.10)' : 'var(--card-bg)',
+                      color: 'var(--text-primary)',
+                      cursor: 'pointer',
                       textAlign: 'left',
                     }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center' }}>
                       <span style={{ fontWeight: 700 }}>{bot.label}</span>
-                      <span style={{ fontSize: 11, color: botModel === bot.value ? '#1e4a7a' : '#6b7280' }}>{bot.badge}</span>
+                      <span style={{ fontSize: 11, color: botModel === bot.value ? 'var(--accent)' : 'var(--text-muted)' }}>{bot.badge}</span>
                     </div>
-                    <div style={{ marginTop: 3, fontSize: 12, color: '#6b7280' }}>{bot.description}</div>
+                    <div style={{ marginTop: 3, fontSize: 11, color: 'var(--text-muted)' }}>{bot.description}</div>
                   </button>
                 ))}
               </div>
-              <div style={{ fontSize: 12, color: '#6b7280' }}>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                 当前选择：{selectedBot.label}，{selectedBot.description}
               </div>
             </div>
-            <button
-              onClick={startNewGame}
-              disabled={loading}
-              style={{
-                width: '100%',
-                padding: '10px',
-                borderRadius: 8,
-                border: 'none',
-                background: loading
-                  ? 'linear-gradient(135deg, #9ca3af 0%, #8b9298 100%)'
-                  : 'linear-gradient(135deg, #1e4a7a 0%, #0f2d4a 100%)',
-                color: '#fff',
-                fontSize: 15,
-                fontWeight: 600,
-                cursor: loading ? 'not-allowed' : 'pointer',
-                boxShadow: loading ? 'none' : '0 4px 12px rgba(30,74,122,0.25)',
-                transition: 'all 0.2s',
-              }}
-            >
-              {loading ? (
-                <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-                  <span style={{ animation: "dotPulse 1.2s ease-in-out infinite" }}>●</span>
-                  洗牌中...
-                </span>
-              ) : '开始对战'}
-            </button>
             {error && (
               <div style={{
-                fontSize: 13, textAlign: 'center', color: '#dc2626',
-                background: '#fef2f2', padding: '6px 10px', borderRadius: 6, border: '1px solid #fecaca'
+                fontSize: 13, color: 'var(--error)',
+                padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)'
               }}>
                 {error}
               </div>
@@ -279,13 +255,6 @@ export function BattlePage() {
           </div>
         </div>
 
-        <p style={{ fontSize: 13, color: '#9ca3af' }}>默认主线为 Mortal；也可切到 70k、weak mortal 或 rulebase。</p>
-
-        <style>{`
-          @keyframes spinIcon { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-          @keyframes floatIcon { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
-          @keyframes dotPulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
-        `}</style>
       </div>
     );
   }
@@ -435,7 +404,7 @@ export function BattlePage() {
   }
 
   return (
-    <div style={{ height: '100%', padding: 16, background: '#f0f2f5', position: 'relative' }}>
+    <div style={{ height: '100%', background: 'var(--page-bg)', position: 'relative', overflow: 'hidden' }}>
       <MahjongTable
         state={state}
         onAction={handleAction}
@@ -450,18 +419,37 @@ export function BattlePage() {
         actionPending={loading}
       />
 
-      {/* 退出按钮 */}
-      <button
-        onClick={() => setShowQuitConfirm(true)}
+      <div
         style={{
-          position: 'absolute', top: 24, right: 24, zIndex: 100,
-          padding: '6px 14px', borderRadius: 6, border: '1px solid #e74c3c',
-          background: 'rgba(255,255,255,0.9)', color: '#e74c3c',
-          fontSize: 13, fontWeight: 600, cursor: 'pointer',
+          position: 'absolute',
+          top: 10,
+          right: 10,
+          zIndex: 100,
+          display: 'flex',
+          gap: 6,
+          flexWrap: 'wrap',
+          justifyContent: 'flex-end',
         }}
       >
-        退出对局
-      </button>
+        <span style={{
+          padding: '5px 8px',
+          borderRadius: 6,
+          border: '1px solid var(--overlay-border)',
+          background: 'var(--overlay-bg)',
+          color: 'var(--control-muted)',
+          fontSize: 12,
+        }}>
+          {selectedBot.label} · {connStatus}
+        </span>
+        <button onClick={() => downloadExport("mjai")} style={battleToolButtonStyle}>Mjai</button>
+        <button onClick={() => downloadExport("tenhou6")} style={battleToolButtonStyle}>Tenhou6</button>
+        <button
+          onClick={() => setShowQuitConfirm(true)}
+          style={{ ...battleToolButtonStyle, borderColor: '#e74c3c', color: '#e74c3c' }}
+        >
+          退出
+        </button>
+      </div>
 
       {/* 退出确认对话框 */}
       {showQuitConfirm && (
@@ -523,3 +511,14 @@ export function BattlePage() {
     </div>
   );
 }
+
+const battleToolButtonStyle: CSSProperties = {
+  padding: '5px 9px',
+  borderRadius: 6,
+  border: '1px solid var(--overlay-border)',
+  background: 'var(--overlay-bg)',
+  color: 'var(--control-muted)',
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: 'pointer',
+};

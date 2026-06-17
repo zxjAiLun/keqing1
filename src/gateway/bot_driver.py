@@ -334,8 +334,13 @@ class BotDriver:
             shanten = snap.get("shanten", 8)
             if shanten == 0 and tsumo_pai and legal_by_type.get("reach"):
                 mgr.reach(room, actor)
-                mgr.discard(room, actor, pai or tsumo_pai, tsumogiri=not bool(pai))
-                return True
+                pending_specs = enumerate_legal_action_specs(room.state.snapshot(actor), actor)
+                pending_dahai = [spec for spec in pending_specs if spec.type == "dahai"]
+                matched = next((spec for spec in pending_dahai if spec.pai == pai), None) if pai else None
+                matched = matched or (pending_dahai[0] if pending_dahai else None)
+                if matched:
+                    mgr.discard(room, actor, matched.pai, tsumogiri=matched.tsumogiri)
+                    return True
 
         elif action_type == "chi":
             target = requested_spec.target
