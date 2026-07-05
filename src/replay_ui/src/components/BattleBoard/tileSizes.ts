@@ -4,6 +4,6 @@
 // 对家手牌约为此尺寸的 0.45 倍
 export const TILE_SIZES = {
   small: { w: 20, h: 28 },
-  normal: { w: 26, h: 36 },
-  large: { w: 56, h: 76 },
+  normal: { w: 28, h: 39 },
+  large: { w: 48, h: 66 },
 } as const;

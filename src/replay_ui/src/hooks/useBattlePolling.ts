@@ -53,7 +53,6 @@ export function useBattlePolling({
         const s = stateRef.current;
         if (s?.phase !== "playing") return;
         if (pendingActionRef.current) return;  // doAction 进行中，跳过
-        if (needsDecisionRef.current) return;  // 等待玩家决策，跳过
 
         const playerId = s.human_player_id ?? 0;
         const actorToMove = s.actor_to_move;
@@ -65,6 +64,27 @@ export function useBattlePolling({
           const data = await res.json();
           if (mountedRef.current) onStateUpdateRef.current(data.state);
         } else {
+          const onlyNone =
+            s.needs_input &&
+            s.legal_actions?.length === 1 &&
+            s.legal_actions[0]?.type === "none";
+          if (onlyNone) {
+            pendingActionRef.current = true;
+            try {
+              const res = await fetch(`/api/battle/action`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ game_id: gameId, action: s.legal_actions[0] }),
+              });
+              if (!res.ok) return;
+              const data = await res.json();
+              if (mountedRef.current) onStateUpdateRef.current(data.state);
+            } finally {
+              pendingActionRef.current = false;
+            }
+            return;
+          }
+          if (needsDecisionRef.current) return;  // 只在玩家本人回合等待玩家决策
           // 人类回合：刷新状态
           const res = await fetch(`/api/battle/state/${gameId}?player_id=${playerId}`);
           if (!res.ok) return;

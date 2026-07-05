@@ -22,6 +22,25 @@ import {
   sidePanelContainerStyle,
 } from './gameReplayStyles';
 
+const TEACHER_MODEL_ORDER: Record<string, number> = {
+  v4: 0,
+  '70k.pth': 1,
+  'T1@71000': 2,
+  'gui_mortal.pth': 3,
+};
+
+function isForcedRiichiTsumogiriEntry(entry: ReplayData['log'][number] | null | undefined): boolean {
+  const action = entry?.gt_action ?? entry?.chosen;
+  return Boolean(
+    entry
+    && !entry.is_obs
+    && action?.type === 'dahai'
+    && action.tsumogiri
+    && action.actor !== undefined
+    && entry.reached?.[action.actor],
+  );
+}
+
 export function GameBoardReplayPage() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -270,6 +289,7 @@ export function GameBoardReplayPage() {
     if (!data) return;
     const pid = data.player_id;
     for (let i = currentStep - 1; i >= 0; i--) {
+      if (isForcedRiichiTsumogiriEntry(data.log[i])) continue;
       if (isReplayReviewDiffForPlayer(data.log[i], pid, activeTeacherModel)) {
         resetBoardPhase();
         setShowOpponentHands(false);
@@ -283,6 +303,7 @@ export function GameBoardReplayPage() {
     if (!data) return;
     const pid = data.player_id;
     for (let i = currentStep + 1; i < data.log.length; i++) {
+      if (isForcedRiichiTsumogiriEntry(data.log[i])) continue;
       if (isReplayReviewDiffForPlayer(data.log[i], pid, activeTeacherModel)) {
         resetBoardPhase();
         setShowOpponentHands(false);
@@ -372,15 +393,7 @@ export function GameBoardReplayPage() {
     navigate(`/game-replay?${nextParams.toString()}`);
   };
 
-  const currentAction = (currentEntry?.gt_action ?? currentEntry?.chosen) as Action | null | undefined;
-  const isForcedRiichiTsumogiri = Boolean(
-    currentEntry
-    && !currentEntry.is_obs
-    && currentAction?.type === 'dahai'
-    && currentAction.tsumogiri
-    && currentAction.actor !== undefined
-    && currentEntry.reached?.[currentAction.actor],
-  );
+  const isForcedRiichiTsumogiri = isForcedRiichiTsumogiriEntry(currentEntry);
 
   // 适配数据
   const battleState = useMemo(
@@ -395,24 +408,33 @@ export function GameBoardReplayPage() {
   const logitData = currentEntry && !currentEntry.is_obs && boardPhase === 'pre' && !isForcedRiichiTsumogiri
     ? buildLogitData(currentEntry)
     : undefined;
-  const teacherModelsForStep = useMemo(() => {
-    if (!currentEntry) return [];
-    const reviews = currentEntry.teacher_reviews && currentEntry.teacher_reviews.length > 0
-      ? currentEntry.teacher_reviews
-      : currentEntry.teacher_review ? [currentEntry.teacher_review] : [];
-    return reviews.map((review) => review.model);
-  }, [currentEntry]);
-  const teacherModelsForStepKey = teacherModelsForStep.join('\n');
+  const replayTeacherModels = useMemo(() => {
+    if (!data) return [];
+    const models: string[] = [];
+    const addModel = (model: string | null | undefined) => {
+      const normalized = model?.trim();
+      if (normalized && !models.includes(normalized)) models.push(normalized);
+    };
+
+    data.selected_teacher_models?.forEach((model) => addModel(model.label));
+    data.teacher_review_overlays?.forEach((overlay) => addModel(overlay.model));
+    addModel(data.teacher_review_overlay?.model);
+    data.log.forEach((logEntry) => {
+      logEntry.teacher_reviews?.forEach((review) => addModel(review.model));
+      addModel(logEntry.teacher_review?.model);
+    });
+    return models.sort((left, right) => (
+      (TEACHER_MODEL_ORDER[left] ?? 100) - (TEACHER_MODEL_ORDER[right] ?? 100)
+    ));
+  }, [data]);
+  const replayTeacherModelsKey = replayTeacherModels.join('\n');
 
   useEffect(() => {
-    if (teacherModelsForStep.length === 0) {
-      if (activeTeacherModel !== null) setActiveTeacherModel(null);
-      return;
+    if (replayTeacherModels.length === 0) return;
+    if (!activeTeacherModel || !replayTeacherModels.includes(activeTeacherModel)) {
+      setActiveTeacherModel(replayTeacherModels[0]);
     }
-    if (!activeTeacherModel || !teacherModelsForStep.includes(activeTeacherModel)) {
-      setActiveTeacherModel(teacherModelsForStep[0]);
-    }
-  }, [teacherModelsForStepKey, activeTeacherModel, teacherModelsForStep]);
+  }, [replayTeacherModelsKey, activeTeacherModel, replayTeacherModels]);
 
   const entry = currentEntry;
   const k = entry?.kyoku_key;
@@ -437,6 +459,15 @@ export function GameBoardReplayPage() {
     () => buildReplayHandsForBoard(events as ReplayEvent[] | null, data, currentStep, currentEntry ?? null, boardPhase),
     [events, data, currentStep, currentEntry, boardPhase],
   );
+  const replayHandsForTable = useMemo(() => {
+    if (!resultSummary || resultSummary.type !== 'hora' || resultSummary.winner == null) {
+      return showOpponentHands ? replayHands : null;
+    }
+    const baseHands = (replayHands ?? [[], [], [], []]).map((tiles) => [...tiles]) as Array<string[] | null>;
+    baseHands[resultSummary.winner] = [...resultSummary.winnerHand];
+    if (showOpponentHands) return baseHands;
+    return baseHands.map((tiles, pid) => (pid === resultSummary.winner ? tiles : null));
+  }, [replayHands, resultSummary, showOpponentHands]);
 
   if (loading) {
     return (
@@ -478,7 +509,7 @@ export function GameBoardReplayPage() {
               mode="replay"
               logitData={logitData}
               activeTeacherModel={activeTeacherModel}
-              revealedOpponentHands={showOpponentHands ? replayHands : null}
+              revealedOpponentHands={replayHandsForTable}
               onToggleOpponentHands={() => setShowOpponentHands((v) => !v)}
             />
             {resultSummary && <ReplayResultOverlay summary={resultSummary} playerNames={playerNames} />}
@@ -592,6 +623,7 @@ export function GameBoardReplayPage() {
                 playerNames={playerNames}
                 currentPlayerId={viewPlayerId}
                 localReviewerLabel={localReviewerLabel}
+                availableTeacherModels={replayTeacherModels}
                 activeTeacherModel={activeTeacherModel}
                 onActiveTeacherModelChange={setActiveTeacherModel}
               />

@@ -3,6 +3,7 @@ import { MainLayout } from './components/Layout/MainLayout';
 import { DashboardPage } from './pages/DashboardPage';
 import { HomePage } from './pages/HomePage';
 import { ReviewPage } from './pages/ReviewPage';
+import { ReviewHistoryPage } from './pages/ReviewHistoryPage';
 import { ReplayViewPage } from './pages/ReplayViewPage';
 import { GameBoardPage } from './pages/GameBoardPage';
 import { GameBoardReplayPage } from './pages/GameBoardReplayPage';
@@ -24,6 +25,7 @@ export default function App() {
             <Route path="/battle" element={<BattlePage />} />
             <Route path="/bot-battle" element={<BotBattlePage />} />
             <Route path="/review" element={<ReviewPage />} />
+            <Route path="/review-history" element={<ReviewHistoryPage />} />
             <Route path="/selfplay-anomalies" element={<SelfplayAnomaliesPage />} />
             <Route path="/behavior-casebook" element={<BehaviorCasebookPage />} />
             <Route path="/mortal-review" element={<MortalDecisionReviewPage />} />

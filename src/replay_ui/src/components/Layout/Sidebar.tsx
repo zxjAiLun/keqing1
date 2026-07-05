@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   BarChart2,
+  History,
   LayoutDashboard,
   Menu,
   PanelLeftClose,
@@ -23,6 +24,7 @@ const NAV_ITEMS: Array<{
 }> = [
   { path: '/', icon: LayoutDashboard, label: '总览', exact: true },
   { path: '/review', icon: BarChart2, label: '牌谱 Review' },
+  { path: '/review-history', icon: History, label: '历史 Review' },
   { path: '/battle', icon: Users, label: '人机对战' },
 ];
 

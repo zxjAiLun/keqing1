@@ -46,7 +46,11 @@ export const BOT_CATALOG: BotCatalogEntry[] = [
   },
 ];
 
-export const GUI_BOT_CATALOG: BotCatalogEntry[] = BOT_CATALOG.filter((entry) => entry.value !== 'rulebase');
+const GUI_MODEL_ORDER: BotType[] = ['weak_mortal', '70k', 't1_71000', 'mortal'];
+
+export const GUI_BOT_CATALOG: BotCatalogEntry[] = BOT_CATALOG
+  .filter((entry) => entry.value !== 'rulebase')
+  .sort((left, right) => GUI_MODEL_ORDER.indexOf(left.value) - GUI_MODEL_ORDER.indexOf(right.value));
 
 export const DEFAULT_BOT_TYPE: BotType = 'mortal';
 

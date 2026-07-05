@@ -309,6 +309,7 @@ def _load_teacher_report_entries(report_path: Path, decisions: dict) -> tuple[st
                     "model": model_tag,
                     "report_path": str(report_path),
                     "report_player_id": report_player_id,
+                    "step": entry.get("step"),
                     "kyoku_index": kyoku_index,
                     "entry_index": entry_index,
                     "junme": entry.get("junme"),
@@ -359,6 +360,11 @@ def _attach_teacher_report_overlays(decisions: dict, report_paths: list[Path]) -
         for entry in decisions.get("log", [])
         if isinstance(entry, dict) and not entry.get("is_obs")
     ]
+    own_entries_by_step = {
+        int(entry["step"]): entry
+        for entry in own_entries
+        if isinstance(entry.get("step"), int)
+    }
     overlays: list[dict] = []
 
     def _attach_to_entry(entry: dict, teacher_entry: dict) -> None:
@@ -368,6 +374,25 @@ def _attach_teacher_report_overlays(decisions: dict, report_paths: list[Path]) -
             if key != "candidates"
         }
         review_entry["candidate_count"] = len(teacher_entry["candidates"])
+        if review_entry.get("actual_action") is None:
+            actual_action = _actual_action_for_review(entry)
+            if actual_action is not None:
+                actual_candidate = next(
+                    (
+                        candidate
+                        for candidate in teacher_entry["candidates"]
+                        if _teacher_same_action(candidate.get("action"), actual_action)
+                    ),
+                    None,
+                )
+                review_entry["actual_action"] = actual_action
+                review_entry["actual_q"] = actual_candidate.get("q_value") if actual_candidate else None
+                review_entry["actual_prob"] = actual_candidate.get("prob") if actual_candidate else None
+                review_entry["is_equal"] = _teacher_same_action(actual_action, review_entry.get("expected_action"))
+                best_q = review_entry.get("best_q")
+                actual_q = review_entry.get("actual_q")
+                if best_q is not None and actual_q is not None:
+                    review_entry["q_loss"] = max(0.0, float(best_q) - float(actual_q))
         entry.setdefault("teacher_reviews", []).append(review_entry)
         entry.setdefault("teacher_review", review_entry)
 
@@ -396,6 +421,15 @@ def _attach_teacher_report_overlays(decisions: dict, report_paths: list[Path]) -
             attached = 0
             own_index = 0
             for teacher_entry in teacher_entries:
+                teacher_step = teacher_entry.get("step")
+                if isinstance(teacher_step, int):
+                    entry = own_entries_by_step.get(teacher_step)
+                    if entry is not None:
+                        _attach_to_entry(entry, teacher_entry)
+                        attached += 1
+                    continue
+
+                # Backward compatibility for older reports without a global step.
                 actual_action = teacher_entry.get("actual_action")
                 expected_action = teacher_entry.get("expected_action")
                 while own_index < len(own_entries):
@@ -416,7 +450,7 @@ def _attach_teacher_report_overlays(decisions: dict, report_paths: list[Path]) -
                     "report_player_id": report_player_id,
                     "teacher_decision_count": len(teacher_entries),
                     "attached_decision_count": attached,
-                    "alignment": "actual_action_order",
+                    "alignment": "step_then_actual_action_order",
                 }
             )
         except Exception as e:
@@ -520,6 +554,16 @@ def _candidate_q_value(candidate: dict) -> float | None:
     return None
 
 
+def _actual_action_for_review(entry: dict) -> dict | None:
+    actual = entry.get("gt_action")
+    if actual is not None:
+        return actual
+    chosen = entry.get("chosen")
+    if isinstance(chosen, dict) and chosen.get("type") == "none":
+        return {"type": "none"}
+    return None
+
+
 def _build_runtime_teacher_report(
     *,
     replay_id: str,
@@ -557,15 +601,16 @@ def _build_runtime_teacher_report(
                     "prob": _float_or_none(candidate.get("prob")),
                 }
             )
+        actual_action = _actual_action_for_review(entry)
         kyoku["entries"].append(
             {
                 "step": entry.get("step"),
                 "junme": entry.get("junme"),
                 "tiles_left": entry.get("tiles_left"),
                 "shanten": entry.get("shanten"),
-                "actual": entry.get("gt_action"),
+                "actual": actual_action,
                 "expected": entry.get("chosen"),
-                "is_equal": _teacher_same_action(entry.get("gt_action"), entry.get("chosen")),
+                "is_equal": _teacher_same_action(actual_action, entry.get("chosen")),
                 "details": details,
             }
         )
@@ -608,6 +653,75 @@ def _write_runtime_teacher_report(
         encoding="utf-8",
     )
     return report_path
+
+
+def _list_review_history(
+    *,
+    storage=None,
+    report_dir: Path | None = None,
+    project_root: Path | None = None,
+) -> list[dict]:
+    storage = storage or get_storage()
+    project_root = (project_root or BASE_DIR.parent.parent).resolve()
+    report_dir = report_dir or (project_root / "artifacts" / "gui_teacher_reports")
+    metas = {item["replay_id"]: item for item in storage.list() if item.get("replay_id")}
+    grouped: dict[tuple[str, int], dict] = {}
+
+    if report_dir.exists():
+        for report_path in report_dir.glob("*.json"):
+            parts = report_path.stem.rsplit("__", 2)
+            if len(parts) != 3 or not parts[2].startswith("p"):
+                continue
+            replay_id, safe_model, player_part = parts
+            meta = metas.get(replay_id)
+            if meta is None:
+                continue
+            try:
+                player_id = int(player_part[1:])
+            except ValueError:
+                continue
+
+            model = next(
+                (
+                    label
+                    for label in _GUI_MORTAL_MODEL_LABELS.values()
+                    if label.replace("@", "_").replace("/", "_").replace("\\", "_").replace(" ", "_") == safe_model
+                ),
+                safe_model,
+            )
+            key = (replay_id, player_id)
+            item = grouped.setdefault(
+                key,
+                {
+                    "replay_id": replay_id,
+                    "created_at": meta.get("created_at", ""),
+                    "player_id": player_id,
+                    "player_name": "",
+                    "player_names": meta.get("player_names", []),
+                    "kyoku_count": meta.get("kyoku_count", 0),
+                    "total_steps": meta.get("total_steps", 0),
+                    "models": [],
+                    "teacher_report_paths": [],
+                },
+            )
+            names = item["player_names"]
+            if 0 <= player_id < len(names):
+                item["player_name"] = names[player_id]
+            relative_path = report_path.resolve().relative_to(project_root).as_posix()
+            item["models"].append(model)
+            item["teacher_report_paths"].append(relative_path)
+
+    model_order = {"v4": 0, "70k.pth": 1, "T1@71000": 2, "gui_mortal.pth": 3}
+    history = list(grouped.values())
+    for item in history:
+        paired = sorted(
+            zip(item["models"], item["teacher_report_paths"]),
+            key=lambda pair: (model_order.get(pair[0], 100), pair[0]),
+        )
+        item["models"] = [pair[0] for pair in paired]
+        item["teacher_report_paths"] = [pair[1] for pair in paired]
+    history.sort(key=lambda item: item["created_at"], reverse=True)
+    return history
 
 
 _DEFAULT_BEHAVIOR_CASEBOOK = (
@@ -897,7 +1011,7 @@ async def replay_multi_teacher(
 
     selected_models = [model.strip() for model in model_types if model and model.strip()]
     if not selected_models:
-        selected_models = ["mortal", "70k"]
+        selected_models = ["weak_mortal", "70k", "t1_71000"]
     allowed_models = set(_GUI_MORTAL_MODEL_LABELS)
     invalid = [model for model in selected_models if model not in allowed_models]
     if invalid:
@@ -1006,6 +1120,12 @@ async def list_replays():
     storage = get_storage()
     metas = storage.list()
     return JSONResponse(content=metas)
+
+
+@app.get("/api/replay/review-history", response_class=JSONResponse)
+async def list_review_history():
+    """列出已持久化且包含 teacher report 的 Review。"""
+    return JSONResponse(content=_list_review_history())
 
 
 @app.get("/api/replay/{replay_id}", response_class=JSONResponse)

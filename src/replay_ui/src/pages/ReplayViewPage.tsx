@@ -60,6 +60,10 @@ function candidateProbabilities(candidates: Array<{ logit: number; beam_score?: 
   ));
 }
 
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
 function buildSortedTiles(entry: DecisionLogEntry): TileWithMeta[] {
   const hand = entry.hand || [];
   const tsumo_pai = entry.tsumo_pai || null;
@@ -182,21 +186,20 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
       model: string;
       total: number;
       match: number;
+      badMove: number;
       ratingScores: number[];
+      similarityScores: number[];
     }>();
 
     const ensure = (model: string) => {
       const key = model || 'model';
       let item = stats.get(key);
       if (!item) {
-        item = { model: key, total: 0, match: 0, ratingScores: [] };
+        item = { model: key, total: 0, match: 0, badMove: 0, ratingScores: [], similarityScores: [] };
         stats.set(key, item);
       }
       return item;
     };
-
-    const finite = (value: unknown): number | null =>
-      typeof value === 'number' && Number.isFinite(value) ? value : null;
 
     for (const entry of log) {
       const reviews = entry.teacher_reviews && entry.teacher_reviews.length > 0
@@ -207,22 +210,42 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
         const item = ensure(model);
         const actual = review.actual_action ?? entry.gt_action;
         const expected = review.expected_action ?? review.top1?.action ?? null;
-        if (actual && expected) {
+        const isImplicitPass = entry.gt_action == null && actual?.type === 'none';
+        if (actual && expected && !isImplicitPass) {
           item.total += 1;
           if (sameReplayAction(expected, actual)) item.match += 1;
         }
 
-        if (!actual) continue;
+        if (!actual || isImplicitPass) continue;
         const qValues: number[] = [];
-        let actualQ = finite(review.actual_q);
+        let actualQ = finiteNumber(review.actual_q);
+        let actualProb = finiteNumber(review.actual_prob);
+        let expectedProb = finiteNumber(review.expected_prob ?? review.top1?.prob ?? review.best_prob);
         for (const candidate of entry.candidates ?? []) {
           const teachers = candidate.teachers ?? (candidate.teacher ? [candidate.teacher] : []);
           const teacher = teachers.find((value) => value.model === model);
-          const q = finite(teacher?.q_value);
-          if (q === null) continue;
-          qValues.push(q);
-          if (actualQ === null && sameReplayAction(candidate.action, actual)) {
-            actualQ = q;
+          const q = finiteNumber(teacher?.q_value);
+          const prob = finiteNumber(teacher?.prob);
+          if (q !== null) {
+            qValues.push(q);
+            if (actualQ === null && sameReplayAction(candidate.action, actual)) {
+              actualQ = q;
+            }
+          }
+          if (prob !== null) {
+            if (actualProb === null && sameReplayAction(candidate.action, actual)) {
+              actualProb = prob;
+            }
+            if (expected && expectedProb === null && sameReplayAction(candidate.action, expected)) {
+              expectedProb = prob;
+            }
+          }
+        }
+        if (expected && actualProb !== null && expectedProb !== null) {
+          const penalty = sameReplayAction(expected, actual) ? 0 : Math.abs(actualProb - expectedProb);
+          item.similarityScores.push(Math.max(0, Math.min(1, 1 - penalty)));
+          if (!sameReplayAction(expected, actual) && actualProb < 0.05) {
+            item.badMove += 1;
           }
         }
         if (actualQ === null || qValues.length < 2) continue;
@@ -235,17 +258,23 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
       }
     }
 
+    const modelOrder: Record<string, number> = { v4: 0, '70k.pth': 1, 'T1@71000': 2, 'gui_mortal.pth': 3 };
     return Array.from(stats.values()).map((item) => {
       const pct = item.total ? item.match / item.total * 100 : 0;
       const rating = item.ratingScores.length
         ? Math.round(1000 * 100 * Math.pow(item.ratingScores.reduce((sum, value) => sum + value, 0) / item.ratingScores.length, 2)) / 1000
         : null;
+      const similarity = item.similarityScores.length
+        ? item.similarityScores.reduce((sum, value) => sum + value, 0) / item.similarityScores.length * 100
+        : null;
       return {
         ...item,
         pct,
         rating: rating === null ? null : Math.round(rating * 10) / 10,
+        similarity: similarity === null ? null : Math.round(similarity * 10) / 10,
+        badMoveRate: item.total ? item.badMove / item.total * 100 : 0,
       };
-    });
+    }).sort((left, right) => (modelOrder[left.model] ?? 100) - (modelOrder[right.model] ?? 100));
   })();
 
   const hasTeacherStats = teacherStats.length > 0;
@@ -282,10 +311,12 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
             <thead>
               <tr style={{ color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' }}>
                 <th style={statsThStyle}>模型</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>类似度</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>一致率</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>恶手率</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>Rating</th>
                 <th style={{ ...statsThStyle, textAlign: 'right' }}>Match</th>
                 <th style={{ ...statsThStyle, textAlign: 'right' }}>Total</th>
-                <th style={{ ...statsThStyle, textAlign: 'right' }}>一致率</th>
-                <th style={{ ...statsThStyle, textAlign: 'right' }}>Rating</th>
               </tr>
             </thead>
             <tbody>
@@ -294,19 +325,29 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
                 total: fallbackTotal,
                 match: fallbackMatch,
                 pct: fallbackPct,
+                similarity: null,
                 rating: data.rating,
+                badMove: 0,
+                badMoveRate: null,
                 ratingScores: [],
+                similarityScores: [],
               }]).map((item) => {
                 const pct = item.total ? item.match / item.total * 100 : 0;
                 return (
                   <tr key={item.model} style={{ borderBottom: '1px solid var(--border)' }}>
                     <td style={statsTdStyle} title={item.model}>{item.model}</td>
-                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>{item.match}</td>
-                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>{item.total}</td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>
+                      {item.similarity === null || item.similarity === undefined ? '—' : `${item.similarity.toFixed(1)}%`}
+                    </td>
                     <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>{pct.toFixed(1)}%</td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>
+                      {item.badMoveRate === null || item.badMoveRate === undefined ? '—' : `${item.badMoveRate.toFixed(1)}%`}
+                    </td>
                     <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>
                       {item.rating === null || item.rating === undefined ? '—' : item.rating.toFixed(1)}
                     </td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>{item.match}</td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>{item.total}</td>
                   </tr>
                 );
               })}

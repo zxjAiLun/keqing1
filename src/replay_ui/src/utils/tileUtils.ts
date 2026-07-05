@@ -270,14 +270,19 @@ export function isReplayReviewDiffForPlayer(
     ? teacherReviews.find((item) => item.model === activeTeacherModel) ?? teacherReviews[0]
     : teacherReviews[0];
   if (!review) return false;
+  const actualAction = review.actual_action
+    ?? (entry.gt_action == null && entry.chosen?.type === 'none' ? entry.chosen : null);
+  const expectedAction = review.expected_action ?? review.top1?.action ?? null;
+  if (actualAction && expectedAction && sameReplayAction(actualAction, expectedAction)) {
+    return false;
+  }
   if (review.is_equal === false) return true;
   if (typeof review.q_loss === 'number' && Number.isFinite(review.q_loss) && review.q_loss > 1e-9) {
     return true;
   }
 
-  const expected = review.expected_action ?? review.top1?.action ?? null;
-  if (review.actual_action && expected) {
-    return !sameReplayAction(review.actual_action, expected);
+  if (actualAction && expectedAction) {
+    return !sameReplayAction(actualAction, expectedAction);
   }
   return false;
 }

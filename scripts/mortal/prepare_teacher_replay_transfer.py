@@ -27,6 +27,7 @@ def parse_args():
     p.add_argument("--output-root", type=Path, default=Path("artifacts/experiments/teacher_transfer_2026_05"))
     p.add_argument("--experiment-id", default="T1_teacher_ce_01")
     p.add_argument("--anchor-checkpoint", type=Path, default=DEFAULT_ANCHOR_70K)
+    p.add_argument("--parent-steps", type=int, default=None, help="Override parent checkpoint steps, useful for weights-only checkpoints")
     p.add_argument("--train-steps", type=int, default=1000)
     p.add_argument("--teacher-ce-weight", type=float, default=0.1)
     p.add_argument("--copy-parent-checkpoint", action="store_true")
@@ -67,7 +68,7 @@ def prepare_t1_config(
 def main():
     args = parse_args()
     base = load_toml(args.base_config)
-    parent_steps = read_checkpoint_steps(args.anchor_checkpoint)
+    parent_steps = int(args.parent_steps) if args.parent_steps is not None else read_checkpoint_steps(args.anchor_checkpoint)
     exp_dir = args.output_root / args.experiment_id
     config_path = exp_dir / "config.toml"
 

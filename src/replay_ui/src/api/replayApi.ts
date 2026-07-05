@@ -4,6 +4,7 @@ import type {
   BehaviorCasebookResponse,
   ReplayData,
   ReplayMeta,
+  ReviewHistoryItem,
   SelfplayAnomalyReplayGroup,
 } from '../types/replay';
 import type { BotType } from '../types/bot';
@@ -66,6 +67,9 @@ export const replayApi = {
   /** 列出所有已保存的回放 */
   list: (): Promise<ReplayMeta[]> =>
     api<ReplayMeta[]>('/replay/list'),
+
+  listReviewHistory: (): Promise<ReviewHistoryItem[]> =>
+    api<ReviewHistoryItem[]>('/replay/review-history'),
 
   /** 获取回放完整数据 */
   get: (

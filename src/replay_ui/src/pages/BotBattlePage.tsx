@@ -14,6 +14,7 @@ export function BotBattlePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [botModel, setBotModel] = useState<BotType>(DEFAULT_BOT_TYPE);
+  const [gameLength, setGameLength] = useState<"tonpu" | "hanchan">("hanchan");
   const pollingRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
 
@@ -24,7 +25,7 @@ export function BotBattlePage() {
       const res = await fetchWithTimeout("/api/battle/start_4bot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bot_model: botModel }),
+        body: JSON.stringify({ bot_model: botModel, game_length: gameLength }),
       });
       if (!res.ok) throw new Error("启动失败");
       const data = await res.json();
@@ -108,6 +109,32 @@ export function BotBattlePage() {
         <div className="card" style={{ padding: 12 }}>
           <SectionTitle title="设置" description="选择同一组模型运行四家自动对战。" />
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+            <label style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}>
+              规则长度
+            </label>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 10 }}>
+              {([
+                ["tonpu", "东风"],
+                ["hanchan", "半庄"],
+              ] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  onClick={() => setGameLength(value)}
+                  style={{
+                    height: 32,
+                    borderRadius: 6,
+                    fontSize: 13,
+                    fontWeight: 700,
+                    border: `1px solid ${gameLength === value ? "#8e44ad" : "var(--border)"}`,
+                    background: gameLength === value ? "rgba(142,68,173,0.08)" : "var(--surface-subtle)",
+                    color: gameLength === value ? "#8e44ad" : "var(--text-primary)",
+                    cursor: "pointer",
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <label style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 500 }}>
               Bot 类型
             </label>

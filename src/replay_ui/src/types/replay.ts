@@ -99,6 +99,8 @@ export interface TeacherReviewEntry {
   is_equal?: boolean | null;
   actual_q?: number | null;
   expected_q?: number | null;
+  actual_prob?: number | null;
+  expected_prob?: number | null;
   best_q?: number | null;
   best_prob?: number | null;
   q_loss?: number | null;
@@ -184,6 +186,18 @@ export interface ReplayMeta {
   total_steps: number;
   player_names: string[];
   final_scores: number[];
+}
+
+export interface ReviewHistoryItem {
+  replay_id: string;
+  created_at: string;
+  player_id: number;
+  player_name: string;
+  player_names: string[];
+  kyoku_count: number;
+  total_steps: number;
+  models: string[];
+  teacher_report_paths: string[];
 }
 
 export interface ReplaySubmitRequest {

@@ -42,12 +42,10 @@ export function Tile({ tile, size = "normal", selected, highlighted, onClick, cl
         <img
           src={`/tiles/${tileSvgName}.svg`}
           alt={tile}
-          title={tile}
           style={{ width: dim.w - 4, height: dim.h - 4, display: "block" }}
         />
       ) : (
         <div
-          title={tile}
           style={{
             width: dim.w - 4,
             height: dim.h - 4,

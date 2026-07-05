@@ -148,3 +148,8 @@ processed_*/
 node_modules/
 scripts/mortal/reviewer_browser_auto.mjs
 start_reviewer_browser_auto_game00000.cmd
+
+# Launcher build artifacts
+build/
+*.spec
+.workbench-launcher.pid

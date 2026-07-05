@@ -494,3 +494,119 @@ Artifacts:
 - High-confidence disagreement list: `artifacts/experiments/reviewer_teacher_probe_2026_05/R1_browser_batch_parse/top_disagreements.jsonl`
 
 Read: browser-assisted submission/archive works. The first expanded `4.1b` report has a similar disagreement profile to the initial `4.1b` smoke: most high-confidence corrections are discard choices, with one call-family correction. This supports using `4.1b` first as a reviewer overlay and curated correction set, not as a broad raw-Q target.
+
+## T2a Risk-Gated Teacher CE
+
+T2a tested a selective teacher CE route from `T1@71000`: keep the normal teacher CE weight at `0.05`, but set teacher CE weight to `0.0` on broad high-risk discard samples. The gate covered self-after-fuuro discards, opponent-riichi discards, after-fuuro-vs-riichi discards, dealer or big-lead states, and start-rank-1 states. DQN, CQL, GRP reward, and next-rank targets were unchanged.
+
+Artifacts:
+
+- Experiment: `artifacts/experiments/teacher_transfer_2026_05/T2a_risk_gated_teacher_ce_005/`
+- Preflight: `preflight/risk_weight_alignment.json`
+- Checkpoints: `checkpoints/mortal_t2a_71400.pth`, `checkpoints/mortal_t2a_71800.pth`
+- Primary eval: `four_player_native_1000h/`
+- Decision report: `T2a_decision_report.md`
+
+Preflight passed over the full teacher replay pool: `10000` files, `1581313` samples, `1214264` matched raw explicit decisions, `mismatch_count=0`. CE active rate was `56.22%`, disabled rate was `43.78%`, and disabled discard rate was `60.37%`; this is inside the planned active-rate bounds.
+
+Native random-seat 1000h result with `70k / 80k_game / T1_71000 / T2a_71800`:
+
+| Model | Rank counts `[1,2,3,4]` | Avg rank | Avg pt |
+| --- | ---: | ---: | ---: |
+| `70k` | `[256,220,258,266]` | 2.534 | -2.97 |
+| `80k_game` | `[264,223,256,257]` | 2.506 | -0.90 |
+| `T1_71000` | `[240,282,246,232]` | 2.470 | +2.97 |
+| `T2a_71800` | `[240,275,240,245]` | 2.490 | +0.90 |
+
+Behavior readout:
+
+| Metric | `T1_71000` | `T2a_71800` |
+| --- | ---: | ---: |
+| Agari | 21.85% | 21.36% |
+| Houjuu | 13.68% | 12.48% |
+| Fuuro | 26.80% | 25.82% |
+| Riichi | 20.38% | 16.87% |
+| After-fuuro agari | 34.32% | 35.80% |
+| After-fuuro houjuu | 13.93% | 13.61% |
+| After-riichi agari | 48.13% | 48.47% |
+| After-riichi houjuu | 16.35% | 15.12% |
+
+Read: T2a lowered houjuu and improved some after-fuuro/after-riichi outcomes, but lost enough agari and riichi pressure that it finished `2.07` avg pt behind T1. This fails the planned continuation rule (`T2a` worse than T1 by more than `1.0` avg pt). Do not promote T2a over T1 and do not expand this exact binary risk gate.
+
+Next T-series design should not use broad CE-off gating. If continuing the idea, use softer/narrower weighting, such as nonzero CE on `vs_riichi` and late discard samples, and validate on a smaller staged smoke before another full 1000h native run.
+
+## T2b Soft Risk-Gated Teacher CE
+
+T2b tested the softer version of T2a: keep normal teacher CE at `0.05`, but use `0.02` instead of `0.0` on the same high-risk discard samples. The goal was to preserve T1's pressure while retaining T2a's lower-houjuu signal.
+
+Artifacts:
+
+- Experiment: `artifacts/experiments/teacher_transfer_2026_05/T2b_soft_risk_teacher_ce_005_002/`
+- Preflight: `preflight/risk_weight_alignment.json`
+- Checkpoint: `checkpoints/mortal_t2b_71400.pth`
+- Stage-1 eval: `four_player_native_250h_71400/`
+- Decision report: `T2b_decision_report.md`
+
+Preflight passed over the full teacher replay pool: `10000` files, `1581313` samples, `1214264` matched raw explicit decisions, `mismatch_count=0`. CE weight mean was `0.03687`, gated sample rate was `43.78%`, and gated discard rate was `60.37%`.
+
+Native random-seat 250h result with `70k / 80k_game / T1_71000 / T2b_71400`:
+
+| Model | Rank counts `[1,2,3,4]` | Avg rank | Avg pt |
+| --- | ---: | ---: | ---: |
+| `70k` | `[66,61,58,65]` | 2.488 | -0.36 |
+| `80k_game` | `[60,68,59,63]` | 2.500 | -0.18 |
+| `T1_71000` | `[65,58,66,61]` | 2.492 | +0.90 |
+| `T2b_71400` | `[59,63,67,61]` | 2.520 | -0.36 |
+
+Behavior readout:
+
+| Metric | `T1_71000` | `T2b_71400` |
+| --- | ---: | ---: |
+| Agari | 21.97% | 21.27% |
+| Houjuu | 13.82% | 11.60% |
+| Fuuro | 26.23% | 24.42% |
+| Riichi | 21.04% | 17.82% |
+| After-fuuro agari | 35.59% | 37.33% |
+| After-fuuro houjuu | 14.69% | 12.75% |
+| After-riichi agari | 48.94% | 47.61% |
+| After-riichi houjuu | 15.14% | 16.22% |
+
+Read: T2b preserved the intended lower-houjuu signal, but still lost enough riichi/agari pressure to fail the stage-1 continuation gate. T2b was `1.26` avg pt behind T1 in the 250h screen, and riichi rate fell by `3.22pp`. Do not train `T2b@71800`.
+
+This stops the broad T-series risk-gated CE family for now. The next planning cycle should pivot to reviewer/NAGA/4.1b high-confidence small-sample diagnosis focused on late/vs-riichi and after-riichi contexts, without treating the reviewer as a hard oracle.
+
+## R2 Outcome-Anchored Reviewer Casebook
+
+R2 is a diagnostic-only casebook generated from existing T2a/T2b native logs. It does not start T3 training and does not convert NAGA/4.1b into hard labels. The goal is to determine whether the repeated T2 failure mode is concentrated in late/vs-riichi and after-riichi decisions, or whether the apparent disagreements are mostly style/outcome noise.
+
+Artifacts:
+
+- Experiment: `artifacts/experiments/reviewer_teacher_probe_2026_05/R2_late_vs_riichi_casebook_2026_06/`
+- Generator: `scripts/mortal/build_r2_outcome_anchored_casebook.py`
+- Casebook: `review_cases.html`
+- Manifest: `case_manifest.jsonl`, `case_manifest.json`
+- NAGA manual input: `naga_kyoku_blocks.txt`, `naga_kyoku_urls.txt`, `naga_kyoku_tenhou6_cases.zip`
+- Full hanchan Tenhou6 archive: `hanchan_tenhou6_cases.zip`
+- External review import template: `external_reviews_pending/import_template.jsonl`
+
+Case selection:
+
+| Bucket | Count |
+| --- | ---: |
+| `late_vs_riichi_negative` | 20 |
+| `after_riichi_negative` | 20 |
+| `after_fuuro_positive` | 10 |
+| `neutral_control` | 10 |
+
+Each case records source log, kyoku index, target seat with wind label, target model, focus slice, outcome, local source-action q/prob from the arena log, and local replay reviews from `70k`, `80k_game`, `T1_71000`, and the target model (`T2a_71800` or `T2b_71400`). The generated replay URL opens the project-native `/game-replay` page at the focus decision, so Tenhou6/NAGA links are secondary reviewer-input artifacts rather than the main casebook UI.
+
+Validation:
+
+- `case_manifest.jsonl` rows: `60`
+- Bucket counts: `20 / 20 / 10 / 10`
+- `naga_kyoku_blocks.txt` separators: `60`
+- Cases with missing replay URL: `0`
+- Cases with four local model reviews: `60`
+- External reviewer status: pending for all `60`
+
+Decision status: no training decision yet. Import NAGA/4.1b reports and human annotations first. If high-confidence reviewer disagreements concentrate in late/vs-riichi and look locally reasonable, the next design can be a narrow T3 targeted correction. If disagreements are scattered or style-only, stop reviewer-training and return to pressure/readout analysis around T1.

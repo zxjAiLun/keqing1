@@ -24,6 +24,7 @@ from scripts.mortal.eval_metrics import (
     summarize_rank_counts_with_references,
     write_metrics,
 )
+from scripts.mortal.build_platform_account_report import build_report as build_platform_account_report
 from scripts.mortal.stat_report import write_stat_report
 
 
@@ -37,12 +38,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed-start", type=int, default=10000)
     parser.add_argument("--seed-key", type=int, default=0x2000)
     parser.add_argument("--seed-count", type=int, default=1, help="1 seed produces 4 hanchans")
+    parser.add_argument("--resume", action="store_true", help="resume from existing logs in output-dir/logs")
     parser.add_argument(
         "--progress-every",
         type=int,
         default=0,
         help="emit stderr progress every N seeds; 0 runs the native arena in one batch",
     )
+    parser.add_argument("--no-platform-report", action="store_true", help="skip platform account pt/rating report")
+    parser.add_argument("--platform-model-label", default=None, help="force platform account labels to MODEL@01-04")
     parser.add_argument("--enable-amp", action="store_true")
     parser.add_argument("--challenger-label", default="challenger (x1)")
     parser.add_argument("--champion-label", default="champion (x3)")
@@ -121,8 +125,30 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     progress_every = int(getattr(args, "progress_every", 0) or 0)
     batch_size = total_seeds if progress_every <= 0 else max(1, progress_every)
     rank_counts = [0, 0, 0, 0]
-    started_at = time.monotonic()
     completed = 0
+    if bool(getattr(args, "resume", False)) and log_dir.exists():
+        existing_stat_report = write_stat_report(
+            output_dir=args.output_dir,
+            log_dir=log_dir,
+            players={
+                str(getattr(args, "challenger_label", "challenger (x1)")): "challenger",
+                str(getattr(args, "champion_label", "champion (x3)")): "champion",
+            },
+            mortal_root=args.mortal_root,
+            rank_pts=rank_points,
+            rank_points_profile=rank_points_profile,
+        )
+        challenger_key = str(getattr(args, "challenger_label", "challenger (x1)"))
+        raw = existing_stat_report["players"][challenger_key]["raw"]
+        completed_games = int(raw["game"])
+        completed = min(completed_games // 4, total_seeds)
+        rank_counts = [int(raw[f"rank_{rank}"]) for rank in range(1, 5)]
+        if completed:
+            print(
+                f"resuming from {completed}/{total_seeds} seeds ({completed * 4}/{total_seeds * 4} games) in {log_dir}",
+                flush=True,
+            )
+    started_at = time.monotonic()
     while completed < total_seeds:
         count = min(batch_size, total_seeds - completed)
         batch_seed_start = int(args.seed_start) + completed
@@ -193,6 +219,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     document["artifacts"]["detailed_stats_json"] = str(args.output_dir / "detailed_stats.json")
     document["artifacts"]["detailed_stats_md"] = str(args.output_dir / "detailed_stats.md")
     document["detailed_stats_schema"] = stat_report["schema"]
+    if not bool(getattr(args, "no_platform_report", False)):
+        platform_output_dir = args.output_dir / "platform_accounts"
+        platform_report = build_platform_account_report(
+            log_dirs=[log_dir],
+            output_dir=platform_output_dir,
+            mortal_root=args.mortal_root,
+            platform_model_label=getattr(args, "platform_model_label", None),
+            rank_points=rank_points,
+        )
+        document["artifacts"]["platform_accounts_dir"] = str(platform_output_dir)
+        document["platform_accounts_schema"] = platform_report["schema"]
     write_metrics(args.output_dir / "metrics.json", document)
     print(json.dumps(document["metrics"], ensure_ascii=False, indent=2), flush=True)
     return document

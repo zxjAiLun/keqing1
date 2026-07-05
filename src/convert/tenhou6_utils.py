@@ -62,6 +62,18 @@ def _called_and_consumed(raw: str, marker: str) -> tuple[str, list[str]]:
     return _tile_from_tenhou6(called_code), [_tile_from_tenhou6(code) for code in consumed_codes]
 
 
+def _normalized_tile_face(tile: str) -> str:
+    return tile[:-1] if tile in {"5mr", "5pr", "5sr"} else tile
+
+
+def _take_meld_matches_discard(raw: str, discarded_pai: str) -> bool:
+    marker = "c" if "c" in raw else "p" if "p" in raw else "m" if "m" in raw else None
+    if marker is None:
+        return False
+    called_pai, _ = _called_and_consumed(raw, marker)
+    return _normalized_tile_face(called_pai) == _normalized_tile_face(discarded_pai)
+
+
 def _decode_discard(raw: int | str, last_draw: str | None) -> tuple[bool, str, bool]:
     reach = False
     value: int | str = raw
@@ -102,15 +114,23 @@ def _result_events(result: list[Any]) -> list[dict[str, Any]]:
     if not result:
         return []
     kind = result[0]
-    deltas = [int(delta) for delta in (result[1] if len(result) > 1 and isinstance(result[1], list) else [0, 0, 0, 0])]
     if kind == "流局":
+        deltas = [int(delta) for delta in (result[1] if len(result) > 1 and isinstance(result[1], list) else [0, 0, 0, 0])]
         return [{"type": "ryukyoku", "reason": "ryukyoku", "deltas": deltas}]
     if kind != "和了":
         return []
+
+    # Tenhou6 stores each winner as a (score deltas, detail) pair.  Double ron
+    # therefore looks like ["和了", deltas1, detail1, deltas2, detail2].
     events: list[dict[str, Any]] = []
-    for detail in result[2:]:
+    for index in range(1, len(result) - 1, 2):
+        raw_deltas = result[index]
+        detail = result[index + 1]
+        if not isinstance(raw_deltas, list) or len(raw_deltas) != 4:
+            continue
         if not isinstance(detail, list) or len(detail) < 2:
             continue
+        deltas = [int(delta) for delta in raw_deltas]
         actor = int(detail[0])
         target = int(detail[1])
         events.append(
@@ -138,11 +158,20 @@ def _convert_kyoku_to_events(kyoku: list[Any], names: list[str], rule: dict[str,
     def has_pending() -> bool:
         return any(take_idx[seat] < len(takes[seat]) or discard_idx[seat] < len(discards[seat]) for seat in range(4))
 
-    def next_call_after(discarder: int) -> int | None:
+    def next_call_after(discarder: int, discarded_pai: str) -> int | None:
         for offset in (1, 2, 3):
             candidate = (discarder + offset) % 4
-            if take_idx[candidate] < len(takes[candidate]) and isinstance(takes[candidate][take_idx[candidate]], str):
-                return candidate
+            if take_idx[candidate] >= len(takes[candidate]):
+                continue
+            next_take = takes[candidate][take_idx[candidate]]
+            if not isinstance(next_take, str) or not _take_meld_matches_discard(next_take, discarded_pai):
+                continue
+            # Chi is only legal from the immediately preceding player's discard.
+            # Without this guard, a future chi can be attached to an earlier
+            # same-faced discard from the opposite player.
+            if "c" in next_take and offset != 1:
+                continue
+            return candidate
         return None
 
     guard = 0
@@ -207,7 +236,7 @@ def _convert_kyoku_to_events(kyoku: list[Any], names: list[str], rule: dict[str,
             discard_idx[actor] += 1
             progressed = True
 
-            caller = next_call_after(actor)
+            caller = next_call_after(actor, pai)
             actor = caller if caller is not None else (actor + 1) % 4
             continue
 

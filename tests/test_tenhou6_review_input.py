@@ -1,3 +1,4 @@
+from convert.tenhou6_utils import _result_events, _take_meld_matches_discard, tenhou6_to_mjai_events
 from replay.bot import _load_events_from_source
 
 
@@ -56,3 +57,78 @@ def test_tenhou6_review_input_converts_to_mjai_events() -> None:
     }
     assert any(event["type"] == "hora" for event in events)
     assert events[-1] == {"type": "end_game"}
+
+
+def test_tenhou6_double_ron_uses_each_result_pair() -> None:
+    result = [
+        "和了",
+        [0, -8300, 9300, 0],
+        [2, 1, 2, "30符4飜7700点", "断幺九(1飜)", "ドラ(2飜)"],
+        [8600, -8600, 0, 0],
+        [0, 1, 0, "満貫8000点", "立直(1飜)", "赤ドラ(1飜)"],
+    ]
+
+    assert _result_events(result) == [
+        {
+            "type": "hora",
+            "actor": 2,
+            "target": 1,
+            "deltas": [0, -8300, 9300, 0],
+        },
+        {
+            "type": "hora",
+            "actor": 0,
+            "target": 1,
+            "deltas": [8600, -8600, 0, 0],
+        },
+    ]
+
+
+def test_tenhou6_meld_must_match_current_discard() -> None:
+    assert _take_meld_matches_discard("p414141", "E") is True
+    assert _take_meld_matches_discard("p414141", "2m") is False
+    assert _take_meld_matches_discard("c353334", "5s") is True
+
+
+def test_tenhou6_chi_waits_for_kamicha_same_tile_discard() -> None:
+    hand = [11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24]
+    kyoku = [
+        [0, 0, 0],
+        [25000, 25000, 25000, 25000],
+        [11],
+        [],
+        hand,
+        [28, 37],
+        [41, 60],
+        hand,
+        ["p414141", "c373638"],
+        [43, 42],
+        hand,
+        [11],
+        [19],
+        hand,
+        [32],
+        [37],
+        ["流局", [0, 0, 0, 0]],
+    ]
+
+    events = tenhou6_to_mjai_events({
+        "name": ["P0", "P1", "P2", "P3"],
+        "rule": {},
+        "log": [kyoku],
+    })
+
+    chi_index = next(index for index, event in enumerate(events) if event["type"] == "chi")
+    assert events[chi_index] == {
+        "type": "chi",
+        "actor": 1,
+        "target": 0,
+        "pai": "7s",
+        "consumed": ["6s", "8s"],
+    }
+    assert events[chi_index - 1] == {
+        "type": "dahai",
+        "actor": 0,
+        "pai": "7s",
+        "tsumogiri": True,
+    }

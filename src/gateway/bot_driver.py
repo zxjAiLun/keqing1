@@ -30,7 +30,7 @@ class BotDriver:
     async def take_turn(self, room: BattleRoom, actor: int) -> Optional[Dict]:
         """驱动单个 bot 完成一回合（供前端 /advance 端点调用）。"""
         self.manager.prepare_turn(room, actor)
-        if room.phase == "ended":
+        if room.phase != "playing":
             return None
 
         snap, event, trigger_event_index = self._build_snap_and_event(room, actor)
@@ -105,13 +105,13 @@ class BotDriver:
 
                 await asyncio.sleep(0.1)
 
-            if room.phase != "ended":
+            if room.phase != "hand_result":
                 break
             if self.manager.is_game_ended(room):
-                room.events.append({"type": "end_game"})
+                self.manager.finalize_game(room)
                 break
             if not self.manager.next_kyoku(room):
-                room.events.append({"type": "end_game"})
+                self.manager.finalize_game(room)
                 break
 
             self.manager.start_kyoku(room, seed=None)
@@ -148,13 +148,13 @@ class BotDriver:
 
                 await asyncio.sleep(0.1)
 
-            if room.phase != "ended":
+            if room.phase != "hand_result":
                 break
             if self.manager.is_game_ended(room):
-                room.events.append({"type": "end_game"})
+                self.manager.finalize_game(room)
                 break
             if not self.manager.next_kyoku(room):
-                room.events.append({"type": "end_game"})
+                self.manager.finalize_game(room)
                 break
 
             self.manager.start_kyoku(room, seed=None)

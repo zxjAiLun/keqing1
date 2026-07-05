@@ -112,3 +112,119 @@ def test_is_game_ended_allows_agari_yame_for_dealer_top():
     room.state.scores = [24000, 25000, 18000, 33000]
 
     assert manager.is_game_ended(room) is True
+
+
+def test_tonpu_east_four_target_score_ends_game():
+    manager, room = _make_room()
+    room.config.game_length = "tonpu"
+    room.config.allow_west_round = False
+    room.state.bakaze = "E"
+    room.state.kyoku = 4
+    room.state.oya = 0
+    room.state.scores = [30100, 26000, 23000, 20900]
+
+    assert manager.is_game_ended(room) is True
+
+
+def test_tonpu_east_four_without_target_enters_south_round():
+    manager, room = _make_room()
+    room.config.game_length = "tonpu"
+    room.config.allow_west_round = False
+    room.state.bakaze = "E"
+    room.state.kyoku = 4
+    room.state.oya = 0
+    room.state.scores = [29500, 28000, 22000, 20500]
+
+    assert manager.is_game_ended(room) is False
+    assert manager.next_kyoku(room) is True
+    assert room.state.bakaze == "S"
+    assert room.state.kyoku == 1
+
+
+def test_hanchan_south_four_without_target_enters_west_round():
+    manager, room = _make_room()
+    room.config.game_length = "hanchan"
+    room.config.allow_west_round = True
+    room.state.bakaze = "S"
+    room.state.kyoku = 4
+    room.state.oya = 0
+    room.state.scores = [29500, 28000, 22000, 20500]
+
+    assert manager.is_game_ended(room) is False
+    assert manager.next_kyoku(room) is True
+    assert room.state.bakaze == "W"
+    assert room.state.kyoku == 1
+
+
+def test_round_terminal_enters_hand_result_not_game_end(monkeypatch):
+    manager, room = _make_room()
+    room.state.bakaze = "E"
+    room.state.kyoku = 1
+    room.state.oya = 0
+
+    def fake_score_hora(*args, **kwargs):
+        return HoraResult(
+            han=2,
+            fu=30,
+            yaku=["Tanyao"],
+            yaku_details=[{"key": "Tanyao", "name": "Tanyao", "han": 1}],
+            is_open_hand=False,
+            cost={"main": 2000, "total": 2000},
+            deltas=[-2000, 2000, 0, 0],
+        )
+
+    monkeypatch.setattr("gateway.battle.score_hora", fake_score_hora)
+
+    manager.hora(room, actor=1, target=0, pai="3m", is_tsumo=False)
+
+    assert room.phase == "hand_result"
+    assert room.round_result["type"] == "hora"
+    assert room.game_result is None
+    assert manager.can_continue(room) is True
+
+
+def test_next_kyoku_after_hand_result_starts_new_hand(monkeypatch):
+    manager, room = _make_room()
+    room.state.bakaze = "E"
+    room.state.kyoku = 1
+    room.state.oya = 0
+
+    def fake_score_hora(*args, **kwargs):
+        return HoraResult(
+            han=2,
+            fu=30,
+            yaku=["Tanyao"],
+            yaku_details=[{"key": "Tanyao", "name": "Tanyao", "han": 1}],
+            is_open_hand=False,
+            cost={"main": 2000, "total": 2000},
+            deltas=[-2000, 2000, 0, 0],
+        )
+
+    monkeypatch.setattr("gateway.battle.score_hora", fake_score_hora)
+    manager.start_kyoku(room, seed=11)
+    manager.hora(room, actor=1, target=0, pai="3m", is_tsumo=False)
+
+    assert room.phase == "hand_result"
+    assert manager.next_kyoku(room) is True
+    manager.start_kyoku(room, seed=12)
+
+    assert room.phase == "playing"
+    assert room.round_result is None
+    assert room.state.bakaze == "E"
+    assert room.state.kyoku == 2
+    assert room.state.scores == [23000, 27000, 25000, 25000]
+
+
+def test_finalize_game_sets_final_result_once():
+    manager, room = _make_room()
+    room.phase = "hand_result"
+    room.events.append({"type": "end_kyoku"})
+    room.state.scores = [32000, 28000, 21000, 19000]
+
+    first = manager.finalize_game(room)
+    second = manager.finalize_game(room)
+
+    assert room.phase == "ended"
+    assert first["final_scores"] == [32000, 28000, 21000, 19000]
+    assert second["final_scores"] == first["final_scores"]
+    assert [event["type"] for event in room.events].count("end_game") == 1

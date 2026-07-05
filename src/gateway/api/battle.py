@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import sys
 import gc
 from typing import Any, Dict, List, Optional
@@ -117,6 +118,11 @@ def _prepare_player_state(room: BattleRoom, player_id: int) -> Dict[str, Any]:
     return manager.get_state_for_player(room, player_id=player_id)
 
 
+def _finish_hand_if_game_ended(room: BattleRoom) -> None:
+    if room.phase == "hand_result" and manager.is_game_ended(room):
+        manager.finalize_game(room)
+
+
 def _record_rating_if_finished(room: BattleRoom) -> list[dict] | None:
     if room.phase != "ended" or room.rating_recorded:
         return None
@@ -136,7 +142,17 @@ def _record_rating_if_finished(room: BattleRoom) -> list[dict] | None:
         initial_oya=0,
     )
     room.rating_recorded = True
+    manager.finalize_game(room, rating_updates=result)
     return result
+
+
+def _prepare_battle_state(room: BattleRoom, player_id: int) -> Dict[str, Any]:
+    state = _prepare_player_state(room, player_id)
+    _finish_hand_if_game_ended(room)
+    _record_rating_if_finished(room)
+    if room.phase != state.get("phase") or room.game_result:
+        state = manager.get_state_for_player(room, player_id=player_id)
+    return state
 
 
 class PlayerInfo(BaseModel):
@@ -188,37 +204,43 @@ async def start_battle(req: StartBattleRequest) -> StartBattleResponse:
     current_bot_model = req.bot_model
     _cleanup_all_bots()
 
-    players: List[PlayerInfo] = [
-        PlayerInfo(id="human", name=req.player_name, type="human"),
-    ]
+    human_seat = random.randrange(4)
+    players: List[PlayerInfo] = []
     bot_names = _build_bot_names(req.bot_model, req.bot_count)
-    for i in range(req.bot_count):
-        players.append(
-            PlayerInfo(
-                id=f"bot_{i}",
-                name=bot_names[i],
-                type="bot",
+    bot_index = 0
+    for seat in range(4):
+        if seat == human_seat:
+            players.append(PlayerInfo(id="human", name=req.player_name, type="human"))
+        else:
+            players.append(
+                PlayerInfo(
+                    id=f"bot_{bot_index}",
+                    name=bot_names[bot_index],
+                    type="bot",
+                )
             )
-        )
+            bot_index += 1
 
+    game_length = req.game_length if req.game_length in {"tonpu", "hanchan"} else "hanchan"
     config = BattleConfig(
         player_count=4,
         players=[p.model_dump() for p in players],
-        game_length=req.game_length if req.game_length in {"tonpu", "hanchan"} else "hanchan",
-        allow_west_round=req.game_length != "tonpu",
+        game_length=game_length,
+        allow_west_round=game_length != "tonpu",
     )
 
     room = manager.create_room(config, seed=req.seed)
-    room.human_player_id = 0
+    room.human_player_id = human_seat
 
     manager.start_kyoku(room, seed=req.seed)
     room.bot_event_cursor = {}
 
-    for bot_id in range(1, 4):
-        get_or_create_bot(bot_id).reset()
+    for bot_id in range(4):
+        if bot_id != human_seat:
+            get_or_create_bot(bot_id).reset()
     bot_driver.sync_all_bots(room)
 
-    state = _prepare_player_state(room, player_id=0)
+    state = _prepare_battle_state(room, player_id=human_seat)
     return StartBattleResponse(game_id=room.game_id, state=state)
 
 
@@ -246,11 +268,12 @@ async def start_4bot(req: Start4BotRequest) -> Dict[str, Any]:
         for i in range(4)
     ]
 
+    game_length = req.game_length if req.game_length in {"tonpu", "hanchan"} else "hanchan"
     config = BattleConfig(
         player_count=4,
         players=[p.model_dump() for p in players],
-        game_length=req.game_length if req.game_length in {"tonpu", "hanchan"} else "hanchan",
-        allow_west_round=req.game_length != "tonpu",
+        game_length=game_length,
+        allow_west_round=game_length != "tonpu",
     )
     room = manager.create_room(config, seed=req.seed)
     room.human_player_id = -1  # 表示无人类玩家
@@ -263,7 +286,7 @@ async def start_4bot(req: Start4BotRequest) -> Dict[str, Any]:
 
     asyncio.create_task(bot_driver.run_4bot_game(room.game_id, req.seed))
 
-    state = manager.get_state_for_player(room, player_id=0)
+    state = _prepare_battle_state(room, player_id=0)
     return {"game_id": room.game_id, "state": state}
 
 
@@ -273,7 +296,7 @@ async def get_state(game_id: str, player_id: int = 0) -> GetStateResponse:
     if not room:
         raise HTTPException(status_code=404, detail="Game not found")
 
-    state = _prepare_player_state(room, player_id=player_id)
+    state = _prepare_battle_state(room, player_id=player_id)
     return GetStateResponse(state=state)
 
 
@@ -335,7 +358,7 @@ async def reconnect(game_id: str, player_id: int = 0) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Game not found")
     room.last_heartbeat = time.time()
     room.disconnected = False
-    state = _prepare_player_state(room, player_id=player_id)
+    state = _prepare_battle_state(room, player_id=player_id)
     return {"reconnected": True, "state": state}
 
 
@@ -372,8 +395,8 @@ async def do_action(req: ActionRequest) -> ActionResponse:
         raise HTTPException(status_code=400, detail=error)
 
     human_player_id = room.human_player_id
-    rating_updates = _record_rating_if_finished(room)
-    state = _prepare_player_state(room, player_id=human_player_id if human_player_id >= 0 else 0)
+    state = _prepare_battle_state(room, player_id=human_player_id if human_player_id >= 0 else 0)
+    rating_updates = (state.get("game_result") or {}).get("rating_updates") or None
     return ActionResponse(success=True, state=state, bot_action=None, rating_updates=rating_updates)
 
 
@@ -388,7 +411,7 @@ async def advance_bot(game_id: str) -> ActionResponse:
     last_bot_action: Optional[Dict] = None
 
     async with _advance_lock:
-        if room.phase != "ended":
+        if room.phase == "playing":
             next_actor = room.state.actor_to_move
             if next_actor is not None and next_actor != human_player_id:
                 is_discard_response = bool(
@@ -412,7 +435,7 @@ async def advance_bot(game_id: str) -> ActionResponse:
 
                 if needs_draw_stage:
                     draw_tile = manager.prepare_turn(room, next_actor)
-                    if room.phase != "ended" and draw_tile is None and room.replay_draw_actor != next_actor:
+                    if room.phase == "playing" and draw_tile is None and room.replay_draw_actor != next_actor:
                         last_bot_action = await bot_driver.take_turn(room, next_actor)
                 elif (
                     room.replay_draw_actor == next_actor
@@ -422,9 +445,34 @@ async def advance_bot(game_id: str) -> ActionResponse:
                 ):
                     last_bot_action = await bot_driver.take_turn(room, next_actor)
 
-    rating_updates = _record_rating_if_finished(room)
-    state = _prepare_player_state(room, player_id=human_player_id if human_player_id >= 0 else 0)
+    state = _prepare_battle_state(room, player_id=human_player_id if human_player_id >= 0 else 0)
+    rating_updates = (state.get("game_result") or {}).get("rating_updates") or None
     return ActionResponse(success=True, state=state, bot_action=last_bot_action, rating_updates=rating_updates)
+
+
+@router.post("/next_kyoku/{game_id}", response_model=ActionResponse)
+async def next_kyoku(game_id: str) -> ActionResponse:
+    room = manager.get_room(game_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Game not found")
+    if room.phase != "hand_result":
+        raise HTTPException(status_code=400, detail="Current game is not waiting for next kyoku")
+    if manager.is_game_ended(room):
+        manager.finalize_game(room)
+        _record_rating_if_finished(room)
+        raise HTTPException(status_code=400, detail="Game has ended")
+    if not manager.next_kyoku(room):
+        manager.finalize_game(room)
+        _record_rating_if_finished(room)
+        raise HTTPException(status_code=400, detail="Game has ended")
+
+    manager.start_kyoku(room, seed=None)
+    room.bot_event_cursor = {}
+    bot_driver.sync_all_bots(room)
+
+    player_id = room.human_player_id if room.human_player_id >= 0 else 0
+    state = _prepare_battle_state(room, player_id=player_id)
+    return ActionResponse(success=True, state=state, bot_action=None, rating_updates=None)
 
 
 @router.get("/ratings")

@@ -12,6 +12,7 @@ interface ReplayDecisionPanelProps {
   currentPlayerId?: number;
   onSwitchPlayer?: (playerId: number) => void;
   localReviewerLabel?: string;
+  availableTeacherModels?: string[];
   activeTeacherModel?: string | null;
   onActiveTeacherModelChange?: (model: string | null) => void;
 }
@@ -133,6 +134,7 @@ export function ReplayDecisionPanel({
   playerNames = [],
   currentPlayerId,
   onSwitchPlayer,
+  availableTeacherModels = [],
   activeTeacherModel: controlledActiveTeacherModel,
   onActiveTeacherModelChange,
 }: ReplayDecisionPanelProps) {
@@ -144,7 +146,14 @@ export function ReplayDecisionPanel({
       : [],
     [entry],
   );
-  const teacherModelsKey = teacherReviews.map((review) => review.model).join('\n');
+  const teacherModels = useMemo(
+    () => Array.from(new Set([
+      ...availableTeacherModels,
+      ...teacherReviews.map((review) => review.model),
+    ].filter(Boolean))),
+    [availableTeacherModels, teacherReviews],
+  );
+  const teacherModelsKey = teacherModels.join('\n');
   const [activeTeacherModel, setActiveTeacherModel] = useState<string | null>(null);
   const selectedTeacherModel = controlledActiveTeacherModel !== undefined
     ? controlledActiveTeacherModel
@@ -155,18 +164,37 @@ export function ReplayDecisionPanel({
   };
 
   useEffect(() => {
-    if (teacherReviews.length === 0) {
-      if (selectedTeacherModel !== null) updateTeacherModel(null);
+    if (controlledActiveTeacherModel !== undefined) return;
+    if (teacherModels.length === 0) {
+      if (activeTeacherModel !== null) setActiveTeacherModel(null);
       return;
     }
-    if (!selectedTeacherModel || !teacherReviews.some((review) => review.model === selectedTeacherModel)) {
-      updateTeacherModel(teacherReviews[0].model);
+    if (!activeTeacherModel || !teacherModels.includes(activeTeacherModel)) {
+      setActiveTeacherModel(teacherModels[0]);
     }
-  }, [teacherModelsKey, selectedTeacherModel, teacherReviews]);
+  }, [teacherModelsKey, controlledActiveTeacherModel, activeTeacherModel, teacherModels]);
+
+  const teacherSelector = teacherModels.length > 0 ? (
+    <div style={sectionStyle}>
+      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+        {teacherModels.map((model) => (
+          <button
+            key={model}
+            type="button"
+            onClick={() => updateTeacherModel(model)}
+            style={teacherChipStyle(model === selectedTeacherModel)}
+          >
+            {model}
+          </button>
+        ))}
+      </div>
+    </div>
+  ) : null;
 
   if (!entry) {
     return (
       <div style={panelStyle(compact)}>
+        {teacherSelector}
         <div style={{ color: 'var(--text-muted)', fontSize: 12, padding: 16 }}>无数据</div>
       </div>
     );
@@ -175,18 +203,20 @@ export function ReplayDecisionPanel({
   // obs 步：其他家操作，无 bot 推理数据
   if (entry.is_obs) {
     return (
-      <div style={panelStyle(compact)} />
+      <div style={panelStyle(compact)}>
+        {teacherSelector}
+      </div>
     );
   }
 
   const { chosen, gt_action, candidates } = entry;
 
-  const activeTeacherReview = teacherReviews.find((review) => review.model === selectedTeacherModel) ?? teacherReviews[0];
+  const activeTeacherReview = teacherReviews.find((review) => review.model === selectedTeacherModel);
   const teacherExpected = teacherAction(activeTeacherReview);
 
   // 按当前 reviewer 的 q 值降序排序；仍强制展示 Bot、实际动作和 teacher 前排动作。
   const visibleCandidates = ensureVisibleCandidates(candidates, chosen, gt_action, teacherReviews, 12);
-  const sorted = sortCandidatesForReviewer(visibleCandidates, activeTeacherReview?.model);
+  const sorted = sortCandidatesForReviewer(visibleCandidates, selectedTeacherModel);
 
   const fallbackProbs = softmaxProbabilities(candidates.map((candidate) => displayScore(candidate)));
   const fallbackProbByCandidate = new Map<DecisionLogEntry['candidates'][number], number>(
@@ -201,26 +231,7 @@ export function ReplayDecisionPanel({
 
   return (
     <div style={panelStyle(compact)}>
-      {teacherReviews.length > 0 && (
-        <div style={sectionStyle}>
-          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-            {teacherReviews.map((review) => {
-              const active = review.model === activeTeacherReview?.model;
-              return (
-                <button
-                  key={`${review.model}-${review.report_path}`}
-                  type="button"
-                  onClick={() => updateTeacherModel(review.model)}
-                  style={teacherChipStyle(active)}
-                  title={review.report_path}
-                >
-                  {review.model}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {teacherSelector}
 
       {/* 权重表格 */}
       <div style={{ ...sectionStyle, flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
@@ -229,7 +240,7 @@ export function ReplayDecisionPanel({
             候选动作
           </span>
           <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-muted)', opacity: 0.8 }}>
-            {activeTeacherReview ? activeTeacherReview.model : '本地'} Q / P
+            {selectedTeacherModel ?? '本地'} Q / P
           </span>
         </div>
 
@@ -247,9 +258,9 @@ export function ReplayDecisionPanel({
             const isGt = sameReplayAction(c.action, gt_action);
             const isTeacher = teacherExpected ? sameReplayAction(c.action, teacherExpected) : false;
             const probability = probabilityOf(c);
-            const teacher = activeTeacherReview ? teacherValueFor(c, activeTeacherReview.model) : null;
-            const scoreLabel = activeTeacherReview ? displayOptionalScore(teacher?.q_value) : displayScoreLabel(c);
-            const probLabel = activeTeacherReview ? displayOptionalProb(teacher?.prob) : displayProbLabel(probability);
+            const teacher = selectedTeacherModel ? teacherValueFor(c, selectedTeacherModel) : null;
+            const scoreLabel = selectedTeacherModel ? displayOptionalScore(teacher?.q_value) : displayScoreLabel(c);
+            const probLabel = selectedTeacherModel ? displayOptionalProb(teacher?.prob) : displayProbLabel(probability);
 
             const barColor = isChosen && isGt ? '#8e44ad'
               : isChosen ? '#e74c3c'

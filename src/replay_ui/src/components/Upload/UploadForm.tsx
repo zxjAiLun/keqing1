@@ -10,10 +10,6 @@ interface UploadFormProps {
 
 type InputType = 'tenhou_url' | 'mjai_json' | 'tenhou6_json';
 
-const DEFAULT_TENHOU_URL = 'https://tenhou.net/3/?log=2021021820gm-00a9-0000-0b6677ca&tw=2';
-const DEFAULT_MJAI_JSON = '[{"type":"start_game","names":["遊走","武田舞彩","九紋龍史進","Nemo"],"kyoku_first":0,"aka_flag":true},{"type":"start_kyoku","bakaze":"E","dora_marker":"9p","kyoku":1,"honba":0,"kyotaku":0,"oya":0,"scores":[25000,25000,25000,25000],"tehais":[["1m","3m","6m","7m","1p","3p","6p","1s","1s","1s","2s","3s","5s"],["1m","3m","5m","6m","9p","2s","2s","2s","8s","9s","E","N","P"],["4m","5m","5pr","6p","8p","4s","6s","7s","7s","8s","9s","9s","S"],["2m","5mr","7m","8m","8m","2p","3p","8p","9p","8s","E","W","W"]]}]';
-const DEFAULT_TENHOU6_JSON = '{"dan":["雀豪★2","雀聖★2","雀豪★1","雀豪★1"],"lobby":0,"log":[[[5,1,0],[22700,29300,35000,13000],[25],[18],[14,46,27,11,16,13,41,25,13,21,52,26,37],[41,41],[21,46],[33,21,38,16,28,36,35,34,39,29,31,18,16],[35,37,27],[21,18,"r35"],[24,32,12,24,38,43,29,46,22,26,15,17,34],[42,28,26],[43,29,32],[11,25,38,22,26,11,22,44,28,47,33,44,21],[16,14],[38,47],["和了",[0,13300,-12300,0],[1,2,1,"満貫12000点","一気通貫(2飜)","立直(1飜)","一発(1飜)","裏ドラ(0飜)"]]]],"name":["Aさん","Bさん","Cさん","Dさん"],"rate":[269.0,3644.0,1206.0,2300.0],"ratingc":"PF4","rule":{"aka":0,"aka51":1,"aka52":1,"aka53":1,"disp":"玉の間南喰赤"},"sx":["C","C","C","C"]}';
-
 const TENHOU6_JSON_MARKER = '#json=';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -91,7 +87,6 @@ function TenhouUrlInput({ value, onChange }: { value: string; onChange: (v: stri
       <textarea
         value={value}
         onChange={e => onChange(e.target.value)}
-        placeholder="https://tenhou.net/3/?log=...&tw=2&#10;或每行一个 https://tenhou.net/6/#json={...}"
         style={{
           width: '100%',
           height: 74,
@@ -107,9 +102,6 @@ function TenhouUrlInput({ value, onChange }: { value: string; onChange: (v: stri
           boxSizing: 'border-box',
         }}
       />
-      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-        支持普通天凤 <code>log=</code> 链接，也支持每行一个 <code>tenhou.net/6/#json=...</code> 链接
-      </div>
     </div>
   );
 }
@@ -122,15 +114,11 @@ function JsonReplayInput({
   onTextChange,
   files,
   onFilesChange,
-  placeholder,
-  helpText,
 }: {
   text: string;
   onTextChange: (v: string) => void;
   files: File[];
   onFilesChange: (files: File[]) => void;
-  placeholder: string;
-  helpText: string;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -159,7 +147,7 @@ function JsonReplayInput({
           transition: 'border-color 0.2s, background 0.2s',
         }}
       >
-        📁 点击或拖拽一个 .json / .jsonl 文件
+        选择文件
         <input
           ref={fileInputRef}
           type="file"
@@ -188,7 +176,6 @@ function JsonReplayInput({
       <textarea
         value={text}
         onChange={e => onTextChange(e.target.value)}
-        placeholder={placeholder}
         style={{
           width: '100%',
           height: 110,
@@ -204,7 +191,6 @@ function JsonReplayInput({
           boxSizing: 'border-box',
         }}
       />
-      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>{helpText}</div>
     </div>
   );
 }
@@ -214,12 +200,12 @@ function JsonReplayInput({
 // ---------------------------------------------------------------------------
 export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
   const [inputType, setInputType] = useState<InputType>('tenhou_url');
-  const [tenhouUrl, setTenhouUrl] = useState(DEFAULT_TENHOU_URL);
-  const [mjaiText, setMjaiText]   = useState(DEFAULT_MJAI_JSON);
-  const [tenhou6Text, setTenhou6Text] = useState(DEFAULT_TENHOU6_JSON);
+  const [tenhouUrl, setTenhouUrl] = useState('');
+  const [mjaiText, setMjaiText]   = useState('');
+  const [tenhou6Text, setTenhou6Text] = useState('');
   const [files, setFiles]         = useState<File[]>([]);
   const [playerId, setPlayerId]   = useState<string>('auto');
-  const [selectedModels, setSelectedModels] = useState<BotType[]>(['70k', 't1_71000', 'weak_mortal']);
+  const [selectedModels, setSelectedModels] = useState<BotType[]>(['weak_mortal', '70k', 't1_71000']);
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState<string | null>(null);
   const [success, setSuccess]     = useState<string | null>(null);
@@ -369,8 +355,6 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
             onTextChange={setTenhou6Text}
             files={files}
             onFilesChange={setFiles}
-            placeholder='{"log":[...],"name":[...],"rule":{...}}'
-            helpText="支持粘贴或上传单个 tenhou6 JSON 文件；需手动选择视角"
           />
         )}
         {inputType === 'mjai_json' && (
@@ -379,8 +363,6 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
             onTextChange={setMjaiText}
             files={files}
             onFilesChange={setFiles}
-            placeholder='[{"type":"start_game",...}] ← 默认已填写示例 mjson'
-            helpText="支持粘贴或上传单个 mjai / JSON 文件；需手动选择视角"
           />
         )}
       </div>
@@ -412,7 +394,7 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
                   type="button"
                   onClick={() => toggleModel(bot.value)}
                   style={{
-                    minHeight: 52,
+                    minHeight: 36,
                     padding: '7px 9px',
                     borderRadius: 7,
                     border: `1px solid ${active ? '#8e44ad' : 'var(--border)'}`,
@@ -424,17 +406,11 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
                     <span style={{ fontSize: 12, fontWeight: 800 }}>{bot.shortLabel}</span>
-                    <span style={{ fontSize: 10, color: active ? '#8e44ad' : 'var(--text-muted)' }}>{active ? '已选' : bot.badge}</span>
-                  </div>
-                  <div style={{ marginTop: 2, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.35 }}>
-                    {bot.description}
+                    {active && <span style={{ fontSize: 10, color: '#8e44ad' }}>已选</span>}
                   </div>
                 </button>
               );
             })}
-          </div>
-          <div style={{ marginTop: 4, fontSize: 12, color: 'var(--text-muted)' }}>
-            运行后会分别生成 teacher report，并在牌桌候选表中以紫/灰模型权重条显示。
           </div>
         </div>
 
