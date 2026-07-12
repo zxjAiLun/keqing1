@@ -27,6 +27,9 @@ const TEACHER_MODEL_ORDER: Record<string, number> = {
   '70k.pth': 1,
   'T1@71000': 2,
   'gui_mortal.pth': 3,
+  'NAGA ニシキ': 4,
+  'NAGA カガシ': 5,
+  'Mortal 4.1c': 6,
 };
 
 function isForcedRiichiTsumogiriEntry(entry: ReplayData['log'][number] | null | undefined): boolean {
@@ -549,6 +552,21 @@ export function GameBoardReplayPage() {
                   </button>
                 </div>
 
+                {(data.external_review_links?.naga || data.external_review_links?.mortal) && (
+                  <div style={externalReviewLinksStyle}>
+                    {data.external_review_links.naga && (
+                      <a href={data.external_review_links.naga} target="_blank" rel="noreferrer" style={externalReviewLinkStyle}>
+                        NAGA
+                      </a>
+                    )}
+                    {data.external_review_links.mortal && (
+                      <a href={data.external_review_links.mortal} target="_blank" rel="noreferrer" style={externalReviewLinkStyle}>
+                        Mortal 4.1c
+                      </a>
+                    )}
+                  </div>
+                )}
+
                 <div style={replaySideMetaStyle}>
                   <span>{kyokuLabel || '回放'}</span>
                   <span>{currentStep + 1}/{totalSteps}{boardPhase === 'post' ? ' 后' : boardPhase === 'reach' ? ' 立直' : ' 前'}</span>
@@ -654,6 +672,26 @@ const replaySideHeaderStyle: CSSProperties = {
   display: 'grid',
   gridTemplateColumns: '1fr 1fr',
   gap: 6,
+};
+
+const externalReviewLinksStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 1fr',
+  gap: 6,
+};
+
+const externalReviewLinkStyle: CSSProperties = {
+  height: 28,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  border: '1px solid var(--border)',
+  borderRadius: 5,
+  color: 'var(--text-primary)',
+  background: 'var(--button-bg)',
+  textDecoration: 'none',
+  fontSize: 11,
+  fontWeight: 700,
 };
 
 const replaySideMetaStyle: CSSProperties = {

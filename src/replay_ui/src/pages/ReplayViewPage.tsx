@@ -258,7 +258,15 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
       }
     }
 
-    const modelOrder: Record<string, number> = { v4: 0, '70k.pth': 1, 'T1@71000': 2, 'gui_mortal.pth': 3 };
+    const modelOrder: Record<string, number> = {
+      v4: 0,
+      '70k.pth': 1,
+      'T1@71000': 2,
+      'gui_mortal.pth': 3,
+      'NAGA ニシキ': 4,
+      'NAGA カガシ': 5,
+      'Mortal 4.1c': 6,
+    };
     return Array.from(stats.values()).map((item) => {
       const pct = item.total ? item.match / item.total * 100 : 0;
       const rating = item.ratingScores.length

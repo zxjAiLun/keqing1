@@ -12,12 +12,15 @@ def test_review_history_groups_reports_by_replay_and_player(tmp_path) -> None:
         },
         bot_type="70k",
         player_names=["A", "B", "C", "D"],
+        external_review_links={"naga": "https://example.com/naga"},
     )
     report_dir = tmp_path / "gui_teacher_reports"
     report_dir.mkdir()
     (report_dir / f"{replay_id}__v4__p1.json").write_text("{}", encoding="utf-8")
     (report_dir / f"{replay_id}__70k.pth__p1.json").write_text("{}", encoding="utf-8")
     (report_dir / f"{replay_id}__T1_71000__p1.json").write_text("{}", encoding="utf-8")
+    (report_dir / f"{replay_id}__NAGA_ニシキ__p1.json").write_text("{}", encoding="utf-8")
+    (report_dir / f"{replay_id}__Mortal_4.1c__p1.json").write_text("{}", encoding="utf-8")
 
     history = _list_review_history(storage=storage, report_dir=report_dir, project_root=tmp_path)
 
@@ -25,8 +28,9 @@ def test_review_history_groups_reports_by_replay_and_player(tmp_path) -> None:
     assert history[0]["replay_id"] == replay_id
     assert history[0]["player_id"] == 1
     assert history[0]["player_name"] == "B"
-    assert history[0]["models"] == ["v4", "70k.pth", "T1@71000"]
-    assert len(history[0]["teacher_report_paths"]) == 3
+    assert history[0]["models"] == ["v4", "70k.pth", "T1@71000", "NAGA ニシキ", "Mortal 4.1c"]
+    assert history[0]["external_review_links"] == {"naga": "https://example.com/naga"}
+    assert len(history[0]["teacher_report_paths"]) == 5
 
 
 def test_runtime_teacher_report_treats_null_ground_truth_as_pass(tmp_path) -> None:

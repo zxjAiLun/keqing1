@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare V1 model_v4 synthetic warm-start training config."""
+"""Prepare V0a model_v4 synthetic scratch training config."""
 
 from __future__ import annotations
 
@@ -18,18 +18,11 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from scripts.mortal.prepare_reward_pt_experiments import dump_toml
-from scripts.mortal.prepare_reward_pt_experiments import read_checkpoint_steps
 
-DEFAULT_PARENT = Path("artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth")
 DEFAULT_OUTPUT_ROOT = Path("artifacts/experiments/v4_synthetic_2026_06")
 DEFAULT_DATA_ROOT = DEFAULT_OUTPUT_ROOT / "V1_data"
-EXPERIMENT_ID = "V1_v4_synthetic_warmstart_2026_06"
+EXPERIMENT_ID = "V0a_v4_synthetic_scratch_2026_06"
 TRAIN_LABELS = ("challenger", "champion", "v4")
-DATASET_GLOBS = (
-    "artifacts/experiments/v4_synthetic_2026_06/V1_data/selfplay_v4_12000h_1v3/logs/**/*_a.json.gz",
-    "artifacts/experiments/v4_synthetic_2026_06/V1_data/selfplay_v4_unique_9000h/logs/**/*.json.gz",
-)
-V4_CHECKPOINT = "artifacts/model_v4_20240308_best_min.pth"
 CHECKPOINT_70K = "artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth"
 CHECKPOINT_80K = "artifacts/mortal_training/checkpoints/mortal_default_80k_rejected_gate.pth"
 CHECKPOINT_T1 = "artifacts/experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth"
@@ -38,13 +31,12 @@ CHECKPOINT_T1 = "artifacts/experiments/teacher_transfer_2026_05/T1_teacher_ce_01
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-config", type=Path, default=Path("artifacts/mortal_training/config.toml"))
-    parser.add_argument("--parent-checkpoint", type=Path, default=DEFAULT_PARENT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
-    parser.add_argument("--parent-steps", type=int, default=None)
-    parser.add_argument("--stage1-steps", type=int, default=74000)
-    parser.add_argument("--final-steps", type=int, default=80000)
-    parser.add_argument("--copy-parent-checkpoint", action="store_true")
+    parser.add_argument("--smoke-steps", type=int, default=400)
+    parser.add_argument("--stage1-steps", type=int, default=2000)
+    parser.add_argument("--probe-steps", type=int, default=10000)
+    parser.add_argument("--reset-state", action="store_true", help="remove existing V0a state/file index before writing config")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -108,7 +100,7 @@ def prepare_config(base_config: Mapping[str, Any], *, exp_dir: Path, data_root: 
     return config
 
 
-def training_command(config_path: Path, target_steps: int) -> list[str]:
+def training_command(config_path: Path, target_steps: int, *, log_every: int = 50) -> list[str]:
     return [
         "uv",
         "run",
@@ -123,6 +115,8 @@ def training_command(config_path: Path, target_steps: int) -> list[str]:
         "cuda",
         "--num-workers",
         "0",
+        "--log-every",
+        str(int(log_every)),
     ]
 
 
@@ -155,124 +149,23 @@ def eval_command(*, checkpoint: Path, output_dir: Path, games: int, seed_start: 
         "--model",
         f"T1_71000={CHECKPOINT_T1}",
         "--model",
-        f"V1={checkpoint}",
+        f"V0a={checkpoint}",
         "--output-dir",
         str(output_dir),
     ]
 
 
-def generation_command(*, models: list[str], output_dir: Path, games: int, seed_start: int, resume: bool) -> list[str]:
-    command = [
-        "uv",
-        "run",
-        "--no-sync",
-        "python",
-        "scripts/mortal/four_player_native.py",
-        "--require-cuda",
-        "--device",
-        "cuda",
-        "--seat-mode",
-        "random",
-        "--seed-start",
-        str(int(seed_start)),
-        "--seed-key",
-        "8192",
-        "--games",
-        str(int(games)),
-        "--progress-every",
-        "25",
-        "--rank-points",
-        "90,45,0,-135",
-    ]
-    for model in models:
-        command.extend(["--model", model])
-    command.extend(["--output-dir", str(output_dir)])
-    if resume:
-        command.append("--resume")
-    return command
-
-
-def selfplay_generation_command(*, output_dir: Path, games: int, seed_start: int, resume: bool) -> list[str]:
-    command = [
-        "uv",
-        "run",
-        "--no-sync",
-        "python",
-        "scripts/mortal/selfplay_native.py",
-        "--model",
-        V4_CHECKPOINT,
-        "--model-label",
-        "v4",
-        "--require-cuda",
-        "--device",
-        "cuda",
-        "--seed-start",
-        str(int(seed_start)),
-        "--seed-key",
-        "8192",
-        "--games",
-        str(int(games)),
-        "--progress-every",
-        "25",
-        "--rank-points",
-        "90,45,0,-135",
-        "--output-dir",
-        str(output_dir),
-    ]
-    if resume:
-        command.append("--resume")
-    return command
-
-
-def data_generation_commands(data_root: Path) -> dict[str, Any]:
-    pools = {
-        "selfplay_v4_unique_9000h": {
-            "models": [
-                f"v4={V4_CHECKPOINT}",
-            ],
-            "output_dir": data_root / "selfplay_v4_unique_9000h",
-            "seed_start": 813000,
-            "smoke_games": 25,
-            "full_games": 9000,
-            "backend": "selfplay",
-        },
-    }
-    commands: dict[str, Any] = {}
-    for pool_id, spec in pools.items():
-        if spec["backend"] == "selfplay":
-            smoke_command = selfplay_generation_command(
-                output_dir=Path(spec["output_dir"]),
-                games=int(spec["smoke_games"]),
-                seed_start=int(spec["seed_start"]),
-                resume=False,
-            )
-            full_command = selfplay_generation_command(
-                output_dir=Path(spec["output_dir"]),
-                games=int(spec["full_games"]),
-                seed_start=int(spec["seed_start"]),
-                resume=True,
-            )
-        else:
-            smoke_command = generation_command(
-                models=list(spec["models"]),
-                output_dir=Path(spec["output_dir"]),
-                games=int(spec["smoke_games"]),
-                seed_start=int(spec["seed_start"]),
-                resume=False,
-            )
-            full_command = generation_command(
-                models=list(spec["models"]),
-                output_dir=Path(spec["output_dir"]),
-                games=int(spec["full_games"]),
-                seed_start=int(spec["seed_start"]),
-                resume=True,
-            )
-        commands[pool_id] = {
-            "backend": spec["backend"],
-            "smoke_command": smoke_command,
-            "full_resume_command": full_command,
-        }
-    return commands
+def maybe_reset(exp_dir: Path) -> None:
+    for path in [
+        exp_dir / "mortal.pth",
+        exp_dir / "mortal_best.pth",
+        exp_dir / "file_index.pth",
+    ]:
+        if path.exists():
+            path.unlink()
+    tb_dir = exp_dir / "tb_mortal"
+    if tb_dir.exists():
+        shutil.rmtree(tb_dir)
 
 
 def main() -> None:
@@ -280,17 +173,18 @@ def main() -> None:
     exp_dir = args.output_root / EXPERIMENT_ID
     config_path = exp_dir / "config.toml"
     checkpoints_dir = exp_dir / "checkpoints"
-    parent_steps = int(args.parent_steps) if args.parent_steps is not None else read_checkpoint_steps(args.parent_checkpoint)
     base_config = load_toml(args.base_config)
     config = prepare_config(base_config, exp_dir=exp_dir, data_root=args.data_root)
 
     manifest = {
-        "schema": "keqing.mortal.v1_v4_synthetic_warmstart_config.v2",
+        "schema": "keqing.mortal.v0a_v4_synthetic_scratch_config.v1",
         "experiment_id": EXPERIMENT_ID,
-        "parent_checkpoint": str(args.parent_checkpoint),
-        "parent_steps": parent_steps,
+        "init": "random_mortal_dqn_aux_existing_grp_targets",
+        "parent_checkpoint": None,
+        "initial_steps": 0,
+        "smoke_steps": int(args.smoke_steps),
         "stage1_steps": int(args.stage1_steps),
-        "final_steps": int(args.final_steps),
+        "probe_steps": int(args.probe_steps),
         "data_root": str(args.data_root),
         "dataset_globs": list(config["dataset"]["globs"]),
         "train_labels": list(TRAIN_LABELS),
@@ -298,7 +192,6 @@ def main() -> None:
         "risk_gate_enabled": False,
         "config": str(config_path),
         "state_file": str(config["control"]["state_file"]),
-        "data_generation_commands": data_generation_commands(args.data_root),
         "dataset_audit_command": [
             "uv",
             "run",
@@ -306,21 +199,22 @@ def main() -> None:
             "python",
             "scripts/mortal/audit_v4_synthetic_dataset.py",
         ],
+        "smoke_training_command": training_command(config_path, int(args.smoke_steps), log_every=10),
         "stage1_training_command": training_command(config_path, int(args.stage1_steps)),
-        "final_training_command": training_command(config_path, int(args.final_steps)),
-        "stage1_archive_path": str(checkpoints_dir / "mortal_v1_74000.pth"),
-        "final_archive_path": str(checkpoints_dir / "mortal_v1_80000.pth"),
+        "probe_training_command": training_command(config_path, int(args.probe_steps)),
+        "stage1_archive_path": str(checkpoints_dir / "mortal_v0a_2000.pth"),
+        "probe_archive_path": str(checkpoints_dir / "mortal_v0a_10000.pth"),
         "stage1_eval_command": eval_command(
-            checkpoint=checkpoints_dir / "mortal_v1_74000.pth",
-            output_dir=exp_dir / "eval_250h_v1_74000",
-            games=250,
-            seed_start=790000,
+            checkpoint=checkpoints_dir / "mortal_v0a_2000.pth",
+            output_dir=exp_dir / "eval_100h_v0a_2000",
+            games=100,
+            seed_start=810000,
         ),
-        "final_eval_command": eval_command(
-            checkpoint=checkpoints_dir / "mortal_v1_80000.pth",
-            output_dir=exp_dir / "eval_1000h_v1_80000",
-            games=1000,
-            seed_start=800000,
+        "probe_eval_command": eval_command(
+            checkpoint=checkpoints_dir / "mortal_v0a_10000.pth",
+            output_dir=exp_dir / "eval_250h_v0a_10000",
+            games=250,
+            seed_start=811000,
         ),
     }
 
@@ -330,13 +224,11 @@ def main() -> None:
 
     exp_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    if args.reset_state:
+        maybe_reset(exp_dir)
     config_path.write_text(dump_toml(config), encoding="utf-8")
     (exp_dir / "v4_train_labels.txt").write_text("\n".join(TRAIN_LABELS) + "\n", encoding="utf-8")
     (exp_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    if args.copy_parent_checkpoint:
-        state_file = Path(config["control"]["state_file"])
-        if not state_file.exists():
-            shutil.copy2(args.parent_checkpoint, state_file)
     print(json.dumps(manifest, ensure_ascii=False, indent=2), flush=True)
 
 

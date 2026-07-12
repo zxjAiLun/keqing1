@@ -107,6 +107,13 @@ export interface TeacherReviewEntry {
   top1?: { action: Action; q_value?: number | null; prob?: number | null; rank?: number | null } | null;
   top2?: { action: Action; q_value?: number | null; prob?: number | null; rank?: number | null } | null;
   candidate_count?: number;
+  display_mode?: 'joint_reach_dahai' | null;
+  candidates?: Array<{
+    action: Action;
+    q_value?: number | null;
+    prob?: number | null;
+    rank?: number | null;
+  }>;
 }
 
 /** /api/replay 返回的 decision_log 条目结构 */
@@ -176,6 +183,12 @@ export interface ReplayData {
   }>;
   teacher_review_overlays?: TeacherReviewOverlay[];
   teacher_review_overlay?: TeacherReviewOverlay;
+  external_review_links?: ExternalReviewLinks;
+}
+
+export interface ExternalReviewLinks {
+  naga?: string;
+  mortal?: string;
 }
 
 export interface ReplayMeta {
@@ -186,6 +199,7 @@ export interface ReplayMeta {
   total_steps: number;
   player_names: string[];
   final_scores: number[];
+  external_review_links?: ExternalReviewLinks;
 }
 
 export interface ReviewHistoryItem {
@@ -198,6 +212,7 @@ export interface ReviewHistoryItem {
   total_steps: number;
   models: string[];
   teacher_report_paths: string[];
+  external_review_links?: ExternalReviewLinks;
 }
 
 export interface ReplaySubmitRequest {

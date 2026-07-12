@@ -60,6 +60,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mortal-root", type=Path, default=Path("third_party/Mortal"))
     parser.add_argument("--platform-model-label", default=None, help="Force all seats to MODEL@01-04.")
     parser.add_argument("--rank-points", default="90,45,0,-135")
+    parser.add_argument("--preserve-log-dir-order", action="store_true", help="process repeated --log-dir inputs in supplied order")
+    parser.add_argument(
+        "--interleave-log-dirs",
+        action="store_true",
+        help="interleave same-index games across log directories, rotating the directory order each round",
+    )
     return parser.parse_args()
 
 
@@ -70,10 +76,28 @@ def parse_rank_points(value: str) -> tuple[float, float, float, float]:
     return tuple(float(part) for part in parts)  # type: ignore[return-value]
 
 
-def iter_log_files(log_dirs: Sequence[Path]) -> list[Path]:
-    files: list[Path] = []
-    for log_dir in log_dirs:
-        files.extend(sorted(log_dir.glob("*.json.gz")))
+def iter_log_files(
+    log_dirs: Sequence[Path],
+    *,
+    preserve_log_dir_order: bool = False,
+    interleave_log_dirs: bool = False,
+) -> list[Path]:
+    files_by_dir = [sorted(log_dir.glob("*.json.gz")) for log_dir in log_dirs]
+    if interleave_log_dirs:
+        files: list[Path] = []
+        max_games = max((len(items) for items in files_by_dir), default=0)
+        dir_count = len(files_by_dir)
+        for game_index in range(max_games):
+            # Rotate the per-round directory order so early Tenhou-R games are
+            # not systematically assigned to the first league lineups.
+            for offset in range(dir_count):
+                dir_index = (game_index + offset) % dir_count
+                if game_index < len(files_by_dir[dir_index]):
+                    files.append(files_by_dir[dir_index][game_index])
+        return files
+    files = [path for items in files_by_dir for path in items]
+    if preserve_log_dir_order:
+        return files
     return sorted(files, key=lambda path: (str(path.parent), path.name))
 
 
@@ -209,10 +233,16 @@ def build_report(
     mortal_root: Path,
     platform_model_label: str | None,
     rank_points: tuple[float, float, float, float],
+    preserve_log_dir_order: bool = False,
+    interleave_log_dirs: bool = False,
 ) -> dict[str, Any]:
     account_log_dir = prepare_output_dir(output_dir)
 
-    files = iter_log_files(log_dirs)
+    files = iter_log_files(
+        log_dirs,
+        preserve_log_dir_order=preserve_log_dir_order,
+        interleave_log_dirs=interleave_log_dirs,
+    )
     accounts: dict[str, AccountState] = {}
     per_game_rows: list[dict[str, Any]] = []
     ledger_rows: list[dict[str, Any]] = []
@@ -360,6 +390,8 @@ def build_report(
         "log_dirs": [str(path) for path in log_dirs],
         "output_dir": str(output_dir),
         "platform_model_label": platform_model_label,
+        "preserve_log_dir_order": bool(preserve_log_dir_order),
+        "interleave_log_dirs": bool(interleave_log_dirs),
         "scoring": {
             "rating_initial": INITIAL_RATING,
             "rating_rank_results": list(TENHOU_RANK_RESULTS),
@@ -488,6 +520,8 @@ def main() -> None:
         mortal_root=args.mortal_root,
         platform_model_label=args.platform_model_label,
         rank_points=parse_rank_points(str(args.rank_points)),
+        preserve_log_dir_order=bool(args.preserve_log_dir_order),
+        interleave_log_dirs=bool(args.interleave_log_dirs),
     )
     print(json.dumps({"games": report["games"], "accounts": len(report["accounts"])}, ensure_ascii=False), flush=True)
 

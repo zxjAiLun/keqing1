@@ -58,6 +58,7 @@ def normalize_replay_decisions(decisions: dict, meta: dict | None = None) -> dic
         "match_count": match_count,
         "bot_type": (meta or {}).get("bot_type", decisions.get("bot_type")),
         "player_names": decisions.get("player_names") or (meta or {}).get("player_names"),
+        "external_review_links": decisions.get("external_review_links") or (meta or {}).get("external_review_links") or {},
     }
 
 

@@ -8,9 +8,8 @@ $Repo = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 Set-Location $Repo
 
 $Pools = @(
-    @{ Name = "selfplay_v4_12000h_1v3"; Logs = "artifacts\experiments\v4_synthetic_2026_06\V1_data\selfplay_v4_12000h_1v3\logs"; Target = 12000 },
-    @{ Name = "mix_v4_70k_T1_4000h"; Logs = "artifacts\experiments\v4_synthetic_2026_06\V1_data\mix_v4_70k_T1_4000h\logs"; Target = 4000 },
-    @{ Name = "mix_v4_80k_T1_4000h"; Logs = "artifacts\experiments\v4_synthetic_2026_06\V1_data\mix_v4_80k_T1_4000h\logs"; Target = 4000 }
+    @{ Name = "selfplay_v4_legacy_3000h"; Logs = "artifacts\experiments\v4_synthetic_2026_06\V1_data\selfplay_v4_12000h_1v3\logs"; Pattern = "*_a.json.gz"; Target = 3000 },
+    @{ Name = "selfplay_v4_unique_9000h"; Logs = "artifacts\experiments\v4_synthetic_2026_06\V1_data\selfplay_v4_unique_9000h\logs"; Pattern = "*.json.gz"; Target = 9000 }
 )
 
 New-Item -ItemType Directory -Force -Path (Split-Path $Output) | Out-Null
@@ -19,7 +18,7 @@ while ($true) {
     $Stamp = Get-Date -Format o
     $Rows = @()
     foreach ($Pool in $Pools) {
-        $Files = @(Get-ChildItem -Path $Pool.Logs -Filter "*.json.gz" -ErrorAction SilentlyContinue)
+        $Files = @(Get-ChildItem -Path $Pool.Logs -Filter $Pool.Pattern -ErrorAction SilentlyContinue)
         $LastWrite = if ($Files.Count -gt 0) {
             ($Files | Sort-Object LastWriteTime -Descending | Select-Object -First 1).LastWriteTime.ToString("o")
         } else {

@@ -7,6 +7,7 @@ import argparse
 from datetime import datetime
 from glob import glob
 import gzip
+import hashlib
 import json
 import logging
 import os
@@ -39,8 +40,37 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--target-steps", type=int, required=True)
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=20260428)
+    parser.add_argument(
+        "--data-seed",
+        type=int,
+        default=None,
+        help="deterministic dataset stream seed; defaults to --seed for a new run and is restored from checkpoints",
+    )
+    parser.add_argument(
+        "--initialize-from",
+        type=Path,
+        default=None,
+        help="initialize model weights from a parent checkpoint with fresh optimizer and data stream",
+    )
+    parser.add_argument(
+        "--initial-steps",
+        type=int,
+        default=0,
+        help="global step assigned to a fresh --initialize-from run",
+    )
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--log-every", type=int, default=50)
+    parser.add_argument(
+        "--archive-steps",
+        default="",
+        help="comma-separated global steps to archive without restarting the data stream",
+    )
+    parser.add_argument("--archive-dir", type=Path, default=None)
+    parser.add_argument(
+        "--allow-legacy-data-replay",
+        action="store_true",
+        help="allow old checkpoints without a data cursor to replay their dataset prefix; never use for clean experiments",
+    )
     return parser.parse_args()
 
 
@@ -53,9 +83,32 @@ def main() -> None:
         target_steps=int(args.target_steps),
         device_override=args.device,
         seed=int(args.seed),
+        data_seed=args.data_seed,
         num_workers=args.num_workers,
         log_every=int(args.log_every),
+        archive_steps=_parse_archive_steps(args.archive_steps),
+        archive_dir=args.archive_dir,
+        allow_legacy_data_replay=bool(args.allow_legacy_data_replay),
+        initialize_from=args.initialize_from,
+        initial_steps=int(args.initial_steps),
     )
+
+
+def _parse_archive_steps(value: str) -> tuple[int, ...]:
+    if not value.strip():
+        return ()
+    steps = tuple(sorted({int(part.strip()) for part in value.split(",") if part.strip()}))
+    if any(step <= 0 for step in steps):
+        raise ValueError("--archive-steps must contain only positive integers")
+    return steps
+
+
+def _sha256_file(file_path: Path) -> str:
+    digest = hashlib.sha256()
+    with file_path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def train_to_target_steps(
@@ -65,13 +118,21 @@ def train_to_target_steps(
     target_steps: int,
     device_override: str | None = None,
     seed: int = 20260428,
+    data_seed: int | None = None,
     num_workers: int | None = None,
     log_every: int = 50,
+    archive_steps: tuple[int, ...] = (),
+    archive_dir: Path | None = None,
+    allow_legacy_data_replay: bool = False,
+    initialize_from: Path | None = None,
+    initial_steps: int = 0,
 ) -> dict[str, Any]:
     if target_steps <= 0:
         raise ValueError(f"target_steps must be positive, got {target_steps}")
     if log_every <= 0:
         raise ValueError(f"log_every must be positive, got {log_every}")
+    if initial_steps < 0:
+        raise ValueError(f"initial_steps must be non-negative, got {initial_steps}")
     random.seed(seed)
     torch.manual_seed(seed)
     mortal_python_dir = (mortal_root / "mortal").resolve()
@@ -119,9 +180,18 @@ def train_to_target_steps(
     scaler = GradScaler(device.type, enabled=bool(control["enable_amp"]))
     best_perf = {"avg_rank": 4.0, "avg_pt": -135.0}
     steps = 0
+    loaded_data_stream: dict[str, Any] | None = None
+    expected_python_rng_state: object | None = None
+    restore_torch_rng_state: torch.Tensor | None = None
+    restore_cuda_rng_states: list[torch.Tensor] | None = None
+    initialization: dict[str, Any] | None = None
 
     state_file = str(control["state_file"])
     if path.exists(state_file):
+        if initialize_from is not None:
+            raise RuntimeError(
+                f"state file already exists at {state_file}; --initialize-from is only valid for a fresh experiment"
+            )
         state = torch.load(state_file, weights_only=True, map_location=device)
         mortal.load_state_dict(state["mortal"])
         dqn.load_state_dict(state["current_dqn"])
@@ -134,16 +204,69 @@ def train_to_target_steps(
             scaler.load_state_dict(state["scaler"])
             best_perf = dict(state["best_perf"])
             steps = int(state["steps"])
+            loaded_data_stream = state.get("data_stream")
+            expected_python_rng_state = state.get("python_rng_state")
+            restore_torch_rng_state = state.get("torch_rng_state")
+            restore_cuda_rng_states = state.get("cuda_rng_states")
+            if loaded_data_stream is None:
+                if not allow_legacy_data_replay:
+                    raise RuntimeError(
+                        "checkpoint has no resumable data_stream metadata; refusing to replay an unknown dataset prefix. "
+                        "Create a fresh experiment or pass --allow-legacy-data-replay explicitly."
+                    )
+                logging.warning("resuming legacy checkpoint with a replayed dataset prefix by explicit request")
+            else:
+                saved_data_seed = int(loaded_data_stream["data_seed"])
+                if data_seed is not None and int(data_seed) != saved_data_seed:
+                    raise ValueError(
+                        f"--data-seed={data_seed} conflicts with checkpoint data_seed={saved_data_seed}"
+                    )
+                data_seed = saved_data_seed
         else:
             logging.info(
                 "loaded weights-only Mortal checkpoint from %s; optimizer/scheduler/aux are initialized fresh at steps=0",
                 state_file,
             )
+    elif initialize_from is not None:
+        parent_path = initialize_from.resolve()
+        if not parent_path.exists():
+            raise FileNotFoundError(f"--initialize-from checkpoint does not exist: {parent_path}")
+        parent = torch.load(parent_path, weights_only=True, map_location=device)
+        try:
+            mortal.load_state_dict(parent["mortal"])
+            dqn.load_state_dict(parent["current_dqn"])
+        except KeyError as exc:
+            raise RuntimeError(f"parent checkpoint is missing required model weights: {parent_path}") from exc
+        if "aux_net" in parent:
+            aux_net.load_state_dict(parent["aux_net"])
+        else:
+            logging.warning("parent checkpoint has no aux_net; keeping fresh auxiliary weights")
+        steps = int(initial_steps)
+        initialization = {
+            "mode": "weights_only_warm_start",
+            "parent_checkpoint": str(parent_path),
+            "parent_sha256": _sha256_file(parent_path),
+            "parent_steps": int(parent.get("steps", 0)),
+            "initial_steps": int(initial_steps),
+            "loaded_aux_net": "aux_net" in parent,
+            "optimizer": "fresh",
+            "scheduler": "fresh",
+            "data_stream": "fresh",
+        }
+        logging.info(
+            "initialized fresh experiment from %s; assigned global steps=%s with fresh optimizer/data stream",
+            parent_path,
+            steps,
+        )
 
     if steps >= target_steps:
         logging.info("Mortal already at steps=%s, target_steps=%s; no training needed", steps, target_steps)
         return {"steps": steps, "trained_steps": 0, "state_file": state_file}
 
+    if data_seed is None:
+        data_seed = int(seed)
+    # Keep the data order independent from model initialization and reconstruct it exactly on resume.
+    random.seed(int(data_seed))
     file_list = _load_or_build_file_index(config)
     logging.info("file list size: %s", f"{len(file_list):,}")
     dataset = config["dataset"]
@@ -194,6 +317,27 @@ def train_to_target_steps(
         )
     )
 
+    data_batches_consumed = int(loaded_data_stream.get("batches_consumed", 0)) if loaded_data_stream else 0
+    resume_skipped_batches = 0
+    if data_batches_consumed:
+        logging.info("reconstructing dataset stream: skipping %s delivered batches", data_batches_consumed)
+        for _ in range(data_batches_consumed):
+            try:
+                next(data_loader)
+            except StopIteration as exc:
+                raise RuntimeError(
+                    "checkpoint data stream exceeds the available dataset; cannot resume safely"
+                ) from exc
+            resume_skipped_batches += 1
+        if expected_python_rng_state is not None and random.getstate() != expected_python_rng_state:
+            raise RuntimeError(
+                "dataset RNG state mismatch while reconstructing resume cursor; refusing to repeat or skip data"
+            )
+    if restore_torch_rng_state is not None:
+        torch.set_rng_state(restore_torch_rng_state.detach().cpu())
+    if restore_cuda_rng_states is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([state.detach().cpu() for state in restore_cuda_rng_states])
+
     writer = SummaryWriter(str(control["tensorboard_dir"]))
     stats = {
         "dqn_loss": 0.0,
@@ -214,6 +358,10 @@ def train_to_target_steps(
     window_stats = {key: 0.0 for key in stats}
     window_count = 0
     trained_steps = 0
+    archive_steps_set = set(int(step) for step in archive_steps)
+    archived_steps_written: set[int] = set()
+    resolved_archive_dir = Path(archive_dir) if archive_dir is not None else Path(state_file).parent / "checkpoints"
+    exposure_path = Path(state_file).parent / "data_exposure.json"
     optimizer.zero_grad(set_to_none=True)
     mse = nn.MSELoss()
     ce = nn.CrossEntropyLoss()
@@ -223,21 +371,54 @@ def train_to_target_steps(
 
     def save_checkpoint() -> None:
         Path(state_file).parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "mortal": mortal.state_dict(),
-                "current_dqn": dqn.state_dict(),
-                "aux_net": aux_net.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict(),
-                "scaler": scaler.state_dict(),
-                "steps": steps,
-                "timestamp": datetime.now().timestamp(),
-                "best_perf": best_perf,
-                "config": config,
-            },
-            state_file,
+        data_stream = {
+            "schema": "keqing.mortal.data_stream.v1",
+            "data_seed": int(data_seed),
+            "batches_consumed": int(data_batches_consumed),
+            "samples_consumed": int(data_batches_consumed * batch_size),
+            "dataset_file_count": int(len(file_list)),
+            "num_workers": int(loader_workers),
+            "resume_skipped_batches": int(resume_skipped_batches),
+        }
+        checkpoint = {
+            "mortal": mortal.state_dict(),
+            "current_dqn": dqn.state_dict(),
+            "aux_net": aux_net.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "scaler": scaler.state_dict(),
+            "steps": steps,
+            "timestamp": datetime.now().timestamp(),
+            "best_perf": best_perf,
+            "config": config,
+            "data_stream": data_stream,
+            "python_rng_state": random.getstate(),
+            "torch_rng_state": torch.get_rng_state(),
+            "cuda_rng_states": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "initialization": initialization,
+        }
+        torch.save(checkpoint, state_file)
+        exposure_path.write_text(
+            json.dumps(
+                {
+                    "steps": int(steps),
+                    "trained_steps_this_invocation": int(trained_steps),
+                    "data_stream": data_stream,
+                    "archive_steps": sorted(archive_steps_set),
+                    "initialization": initialization,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
         )
+        if steps in archive_steps_set and steps not in archived_steps_written:
+            resolved_archive_dir.mkdir(parents=True, exist_ok=True)
+            archive_path = resolved_archive_dir / f"mortal_{steps}.pth"
+            torch.save(checkpoint, archive_path)
+            archived_steps_written.add(int(steps))
+            logging.info("archived Mortal checkpoint: %s", archive_path)
         logging.info("saved Mortal checkpoint: %s steps=%s", state_file, steps)
 
     def log_train_metrics(*, prefix: str = "Mortal train metrics") -> None:
@@ -299,6 +480,7 @@ def train_to_target_steps(
             raise RuntimeError(
                 f"Mortal offline dataset ended at steps={steps} before target_steps={target_steps}"
             ) from exc
+        data_batches_consumed += 1
         if risk_gate_enabled:
             obs, actions, masks, steps_to_done, kyoku_rewards, player_ranks, teacher_ce_weights = batch
         else:
@@ -409,7 +591,7 @@ def train_to_target_steps(
         scheduler.step()
         if trained_steps == 1 or trained_steps % log_every == 0 or steps >= target_steps:
             log_train_metrics()
-        if save_every > 0 and steps % save_every == 0:
+        if (save_every > 0 and steps % save_every == 0) or steps in archive_steps_set:
             save_checkpoint()
 
     log_train_metrics(prefix="Mortal final train metrics")

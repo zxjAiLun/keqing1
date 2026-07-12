@@ -71,6 +71,13 @@ def _parse_args() -> argparse.Namespace:
         help="random seats per hanchan, or four fixed rotation splits per seed",
     )
     parser.add_argument("--progress-every", type=int, default=0, help="emit progress every N hanchans")
+    parser.add_argument(
+        "--native-batch-games",
+        type=int,
+        default=0,
+        help="hanchans per Rust arena batch; 0 preserves the progress-sized batch behavior",
+    )
+    parser.add_argument("--profile", action="store_true", help="record per-engine inference batch and timing telemetry")
     parser.add_argument("--resume", action="store_true", help="resume from existing native logs in output-dir/logs")
     parser.add_argument("--no-platform-report", action="store_true", help="skip platform account pt/rating report")
     parser.add_argument("--platform-model-label", default=None, help="force platform account labels to MODEL@01-04")
@@ -86,6 +93,7 @@ def _load_engine(
     mortal_root: Path,
     device: str,
     enable_amp: bool,
+    enable_profile: bool,
 ) -> Any:
     mortal_python_dir = (mortal_root / "mortal").resolve()
     if str(mortal_python_dir) not in sys.path:
@@ -114,6 +122,7 @@ def _load_engine(
         enable_quick_eval=True,
         enable_rule_based_agari_guard=True,
         name=label,
+        enable_profile=enable_profile,
     )
 
 
@@ -123,6 +132,7 @@ def _load_engines(
     mortal_root: Path,
     device: str,
     enable_amp: bool,
+    enable_profile: bool,
 ) -> tuple[list[str], list[Any], dict[str, float]]:
     labels = list(models)
     engines: list[Any] = []
@@ -136,6 +146,7 @@ def _load_engines(
                 mortal_root=mortal_root,
                 device=device,
                 enable_amp=enable_amp,
+                enable_profile=enable_profile,
             )
         )
         load_times[label] = time.perf_counter() - started
@@ -181,12 +192,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         mortal_root=args.mortal_root,
         device=str(args.device),
         enable_amp=bool(args.enable_amp),
+        enable_profile=bool(args.profile),
     )
 
     env = FourPlayer(disable_progress_bar=True, log_dir=str(log_dir))
     total_games = int(args.games)
     progress_every = int(getattr(args, "progress_every", 0) or 0)
-    batch_size = total_games if progress_every <= 0 else max(1, progress_every)
+    requested_batch_size = int(getattr(args, "native_batch_games", 0) or 0)
+    batch_size = requested_batch_size or (total_games if progress_every <= 0 else max(1, progress_every))
+    if batch_size <= 0:
+        raise ValueError("--native-batch-games must be positive when provided")
     rank_counts = {label: [0, 0, 0, 0] for label in labels}
     completed = 0
     if bool(getattr(args, "resume", False)) and log_dir.exists():
@@ -270,6 +285,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "seed_key": int(args.seed_key),
             "games": int(args.games),
             "seat_mode": str(args.seat_mode),
+            "native_batch_games": int(batch_size),
             "device": str(args.device),
             "rank_points_profile": rank_points_profile,
             "rank_points_values": [float(value) for value in rank_points],
@@ -281,6 +297,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         rank_points_values=rank_points,
     )
     write_metrics(output_dir / "metrics.json", document)
+
+    if bool(args.profile):
+        inference_profile = {label: engine.profile_snapshot() for label, engine in zip(labels, engines, strict=True)}
+        profile_path = output_dir / "inference_profile.json"
+        profile_path.write_text(json.dumps(inference_profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        document["artifacts"]["inference_profile_json"] = str(profile_path)
+        document["inference_profile"] = inference_profile
 
     stat_report = write_stat_report(
         output_dir=output_dir,

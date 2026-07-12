@@ -6,13 +6,69 @@ from typing import Any
 from inference.rulebase_bot import RulebaseBot
 from inference.mortal_bot import MortalReviewBot
 
-MORTAL_CHECKPOINTS = {
-    "mortal": "gui_mortal.pth",
+# Named Mortal checkpoints shipped under artifacts/mortal_serving.
+# Only Mortal-format weights are supported (no xmodel / custom architectures).
+MORTAL_CHECKPOINTS: dict[str, str] = {
+    "mortal": "mortal.pth",
     "70k": "70k.pth",
-    "t1_71000": "../experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth",
-    "weak_mortal": "../model_v4_20240308_best_min.pth",
+    "gui": "gui_mortal.pth",
+    "v4": "gui_mortal.pth",
+    "weak": "weak_mortal.pth",
+    "weak_mortal": "weak_mortal.pth",
 }
+
 SUPPORTED_BOT_NAMES = {"rulebase", *MORTAL_CHECKPOINTS.keys()}
+
+# Arbitrary checkpoint paths are also accepted (e.g. a freshly trained weight).
+_CHECKPOINT_SUFFIXES = {".pth", ".pt", ".ckpt"}
+
+
+def resolve_bot_spec(
+    spec: str, project_root: str | Path
+) -> tuple[str, Path | None]:
+    """Resolve a bot spec string into (kind, model_path).
+
+    ``kind`` is either ``"rulebase"`` or ``"mortal"``.
+    ``model_path`` is ``None`` for rulebase, otherwise an absolute Path to a
+    Mortal-format checkpoint.
+
+    A spec is interpreted as:
+      * ``"rulebase"``           -> rule-based bot, no model
+      * a key in MORTAL_CHECKPOINTS (e.g. ``"mortal"``, ``"70k"``, ``"v4"``)
+      * an explicit path ending in ``.pth/.pt/.ckpt`` (absolute, or resolved
+        relative to artifacts/mortal_serving)
+    """
+    spec = str(spec).strip()
+    if not spec:
+        raise ValueError("bot spec must not be empty")
+
+    if spec == "rulebase":
+        return "rulebase", None
+
+    if spec in MORTAL_CHECKPOINTS:
+        path = Path(project_root) / "artifacts" / "mortal_serving" / MORTAL_CHECKPOINTS[spec]
+        return "mortal", path.resolve()
+
+    candidate = Path(spec)
+    if candidate.suffix.lower() in _CHECKPOINT_SUFFIXES:
+        if candidate.is_absolute() and candidate.exists():
+            return "mortal", candidate.resolve()
+        alt = Path(project_root) / "artifacts" / "mortal_serving" / candidate.name
+        if alt.exists():
+            return "mortal", alt.resolve()
+        # Surface a clear error instead of failing deep inside torch.load.
+        searched = [str(candidate.resolve())]
+        if not candidate.is_absolute():
+            searched.append(str(alt.resolve()))
+        raise FileNotFoundError(
+            f"mortal checkpoint not found for spec {spec!r}; searched: {searched}"
+        )
+
+    raise ValueError(
+        f"unknown bot spec: {spec!r}. "
+        f"Use one of {sorted(MORTAL_CHECKPOINTS)} (or 'rulebase'), "
+        f"or an explicit .pth/.pt/.ckpt path."
+    )
 
 
 def create_runtime_bot(
@@ -26,21 +82,21 @@ def create_runtime_bot(
     beam_k: int = 3,
     beam_lambda: float = 1.0,
     rank_pt_lambda: float = 0.0,
+    enable_review_log: bool = True,
 ) -> Any:
-    if bot_name == "rulebase":
+    """Create a runtime bot. ``bot_name`` may be a named checkpoint, ``rulebase``,
+    or an explicit checkpoint path. An explicit ``model_path`` overrides the
+    resolved checkpoint location."""
+    kind, resolved = resolve_bot_spec(bot_name, project_root)
+    if kind == "rulebase":
         return RulebaseBot(player_id=player_id, verbose=verbose)
-    if bot_name in MORTAL_CHECKPOINTS:
-        resolved_model_path = (
-            Path(model_path)
-            if model_path is not None
-            else Path(project_root) / "artifacts" / "mortal_serving" / MORTAL_CHECKPOINTS[bot_name]
-        )
-        resolved_model_path = resolved_model_path.resolve()
-        return MortalReviewBot(
-            player_id=player_id,
-            model_path=resolved_model_path,
-            mortal_root=Path(project_root) / "third_party" / "Mortal",
-            device=device,
-            verbose=verbose,
-        )
-    raise ValueError(f"Unsupported bot name: {bot_name}")
+    if model_path is not None:
+        resolved = Path(model_path).resolve()
+    return MortalReviewBot(
+        player_id=player_id,
+        model_path=resolved,
+        mortal_root=Path(project_root) / "third_party" / "Mortal",
+        device=device,
+        verbose=verbose,
+        enable_review_log=enable_review_log,
+    )

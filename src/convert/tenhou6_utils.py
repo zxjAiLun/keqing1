@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,15 @@ def _called_and_consumed(raw: str, marker: str) -> tuple[str, list[str]]:
     except ValueError:
         pass
     return _tile_from_tenhou6(called_code), [_tile_from_tenhou6(code) for code in consumed_codes]
+
+
+def _decode_kakan(raw: str) -> tuple[str, list[str]]:
+    if "k" not in raw:
+        raise ValueError(f"invalid tenhou6 kakan string: {raw!r}")
+    pai, consumed = _called_and_consumed(raw, "k")
+    if len(consumed) != 3:
+        raise ValueError(f"invalid tenhou6 kakan string: {raw!r}")
+    return pai, consumed
 
 
 def _normalized_tile_face(tile: str) -> str:
@@ -153,7 +163,14 @@ def _convert_kyoku_to_events(kyoku: list[Any], names: list[str], rule: dict[str,
     discard_idx = [0, 0, 0, 0]
     last_draw: list[str | None] = [None, None, None, None]
     last_discard_actor: int | None = None
+    extra_dora_markers = [_tile_from_tenhou6(value) for value in kyoku[2][1:]]
+    pending_dora_marker: str | None = None
     actor = oya
+
+    def queue_next_dora_marker() -> None:
+        nonlocal pending_dora_marker
+        if pending_dora_marker is None and extra_dora_markers:
+            pending_dora_marker = extra_dora_markers.pop(0)
 
     def has_pending() -> bool:
         return any(take_idx[seat] < len(takes[seat]) or discard_idx[seat] < len(discards[seat]) for seat in range(4))
@@ -194,13 +211,19 @@ def _convert_kyoku_to_events(kyoku: list[Any], names: list[str], rule: dict[str,
                 elif "m" in take:
                     pai, consumed = _called_and_consumed(take, "m")
                     events.append({"type": "daiminkan", "actor": actor, "target": target, "pai": pai, "consumed": consumed})
+                    queue_next_dora_marker()
                 else:
                     raise ValueError(f"unsupported tenhou6 take meld: {take!r}")
                 take_idx[actor] += 1
                 progressed = True
+                if "m" in take:
+                    continue
             else:
                 pai = _tile_from_tenhou6(take)
                 events.append({"type": "tsumo", "actor": actor, "pai": pai})
+                if pending_dora_marker is not None:
+                    events.append({"type": "dora", "dora_marker": pending_dora_marker})
+                    pending_dora_marker = None
                 last_draw[actor] = pai
                 take_idx[actor] += 1
                 progressed = True
@@ -210,19 +233,21 @@ def _convert_kyoku_to_events(kyoku: list[Any], names: list[str], rule: dict[str,
             if isinstance(discard, str) and "a" in discard:
                 consumed = [_tile_from_tenhou6(code) for code in _meld_codes(discard)]
                 events.append({"type": "ankan", "actor": actor, "consumed": consumed})
+                queue_next_dora_marker()
                 discard_idx[actor] += 1
                 progressed = True
                 continue
-            if isinstance(discard, str) and discard.startswith("k"):
-                codes = _meld_codes(discard)
+            if isinstance(discard, str) and "k" in discard:
+                pai, consumed = _decode_kakan(discard)
                 events.append(
                     {
                         "type": "kakan",
                         "actor": actor,
-                        "pai": _tile_from_tenhou6(codes[0]),
-                        "consumed": [_tile_from_tenhou6(code) for code in codes[1:]],
+                        "pai": pai,
+                        "consumed": consumed,
                     }
                 )
+                queue_next_dora_marker()
                 discard_idx[actor] += 1
                 progressed = True
                 continue
@@ -268,14 +293,38 @@ def tenhou6_to_mjai_events(t6_json: dict[str, Any]) -> list[dict[str, Any]]:
     return events
 
 
-def _convlog_candidates() -> list[Path]:
-    if os.name == "nt":
-        return [CONVLOG_BIN.with_suffix(".exe"), CONVLOG_BIN]
-    return [CONVLOG_BIN]
+def _wsl_path(path: Path) -> str:
+    result = subprocess.run(
+        ["wsl.exe", "wslpath", "-a", path.resolve().as_posix()],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _convlog_command(input_path: Path, output_path: Path) -> list[str] | None:
+    if os.name != "nt":
+        return [str(CONVLOG_BIN), str(input_path), str(output_path)] if CONVLOG_BIN.exists() else None
+
+    windows_binary = CONVLOG_BIN.with_suffix(".exe")
+    if windows_binary.exists():
+        return [str(windows_binary), str(input_path), str(output_path)]
+
+    if CONVLOG_BIN.exists() and shutil.which("wsl.exe"):
+        return [
+            "wsl.exe",
+            "--",
+            _wsl_path(CONVLOG_BIN),
+            _wsl_path(input_path),
+            _wsl_path(output_path),
+        ]
+    return None
 
 
 def tenhou6_to_mjson(t6_json: dict, output_path: Path) -> bool:
     """Write tenhou6 JSON to an mjai JSONL file. Returns success."""
+    python_error: Exception | None = None
     try:
         events = tenhou6_to_mjai_events(t6_json)
         output_path.write_text(
@@ -284,14 +333,18 @@ def tenhou6_to_mjson(t6_json: dict, output_path: Path) -> bool:
         )
         return True
     except Exception as exc:
+        python_error = exc
         print(f"  WARN python tenhou6 converter failed, trying convlog: {exc}")
 
     tmp = output_path.with_suffix(".tmp.json")
     try:
         tmp.write_text(json.dumps(t6_json, ensure_ascii=False), encoding="utf-8")
-        convlog_bin = next((candidate for candidate in _convlog_candidates() if candidate.exists()), CONVLOG_BIN)
+        command = _convlog_command(tmp, output_path)
+        if command is None:
+            print(f"  ERROR no compatible convlog executable; python converter error: {python_error}")
+            return False
         result = subprocess.run(
-            [str(convlog_bin), str(tmp), str(output_path)],
+            command,
             capture_output=True,
             text=True,
         )

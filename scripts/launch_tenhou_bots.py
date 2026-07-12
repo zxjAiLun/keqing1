@@ -4,6 +4,7 @@ import argparse
 import logging
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -18,11 +19,75 @@ from gateway.tenhou_bot_client import (
     launch_bot_threads,
     start_gateway_subprocess,
 )
+from inference.bot_registry import MORTAL_CHECKPOINTS, resolve_bot_spec
+
+MAX_BOTS = 4
+
+
+def _pick_device(requested: str) -> str:
+    if requested != "cuda":
+        return requested
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    logging.info("cuda requested but not available; falling back to cpu")
+    return "cpu"
+
+
+def _build_configs(args: argparse.Namespace) -> list[BotClientConfig]:
+    bots = args.bots
+    if len(bots) > MAX_BOTS:
+        sys.exit(
+            f"error: too many bots ({len(bots)}). max is {MAX_BOTS} "
+            f"(self-use playwithyou limit)."
+        )
+    if len(bots) == 0:
+        sys.exit("error: provide at least one bot spec via --bots")
+
+    # Fail fast with a clear message before spinning up any threads.
+    for spec in bots:
+        try:
+            kind, path = resolve_bot_spec(spec, PROJECT_ROOT)
+        except (ValueError, FileNotFoundError) as exc:
+            sys.exit(f"error: invalid bot spec {spec!r}: {exc}")
+        if kind == "mortal" and path is not None and not path.exists():
+            sys.exit(f"error: checkpoint not found for {spec!r}: {path}")
+
+    device = _pick_device(args.device)
+    normalized_room = normalize_tenhou_room(args.room, default_suffix=str(args.game_type))
+    count = len(bots)
+
+    configs: list[BotClientConfig] = []
+    for i, spec in enumerate(bots):
+        name = args.name_prefix if count == 1 else f"{args.name_prefix}-{i + 1}"
+        configs.append(
+            BotClientConfig(
+                host=args.gateway_host,
+                port=args.gateway_port,
+                room=normalized_room,
+                name=name,
+                bot_name=spec,
+                project_root=PROJECT_ROOT,
+                model_path=None,  # resolved from spec by the client
+                device=device,
+                verbose=args.bot_verbose,
+                think_delay=args.think_delay,
+            )
+        )
+    return configs
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Launch one or more runtime bots into a Tenhou gateway room"
+        description=(
+            "Summon up to 4 Mortal-weight bot accounts into a Tenhou private "
+            "room (e.g. L2147) as NoName guests, for self-play / model testing. "
+            "Each account can use a different checkpoint."
+        )
     )
     parser.add_argument(
         "--room",
@@ -35,24 +100,25 @@ def main() -> None:
         default=9,
         help="Tenhou queue/game type integer (default 9 = 4p hanchan multiplayer)",
     )
-    parser.add_argument("--count", type=int, default=2, help="How many bot clients to start")
     parser.add_argument(
-        "--bot",
-        default="xmodel1",
-        help="Bot type: xmodel1/keqingv4/rulebase",
+        "--bots",
+        nargs="+",
+        default=["mortal"],
+        help=(
+            "One spec per bot account (order = seat-agnostic accounts). "
+            f"Known names: {sorted(MORTAL_CHECKPOINTS)} and 'rulebase'; "
+            "or an explicit .pth/.pt/.ckpt path. Max %d accounts." % MAX_BOTS
+        ),
     )
-    parser.add_argument(
-        "--name-prefix", default="NoName", help="Prefix for bot display names"
-    )
+    parser.add_argument("--name-prefix", default="NoName", help="Display name prefix for bots")
     parser.add_argument("--gateway-host", default="127.0.0.1")
     parser.add_argument("--gateway-port", type=int, default=11600)
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--model-path", default=None, help="Optional explicit checkpoint path")
-    parser.add_argument("--stagger-seconds", type=float, default=0.5)
+    parser.add_argument("--device", default="cuda", help="Inference device (cuda/cpu)")
+    parser.add_argument("--stagger-seconds", type=float, default=1.0)
     parser.add_argument(
         "--start-gateway",
         action="store_true",
-        help="Start src/gateway/main.py automatically",
+        help="Start a local mjai gateway for this summon",
     )
     parser.add_argument("--gateway-debug", action="store_true")
     parser.add_argument("--gateway-log-dir", default="logs")
@@ -71,12 +137,30 @@ def main() -> None:
         help="Optional JSON object merged into the HELO payload",
     )
     parser.add_argument("--bot-verbose", action="store_true")
+    parser.add_argument(
+        "--session-token",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--gateway-owner-token",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--think-delay",
+        type=float,
+        default=0.0,
+        help="Seconds to pause on the bot's own turn before acting (Speed control). 0 = instant.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
-    normalized_room = normalize_tenhou_room(args.room, default_suffix=str(args.game_type))
+    configs = _build_configs(args)
 
+    stop_event = threading.Event()
     gateway_proc = None
+
     if args.start_gateway:
         extra_env = {}
         if args.tenhou_uri:
@@ -92,47 +176,49 @@ def main() -> None:
             debug=args.gateway_debug,
             log_dir=(PROJECT_ROOT / args.gateway_log_dir),
             extra_env=extra_env or None,
+            port=args.gateway_port,
+            owner_token=args.gateway_owner_token,
         )
         time.sleep(1.5)
         if gateway_proc.poll() is not None:
             raise RuntimeError("gateway subprocess exited early; check logs and port availability")
 
-    configs = [
-        BotClientConfig(
-            host=args.gateway_host,
-            port=args.gateway_port,
-            room=normalized_room,
-            name=(
-                args.name_prefix
-                if args.name_prefix == "NoName" or args.count == 1
-                else f"{args.name_prefix}-{i + 1}"
-            ),
-            bot_name=args.bot,
-            project_root=PROJECT_ROOT,
-            model_path=Path(args.model_path) if args.model_path else None,
-            device=args.device,
-            verbose=args.bot_verbose,
-        )
-        for i in range(args.count)
-    ]
-
-    threads = launch_bot_threads(configs, stagger_seconds=args.stagger_seconds)
+    threads = launch_bot_threads(
+        configs, stagger_seconds=args.stagger_seconds, stop_event=stop_event
+    )
+    logging.info(
+        "launched %d bot(s) into %s: %s",
+        len(threads),
+        configs[0].room,
+        ", ".join(f"{c.name}={c.bot_name}" for c in configs),
+    )
 
     def _shutdown(*_: object) -> None:
-        if gateway_proc is not None and gateway_proc.poll() is None:
-            gateway_proc.terminate()
-        raise SystemExit(0)
+        logging.info("shutting down ...")
+        stop_event.set()
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
     try:
-        for thread in threads:
-            thread.join()
+        while not stop_event.is_set():
+            # A disconnected bot is terminal for this summon. Do not rejoin;
+            # close all remaining bots and the local gateway as one unit.
+            if any(not thread.is_alive() for thread in threads):
+                logging.warning("a bot connection ended; stopping this summon without reconnecting")
+                stop_event.set()
+                break
+            time.sleep(0.5)
     finally:
+        stop_event.set()
         if gateway_proc is not None and gateway_proc.poll() is None:
             gateway_proc.terminate()
-            gateway_proc.wait(timeout=5)
+            try:
+                gateway_proc.wait(timeout=5)
+            except Exception:
+                gateway_proc.kill()
+        for thread in threads:
+            thread.join(timeout=5)
 
 
 if __name__ == "__main__":

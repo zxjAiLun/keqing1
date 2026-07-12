@@ -46,6 +46,13 @@ class RulebaseBot:
         self.decision_log.clear()
         self.game_state = GameState()
 
+    def set_player_id(self, player_id: int) -> None:
+        player_id = int(player_id)
+        if self.player_id == player_id:
+            return
+        self.player_id = player_id
+        self.reset()
+
     def react(self, event: dict, gt_action: Optional[dict] = None) -> Optional[dict]:
         actor = self.player_id
         ctx = self._context_builder.build(self.game_state, actor, event)

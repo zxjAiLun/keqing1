@@ -52,7 +52,7 @@ export function ReviewHistoryPage() {
           <span>视角</span>
           <span>模型</span>
           <span>牌局</span>
-          <span />
+          <span>打开</span>
         </div>
         {items.map((item) => (
           <div key={`${item.replay_id}-${item.player_id}`} style={rowStyle}>
@@ -62,10 +62,21 @@ export function ReviewHistoryPage() {
               {item.models.map((model) => <span key={model} style={modelTagStyle}>{model}</span>)}
             </span>
             <span>{item.kyoku_count}局 / {item.total_steps}步</span>
-            <button type="button" onClick={() => navigate(buildReviewHistoryPath(item))} style={openButtonStyle}>
-              <ExternalLink size={14} />
-              打开
-            </button>
+            <span style={actionGroupStyle}>
+              <button type="button" onClick={() => navigate(buildReviewHistoryPath(item))} style={openButtonStyle}>
+                本地
+              </button>
+              {item.external_review_links?.naga && (
+                <a href={item.external_review_links.naga} target="_blank" rel="noreferrer" style={externalButtonStyle}>
+                  NAGA <ExternalLink size={12} />
+                </a>
+              )}
+              {item.external_review_links?.mortal && (
+                <a href={item.external_review_links.mortal} target="_blank" rel="noreferrer" style={externalButtonStyle}>
+                  Mortal <ExternalLink size={12} />
+                </a>
+              )}
+            </span>
           </div>
         ))}
         {!loading && items.length === 0 && !error && <div style={statusStyle}>暂无历史 Review</div>}
@@ -83,7 +94,7 @@ const tableStyle: React.CSSProperties = {
   background: 'var(--card-bg)',
 };
 
-const gridColumns = '150px minmax(100px, 1fr) minmax(210px, 1.5fr) 110px 76px';
+const gridColumns = '150px minmax(100px, 1fr) minmax(210px, 1.5fr) 110px minmax(190px, auto)';
 const headerStyle: React.CSSProperties = {
   display: 'grid',
   gridTemplateColumns: gridColumns,
@@ -129,6 +140,21 @@ const openButtonStyle: React.CSSProperties = {
   color: '#8e44ad',
   fontWeight: 800,
   cursor: 'pointer',
+};
+const actionGroupStyle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' };
+const externalButtonStyle: React.CSSProperties = {
+  height: 28,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: 4,
+  border: '1px solid var(--border)',
+  borderRadius: 5,
+  padding: '0 7px',
+  color: 'var(--text-primary)',
+  textDecoration: 'none',
+  fontSize: 11,
+  fontWeight: 700,
 };
 const actionButtonStyle: React.CSSProperties = { height: 32, display: 'inline-flex', alignItems: 'center', gap: 6 };
 const statusStyle: React.CSSProperties = { padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 };

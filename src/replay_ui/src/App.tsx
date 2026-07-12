@@ -9,6 +9,7 @@ import { GameBoardPage } from './pages/GameBoardPage';
 import { GameBoardReplayPage } from './pages/GameBoardReplayPage';
 import { BattlePage } from './pages/BattlePage';
 import { BotBattlePage } from './pages/BotBattlePage';
+import { PlayWithYouPage } from './pages/PlayWithYouPage';
 import { SelfplayAnomaliesPage } from './pages/SelfplayAnomaliesPage';
 import { MortalDecisionReviewPage } from './pages/MortalDecisionReviewPage';
 import { BehaviorCasebookPage } from './pages/BehaviorCasebookPage';
@@ -24,6 +25,7 @@ export default function App() {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/battle" element={<BattlePage />} />
             <Route path="/bot-battle" element={<BotBattlePage />} />
+          <Route path="/play-with-you" element={<PlayWithYouPage />} />
             <Route path="/review" element={<ReviewPage />} />
             <Route path="/review-history" element={<ReviewHistoryPage />} />
             <Route path="/selfplay-anomalies" element={<SelfplayAnomaliesPage />} />

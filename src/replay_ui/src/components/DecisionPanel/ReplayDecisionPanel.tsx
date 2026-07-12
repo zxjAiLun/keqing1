@@ -72,11 +72,16 @@ function sortCandidatesForReviewer(
     return list.sort((a, b) => displayScore(b) - displayScore(a));
   }
   return list.sort((a, b) => {
-    const av = teacherValueFor(a, activeModel)?.q_value;
-    const bv = teacherValueFor(b, activeModel)?.q_value;
+    const at = teacherValueFor(a, activeModel);
+    const bt = teacherValueFor(b, activeModel);
+    const av = at?.q_value;
+    const bv = bt?.q_value;
     const aq = typeof av === 'number' && Number.isFinite(av) ? av : -Infinity;
     const bq = typeof bv === 'number' && Number.isFinite(bv) ? bv : -Infinity;
     if (bq !== aq) return bq - aq;
+    const ap = typeof at?.prob === 'number' && Number.isFinite(at.prob) ? at.prob : -Infinity;
+    const bp = typeof bt?.prob === 'number' && Number.isFinite(bt.prob) ? bt.prob : -Infinity;
+    if (bp !== ap) return bp - ap;
     return displayScore(b) - displayScore(a);
   });
 }
@@ -115,7 +120,7 @@ function ensureVisibleCandidates(
 function shortLabel(action: { type: string; pai?: string; consumed?: string[] }): string {
   switch (action.type) {
     case 'dahai':   return action.pai ?? '?';
-    case 'reach':   return '立直';
+    case 'reach':   return action.pai ? `${action.pai}立直` : '立直';
     case 'none':    return '过';
     case 'hora':    return '和牌';
     case 'chi':     return `吃${action.pai ?? ''}`;
@@ -213,10 +218,31 @@ export function ReplayDecisionPanel({
 
   const activeTeacherReview = teacherReviews.find((review) => review.model === selectedTeacherModel);
   const teacherExpected = teacherAction(activeTeacherReview);
+  const usesJointReachCandidates = activeTeacherReview?.display_mode === 'joint_reach_dahai'
+    && Boolean(activeTeacherReview.candidates?.length);
+  const jointReachCandidates: DecisionLogEntry['candidates'] = usesJointReachCandidates
+    ? (activeTeacherReview?.candidates ?? []).map((candidate) => ({
+        action: candidate.action,
+        logit: candidate.q_value ?? 0,
+        final_score: candidate.q_value ?? 0,
+        prob: candidate.prob ?? undefined,
+        teachers: [{
+          model: activeTeacherReview?.model ?? '',
+          q_value: candidate.q_value,
+          prob: candidate.prob,
+          rank: candidate.rank,
+        }],
+      }))
+    : [];
 
   // 按当前 reviewer 的 q 值降序排序；仍强制展示 Bot、实际动作和 teacher 前排动作。
-  const visibleCandidates = ensureVisibleCandidates(candidates, chosen, gt_action, teacherReviews, 12);
+  const visibleCandidates = usesJointReachCandidates
+    ? jointReachCandidates
+    : ensureVisibleCandidates(candidates, chosen, gt_action, teacherReviews, 12);
   const sorted = sortCandidatesForReviewer(visibleCandidates, selectedTeacherModel);
+  const actualActionForRows = usesJointReachCandidates
+    ? activeTeacherReview?.actual_action ?? null
+    : gt_action;
 
   const fallbackProbs = softmaxProbabilities(candidates.map((candidate) => displayScore(candidate)));
   const fallbackProbByCandidate = new Map<DecisionLogEntry['candidates'][number], number>(
@@ -255,7 +281,7 @@ export function ReplayDecisionPanel({
         <div style={{ flex: 1, overflowY: 'auto' }}>
           {sorted.map((c, idx) => {
             const isChosen = sameReplayAction(c.action, chosen);
-            const isGt = sameReplayAction(c.action, gt_action);
+            const isGt = sameReplayAction(c.action, actualActionForRows);
             const isTeacher = teacherExpected ? sameReplayAction(c.action, teacherExpected) : false;
             const probability = probabilityOf(c);
             const teacher = selectedTeacherModel ? teacherValueFor(c, selectedTeacherModel) : null;

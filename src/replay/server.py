@@ -15,6 +15,7 @@ from urllib.parse import urlparse, parse_qs
 from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from replay.normalize import normalize_replay_decisions
+from replay.external_reports import write_external_teacher_reports
 
 
 class _NumpyEncoder(json.JSONEncoder):
@@ -58,6 +59,10 @@ app = FastAPI(title="Keqing Unified Server", description="立直麻将 Review + 
 # ========== 合并 Battle Router ==========
 from gateway.api.battle import router as battle_router
 app.include_router(battle_router)
+
+# ========== Play with you (Tenhou 在线呼出 Mortal 账号) ==========
+from gateway.api.playwithyou import router as playwithyou_router
+app.include_router(playwithyou_router)
 
 # ========== 静态资源 ==========
 app.mount("/tiles", StaticFiles(directory=BASE_DIR.parent.parent / "tiles" / "riichi-mahjong-tiles" / "Regular"), name="tiles")
@@ -315,6 +320,7 @@ def _load_teacher_report_entries(report_path: Path, decisions: dict) -> tuple[st
                     "junme": entry.get("junme"),
                     "tiles_left": entry.get("tiles_left"),
                     "shanten": entry.get("shanten"),
+                    "display_mode": entry.get("display_mode"),
                     "actual_action": actual_action,
                     "expected_action": expected_action,
                     "is_equal": entry.get("is_equal"),
@@ -374,6 +380,8 @@ def _attach_teacher_report_overlays(decisions: dict, report_paths: list[Path]) -
             if key != "candidates"
         }
         review_entry["candidate_count"] = len(teacher_entry["candidates"])
+        if teacher_entry.get("display_mode"):
+            review_entry["candidates"] = teacher_entry["candidates"]
         if review_entry.get("actual_action") is None:
             actual_action = _actual_action_for_review(entry)
             if actual_action is not None:
@@ -401,10 +409,32 @@ def _attach_teacher_report_overlays(decisions: dict, report_paths: list[Path]) -
                 continue
             local_action = candidate.get("action")
             match = None
-            for teacher_candidate in teacher_entry["candidates"]:
-                if _teacher_same_action(local_action, teacher_candidate.get("action")):
-                    match = teacher_candidate
-                    break
+            if teacher_entry.get("display_mode") == "joint_reach_dahai":
+                local_type = local_action.get("type") if isinstance(local_action, dict) else None
+                if local_type == "dahai":
+                    matches = [
+                        item for item in teacher_entry["candidates"]
+                        if (item.get("action") or {}).get("pai") == local_action.get("pai")
+                    ]
+                elif local_type == "reach":
+                    matches = [
+                        item for item in teacher_entry["candidates"]
+                        if (item.get("action") or {}).get("type") == "reach"
+                    ]
+                else:
+                    matches = []
+                if matches:
+                    probabilities = [item.get("prob") for item in matches if item.get("prob") is not None]
+                    match = {
+                        "q_value": None,
+                        "prob": sum(float(value) for value in probabilities) if probabilities else None,
+                        "rank": None,
+                    }
+            else:
+                for teacher_candidate in teacher_entry["candidates"]:
+                    if _teacher_same_action(local_action, teacher_candidate.get("action")):
+                        match = teacher_candidate
+                        break
             if match:
                 teacher_value = {
                     "model": teacher_entry["model"],
@@ -482,6 +512,19 @@ def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
         "weak_mortal": BASE_DIR.parent.parent / "artifacts" / "model_v4_20240308_best_min.pth",
     }
     return mapping[bot_type]
+
+
+def _external_review_links(naga_url: str = "", mortal_url: str = "") -> dict[str, str]:
+    links: dict[str, str] = {}
+    for key, raw_value in (("naga", naga_url), ("mortal", mortal_url)):
+        value = raw_value.strip()
+        if not value:
+            continue
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(f"{key} Review 链接必须是有效的 http/https URL")
+        links[key] = value
+    return links
 
 
 _GUI_MORTAL_MODEL_LABELS = {
@@ -681,7 +724,12 @@ def _list_review_history(
             except ValueError:
                 continue
 
-            model = next(
+            external_labels = {
+                "NAGA_ニシキ": "NAGA ニシキ",
+                "NAGA_カガシ": "NAGA カガシ",
+                "Mortal_4.1c": "Mortal 4.1c",
+            }
+            model = external_labels.get(safe_model) or next(
                 (
                     label
                     for label in _GUI_MORTAL_MODEL_LABELS.values()
@@ -702,6 +750,7 @@ def _list_review_history(
                     "total_steps": meta.get("total_steps", 0),
                     "models": [],
                     "teacher_report_paths": [],
+                    "external_review_links": meta.get("external_review_links", {}),
                 },
             )
             names = item["player_names"]
@@ -711,7 +760,15 @@ def _list_review_history(
             item["models"].append(model)
             item["teacher_report_paths"].append(relative_path)
 
-    model_order = {"v4": 0, "70k.pth": 1, "T1@71000": 2, "gui_mortal.pth": 3}
+    model_order = {
+        "v4": 0,
+        "70k.pth": 1,
+        "T1@71000": 2,
+        "gui_mortal.pth": 3,
+        "NAGA ニシキ": 4,
+        "NAGA カガシ": 5,
+        "Mortal 4.1c": 6,
+    }
     history = list(grouped.values())
     for item in history:
         paired = sorted(
@@ -1001,6 +1058,8 @@ async def replay(
 async def replay_multi_teacher(
     player_id: Annotated[int, Form()] = 0,
     model_types: Annotated[list[str], Form()] = [],
+    naga_url: Annotated[str, Form()] = "",
+    mortal_url: Annotated[str, Form()] = "",
     files: Annotated[list[UploadFile], File()] = [],
     json_text: Annotated[str, Form()] = "",
     input_type: Annotated[str, Form()] = "url",
@@ -1021,6 +1080,7 @@ async def replay_multi_teacher(
         )
 
     try:
+        external_links = _external_review_links(naga_url, mortal_url)
         events = await _events_from_replay_form(files=files, json_text=json_text, input_type=input_type)
         normalized_events = _normalize_replay_events(events)
         storage = get_storage()
@@ -1051,6 +1111,7 @@ async def replay_multi_teacher(
             bot_type=base_model,
             player_names=base_decisions.get("player_names"),
             checkpoint=str(checkpoints[base_model]),
+            external_review_links=external_links,
         )
         base_decisions["replay_id"] = replay_id
 
@@ -1064,6 +1125,17 @@ async def replay_multi_teacher(
                 decisions=decisions_by_model[model_type],
             )
             report_paths.append(report_path)
+
+        if external_links:
+            report_paths.extend(
+                write_external_teacher_reports(
+                    replay_id=replay_id,
+                    player_id=player_id,
+                    decisions=base_decisions,
+                    links=external_links,
+                    output_dir=BASE_DIR.parent.parent / "artifacts" / "gui_teacher_reports",
+                )
+            )
 
         attached = _attach_teacher_report_overlays(base_decisions, report_paths)
         project_root = BASE_DIR.parent.parent.resolve()
@@ -1079,6 +1151,7 @@ async def replay_multi_teacher(
             }
             for model_type in selected_models
         ]
+        attached["external_review_links"] = external_links
         return Response(
             content=json.dumps(_json_safe(attached), cls=_NumpyEncoder, ensure_ascii=False, allow_nan=False),
             media_type="application/json",

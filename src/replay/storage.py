@@ -51,6 +51,7 @@ class ReplayStorage:
         bot_type: str = "mortal",
         player_names: Optional[list[str]] = None,
         checkpoint: Optional[str] = None,
+        external_review_links: Optional[dict[str, str]] = None,
     ) -> str:
         """保存回放到文件系统，返回 replay_id。"""
         replay_id = f"replay_{uuid.uuid4().hex[:8]}_{int(time.time())}"
@@ -89,6 +90,8 @@ class ReplayStorage:
             "player_names": player_names or ["E", "S", "W", "N"],
             "final_scores": final_scores,
         }
+        if external_review_links:
+            meta["external_review_links"] = external_review_links
         meta_path = replay_dir / "meta.json"
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -98,6 +101,19 @@ class ReplayStorage:
         self._write_index(index)
 
         return replay_id
+
+    def update_meta(self, replay_id: str, updates: dict) -> bool:
+        index = self._read_index()
+        meta = index.get(replay_id)
+        if not isinstance(meta, dict):
+            return False
+        meta.update(updates)
+        index[replay_id] = meta
+        self._write_index(index)
+        meta_path = self.base_dir / replay_id / "meta.json"
+        if meta_path.parent.exists():
+            meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
 
     def list(self) -> list[dict]:
         """返回所有回放元信息列表（按时间倒序）。"""

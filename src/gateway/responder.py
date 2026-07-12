@@ -6,7 +6,6 @@ from abc import ABCMeta, abstractmethod
 from itertools import combinations, permutations
 from typing import Awaitable, Callable
 
-import gateway.utils as utils
 from gateway.utils.state import State
 from gateway.utils.converter import (mjai_to_tenhou, mjai_to_tenhou_one,
                              tenhou_to_mjai, tenhou_to_mjai_one, to_34_array)
@@ -14,6 +13,64 @@ from gateway.utils.decoder import Meld, parse_owari_tag, parse_sc_tag
 from gateway.utils.judrdy import isrh
 
 logger = logging.getLogger(__name__)
+
+
+def _is_offered_action(received: dict, possible_actions: list[dict]) -> bool:
+    """Whether Tenhou explicitly offered this non-discard action.
+
+    The model maintains an independent reconstructed state.  Never let that
+    reconstruction override Tenhou's live response window; matching consumed
+    tiles also prevents sending a different chi/pon variant than the server
+    offered.
+    """
+    for offered in possible_actions:
+        if received.get('type') != offered.get('type'):
+            continue
+        if 'pai' in offered and received.get('pai') != offered.get('pai'):
+            continue
+        if 'consumed' in offered:
+            if sorted(received.get('consumed') or []) != sorted(offered['consumed']):
+                continue
+        return True
+    return False
+
+
+def _fallback_discard_index(state: State, *, cannot_dahai: list[str] | None = None) -> int:
+    """Choose a locally legal discard when a required bot response is absent."""
+    forbidden = set(cannot_dahai or [])
+    for index in reversed(state.hand):
+        if tenhou_to_mjai_one(index) not in forbidden:
+            return index
+    # A valid reach response always has at least one legal discard. This last
+    # resort is defensive for malformed upstream state only.
+    return state.hand[-1]
+
+
+def _tenhou_scores_to_points(raw_scores: str) -> list[int]:
+    """Convert Tenhou's hundred-point score fields to mjai/Mortal points.
+
+    Live Tenhou INIT/REACH packets use values such as ``250`` for 25,000
+    points.  Accept already-normalised values too, which keeps local protocol
+    simulators and exported JSON inputs convenient.
+    """
+    values = [int(value) for value in raw_scores.split(',') if value]
+    return [value * 100 if abs(value) <= 1000 else value for value in values]
+
+
+def _tenhou_agari_to_hora(message: dict[str, str], scores: list[int]) -> dict:
+    """Preserve the actor, target and winning tile from a Tenhou AGARI.
+
+    Native Mortal validates full mjai ``hora`` events.  A scores-only event
+    makes it reject the hand result and leaves its reconstructed game state at
+    the previous turn, which corrupts every following kyoku.
+    """
+    return {
+        'type': 'hora',
+        'actor': int(message['who']),
+        'target': int(message['fromWho']),
+        'pai': tenhou_to_mjai_one(int(message['machi'])),
+        'scores': scores,
+    }
 
 
 class Base(metaclass=ABCMeta):
@@ -101,12 +158,18 @@ class UN(Base):
             send_to_tenhou: Callable[[dict], Awaitable[None]],
             send_to_mjai: Callable[[dict], Awaitable[dict]]):
         import urllib.parse
+        matched_seat = None
         for i in range(4):
             raw = message.get(f'n{i}', '')
             name = urllib.parse.unquote(raw)
-            if name == state.name:
-                state.seat = i
-                break
+            state.names[i] = name
+            # Guest sessions can all be named exactly ``NoName``. Preserve the
+            # first match (the protocol's local perspective) while still
+            # collecting every name for Mortal's required [String; 4] field.
+            if matched_seat is None and name == state.name:
+                matched_seat = i
+        if matched_seat is not None:
+            state.seat = matched_seat
 
 
 class Taikyoku(Base):
@@ -119,7 +182,13 @@ class Taikyoku(Base):
             message: dict[str, str],
             send_to_tenhou: Callable[[dict], Awaitable[None]],
             send_to_mjai: Callable[[dict], Awaitable[dict]]):
-        sent = {'type': 'start_game', 'id': state.seat, 'names': []}
+        # Native libriichi Bot requires `names` to be a length-4 array; an empty
+        # list crashes every bot at game start. Fall back to 4 placeholders.
+        names = list(getattr(state, "names", []) or [])
+        while len(names) < 4:
+            names.append("")
+        names = names[:4]
+        sent = {'type': 'start_game', 'id': state.seat, 'names': names}
 
         if 'log' in message:
             oya = int(message['oya'])
@@ -155,7 +224,9 @@ class Init(Base):
         oya = int(message['oya'])
         seed = [int(s) for s in message['seed'].split(',')]
         bakaze = self.bakaze[seed[0] // 4]
-        kyoku = seed[0] % 4
+        # Mortal's StartKyoku.kyoku is 1-indexed (BoundedU8<1,4>); Tenhou's seed
+        # round index is 0-indexed, so convert.
+        kyoku = (seed[0] % 4) + 1
         honba = seed[1]
         kyotaku = seed[2]
         dora_marker = tenhou_to_mjai_one(seed[5])
@@ -163,7 +234,7 @@ class Init(Base):
         tehais[0] = tenhou_to_mjai(state.hand)
 
         ten = message.get('ten', '')
-        scores = [int(s) * 100 for s in ten.split(',') if s] if ten else [25000] * 4
+        scores = _tenhou_scores_to_points(ten) if ten else [25000] * 4
 
         sent = {
             'type': 'start_kyoku',
@@ -239,35 +310,53 @@ class Tsumo(Base):
 
             received = await send_to_mjai(sent)
 
+            # The live Tenhou flags are authoritative. A native model can
+            # occasionally nominate an action (notably reach) that it sees as
+            # legal in its reconstructed state but Tenhou did not offer.
+            # Sending that command disconnects the table, so use the drawn
+            # tile as a safe, always-legal fallback.
+            received_type = received.get('type')
+            if received_type != 'dahai' and not _is_offered_action(received, possible_actions):
+                logger.warning(
+                    "bot selected unavailable tsumo action %r; falling back to tsumogiri",
+                    received_type,
+                )
+                received = {
+                    'type': 'dahai',
+                    'pai': tenhou_to_mjai_one(state.hand[-1]),
+                    'tsumogiri': True,
+                }
+
             if received['type'] == 'dahai':
                 # 打牌
-                p = mjai_to_tenhou_one(state, received['pai'], received['tsumogiri'])
-
-                if not state.in_riichi:
-                    await utils.random_sleep(1, 2)
+                try:
+                    p = mjai_to_tenhou_one(
+                        state, received['pai'], received.get('tsumogiri', False)
+                    )
+                except (IndexError, KeyError, TypeError, ValueError):
+                    logger.warning(
+                        "bot selected invalid discard %r; falling back to tsumogiri",
+                        received,
+                    )
+                    p = state.hand[-1]
 
                 await send_to_tenhou({'tag': 'D', 'p': p})
             elif received['type'] == 'hora':
                 # 自摸
                 state.hora_pending = True
-                await utils.random_sleep(1, 2)
                 await send_to_tenhou({'tag': 'N', 'type': 7})
             elif received['type'] == 'reach':
                 # 立直
-                await utils.random_sleep(1, 2)
                 await send_to_tenhou({'tag': 'REACH'})
             elif received['type'] == 'ryukyoku':
                 # 九種九牌
-                await utils.random_sleep(1, 2)
                 await send_to_tenhou({'tag': 'N', 'type': 9})
             elif received['type'] == 'ankan':
                 # 暗槓
-                await utils.random_sleep(1, 2)
                 hai = mjai_to_tenhou_one(state, received['consumed'][0]) // 4 * 4
                 await send_to_tenhou({'tag': 'N', 'type': 4, 'hai': hai})
             elif received['type'] == 'kakan':
                 # 加槓
-                await utils.random_sleep(1, 2)
                 hai = mjai_to_tenhou_one(state, received['pai'])
                 await send_to_tenhou({'tag': 'N', 'type': 5, 'hai': hai})
         else:
@@ -377,21 +466,23 @@ class Dahai(Base):
             possible_actions.append({'type': 'hora'})
 
         received = await send_to_mjai(sent)
+        if received.get('type') != 'none' and not _is_offered_action(received, possible_actions):
+            logger.warning(
+                "bot selected unavailable discard-response action %r; passing",
+                received.get('type'),
+            )
+            received = {'type': 'none'}
 
         if received['type'] == 'pon':
             hai0, hai1 = mjai_to_tenhou(state, received['consumed'])
-            await utils.random_sleep(1, 2)
             await send_to_tenhou({'tag': 'N', 'type': 1, 'hai0': hai0, 'hai1': hai1})
         elif received['type'] == 'daiminkan':
             await send_to_tenhou({'tag': 'N', 'type': 2})
-            await utils.random_sleep(1, 2)
         elif received['type'] == 'chi':
             hai0, hai1 = mjai_to_tenhou(state, received['consumed'])
-            await utils.random_sleep(1, 2)
             await send_to_tenhou({'tag': 'N', 'type': 3, 'hai0': hai0, 'hai1': hai1})
         elif received['type'] == 'hora':
             state.hora_pending = True
-            await utils.random_sleep(1, 2)
             await send_to_tenhou({'tag': 'N', 'type': 6})
         elif t != 0 and received['type'] == 'none':
             await send_to_tenhou({'tag': 'N'})
@@ -458,10 +549,18 @@ class Naki(Base):
 
         received = await send_to_mjai(sent)
 
-        if received['type'] == 'dahai':
-            # 打牌
-            p = mjai_to_tenhou_one(state, received['pai'], received['tsumogiri'])
-            await utils.random_sleep(1, 2)
+        if actor == 0:
+            if received.get('type') == 'dahai':
+                try:
+                    p = mjai_to_tenhou_one(
+                        state, received['pai'], received.get('tsumogiri', False)
+                    )
+                except (IndexError, KeyError, TypeError, ValueError):
+                    logger.warning("bot selected invalid post-meld discard %r", received)
+                    p = _fallback_discard_index(state)
+            else:
+                logger.warning("bot omitted required post-meld discard; using fallback")
+                p = _fallback_discard_index(state)
             await send_to_tenhou({'tag': 'D', 'p': p})
 
     def cannot_dahai(self, meld: Meld, state: State) -> list[str]:
@@ -494,10 +593,20 @@ class ReachStep1(Base):
         sent = {'type': 'reach', 'actor': actor}
 
         if actor == 0:
-            sent['cannot_dahai'] = self.cannot_dahai(state)
+            cannot_dahai = self.cannot_dahai(state)
+            sent['cannot_dahai'] = cannot_dahai
             received = await send_to_mjai(sent)
-            p = mjai_to_tenhou_one(state, received['pai'], received['tsumogiri'])
-            await utils.random_sleep(1, 2)
+            if received.get('type') == 'dahai':
+                try:
+                    p = mjai_to_tenhou_one(
+                        state, received['pai'], received.get('tsumogiri', False)
+                    )
+                except (IndexError, KeyError, TypeError, ValueError):
+                    logger.warning("bot selected invalid reach discard %r", received)
+                    p = _fallback_discard_index(state, cannot_dahai=cannot_dahai)
+            else:
+                logger.warning("bot omitted required reach discard; using fallback")
+                p = _fallback_discard_index(state, cannot_dahai=cannot_dahai)
             await send_to_tenhou({'tag': 'D', 'p': p})
         else:
             await send_to_mjai(sent)
@@ -537,7 +646,7 @@ class ReachStep2(Base):
         actor = int(message['who'])
         deltas = [0] * 4
         deltas[actor] = -1000
-        scores = [int(s) * 100 for s in message['ten'].split(',')]
+        scores = _tenhou_scores_to_points(message['ten'])
         await send_to_mjai({
             'type': 'reach_accepted',
             'actor': actor,
@@ -572,7 +681,7 @@ class Agari(Base):
             send_to_tenhou: Callable[[dict], Awaitable[None]],
             send_to_mjai: Callable[[dict], Awaitable[dict]]):
         scores = parse_sc_tag(message)
-        await send_to_mjai({'type': 'hora', 'scores': scores})
+        await send_to_mjai(_tenhou_agari_to_hora(message, scores))
         await send_to_mjai({'type': 'end_kyoku'})
         await send_to_tenhou({'tag': 'NEXTREADY'})
 
@@ -606,7 +715,7 @@ class End(Base):
         scores = parse_sc_tag(message)
 
         if message['tag'] == 'AGARI':
-            await send_to_mjai({'type': 'hora', 'scores': scores})
+            await send_to_mjai(_tenhou_agari_to_hora(message, scores))
         else:
             await send_to_mjai({'type': 'ryukyoku', 'scores': scores})
 

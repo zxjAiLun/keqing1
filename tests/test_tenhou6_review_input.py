@@ -1,5 +1,41 @@
-from convert.tenhou6_utils import _result_events, _take_meld_matches_discard, tenhou6_to_mjai_events
+import convert.tenhou6_utils as tenhou6_utils
+from convert.tenhou6_utils import _decode_kakan, _result_events, _take_meld_matches_discard, tenhou6_to_mjai_events
 from replay.bot import _load_events_from_source
+
+
+def test_tenhou6_kakan_marker_can_appear_inside_meld_string() -> None:
+    assert _decode_kakan("46k464646") == ("F", ["F", "F", "F"])
+    assert _decode_kakan("4545k4545") == ("P", ["P", "P", "P"])
+    assert _decode_kakan("51k151515") == ("5m", ["5mr", "5m", "5m"])
+
+
+def test_windows_convlog_never_executes_linux_binary_directly(monkeypatch, tmp_path) -> None:
+    linux_binary = tmp_path / "convlog"
+    linux_binary.write_bytes(b"\x7fELF")
+    monkeypatch.setattr(tenhou6_utils, "CONVLOG_BIN", linux_binary)
+    monkeypatch.setattr(tenhou6_utils.os, "name", "nt")
+    monkeypatch.setattr(tenhou6_utils.shutil, "which", lambda _name: None)
+
+    assert tenhou6_utils._convlog_command(tmp_path / "input.json", tmp_path / "output.mjson") is None
+
+
+def test_windows_convlog_uses_wsl_for_linux_binary(monkeypatch, tmp_path) -> None:
+    linux_binary = tmp_path / "convlog"
+    linux_binary.write_bytes(b"\x7fELF")
+    monkeypatch.setattr(tenhou6_utils, "CONVLOG_BIN", linux_binary)
+    monkeypatch.setattr(tenhou6_utils.os, "name", "nt")
+    monkeypatch.setattr(tenhou6_utils.shutil, "which", lambda _name: "C:/Windows/System32/wsl.exe")
+    monkeypatch.setattr(tenhou6_utils, "_wsl_path", lambda path: f"/mnt/e/{path.name}")
+
+    command = tenhou6_utils._convlog_command(tmp_path / "input.json", tmp_path / "output.mjson")
+
+    assert command == [
+        "wsl.exe",
+        "--",
+        "/mnt/e/convlog",
+        "/mnt/e/input.json",
+        "/mnt/e/output.mjson",
+    ]
 
 
 def test_tenhou6_review_input_converts_to_mjai_events() -> None:

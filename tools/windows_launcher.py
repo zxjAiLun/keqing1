@@ -174,6 +174,9 @@ def load_review_history(project_root: Path) -> list[dict]:
         "T1_71000": "T1@71000",
         "v4": "v4",
         "gui_mortal.pth": "gui_mortal.pth",
+        "NAGA_ニシキ": "NAGA ニシキ",
+        "NAGA_カガシ": "NAGA カガシ",
+        "Mortal_4.1c": "Mortal 4.1c",
     }
     if report_dir.exists():
         for report_path in report_dir.glob("*.json"):
@@ -197,11 +200,20 @@ def load_review_history(project_root: Path) -> list[dict]:
                 "player_name": names[player_id] if 0 <= player_id < len(names) else f"P{player_id}",
                 "models": [],
                 "teacher_report_paths": [],
+                "external_review_links": meta.get("external_review_links", {}),
             })
             item["models"].append(model_labels.get(safe_model, safe_model))
             item["teacher_report_paths"].append(report_path.relative_to(project_root).as_posix())
 
-    model_order = {"v4": 0, "70k.pth": 1, "T1@71000": 2, "gui_mortal.pth": 3}
+    model_order = {
+        "v4": 0,
+        "70k.pth": 1,
+        "T1@71000": 2,
+        "gui_mortal.pth": 3,
+        "NAGA ニシキ": 4,
+        "NAGA カガシ": 5,
+        "Mortal 4.1c": 6,
+    }
     items = list(grouped.values())
     for item in items:
         pairs = sorted(
@@ -361,10 +373,25 @@ class WorkbenchLauncher:
         self.history_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         history_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.history_tree.bind("<Double-1>", lambda _event: self._on_open_history())
+        self.history_tree.bind("<<TreeviewSelect>>", lambda _event: self._update_external_buttons())
 
         history_buttons = ttk.Frame(history_frame)
         history_buttons.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(history_buttons, text="打开选中 Review", command=self._on_open_history).pack(side=tk.LEFT)
+        self.naga_btn = ttk.Button(
+            history_buttons,
+            text="NAGA",
+            command=lambda: self._on_open_external_review("naga"),
+            state=tk.DISABLED,
+        )
+        self.naga_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.mortal_btn = ttk.Button(
+            history_buttons,
+            text="Mortal 4.1c",
+            command=lambda: self._on_open_external_review("mortal"),
+            state=tk.DISABLED,
+        )
+        self.mortal_btn.pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(history_buttons, text="刷新", command=self._refresh_history).pack(side=tk.LEFT, padx=(8, 0))
 
         # 进度条（初始隐藏）
@@ -400,14 +427,28 @@ class WorkbenchLauncher:
             )
         if selected_id and selected_id in self.history_items:
             self.history_tree.selection_set(selected_id)
+        self._update_external_buttons()
+
+    def _selected_history_item(self) -> dict | None:
+        selected = self.history_tree.selection()
+        return self.history_items.get(selected[0]) if selected else None
+
+    def _update_external_buttons(self) -> None:
+        item = self._selected_history_item()
+        links = item.get("external_review_links", {}) if item else {}
+        self.naga_btn.configure(state=tk.NORMAL if links.get("naga") else tk.DISABLED)
+        self.mortal_btn.configure(state=tk.NORMAL if links.get("mortal") else tk.DISABLED)
+
+    def _on_open_external_review(self, kind: str) -> None:
+        item = self._selected_history_item()
+        url = (item or {}).get("external_review_links", {}).get(kind)
+        if url:
+            open_browser(url)
 
     def _on_open_history(self) -> None:
-        selected = self.history_tree.selection()
-        if not selected:
-            messagebox.showinfo("历史 Review", "请先选择一条 Review。")
-            return
-        item = self.history_items.get(selected[0])
+        item = self._selected_history_item()
         if item is None:
+            messagebox.showinfo("历史 Review", "请先选择一条 Review。")
             return
         target_url = review_url(item)
         if self.running or is_workbench_http(DEFAULT_PORT):

@@ -35,6 +35,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--mortal-root", type=Path, default=Path("third_party/Mortal"))
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/eval/one_vs_three_smoke"))
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--require-cuda", action="store_true")
     parser.add_argument("--seed-start", type=int, default=10000)
     parser.add_argument("--seed-key", type=int, default=0x2000)
     parser.add_argument("--seed-count", type=int, default=1, help="1 seed produces 4 hanchans")
@@ -45,6 +46,13 @@ def _parse_args() -> argparse.Namespace:
         default=0,
         help="emit stderr progress every N seeds; 0 runs the native arena in one batch",
     )
+    parser.add_argument(
+        "--native-batch-seeds",
+        type=int,
+        default=0,
+        help="seed sets per Rust arena batch; 0 preserves the progress-sized batch behavior",
+    )
+    parser.add_argument("--profile", action="store_true", help="record per-engine inference batch and timing telemetry")
     parser.add_argument("--no-platform-report", action="store_true", help="skip platform account pt/rating report")
     parser.add_argument("--platform-model-label", default=None, help="force platform account labels to MODEL@01-04")
     parser.add_argument("--enable-amp", action="store_true")
@@ -61,6 +69,7 @@ def _load_engine(
     device: str,
     name: str,
     enable_amp: bool,
+    enable_profile: bool,
 ) -> Any:
     mortal_python_dir = (mortal_root / "mortal").resolve()
     if str(mortal_python_dir) not in sys.path:
@@ -88,10 +97,13 @@ def _load_engine(
         enable_amp=bool(enable_amp),
         enable_rule_based_agari_guard=True,
         name=name,
+        enable_profile=enable_profile,
     )
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    if bool(args.require_cuda) and not torch.cuda.is_available():
+        raise SystemExit("CUDA required but torch.cuda.is_available() is False")
     mortal_python_dir = (args.mortal_root / "mortal").resolve()
     if str(mortal_python_dir) not in sys.path:
         sys.path.insert(0, str(mortal_python_dir))
@@ -111,6 +123,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         device=str(args.device),
         name="challenger",
         enable_amp=bool(args.enable_amp),
+        enable_profile=bool(args.profile),
     )
     champion = _load_engine(
         state_file=champion_path,
@@ -118,12 +131,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         device=str(args.device),
         name="champion",
         enable_amp=bool(args.enable_amp),
+        enable_profile=bool(args.profile),
     )
 
     env = OneVsThree(disable_progress_bar=True, log_dir=str(log_dir))
     total_seeds = int(args.seed_count)
     progress_every = int(getattr(args, "progress_every", 0) or 0)
-    batch_size = total_seeds if progress_every <= 0 else max(1, progress_every)
+    requested_batch_size = int(getattr(args, "native_batch_seeds", 0) or 0)
+    batch_size = requested_batch_size or (total_seeds if progress_every <= 0 else max(1, progress_every))
+    if batch_size <= 0:
+        raise ValueError("--native-batch-seeds must be positive when provided")
     rank_counts = [0, 0, 0, 0]
     completed = 0
     if bool(getattr(args, "resume", False)) and log_dir.exists():
@@ -195,6 +212,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "seed_start": int(args.seed_start),
             "seed_key": int(args.seed_key),
             "seed_count": int(args.seed_count),
+            "native_batch_seeds": int(batch_size),
             "device": str(args.device),
             "rank_points_profile": rank_points_profile,
             "rank_points_values": [float(value) for value in rank_points],
@@ -205,6 +223,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         rank_points_values=rank_points,
     )
     write_metrics(args.output_dir / "metrics.json", document)
+    if bool(args.profile):
+        inference_profile = {
+            "challenger": challenger.profile_snapshot(),
+            "champion": champion.profile_snapshot(),
+        }
+        profile_path = args.output_dir / "inference_profile.json"
+        profile_path.write_text(json.dumps(inference_profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        document["artifacts"]["inference_profile_json"] = str(profile_path)
+        document["inference_profile"] = inference_profile
     stat_report = write_stat_report(
         output_dir=args.output_dir,
         log_dir=log_dir,

@@ -80,7 +80,7 @@ export function actionLabel(action: { type: string; pai?: string; tsumogiri?: bo
     case 'dahai':
       return action.tsumogiri ? `摸切 ${action.pai}` : `打 ${action.pai}`;
     case 'reach':
-      return '立直';
+      return action.pai ? `${action.pai} 立直` : '立直';
     case 'reach_accepted':
       return '立直接受';
     case 'chi': {
@@ -143,8 +143,11 @@ function normalizedConsumedKey(consumed: string[] | undefined): string {
 export function actionComparableKey(action: ComparableAction | null | undefined): string {
   if (!action) return '';
   const type = normalizeReplayActionType(action.type);
-  if (type === 'none' || type === 'reach' || type === 'ryukyoku') {
+  if (type === 'none' || type === 'ryukyoku') {
     return JSON.stringify({ type });
+  }
+  if (type === 'reach') {
+    return JSON.stringify({ type, pai: action.pai ? normalizeTileKeepAka(action.pai) : null });
   }
   if (type === 'dahai') {
     return JSON.stringify({
@@ -184,8 +187,12 @@ export function sameReplayAction(
   const typeB = normalizeReplayActionType(b.type);
   if (typeA !== typeB) return false;
 
-  if (typeA === 'none' || typeA === 'reach' || typeA === 'ryukyoku') {
+  if (typeA === 'none' || typeA === 'ryukyoku') {
     return true;
+  }
+  if (typeA === 'reach') {
+    if (!a.pai && !b.pai) return true;
+    return Boolean(a.pai && b.pai && normalizeTileKeepAka(a.pai) === normalizeTileKeepAka(b.pai));
   }
 
   if (typeA === 'dahai') {
