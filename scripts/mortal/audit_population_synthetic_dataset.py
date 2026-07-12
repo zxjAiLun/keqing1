@@ -88,7 +88,7 @@ def audit_pool(data_root: Path, pool_id: str, expected_start: int) -> dict[str, 
 
 def main() -> None:
     args = parse_args()
-    pools = [audit_pool(args.data_root, pool_id, seed_start) for pool_id, seed_start, _ in POOL_SPECS]
+    pools = [audit_pool(args.data_root, pool_id, seed_start) for pool_id, seed_start in POOL_SPECS]
     hash_owners: dict[str, list[str]] = {}
     seed_owners: dict[str, list[str]] = {}
     for pool in pools:

@@ -11,24 +11,17 @@ export interface BotCatalogEntry {
 export const BOT_CATALOG: BotCatalogEntry[] = [
   {
     value: 'mortal',
-    label: 'Mortal gui_mortal.pth',
-    shortLabel: 'gui_mortal',
-    badge: '当前训练导出',
-    description: 'artifacts/mortal_serving/gui_mortal.pth。当前 GUI 默认使用的 Mortal checkpoint。',
+    label: 'Mortal candidate',
+    shortLabel: 'candidate',
+    badge: 'V2 candidate',
+    description: 'V2@74000 存在时使用该权重，否则回退到 70k。',
   },
   {
     value: '70k',
-    label: 'Mortal 70k.pth',
+    label: 'Mortal 70k',
     shortLabel: '70k',
     badge: '70k 锚点',
-    description: 'artifacts/mortal_serving/70k.pth。固定 70k 训练步锚点权重。',
-  },
-  {
-    value: 't1_71000',
-    label: 'Mortal T1@71000',
-    shortLabel: 'T1@71000',
-    badge: 'baseline',
-    description: 'artifacts/experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth。基于 70k + v4 teacher CE 的 71000 step baseline。',
+    description: '固定 70k 训练步锚点权重。',
   },
   {
     value: 'weak_mortal',
@@ -46,7 +39,7 @@ export const BOT_CATALOG: BotCatalogEntry[] = [
   },
 ];
 
-const GUI_MODEL_ORDER: BotType[] = ['weak_mortal', '70k', 't1_71000', 'mortal'];
+const GUI_MODEL_ORDER: BotType[] = ['weak_mortal', '70k', 'mortal'];
 
 export const GUI_BOT_CATALOG: BotCatalogEntry[] = BOT_CATALOG
   .filter((entry) => entry.value !== 'rulebase')
@@ -55,9 +48,8 @@ export const GUI_BOT_CATALOG: BotCatalogEntry[] = BOT_CATALOG
 export const DEFAULT_BOT_TYPE: BotType = 'mortal';
 
 export const BOT_CHECKPOINT_DEFAULTS: Record<BotType, string> = {
-  mortal: 'artifacts/mortal_serving/gui_mortal.pth',
-  '70k': 'artifacts/mortal_serving/70k.pth',
-  t1_71000: 'artifacts/experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth',
+  mortal: 'artifacts/experiments/model_pool_2026_07/V2_population_mixed_v4_warmstart_2026_07/checkpoints/mortal_74000.pth',
+  '70k': 'artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth',
   weak_mortal: 'artifacts/model_v4_20240308_best_min.pth',
   rulebase: '',
 };

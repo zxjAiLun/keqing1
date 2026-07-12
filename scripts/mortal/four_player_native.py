@@ -28,11 +28,14 @@ from scripts.mortal.build_platform_account_report import build_report as build_p
 from scripts.mortal.stat_report import write_stat_report
 
 
+_ANCHOR_70K = Path("artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth")
+_V2_CANDIDATE = Path("artifacts/experiments/model_pool_2026_07/V2_population_mixed_v4_warmstart_2026_07/checkpoints/mortal_74000.pth")
+_V4 = Path("artifacts/model_v4_20240308_best_min.pth")
 DEFAULT_MODELS = {
-    "70k": Path("artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth"),
-    "80k_game": Path("artifacts/mortal_training/checkpoints/mortal_default_80k_rejected_gate.pth"),
-    "T1_71000": Path("artifacts/experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth"),
-    "model_v4": Path("artifacts/model_v4_20240308_best_min.pth"),
+    "model_v4": _V4,
+    "70k": _ANCHOR_70K,
+    "candidate": _V2_CANDIDATE if _V2_CANDIDATE.exists() else _ANCHOR_70K,
+    "v4_reference": _V4,
 }
 
 

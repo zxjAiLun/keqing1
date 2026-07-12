@@ -6,15 +6,18 @@ from typing import Any
 from inference.rulebase_bot import RulebaseBot
 from inference.mortal_bot import MortalReviewBot
 
-# Named Mortal checkpoints shipped under artifacts/mortal_serving.
-# Only Mortal-format weights are supported (no xmodel / custom architectures).
-MORTAL_CHECKPOINTS: dict[str, str] = {
-    "mortal": "mortal.pth",
-    "70k": "70k.pth",
-    "gui": "gui_mortal.pth",
-    "v4": "gui_mortal.pth",
-    "weak": "weak_mortal.pth",
-    "weak_mortal": "weak_mortal.pth",
+_ANCHOR_70K = Path("artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth")
+_V4 = Path("artifacts/model_v4_20240308_best_min.pth")
+_V2_CANDIDATE = Path("artifacts/experiments/model_pool_2026_07/V2_population_mixed_v4_warmstart_2026_07/checkpoints/mortal_74000.pth")
+
+# Named local Mortal checkpoints. ``mortal`` prefers the promoted V2 candidate
+# once available and falls back to the 70k anchor during training.
+MORTAL_CHECKPOINTS: dict[str, Path] = {
+    "mortal": _V2_CANDIDATE,
+    "70k": _ANCHOR_70K,
+    "v4": _V4,
+    "weak": _V4,
+    "weak_mortal": _V4,
 }
 
 SUPPORTED_BOT_NAMES = {"rulebase", *MORTAL_CHECKPOINTS.keys()}
@@ -36,7 +39,7 @@ def resolve_bot_spec(
       * ``"rulebase"``           -> rule-based bot, no model
       * a key in MORTAL_CHECKPOINTS (e.g. ``"mortal"``, ``"70k"``, ``"v4"``)
       * an explicit path ending in ``.pth/.pt/.ckpt`` (absolute, or resolved
-        relative to artifacts/mortal_serving)
+        relative to the project root)
     """
     spec = str(spec).strip()
     if not spec:
@@ -46,14 +49,16 @@ def resolve_bot_spec(
         return "rulebase", None
 
     if spec in MORTAL_CHECKPOINTS:
-        path = Path(project_root) / "artifacts" / "mortal_serving" / MORTAL_CHECKPOINTS[spec]
+        path = Path(project_root) / MORTAL_CHECKPOINTS[spec]
+        if spec == "mortal" and not path.exists():
+            path = Path(project_root) / _ANCHOR_70K
         return "mortal", path.resolve()
 
     candidate = Path(spec)
     if candidate.suffix.lower() in _CHECKPOINT_SUFFIXES:
         if candidate.is_absolute() and candidate.exists():
             return "mortal", candidate.resolve()
-        alt = Path(project_root) / "artifacts" / "mortal_serving" / candidate.name
+        alt = Path(project_root) / candidate
         if alt.exists():
             return "mortal", alt.resolve()
         # Surface a clear error instead of failing deep inside torch.load.

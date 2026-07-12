@@ -35,19 +35,19 @@ from inference.mortal_bot import MortalReviewBot
 _BOT_CLASSES = {
     "mortal": MortalReviewBot,
     "70k": MortalReviewBot,
-    "t1_71000": MortalReviewBot,
     "weak_mortal": MortalReviewBot,
     "rulebase": RulebaseBot,
 }
-_MORTAL_BOT_TYPES = {"mortal", "70k", "t1_71000", "weak_mortal"}
+_MORTAL_BOT_TYPES = {"mortal", "70k", "weak_mortal"}
 
 PLAYER_NAMES = ["East", "South", "West", "North"]
 
 # 默认 checkpoint 路径（按 bot 类型，相对于 PROJECT_ROOT）
+_ANCHOR_70K = _PROJECT_ROOT / "artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth"
+_V2_CANDIDATE = _PROJECT_ROOT / "artifacts/experiments/model_pool_2026_07/V2_population_mixed_v4_warmstart_2026_07/checkpoints/mortal_74000.pth"
 _DEFAULT_CHECKPOINTS = {
-    "mortal": _PROJECT_ROOT / "artifacts/mortal_serving/gui_mortal.pth",
-    "70k": _PROJECT_ROOT / "artifacts/mortal_serving/70k.pth",
-    "t1_71000": _PROJECT_ROOT / "artifacts/experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth",
+    "mortal": _V2_CANDIDATE if _V2_CANDIDATE.exists() else _ANCHOR_70K,
+    "70k": _ANCHOR_70K,
     "weak_mortal": _PROJECT_ROOT / "artifacts/model_v4_20240308_best_min.pth",
 }
 _REVIEW_EXPORTER = DefaultRuntimeReviewExporter()

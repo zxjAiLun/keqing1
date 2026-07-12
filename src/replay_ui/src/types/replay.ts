@@ -160,7 +160,7 @@ export interface DecisionLogEntry {
   kyoku_key: KyokuInfo;
   /** 多个 reviewer teacher overlay，例如 Mortal 3.0 / 4.1b 的 q/prob。 */
   teacher_reviews?: TeacherReviewEntry[];
-  /** 可选 reviewer teacher overlay，例如 Mortal 4.1b 的 q/prob。兼容旧字段。 */
+  /** 可选本地模型 overlay，包含候选动作的 q/prob。 */
   teacher_review?: TeacherReviewEntry;
 }
 

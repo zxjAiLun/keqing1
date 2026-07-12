@@ -227,7 +227,7 @@ def _resolve_model_path(
     if model_path is not None:
         return Path(model_path)
     if bot_name == "mortal":
-        return Path(project_root) / "artifacts" / "mortal_serving" / "mortal.pth"
+        return Path(project_root) / "artifacts" / "mortal_training" / "checkpoints" / "mortal_default_70k_promoted_candidate.pth"
     return Path(project_root) / "artifacts" / "models" / bot_name / "best.pth"
 
 

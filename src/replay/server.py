@@ -6,16 +6,12 @@ import json
 import math
 import sys
 import numpy as np
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Annotated
-from urllib.request import urlopen, Request
-from urllib.parse import urlparse, parse_qs
 
 from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from replay.normalize import normalize_replay_decisions
-from replay.external_reports import write_external_teacher_reports
 
 
 class _NumpyEncoder(json.JSONEncoder):
@@ -48,11 +44,6 @@ def _json_safe(value):
 from fastapi.staticfiles import StaticFiles
 
 BASE_DIR = Path(__file__).parent
-
-_SCRIPTS_DIR = Path(__file__).parent.parent.parent / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-from mjlog2mjai_parse import parse_mjlog_to_mjai
 
 app = FastAPI(title="Keqing Unified Server", description="立直麻将 Review + 对战服务")
 
@@ -505,32 +496,20 @@ def _infer_player_bot_type(player_name: str | None, fallback: str | None = None)
 
 
 def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
+    project_root = BASE_DIR.parent.parent
+    candidate = project_root / "artifacts" / "experiments" / "model_pool_2026_07" / "V2_population_mixed_v4_warmstart_2026_07" / "checkpoints" / "mortal_74000.pth"
+    anchor = project_root / "artifacts" / "mortal_training" / "checkpoints" / "mortal_default_70k_promoted_candidate.pth"
     mapping = {
-        "mortal": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "gui_mortal.pth",
-        "70k": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "70k.pth",
-        "t1_71000": BASE_DIR.parent.parent / "artifacts" / "experiments" / "teacher_transfer_2026_05" / "T1_teacher_ce_01" / "mortal.pth",
-        "weak_mortal": BASE_DIR.parent.parent / "artifacts" / "model_v4_20240308_best_min.pth",
+        "mortal": candidate if candidate.exists() else anchor,
+        "70k": anchor,
+        "weak_mortal": project_root / "artifacts" / "model_v4_20240308_best_min.pth",
     }
     return mapping[bot_type]
 
 
-def _external_review_links(naga_url: str = "", mortal_url: str = "") -> dict[str, str]:
-    links: dict[str, str] = {}
-    for key, raw_value in (("naga", naga_url), ("mortal", mortal_url)):
-        value = raw_value.strip()
-        if not value:
-            continue
-        parsed = urlparse(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError(f"{key} Review 链接必须是有效的 http/https URL")
-        links[key] = value
-    return links
-
-
 _GUI_MORTAL_MODEL_LABELS = {
-    "mortal": "gui_mortal.pth",
-    "70k": "70k.pth",
-    "t1_71000": "T1@71000",
+    "mortal": "V2 candidate",
+    "70k": "70k",
     "weak_mortal": "v4",
 }
 
@@ -555,24 +534,7 @@ async def _events_from_replay_form(
         raise ValueError("请上传文件或粘贴 JSON 文本")
 
     if input_type == "url":
-        parsed = urlparse(text)
-        qs = parse_qs(parsed.query)
-        ids = qs.get("log", [])
-        if not ids:
-            raise ValueError("天凤链接中未找到 log 参数")
-        log_id = ids[0]
-        xml_url = f"https://tenhou.net/0/log/?{log_id}"
-        req = Request(xml_url, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; mahjong-research-bot/1.0)",
-            "Referer": "https://tenhou.net/",
-        })
-        with urlopen(req, timeout=30) as resp:
-            xml_str = resp.read().decode("utf-8", errors="replace")
-        if "<mjloggm" not in xml_str and "<mjlog" not in xml_str.lower():
-            raise ValueError("XML 内容异常，可能牌谱不存在或需要权限")
-        root = ET.fromstring(xml_str)
-        mjson_str = parse_mjlog_to_mjai(root)
-        return [json.loads(line) for line in mjson_str.splitlines() if line.strip()]
+        raise ValueError("经典天凤 XML URL 导入已移除；请使用 Tenhou6 JSON、mjai JSON 或上传文件")
 
     if input_type == "tenhou6":
         from replay.bot import _load_events_from_source
@@ -679,7 +641,7 @@ def _write_runtime_teacher_report(
     decisions: dict,
 ) -> Path:
     project_root = BASE_DIR.parent.parent
-    out_dir = project_root / "artifacts" / "gui_teacher_reports"
+    out_dir = project_root / "artifacts" / "replay_model_reviews"
     out_dir.mkdir(parents=True, exist_ok=True)
     safe_model = _GUI_MORTAL_MODEL_LABELS.get(model_type, model_type)
     safe_model = safe_model.replace("@", "_").replace("/", "_").replace("\\", "_").replace(" ", "_")
@@ -706,7 +668,7 @@ def _list_review_history(
 ) -> list[dict]:
     storage = storage or get_storage()
     project_root = (project_root or BASE_DIR.parent.parent).resolve()
-    report_dir = report_dir or (project_root / "artifacts" / "gui_teacher_reports")
+    report_dir = report_dir or (project_root / "artifacts" / "replay_model_reviews")
     metas = {item["replay_id"]: item for item in storage.list() if item.get("replay_id")}
     grouped: dict[tuple[str, int], dict] = {}
 
@@ -724,12 +686,7 @@ def _list_review_history(
             except ValueError:
                 continue
 
-            external_labels = {
-                "NAGA_ニシキ": "NAGA ニシキ",
-                "NAGA_カガシ": "NAGA カガシ",
-                "Mortal_4.1c": "Mortal 4.1c",
-            }
-            model = external_labels.get(safe_model) or next(
+            model = next(
                 (
                     label
                     for label in _GUI_MORTAL_MODEL_LABELS.values()
@@ -762,12 +719,8 @@ def _list_review_history(
 
     model_order = {
         "v4": 0,
-        "70k.pth": 1,
-        "T1@71000": 2,
-        "gui_mortal.pth": 3,
-        "NAGA ニシキ": 4,
-        "NAGA カガシ": 5,
-        "Mortal 4.1c": 6,
+        "70k": 1,
+        "V2 candidate": 2,
     }
     history = list(grouped.values())
     for item in history:
@@ -781,23 +734,11 @@ def _list_review_history(
     return history
 
 
-_DEFAULT_BEHAVIOR_CASEBOOK = (
-    BASE_DIR.parent.parent
-    / "artifacts"
-    / "experiments"
-    / "default_mainline_2026_05"
-    / "behavior_replay_cases"
-)
-_DEFAULT_PAIRED_BEHAVIOR_CASEBOOK = (
-    BASE_DIR.parent.parent
-    / "artifacts"
-    / "experiments"
-    / "default_mainline_2026_05"
-    / "paired_behavior_cases"
-)
+_DEFAULT_BEHAVIOR_CASEBOOK = BASE_DIR.parent.parent / "artifacts" / "replay_model_reviews"
+_DEFAULT_PAIRED_BEHAVIOR_CASEBOOK = _DEFAULT_BEHAVIOR_CASEBOOK
 _CASEBOOK_CHECKPOINTS = {
-    "70k": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "70k.pth",
-    "80k": BASE_DIR.parent.parent / "artifacts" / "mortal_serving" / "gui_mortal.pth",
+    "70k": BASE_DIR.parent.parent / "artifacts" / "mortal_training" / "checkpoints" / "mortal_default_70k_promoted_candidate.pth",
+    "candidate": _default_checkpoint_for_bot_type("mortal"),
 }
 
 
@@ -975,27 +916,7 @@ async def replay(
             text = json_text.strip()
 
         if input_type == "url":
-            parsed = urlparse(text)
-            qs = parse_qs(parsed.query)
-            ids = qs.get("log", [])
-            if not ids:
-                return JSONResponse(status_code=400, content={"error": "天凤链接中未找到 log 参数"})
-            log_id = ids[0]
-
-            xml_url = f"https://tenhou.net/0/log/?{log_id}"
-            req = Request(xml_url, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; mahjong-research-bot/1.0)",
-                "Referer": "https://tenhou.net/",
-            })
-            with urlopen(req, timeout=30) as resp:
-                xml_str = resp.read().decode("utf-8", errors="replace")
-            if "<mjloggm" not in xml_str and "<mjlog" not in xml_str.lower():
-                return JSONResponse(status_code=400, content={"error": "XML 内容异常，可能牌谱不存在或需要权限"})
-
-            root = ET.fromstring(xml_str)
-            mjson_str = parse_mjlog_to_mjai(root)
-            events = [json.loads(l) for l in mjson_str.splitlines() if l.strip()]
-            bot = run_replay_single_raw(events, player_id=player_id, checkpoint=checkpoint or None, input_type="url", bot_type=bot_type)
+            return JSONResponse(status_code=400, content={"error": "经典天凤 XML URL 导入已移除；请使用 Tenhou6 JSON 或 mjai JSON"})
 
         elif input_type == "tenhou6":
             data = json.loads(text)
@@ -1058,19 +979,17 @@ async def replay(
 async def replay_multi_teacher(
     player_id: Annotated[int, Form()] = 0,
     model_types: Annotated[list[str], Form()] = [],
-    naga_url: Annotated[str, Form()] = "",
-    mortal_url: Annotated[str, Form()] = "",
     files: Annotated[list[UploadFile], File()] = [],
     json_text: Annotated[str, Form()] = "",
     input_type: Annotated[str, Form()] = "url",
 ):
-    """Run one replay with several Mortal checkpoints and attach NAGA-style teacher overlays."""
+    """Run a replay with local Mortal checkpoints and attach local Q/P overlays."""
     from replay.api import run_replay_single_raw
     from replay.bot import render_replay_json
 
     selected_models = [model.strip() for model in model_types if model and model.strip()]
     if not selected_models:
-        selected_models = ["weak_mortal", "70k", "t1_71000"]
+        selected_models = ["weak_mortal", "70k", "mortal"]
     allowed_models = set(_GUI_MORTAL_MODEL_LABELS)
     invalid = [model for model in selected_models if model not in allowed_models]
     if invalid:
@@ -1080,7 +999,6 @@ async def replay_multi_teacher(
         )
 
     try:
-        external_links = _external_review_links(naga_url, mortal_url)
         events = await _events_from_replay_form(files=files, json_text=json_text, input_type=input_type)
         normalized_events = _normalize_replay_events(events)
         storage = get_storage()
@@ -1111,7 +1029,7 @@ async def replay_multi_teacher(
             bot_type=base_model,
             player_names=base_decisions.get("player_names"),
             checkpoint=str(checkpoints[base_model]),
-            external_review_links=external_links,
+            external_review_links={},
         )
         base_decisions["replay_id"] = replay_id
 
@@ -1125,17 +1043,6 @@ async def replay_multi_teacher(
                 decisions=decisions_by_model[model_type],
             )
             report_paths.append(report_path)
-
-        if external_links:
-            report_paths.extend(
-                write_external_teacher_reports(
-                    replay_id=replay_id,
-                    player_id=player_id,
-                    decisions=base_decisions,
-                    links=external_links,
-                    output_dir=BASE_DIR.parent.parent / "artifacts" / "gui_teacher_reports",
-                )
-            )
 
         attached = _attach_teacher_report_overlays(base_decisions, report_paths)
         project_root = BASE_DIR.parent.parent.resolve()
@@ -1151,7 +1058,7 @@ async def replay_multi_teacher(
             }
             for model_type in selected_models
         ]
-        attached["external_review_links"] = external_links
+        attached["external_review_links"] = {}
         return Response(
             content=json.dumps(_json_safe(attached), cls=_NumpyEncoder, ensure_ascii=False, allow_nan=False),
             media_type="application/json",

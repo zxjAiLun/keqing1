@@ -31,8 +31,6 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 python_files = [
     "test_mortal_eval_metrics.py",
-    "test_generate_mortal_riichienv_replays.py",
-    "test_prepare_mortal_training.py",
     "test_rulebase_bot.py",
     "test_replay_action_semantics_matrix.py",
     "test_replay_actionspec_alignment.py",
@@ -49,7 +47,6 @@ python_files = [
     "test_tenhou_bridge.py",
     "test_tenhou6_review_input.py",
     "test_tenhou_public_state_sync.py",
-    "test_reviewer_teacher_probe.py",
     "test_final_rank.py",
     "test_legal_actions_*.py",
     "test_normal_progress.py",

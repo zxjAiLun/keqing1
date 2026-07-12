@@ -500,7 +500,7 @@ def test_resolve_model_path_uses_mortal_default_checkpoint() -> None:
         bot_name="mortal",
         project_root=Path("/tmp/project"),
         model_path=None,
-    ) == Path("/tmp/project/artifacts/mortal_serving/mortal.pth")
+    ) == Path("/tmp/project/artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth")
 
 
 def test_decode_jwt_payload_unverified_reads_name_and_bot_id() -> None:
@@ -544,7 +544,7 @@ def test_create_agent_supports_mortal(monkeypatch) -> None:
     )
 
     assert isinstance(agent, FakeMortalAgent)
-    assert created["model_path"] == Path("/tmp/project/artifacts/mortal_serving/mortal.pth")
+    assert created["model_path"] == Path("/tmp/project/artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth")
     assert created["project_root"] == Path("/tmp/project")
     assert created["device"] == "cpu"
     assert created["verbose"] is True

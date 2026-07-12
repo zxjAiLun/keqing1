@@ -20,10 +20,9 @@ const ACCENT = "#8e44ad";
 
 const NETWORK_OPTIONS: Array<{ value: NetworkId; label: string; hint: string }> = [
   { value: "none", label: "none", hint: "不呼出" },
-  { value: "mortal", label: "Mortal", hint: "gui_mortal.pth" },
-  { value: "70k", label: "Mortal 70k", hint: "70k.pth" },
-  { value: "weak_mortal", label: "Mortal v4", hint: "weak_mortal.pth" },
-  { value: "t1_71000", label: "Mortal T1@71000", hint: "teacher transfer" },
+  { value: "mortal", label: "Mortal candidate", hint: "V2@74000 or 70k fallback" },
+  { value: "70k", label: "Mortal 70k", hint: "70k anchor" },
+  { value: "weak_mortal", label: "Mortal v4", hint: "external v4" },
   { value: "custom", label: "自定义权重", hint: "绝对 .pth 路径" },
 ];
 

@@ -11,8 +11,8 @@ Design notes:
   starts its own gateway on TCP 11600, so a second concurrent session would
   fail to bind that port. We reject new starts while one is running (the user
   must stop the previous one first).
-* UI sends human-friendly network ids (``mortal`` / ``70k`` / ``weak_mortal`` /
-  ``t1_71000`` / ``none`` / ``custom``); we translate them into launcher specs
+ * UI sends human-friendly network ids (``mortal`` / ``70k`` / ``weak_mortal`` /
+  ``none`` / ``custom``); we translate them into launcher specs
   (named checkpoints or absolute ``.pth`` paths) here, keeping the frontend
   dumb.
 """
@@ -52,23 +52,13 @@ SPEED_PRESETS: Dict[str, float] = {
     "turbo": 0.0,
 }
 
-# UI network id -> launcher spec. ``t1_71000`` and any custom path are resolved
-# to absolute .pth paths below; the rest are named checkpoints.
+# UI network id -> launcher spec. Custom paths are resolved to absolute files;
+# the rest are named local checkpoints.
 NETWORK_TO_SPEC: Dict[str, str] = {
-    # The GUI's primary Mortal choice is explicitly the review/GUI checkpoint;
-    # retain the CLI's separate `mortal` spec for callers that want mortal.pth.
-    "mortal": "gui",
+    "mortal": "mortal",
     "70k": "70k",
     "weak_mortal": "weak_mortal",
 }
-_T1_71000_PATH = (
-    PROJECT_ROOT
-    / "artifacts"
-    / "experiments"
-    / "teacher_transfer_2026_05"
-    / "T1_teacher_ce_01"
-    / "mortal.pth"
-)
 
 # Hard cap on remembered log lines per session (bound memory; GUI shows a tail).
 MAX_LOG_LINES = 4000
@@ -181,12 +171,6 @@ def _resolve_spec(network: str, custom_paths: Dict[int, str], slot: int) -> Opti
         return str(path.resolve())
     if network in NETWORK_TO_SPEC:
         return NETWORK_TO_SPEC[network]
-    if network == "t1_71000":
-        if not _T1_71000_PATH.exists():
-            raise FileNotFoundError(
-                f"slot {slot + 1}: T1@71000 checkpoint missing: {_T1_71000_PATH}"
-            )
-        return str(_T1_71000_PATH.resolve())
     # Allow passing a raw launcher spec (named checkpoint or explicit path) too.
     return network
 

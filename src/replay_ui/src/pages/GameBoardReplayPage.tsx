@@ -24,12 +24,8 @@ import {
 
 const TEACHER_MODEL_ORDER: Record<string, number> = {
   v4: 0,
-  '70k.pth': 1,
-  'T1@71000': 2,
-  'gui_mortal.pth': 3,
-  'NAGA ニシキ': 4,
-  'NAGA カガシ': 5,
-  'Mortal 4.1c': 6,
+  '70k': 1,
+  'V2 candidate': 2,
 };
 
 function isForcedRiichiTsumogiriEntry(entry: ReplayData['log'][number] | null | undefined): boolean {
@@ -552,21 +548,6 @@ export function GameBoardReplayPage() {
                   </button>
                 </div>
 
-                {(data.external_review_links?.naga || data.external_review_links?.mortal) && (
-                  <div style={externalReviewLinksStyle}>
-                    {data.external_review_links.naga && (
-                      <a href={data.external_review_links.naga} target="_blank" rel="noreferrer" style={externalReviewLinkStyle}>
-                        NAGA
-                      </a>
-                    )}
-                    {data.external_review_links.mortal && (
-                      <a href={data.external_review_links.mortal} target="_blank" rel="noreferrer" style={externalReviewLinkStyle}>
-                        Mortal 4.1c
-                      </a>
-                    )}
-                  </div>
-                )}
-
                 <div style={replaySideMetaStyle}>
                   <span>{kyokuLabel || '回放'}</span>
                   <span>{currentStep + 1}/{totalSteps}{boardPhase === 'post' ? ' 后' : boardPhase === 'reach' ? ' 立直' : ' 前'}</span>
@@ -767,7 +748,7 @@ type ReplayEvent = Record<string, unknown>;
 function displayReviewerModelLabel(raw: string | undefined): string {
   const label = (raw || '主视角模型').trim();
   if (label === '70k.pth') return '70k';
-  if (label === 'gui_mortal.pth') return 'mortal';
+  if (label === 'V2 candidate') return 'candidate';
   return label.endsWith('.pth') ? label.slice(0, -4) : label;
 }
 

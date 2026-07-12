@@ -10,37 +10,62 @@ import os
 from pathlib import Path
 import sys
 import tomllib
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scripts.mortal.prepare_reward_pt_experiments import dump_toml, read_checkpoint_steps
-
-
 EXPERIMENT_ID = "V2_population_mixed_v4_warmstart_2026_07"
 DEFAULT_OUTPUT_ROOT = Path("artifacts/experiments/model_pool_2026_07")
 DEFAULT_DATA_ROOT = DEFAULT_OUTPUT_ROOT / "V2_data"
 PARENT_CHECKPOINT = Path("artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth")
-CHECKPOINTS = {
-    "model_v4": "artifacts/model_v4_20240308_best_min.pth",
-    "70k": "artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth",
-    "80k_game": "artifacts/mortal_training/checkpoints/mortal_default_80k_rejected_gate.pth",
-    "T1_71000": "artifacts/experiments/teacher_transfer_2026_05/T1_teacher_ce_01/mortal.pth",
-    "V0b_15000": "artifacts/experiments/v4_synthetic_2026_06/V0b_v4_synthetic_clean_2026_07/checkpoints/mortal_15000.pth",
-    "V1_74000": "artifacts/experiments/v4_synthetic_2026_06/V1_v4_synthetic_warmstart_2026_06/checkpoints/mortal_v1_74000.pth",
-}
 POOL_SPECS = (
-    ("v4_70k_t1_v0b_2000h", 960000, ("model_v4", "70k", "T1_71000", "V0b_15000")),
-    ("v4_70k_v1_80k_2000h", 962000, ("model_v4", "70k", "V1_74000", "80k_game")),
-    ("v4_v0b_v1_t1_2000h", 964000, ("model_v4", "V0b_15000", "V1_74000", "T1_71000")),
+    ("v4_70k_t1_v0b_2000h", 960000),
+    ("v4_70k_v1_80k_2000h", 962000),
+    ("v4_v0b_v1_t1_2000h", 964000),
 )
+
+
+def read_checkpoint_steps(checkpoint: Path) -> int:
+    import torch  # noqa: PLC0415
+
+    return int(torch.load(checkpoint, weights_only=True, map_location="cpu")["steps"])
+
+
+def dump_toml(data: Mapping[str, Any]) -> str:
+    lines: list[str] = []
+
+    def render_table(prefix: list[str], table: Mapping[str, Any]) -> None:
+        scalars = [(str(key), value) for key, value in table.items() if not isinstance(value, Mapping)]
+        children = [(str(key), value) for key, value in table.items() if isinstance(value, Mapping)]
+        if prefix:
+            if lines:
+                lines.append("")
+            lines.append("[" + ".".join(prefix) + "]")
+        for key, value in scalars:
+            lines.append(f"{key} = {toml_value(value)}")
+        for key, value in children:
+            render_table([*prefix, key], value)
+
+    def toml_value(value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return repr(value)
+        if isinstance(value, str):
+            return json.dumps(value)
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return "[" + ", ".join(toml_value(item) for item in value) + "]"
+        raise TypeError(f"unsupported TOML value type: {type(value).__name__}")
+
+    render_table([], data)
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-config", type=Path, default=Path("artifacts/mortal_training/config.toml"))
+    parser.add_argument("--base-config", type=Path, default=Path("configs/mortal_offline_mainline.toml"))
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--parent-checkpoint", type=Path, default=PARENT_CHECKPOINT)
@@ -78,46 +103,14 @@ def prepare_config(base_config: dict[str, Any], *, exp_dir: Path, data_root: Pat
     control["tensorboard_dir"] = str((exp_dir / "tb_mortal").resolve())
 
     dataset = config.setdefault("dataset", {})
-    dataset["globs"] = [str((data_root / pool_id / "logs" / "**" / "*.json.gz").resolve()) for pool_id, _, _ in POOL_SPECS]
+    dataset["globs"] = [str((data_root / pool_id / "logs" / "**" / "*.json.gz").resolve()) for pool_id, _ in POOL_SPECS]
     dataset["file_index"] = str((exp_dir / "file_index.pth").resolve())
     dataset["num_workers"] = 0
     dataset["player_names_files"] = [str((exp_dir / "v4_train_labels.txt").resolve())]
     dataset["num_epochs"] = 1
     dataset["enable_augmentation"] = False
 
-    teacher = config.setdefault("teacher", {})
-    teacher["ce_weight"] = 0.0
-    teacher["risk_gate_enabled"] = False
-    teacher["risk_gate"] = {"enabled": False}
     return config
-
-
-def _native_command(*, pool_id: str, seed_start: int, labels: tuple[str, ...], output_dir: Path, games: int, resume: bool) -> list[str]:
-    command = [
-        "uv", "run", "--no-sync", "python", "scripts/mortal/four_player_native.py",
-        "--require-cuda", "--device", "cuda", "--seat-mode", "random",
-        "--seed-start", str(seed_start), "--seed-key", "8192", "--games", str(games),
-        "--native-batch-games", "100", "--progress-every", "100", "--rank-points", "90,45,0,-135",
-    ]
-    for label in labels:
-        command.extend(["--model", f"{label}={CHECKPOINTS[label]}"])
-    command.extend(["--output-dir", str(output_dir)])
-    if resume:
-        command.append("--resume")
-    return command
-
-
-def _eval_command(*, checkpoint: Path, output_dir: Path, games: int, seed_start: int) -> list[str]:
-    command = [
-        "uv", "run", "--no-sync", "python", "scripts/mortal/four_player_native.py",
-        "--require-cuda", "--device", "cuda", "--seat-mode", "random",
-        "--seed-start", str(seed_start), "--seed-key", "8192", "--games", str(games),
-        "--native-batch-games", "100", "--progress-every", "100", "--rank-points", "90,45,0,-135",
-    ]
-    for label in ("model_v4", "70k", "T1_71000"):
-        command.extend(["--model", f"{label}={CHECKPOINTS[label]}"])
-    command.extend(["--model", f"V2={checkpoint}", "--output-dir", str(output_dir)])
-    return command
 
 
 def main() -> None:
@@ -129,18 +122,7 @@ def main() -> None:
     config_path = exp_dir / "config.toml"
     checkpoints_dir = exp_dir / "checkpoints"
     parent_steps = read_checkpoint_steps(args.parent_checkpoint)
-    pools = []
-    for pool_id, seed_start, labels in POOL_SPECS:
-        output_dir = args.data_root / pool_id
-        pools.append({
-            "pool_id": pool_id,
-            "seed_start": seed_start,
-            "games": 2000,
-            "models": list(labels),
-            "train_label": "model_v4",
-            "smoke_command": _native_command(pool_id=pool_id, seed_start=seed_start, labels=labels, output_dir=output_dir, games=25, resume=False),
-            "full_resume_command": _native_command(pool_id=pool_id, seed_start=seed_start, labels=labels, output_dir=output_dir, games=2000, resume=True),
-        })
+    pools = [{"pool_id": pool_id, "seed_start": seed_start, "games": 2000, "train_label": "model_v4"} for pool_id, seed_start in POOL_SPECS]
     train_base = [
         "uv", "run", "--no-sync", "python", "scripts/run_mortal_dqn_offline.py",
         "--config", str(config_path), "--device", "cuda", "--num-workers", "0",
@@ -152,7 +134,7 @@ def main() -> None:
         "schema": "keqing.mortal.v2_population_mixed_warmstart.v1",
         "experiment_id": EXPERIMENT_ID,
         "initialization": {"parent_checkpoint": str(args.parent_checkpoint), "parent_steps": parent_steps, "initial_steps": args.initial_steps, "optimizer": "fresh", "data_stream": "fresh"},
-        "objective": "offline DQN + CQL + next-rank auxiliary; teacher CE disabled",
+        "objective": "offline DQN + CQL + next-rank auxiliary",
         "train_labels": ["model_v4"],
         "pools": pools,
         "expected_unique_hanchans": 6000,
@@ -163,8 +145,6 @@ def main() -> None:
         "training_command": [*train_base, "--target-steps", str(args.final_steps)],
         "stage1_archive": str(checkpoints_dir / f"mortal_{args.stage1_steps}.pth"),
         "final_archive": str(checkpoints_dir / f"mortal_{args.final_steps}.pth"),
-        "stage1_eval": _eval_command(checkpoint=checkpoints_dir / f"mortal_{args.stage1_steps}.pth", output_dir=exp_dir / f"eval_250h_v2_{args.stage1_steps}", games=250, seed_start=966000),
-        "final_eval": _eval_command(checkpoint=checkpoints_dir / f"mortal_{args.final_steps}.pth", output_dir=exp_dir / f"eval_500h_v2_{args.final_steps}", games=500, seed_start=967000),
     }
     if args.dry_run:
         print(json.dumps(manifest, ensure_ascii=False, indent=2))

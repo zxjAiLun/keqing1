@@ -25,7 +25,6 @@ if os.name == "nt" and not os.environ.get("TORCHINDUCTOR_CACHE_DIR"):
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = str((Path.cwd() / ".torchinductor_cache").resolve())
 
 import torch
-import torch.nn.functional as F
 from torch import nn, optim
 from torch.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
@@ -147,10 +146,6 @@ def train_to_target_steps(
     from dataloader import FileDatasetsIter, worker_init_fn  # noqa: PLC0415
     from lr_scheduler import LinearWarmUpCosineAnnealingLR  # noqa: PLC0415
     from model import AuxNet, Brain, DQN  # noqa: PLC0415
-    from scripts.mortal.risk_gated_mortal_dataloader import (  # noqa: PLC0415
-        RiskGatedFileDatasetsIter,
-        risk_gate_config_from_mapping,
-    )
 
     control = config["control"]
     version = int(control["version"])
@@ -270,41 +265,17 @@ def train_to_target_steps(
     file_list = _load_or_build_file_index(config)
     logging.info("file list size: %s", f"{len(file_list):,}")
     dataset = config["dataset"]
-    teacher_config = config.get("teacher", {})
-    risk_gate = risk_gate_config_from_mapping(teacher_config)
-    risk_gate_enabled = bool(risk_gate.enabled)
-    if risk_gate_enabled:
-        logging.info(
-            "teacher risk gate enabled: base_weight=%.6f risk_weight=%.6f",
-            risk_gate.base_weight,
-            risk_gate.risk_weight,
-        )
     loader_workers = int(dataset["num_workers"] if num_workers is None else num_workers)
-    dataset_iter = (
-        RiskGatedFileDatasetsIter(
-            version=version,
-            file_list=file_list,
-            pts=config["env"]["pts"],
-            file_batch_size=int(dataset["file_batch_size"]),
-            reserve_ratio=float(dataset["reserve_ratio"]),
-            player_names=_load_player_names(config),
-            num_epochs=int(dataset["num_epochs"]),
-            enable_augmentation=bool(dataset["enable_augmentation"]),
-            augmented_first=bool(dataset["augmented_first"]),
-            gate=risk_gate,
-        )
-        if risk_gate_enabled
-        else FileDatasetsIter(
-            version=version,
-            file_list=file_list,
-            pts=config["env"]["pts"],
-            file_batch_size=int(dataset["file_batch_size"]),
-            reserve_ratio=float(dataset["reserve_ratio"]),
-            player_names=_load_player_names(config),
-            num_epochs=int(dataset["num_epochs"]),
-            enable_augmentation=bool(dataset["enable_augmentation"]),
-            augmented_first=bool(dataset["augmented_first"]),
-        )
+    dataset_iter = FileDatasetsIter(
+        version=version,
+        file_list=file_list,
+        pts=config["env"]["pts"],
+        file_batch_size=int(dataset["file_batch_size"]),
+        reserve_ratio=float(dataset["reserve_ratio"]),
+        player_names=_load_player_names(config),
+        num_epochs=int(dataset["num_epochs"]),
+        enable_augmentation=bool(dataset["enable_augmentation"]),
+        augmented_first=bool(dataset["augmented_first"]),
     )
     data_loader = iter(
         DataLoader(
@@ -345,12 +316,6 @@ def train_to_target_steps(
         "next_rank_loss": 0.0,
         "total_loss": 0.0,
         "next_rank_acc": 0.0,
-        "teacher_ce_loss": 0.0,
-        "teacher_ce_weight_mean": 0.0,
-        "teacher_ce_active_rate": 0.0,
-        "teacher_ce_disabled_rate": 0.0,
-        "teacher_ce_gated_rate": 0.0,
-        "teacher_ce_base_rate": 0.0,
         "q_mean": 0.0,
         "target_mean": 0.0,
         "q_abs_err": 0.0,
@@ -429,9 +394,7 @@ def train_to_target_steps(
         lr = float(scheduler.get_last_lr()[0])
         logging.info(
             "%s: steps=%s/%s window=%s "
-            "loss_total=%.6f dqn_loss=%.6f cql_loss=%.6f next_rank_loss=%.6f teacher_ce_loss=%.6f "
-            "teacher_ce_w_mean=%.6f teacher_ce_gated=%.4f teacher_ce_base=%.4f "
-            "teacher_ce_active=%.4f teacher_ce_disabled=%.4f "
+            "loss_total=%.6f dqn_loss=%.6f cql_loss=%.6f next_rank_loss=%.6f "
             "next_rank_acc=%.4f q_mean=%.4f target_mean=%.4f q_abs_err=%.4f lr=%.8g",
             prefix,
             steps,
@@ -441,12 +404,6 @@ def train_to_target_steps(
             avg["dqn_loss"],
             avg["cql_loss"],
             avg["next_rank_loss"],
-            avg["teacher_ce_loss"],
-            avg["teacher_ce_weight_mean"],
-            avg["teacher_ce_gated_rate"],
-            avg["teacher_ce_base_rate"],
-            avg["teacher_ce_active_rate"],
-            avg["teacher_ce_disabled_rate"],
             avg["next_rank_acc"],
             avg["q_mean"],
             avg["target_mean"],
@@ -457,12 +414,6 @@ def train_to_target_steps(
         writer.add_scalar("loss/dqn_window", avg["dqn_loss"], steps)
         writer.add_scalar("loss/cql_window", avg["cql_loss"], steps)
         writer.add_scalar("loss/next_rank_window", avg["next_rank_loss"], steps)
-        writer.add_scalar("loss/teacher_ce_window", avg["teacher_ce_loss"], steps)
-        writer.add_scalar("teacher/ce_weight_mean_window", avg["teacher_ce_weight_mean"], steps)
-        writer.add_scalar("teacher/ce_gated_rate_window", avg["teacher_ce_gated_rate"], steps)
-        writer.add_scalar("teacher/ce_base_rate_window", avg["teacher_ce_base_rate"], steps)
-        writer.add_scalar("teacher/ce_active_rate_window", avg["teacher_ce_active_rate"], steps)
-        writer.add_scalar("teacher/ce_disabled_rate_window", avg["teacher_ce_disabled_rate"], steps)
         writer.add_scalar("acc/next_rank_window", avg["next_rank_acc"], steps)
         writer.add_scalar("q/q_mean_window", avg["q_mean"], steps)
         writer.add_scalar("q/target_mean_window", avg["target_mean"], steps)
@@ -481,11 +432,7 @@ def train_to_target_steps(
                 f"Mortal offline dataset ended at steps={steps} before target_steps={target_steps}"
             ) from exc
         data_batches_consumed += 1
-        if risk_gate_enabled:
-            obs, actions, masks, steps_to_done, kyoku_rewards, player_ranks, teacher_ce_weights = batch
-        else:
-            obs, actions, masks, steps_to_done, kyoku_rewards, player_ranks = batch
-            teacher_ce_weights = None
+        obs, actions, masks, steps_to_done, kyoku_rewards, player_ranks = batch
         if int(obs.shape[0]) != batch_size:
             continue
         obs = obs.to(dtype=torch.float32, device=device)
@@ -494,8 +441,6 @@ def train_to_target_steps(
         steps_to_done = steps_to_done.to(dtype=torch.int64, device=device)
         kyoku_rewards = kyoku_rewards.to(dtype=torch.float64, device=device)
         player_ranks = player_ranks.to(dtype=torch.int64, device=device)
-        if teacher_ce_weights is not None:
-            teacher_ce_weights = teacher_ce_weights.to(dtype=torch.float32, device=device)
         if not bool(masks[range(batch_size), actions].all().item()):
             raise RuntimeError("Mortal dataset produced an action outside its legal mask")
 
@@ -508,64 +453,16 @@ def train_to_target_steps(
             cql_loss = q_out.logsumexp(-1).mean() - q.mean()
             (next_rank_logits,) = aux_net(phi)
             next_rank_loss = ce(next_rank_logits, player_ranks)
-            teacher_ce_loss = torch.tensor(0.0, device=device)
-            teacher_ce_weight = float(teacher_config.get("ce_weight", 0))
-            if risk_gate_enabled:
-                teacher_ce_each = F.cross_entropy(q_out, actions, reduction="none")
-                teacher_ce_loss = (teacher_ce_each * teacher_ce_weights).mean()
-                teacher_ce_loss_term = teacher_ce_loss
-            else:
-                teacher_ce_loss_term = torch.tensor(0.0, device=device)
-                if teacher_ce_weight > 0:
-                    teacher_ce_loss = ce(q_out, actions)
-                    teacher_ce_loss_term = teacher_ce_loss * teacher_ce_weight
-            loss = dqn_loss + cql_loss * float(config["cql"]["min_q_weight"]) + next_rank_loss * float(config["aux"]["next_rank_weight"]) + teacher_ce_loss_term
+            loss = dqn_loss + cql_loss * float(config["cql"]["min_q_weight"]) + next_rank_loss * float(config["aux"]["next_rank_weight"])
 
         scaler.scale(loss / opt_step_every).backward()
         with torch.inference_mode():
-            teacher_weight_mean = 0.0
-            teacher_active_rate = 0.0
-            teacher_disabled_rate = 0.0
-            teacher_gated_rate = 0.0
-            teacher_base_rate = 0.0
-            if teacher_ce_weights is not None:
-                teacher_weight_mean = float(teacher_ce_weights.detach().mean().cpu())
-                teacher_active_rate = float((teacher_ce_weights > 0).to(torch.float64).mean().detach().cpu())
-                teacher_disabled_rate = float((teacher_ce_weights == 0).to(torch.float64).mean().detach().cpu())
-                risk_weight = float(risk_gate.risk_weight)
-                base_weight = float(risk_gate.base_weight)
-                teacher_gated_rate = float(
-                    torch.isclose(
-                        teacher_ce_weights,
-                        torch.full_like(teacher_ce_weights, risk_weight),
-                    )
-                    .to(torch.float64)
-                    .mean()
-                    .detach()
-                    .cpu()
-                )
-                teacher_base_rate = float(
-                    torch.isclose(
-                        teacher_ce_weights,
-                        torch.full_like(teacher_ce_weights, base_weight),
-                    )
-                    .to(torch.float64)
-                    .mean()
-                    .detach()
-                    .cpu()
-                )
             batch_metrics = {
                 "dqn_loss": float(dqn_loss.detach().cpu()),
                 "cql_loss": float(cql_loss.detach().cpu()),
                 "next_rank_loss": float(next_rank_loss.detach().cpu()),
                 "total_loss": float(loss.detach().cpu()),
                 "next_rank_acc": float((next_rank_logits.argmax(-1) == player_ranks).to(torch.float64).mean().detach().cpu()),
-                "teacher_ce_loss": float(teacher_ce_loss.detach().cpu()),
-                "teacher_ce_weight_mean": teacher_weight_mean,
-                "teacher_ce_active_rate": teacher_active_rate,
-                "teacher_ce_disabled_rate": teacher_disabled_rate,
-                "teacher_ce_gated_rate": teacher_gated_rate,
-                "teacher_ce_base_rate": teacher_base_rate,
                 "q_mean": float(q.detach().to(torch.float32).mean().cpu()),
                 "target_mean": float(q_target_mc.detach().to(torch.float32).mean().cpu()),
                 "q_abs_err": float((q.detach().to(torch.float32) - q_target_mc.detach().to(torch.float32)).abs().mean().cpu()),

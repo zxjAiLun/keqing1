@@ -205,9 +205,7 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
   const [tenhou6Text, setTenhou6Text] = useState('');
   const [files, setFiles]         = useState<File[]>([]);
   const [playerId, setPlayerId]   = useState<string>('auto');
-  const [selectedModels, setSelectedModels] = useState<BotType[]>(['weak_mortal', '70k', 't1_71000']);
-  const [nagaUrl, setNagaUrl] = useState('');
-  const [mortalUrl, setMortalUrl] = useState('');
+  const [selectedModels, setSelectedModels] = useState<BotType[]>(['weak_mortal', '70k', 'mortal']);
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState<string | null>(null);
   const [success, setSuccess]     = useState<string | null>(null);
@@ -238,17 +236,6 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
       setError('至少选择一个 Mortal checkpoint');
       return;
     }
-    for (const [label, value] of [['NAGA', nagaUrl], ['Mortal 4.1c', mortalUrl]]) {
-      if (!value.trim()) continue;
-      try {
-        const parsed = new URL(value.trim());
-        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error();
-      } catch {
-        setError(`${label} 链接格式错误`);
-        return;
-      }
-    }
-
     setLoading(true);
     setError(null);
     setSuccess(null);
@@ -301,9 +288,6 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
       for (const model of selectedModels) {
         formData.append('model_types', model);
       }
-      if (nagaUrl.trim()) formData.append('naga_url', nagaUrl.trim());
-      if (mortalUrl.trim()) formData.append('mortal_url', mortalUrl.trim());
-
       const res = await fetch('/api/replay/multi-teacher', { method: 'POST', body: formData });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -379,17 +363,6 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
             onFilesChange={setFiles}
           />
         )}
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 8, marginBottom: 14 }}>
-        <label style={externalLinkLabelStyle}>
-          <span>NAGA Review</span>
-          <input type="url" value={nagaUrl} onChange={(event) => setNagaUrl(event.target.value)} style={externalLinkInputStyle} />
-        </label>
-        <label style={externalLinkLabelStyle}>
-          <span>Mortal 4.1c Review</span>
-          <input type="url" value={mortalUrl} onChange={(event) => setMortalUrl(event.target.value)} style={externalLinkInputStyle} />
-        </label>
       </div>
 
       {/* 底部参数行 */}

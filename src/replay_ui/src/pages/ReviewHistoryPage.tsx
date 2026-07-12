@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ExternalLink, RefreshCw } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { replayApi } from '../api/replayApi';
 import { PageHeader, PageShell } from '../components/Layout/PageScaffold';
@@ -66,16 +66,6 @@ export function ReviewHistoryPage() {
               <button type="button" onClick={() => navigate(buildReviewHistoryPath(item))} style={openButtonStyle}>
                 本地
               </button>
-              {item.external_review_links?.naga && (
-                <a href={item.external_review_links.naga} target="_blank" rel="noreferrer" style={externalButtonStyle}>
-                  NAGA <ExternalLink size={12} />
-                </a>
-              )}
-              {item.external_review_links?.mortal && (
-                <a href={item.external_review_links.mortal} target="_blank" rel="noreferrer" style={externalButtonStyle}>
-                  Mortal <ExternalLink size={12} />
-                </a>
-              )}
             </span>
           </div>
         ))}
