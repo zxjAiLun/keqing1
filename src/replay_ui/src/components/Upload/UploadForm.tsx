@@ -445,24 +445,3 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
     </form>
   );
 }
-
-const externalLinkLabelStyle: React.CSSProperties = {
-  display: 'grid',
-  gap: 5,
-  color: 'var(--text-primary)',
-  fontSize: 12,
-  fontWeight: 700,
-};
-
-const externalLinkInputStyle: React.CSSProperties = {
-  width: '100%',
-  height: 34,
-  border: '1px solid var(--border)',
-  borderRadius: 6,
-  padding: '0 9px',
-  background: 'var(--card-bg)',
-  color: 'var(--text-primary)',
-  fontFamily: 'Menlo, Consolas, monospace',
-  fontSize: 11,
-  boxSizing: 'border-box',
-};

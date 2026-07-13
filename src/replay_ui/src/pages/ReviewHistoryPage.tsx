@@ -132,19 +132,5 @@ const openButtonStyle: React.CSSProperties = {
   cursor: 'pointer',
 };
 const actionGroupStyle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' };
-const externalButtonStyle: React.CSSProperties = {
-  height: 28,
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  gap: 4,
-  border: '1px solid var(--border)',
-  borderRadius: 5,
-  padding: '0 7px',
-  color: 'var(--text-primary)',
-  textDecoration: 'none',
-  fontSize: 11,
-  fontWeight: 700,
-};
 const actionButtonStyle: React.CSSProperties = { height: 32, display: 'inline-flex', alignItems: 'center', gap: 6 };
 const statusStyle: React.CSSProperties = { padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 };

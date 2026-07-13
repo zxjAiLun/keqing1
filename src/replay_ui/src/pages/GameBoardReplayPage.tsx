@@ -655,26 +655,6 @@ const replaySideHeaderStyle: CSSProperties = {
   gap: 6,
 };
 
-const externalReviewLinksStyle: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: '1fr 1fr',
-  gap: 6,
-};
-
-const externalReviewLinkStyle: CSSProperties = {
-  height: 28,
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  border: '1px solid var(--border)',
-  borderRadius: 5,
-  color: 'var(--text-primary)',
-  background: 'var(--button-bg)',
-  textDecoration: 'none',
-  fontSize: 11,
-  fontWeight: 700,
-};
-
 const replaySideMetaStyle: CSSProperties = {
   display: 'flex',
   justifyContent: 'space-between',
