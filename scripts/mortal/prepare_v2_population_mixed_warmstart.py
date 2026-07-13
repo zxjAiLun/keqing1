@@ -107,7 +107,7 @@ def prepare_config(base_config: dict[str, Any], *, exp_dir: Path, data_root: Pat
     dataset["file_index"] = str((exp_dir / "file_index.pth").resolve())
     dataset["num_workers"] = 0
     dataset["player_names_files"] = [str((exp_dir / "v4_train_labels.txt").resolve())]
-    dataset["num_epochs"] = 1
+    dataset["num_epochs"] = 2
     dataset["enable_augmentation"] = False
 
     return config

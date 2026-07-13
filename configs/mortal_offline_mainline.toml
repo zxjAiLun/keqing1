@@ -16,7 +16,7 @@ file_batch_size = 15
 reserve_ratio = 0.0
 num_workers = 0
 player_names_files = []
-num_epochs = 1
+num_epochs = 2
 enable_augmentation = false
 augmented_first = false
 
