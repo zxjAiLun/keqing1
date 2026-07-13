@@ -8,6 +8,8 @@
 
 Run `scripts/mortal/run_v2_population_mixed_warmstart.ps1 -RunTraining` from Windows. The runner warm-starts from 70k weights with a fresh optimizer and data stream, archives steps 72,000 and 74,000, and trains only the DQN, CQL, and next-rank objectives.
 
+The active config uses `reward.mode = "terminal_rank"`: it derives the sparse terminal reward from the recorded final rank, so training does not depend on the removed external GRP checkpoint.
+
 ## Evaluation
 
 Use `scripts/mortal/four_player_native.py` for CUDA native random-seat arenas and `scripts/mortal/build_platform_account_report.py` for per-account Pt/R and behavior summaries. Prefer average rank points, rank distribution, and behavior metrics over one-direction 1v3 gates.

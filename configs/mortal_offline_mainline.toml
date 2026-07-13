@@ -24,6 +24,9 @@ augmented_first = false
 gamma = 1.0
 pts = [6.0, 4.0, 2.0, 0.0]
 
+[reward]
+mode = "terminal_rank"
+
 [resnet]
 conv_channels = 192
 num_blocks = 40
