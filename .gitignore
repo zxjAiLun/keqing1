@@ -116,13 +116,7 @@ uv.lock
 .venv/
 
 tiles/
-!third_party/
-third_party/*
-!third_party/Mortal/
-third_party/Mortal/*
-!third_party/Mortal/mortal/
-third_party/Mortal/mortal/*
-!third_party/Mortal/mortal/dataloader.py
+third_party/
 archive/
 .omx/
 
