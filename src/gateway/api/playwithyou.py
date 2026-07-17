@@ -11,7 +11,7 @@ Design notes:
   starts its own gateway on TCP 11600, so a second concurrent session would
   fail to bind that port. We reject new starts while one is running (the user
   must stop the previous one first).
- * UI sends human-friendly network ids (``mortal`` / ``70k`` / ``weak_mortal`` /
+ * UI sends human-friendly network ids (``mortal`` / ``70k`` / ``ext_mortal`` /
   ``none`` / ``custom``); we translate them into launcher specs
   (named checkpoints or absolute ``.pth`` paths) here, keeping the frontend
   dumb.
@@ -57,7 +57,7 @@ SPEED_PRESETS: Dict[str, float] = {
 NETWORK_TO_SPEC: Dict[str, str] = {
     "mortal": "mortal",
     "70k": "70k",
-    "weak_mortal": "weak_mortal",
+    "ext_mortal": "ext_mortal",
 }
 
 # Hard cap on remembered log lines per session (bound memory; GUI shows a tail).

@@ -36,9 +36,10 @@ _BOT_CLASSES = {
     "mortal": MortalReviewBot,
     "70k": MortalReviewBot,
     "weak_mortal": MortalReviewBot,
+    "ext_mortal": MortalReviewBot,
     "rulebase": RulebaseBot,
 }
-_MORTAL_BOT_TYPES = {"mortal", "70k", "weak_mortal"}
+_MORTAL_BOT_TYPES = {"mortal", "70k", "weak_mortal", "ext_mortal"}
 
 PLAYER_NAMES = ["East", "South", "West", "North"]
 
@@ -48,7 +49,8 @@ _V2_CANDIDATE = _PROJECT_ROOT / "artifacts/experiments/model_pool_2026_07/V2_pop
 _DEFAULT_CHECKPOINTS = {
     "mortal": _V2_CANDIDATE if _V2_CANDIDATE.exists() else _ANCHOR_70K,
     "70k": _ANCHOR_70K,
-    "weak_mortal": _PROJECT_ROOT / "artifacts/model_v4_20240308_best_min.pth",
+    "weak_mortal": _PROJECT_ROOT / "artifacts/external_mortal_20240308_best_min.pth",
+    "ext_mortal": _PROJECT_ROOT / "artifacts/external_mortal_20240308_best_min.pth",
 }
 _REVIEW_EXPORTER = DefaultRuntimeReviewExporter()
 
@@ -181,7 +183,7 @@ def run_replay_from_source(
         输入内容类型："auto"（自动检测）、"tenhou6"（tenhou6 JSON）、"mjai"（mjai JSONL）。
         "url" 模式下 source 已是 mjai 事件列表。
     bot_type : str
-        Bot type: `mortal` / `70k` / `weak_mortal` / `rulebase`.
+        Bot type: `mortal` / `70k` / `ext_mortal` / `rulebase`.
         `rulebase` 不加载 checkpoint；其余模型在 checkpoint 为 None 时使用默认路径。
 
     Returns
@@ -574,8 +576,8 @@ def main():
     parser.add_argument(
         "--bot-type",
         default="mortal",
-        choices=["mortal", "70k", "weak_mortal", "rulebase"],
-        help="Bot 类型：mortal / 70k / weak_mortal / rulebase",
+        choices=["mortal", "70k", "ext_mortal", "rulebase"],
+        help="Bot 类型：mortal / 70k / ext_mortal / rulebase",
     )
     parser.add_argument("--output", default=None, help="HTML 输出路径")
     parser.add_argument(

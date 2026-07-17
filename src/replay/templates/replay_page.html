@@ -297,7 +297,7 @@
         <select id="bot-type">
           <option value="mortal" selected>mortal · 当前主线</option>
           <option value="70k">70k · 标准锚点</option>
-          <option value="weak_mortal">weak mortal · model_v4</option>
+          <option value="ext_mortal">External Mortal</option>
           <option value="rulebase">rulebase · 规则基线</option>
         </select>
       </div>
@@ -762,7 +762,7 @@ jsonTextarea.addEventListener('input', () => {
 const BOT_DEFAULTS = {
   mortal: 'artifacts/mortal_serving/gui_mortal.pth',
   '70k': 'artifacts/mortal_serving/70k.pth',
-  weak_mortal: 'artifacts/mortal_serving/weak_mortal.pth',
+  ext_mortal: 'artifacts/external_mortal_20240308_best_min.pth',
   rulebase: '',
 };
 const checkpointInput = document.getElementById('checkpoint');

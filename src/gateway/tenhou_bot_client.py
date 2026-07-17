@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Kept for reference; actual validation goes through resolve_bot_spec so that
 # explicit .pth paths are also accepted.
-SUPPORTED_GATEWAY_BOTS = {"rulebase", "mortal", "70k", "gui", "v4", "weak"}
+SUPPORTED_GATEWAY_BOTS = {"rulebase", "mortal", "70k", "gui", "ext_mortal", "weak"}
 
 
 def _is_stopped(stop_event: threading.Event | None) -> bool:

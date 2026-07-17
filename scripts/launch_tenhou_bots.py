@@ -201,11 +201,29 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _shutdown)
 
     try:
+        ended_names: set[str] = set()
         while not stop_event.is_set():
-            # A disconnected bot is terminal for this summon. Do not rejoin;
-            # close all remaining bots and the local gateway as one unit.
-            if any(not thread.is_alive() for thread in threads):
-                logging.warning("a bot connection ended; stopping this summon without reconnecting")
+            # A single disconnected bot is terminal for that bot only.  Do
+            # not reconnect it (the summon remains one-shot), and do not kill
+            # the healthy connections: Tenhou can keep the remaining seats
+            # alive while the disconnected seat is handled by the table.
+            for thread in threads:
+                if not thread.is_alive() and thread.name not in ended_names:
+                    ended_names.add(thread.name)
+                    logging.warning(
+                        "[%s] bot connection ended; leaving remaining bots alive without reconnecting",
+                        thread.name,
+                    )
+
+            # Once every bot has ended there is no useful relay left to keep
+            # alive, so terminate the owned gateway and finish normally.
+            if all(not thread.is_alive() for thread in threads):
+                logging.warning("all bot connections ended; stopping summon")
+                stop_event.set()
+                break
+
+            if gateway_proc is not None and gateway_proc.poll() is not None:
+                logging.error("gateway subprocess exited while bots were running")
                 stop_event.set()
                 break
             time.sleep(0.5)

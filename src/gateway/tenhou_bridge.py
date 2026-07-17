@@ -216,4 +216,16 @@ class TenhouBridge:
             for task in done:
                 exc = task.exception()
                 if exc is not None:
+                    # Tenhou commonly closes a table with an empty 1005 close
+                    # frame after sending BYE.  This is a normal terminal
+                    # session event, not a gateway crash; the bot client will
+                    # observe EOF and the launcher will leave other bots
+                    # running.
+                    if isinstance(exc, websockets.exceptions.ConnectionClosed):
+                        logger.info(
+                            "tenhou websocket closed for %s: %s",
+                            self.state.name,
+                            exc,
+                        )
+                        continue
                     raise exc

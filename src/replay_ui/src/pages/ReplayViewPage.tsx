@@ -259,7 +259,7 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
     }
 
     const modelOrder: Record<string, number> = {
-      v4: 0,
+      ext_mortal: 0,
       '70k': 1,
       'V2 candidate': 2,
     };

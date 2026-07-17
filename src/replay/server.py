@@ -484,8 +484,8 @@ def _attach_teacher_report_overlays(decisions: dict, report_paths: list[Path]) -
 
 def _infer_player_bot_type(player_name: str | None, fallback: str | None = None) -> str:
     raw = (player_name or "").lower()
-    if "weak_mortal" in raw or "weak mortal" in raw:
-        return "weak_mortal"
+    if "ext_mortal" in raw or "external mortal" in raw or "weak_mortal" in raw or "weak mortal" in raw:
+        return "ext_mortal"
     if "70k" in raw:
         return "70k"
     if "mortal" in raw:
@@ -502,7 +502,7 @@ def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
     mapping = {
         "mortal": candidate if candidate.exists() else anchor,
         "70k": anchor,
-        "weak_mortal": project_root / "artifacts" / "model_v4_20240308_best_min.pth",
+        "ext_mortal": project_root / "artifacts" / "external_mortal_20240308_best_min.pth",
     }
     return mapping[bot_type]
 
@@ -510,7 +510,7 @@ def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
 _GUI_MORTAL_MODEL_LABELS = {
     "mortal": "V2 candidate",
     "70k": "70k",
-    "weak_mortal": "v4",
+    "ext_mortal": "External Mortal",
 }
 
 
@@ -718,7 +718,7 @@ def _list_review_history(
             item["teacher_report_paths"].append(relative_path)
 
     model_order = {
-        "v4": 0,
+        "External Mortal": 0,
         "70k": 1,
         "V2 candidate": 2,
     }
@@ -989,7 +989,7 @@ async def replay_multi_teacher(
 
     selected_models = [model.strip() for model in model_types if model and model.strip()]
     if not selected_models:
-        selected_models = ["weak_mortal", "70k", "mortal"]
+        selected_models = ["ext_mortal", "70k", "mortal"]
     allowed_models = set(_GUI_MORTAL_MODEL_LABELS)
     invalid = [model for model in selected_models if model not in allowed_models]
     if invalid:

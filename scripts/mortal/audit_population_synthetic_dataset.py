@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit the V2 mixed-ecology synthetic pools before offline training."""
+"""Audit the retained mixed-ecology synthetic pools before offline training."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def audit_pool(data_root: Path, pool_id: str, expected_start: int) -> dict[str, 
     malformed: list[dict[str, str]] = []
     hashes: dict[str, list[str]] = {}
     seed_keys: dict[str, list[str]] = {}
-    model_v4_seats = 0
+    trainable_ext_mortal_seats = 0
     for file_path in files:
         try:
             match = LOG_NAME_RE.fullmatch(file_path.name)
@@ -61,9 +61,9 @@ def audit_pool(data_root: Path, pool_id: str, expected_start: int) -> dict[str, 
             names = start.get("names")
             if not isinstance(names, list) or len(names) != 4:
                 raise ValueError(f"invalid start_game names: {names!r}")
-            if names.count("model_v4") != 1:
-                raise ValueError(f"expected exactly one model_v4 seat, found {names!r}")
-            model_v4_seats += 1
+            if names.count("ext_mortal") != 1:
+                raise ValueError(f"expected exactly one ext_mortal seat, found {names!r}")
+            trainable_ext_mortal_seats += 1
             seed = int(match.group("seed"))
             key = int(match.group("key"))
             if seed < expected_start or seed >= expected_start + 2000:
@@ -76,7 +76,7 @@ def audit_pool(data_root: Path, pool_id: str, expected_start: int) -> dict[str, 
         "pool_id": pool_id,
         "expected_games": 2000,
         "file_count": len(files),
-        "model_v4_seat_count": model_v4_seats,
+        "trainable_ext_mortal_seat_count": trainable_ext_mortal_seats,
         "malformed": malformed[:10],
         "malformed_count": len(malformed),
         "canonical_hashes": [[digest, paths[0]] for digest, paths in hashes.items()],
@@ -97,14 +97,14 @@ def main() -> None:
         for seed_key, file_path in pool.pop("seed_keys"):
             seed_owners.setdefault(seed_key, []).append(file_path)
     file_count = sum(int(pool["file_count"]) for pool in pools)
-    v4_seats = sum(int(pool["model_v4_seat_count"]) for pool in pools)
+    ext_mortal_seats = sum(int(pool["trainable_ext_mortal_seat_count"]) for pool in pools)
     malformed = sum(int(pool["malformed_count"]) for pool in pools)
     duplicate_count = file_count - len(hash_owners)
     seed_overlap_count = file_count - len(seed_owners)
     coverage = file_count / 6000
     passed = (
         coverage >= float(args.min_coverage)
-        and v4_seats / 6000 >= float(args.min_coverage)
+        and ext_mortal_seats / 6000 >= float(args.min_coverage)
         and malformed == 0
         and duplicate_count == 0
         and seed_overlap_count == 0
@@ -116,8 +116,8 @@ def main() -> None:
             "expected_games": 6000,
             "file_count": file_count,
             "coverage": coverage,
-            "expected_trainable_v4_seats": 6000,
-            "trainable_v4_seat_count": v4_seats,
+            "expected_trainable_ext_mortal_seats": 6000,
+            "trainable_ext_mortal_seat_count": ext_mortal_seats,
             "malformed_count": malformed,
             "canonical_unique_count": len(hash_owners),
             "canonical_duplicate_count": duplicate_count,

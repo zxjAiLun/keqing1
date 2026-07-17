@@ -30,12 +30,12 @@ from scripts.mortal.stat_report import write_stat_report
 
 _ANCHOR_70K = Path("artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth")
 _V2_CANDIDATE = Path("artifacts/experiments/model_pool_2026_07/V2_population_mixed_v4_warmstart_2026_07/checkpoints/mortal_74000.pth")
-_V4 = Path("artifacts/model_v4_20240308_best_min.pth")
+_EXT_MORTAL = Path("artifacts/external_mortal_20240308_best_min.pth")
 DEFAULT_MODELS = {
-    "model_v4": _V4,
+    "ext_mortal": _EXT_MORTAL,
     "70k": _ANCHOR_70K,
     "candidate": _V2_CANDIDATE if _V2_CANDIDATE.exists() else _ANCHOR_70K,
-    "v4_reference": _V4,
+    "ext_mortal_control": _EXT_MORTAL,
 }
 
 
@@ -328,6 +328,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             platform_model_label=getattr(args, "platform_model_label", None),
             rank_points=rank_points,
         )
+        platform_rank_counts = {label: [0, 0, 0, 0] for label in labels}
+        for account in platform_report["accounts"]:
+            model_label = str(account["model_label"])
+            if model_label in platform_rank_counts:
+                platform_rank_counts[model_label] = [
+                    left + int(right)
+                    for left, right in zip(
+                        platform_rank_counts[model_label],
+                        [int(account.get(f"rank_{rank}", 0)) for rank in range(1, 5)],
+                        strict=True,
+                    )
+                ]
+        if platform_rank_counts != rank_counts:
+            raise RuntimeError(
+                "platform account rank counts disagree with native metrics: "
+                f"native={rank_counts!r} platform={platform_rank_counts!r}"
+            )
         document["artifacts"]["platform_accounts_dir"] = str(platform_output_dir)
         document["platform_accounts_schema"] = platform_report["schema"]
     write_metrics(output_dir / "metrics.json", document)

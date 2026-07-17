@@ -31,7 +31,7 @@ from scripts.mortal.stat_report import write_stat_report
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--model-label", default="v4")
+    parser.add_argument("--model-label", default="ext_mortal")
     parser.add_argument("--mortal-root", type=Path, default=Path("third_party/Mortal"))
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

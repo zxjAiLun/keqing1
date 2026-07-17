@@ -24,11 +24,11 @@ export const BOT_CATALOG: BotCatalogEntry[] = [
     description: '固定 70k 训练步锚点权重。',
   },
   {
-    value: 'weak_mortal',
-    label: 'Mortal v4',
-    shortLabel: 'v4',
-    badge: '外部 v4',
-    description: 'artifacts/model_v4_20240308_best_min.pth。外部 v4 参考权重。',
+    value: 'ext_mortal',
+    label: 'External Mortal',
+    shortLabel: 'External',
+    badge: '外部参考',
+    description: 'artifacts/external_mortal_20240308_best_min.pth。外部 Mortal 参考权重。',
   },
   {
     value: 'rulebase',
@@ -39,7 +39,7 @@ export const BOT_CATALOG: BotCatalogEntry[] = [
   },
 ];
 
-const GUI_MODEL_ORDER: BotType[] = ['weak_mortal', '70k', 'mortal'];
+const GUI_MODEL_ORDER: BotType[] = ['ext_mortal', '70k', 'mortal'];
 
 export const GUI_BOT_CATALOG: BotCatalogEntry[] = BOT_CATALOG
   .filter((entry) => entry.value !== 'rulebase')
@@ -50,7 +50,7 @@ export const DEFAULT_BOT_TYPE: BotType = 'mortal';
 export const BOT_CHECKPOINT_DEFAULTS: Record<BotType, string> = {
   mortal: 'artifacts/experiments/model_pool_2026_07/V2_population_mixed_v4_warmstart_2026_07/checkpoints/mortal_74000.pth',
   '70k': 'artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth',
-  weak_mortal: 'artifacts/model_v4_20240308_best_min.pth',
+  ext_mortal: 'artifacts/external_mortal_20240308_best_min.pth',
   rulebase: '',
 };
 

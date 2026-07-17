@@ -1,1 +1,1 @@
-export type BotType = 'mortal' | '70k' | 'weak_mortal' | 'rulebase';
+export type BotType = 'mortal' | '70k' | 'ext_mortal' | 'rulebase';

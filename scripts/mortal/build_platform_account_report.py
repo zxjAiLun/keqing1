@@ -122,8 +122,11 @@ def stable_source_id(path: Path, seen: dict[str, int]) -> str:
 
 
 def normalize_model_label(raw_name: str) -> str:
-    if re.fullmatch(r"v4(?:_[a-zA-Z0-9]+)?", raw_name):
-        return "v4"
+    if raw_name in {"ext_mortal", "weak_mortal"}:
+        return "ext_mortal"
+    suffix_match = re.fullmatch(r"(.+)_([ab])", raw_name)
+    if suffix_match and suffix_match.group(1) in {"ext_mortal", "70k", "V2_74000", "V3_74000"}:
+        return suffix_match.group(1)
     return raw_name
 
 
@@ -182,12 +185,20 @@ def initial_and_final_scores_from_events(events: Sequence[Mapping[str, Any]]) ->
                 scores = [int(value) for value in raw_scores]
                 if initial_scores is None:
                     initial_scores = list(scores)
+        elif event_type == "reach_accepted" and scores is not None:
+            actor = event.get("actor")
+            if actor is not None:
+                scores[int(actor)] -= 1000
         elif event_type in {"hora", "ryukyoku"} and scores is not None:
             deltas = event.get("deltas")
             if isinstance(deltas, list) and len(deltas) == 4:
                 scores = [int(score + int(delta)) for score, delta in zip(scores, deltas, strict=True)]
     if initial_scores is None or scores is None:
         raise ValueError("could not reconstruct final scores")
+    total = sum(scores)
+    if total < 100_000:
+        ranks = ranks_from_scores(scores)
+        scores[ranks.index(1)] += 100_000 - total
     return initial_scores, scores
 
 

@@ -7,7 +7,7 @@ from inference.rulebase_bot import RulebaseBot
 from inference.mortal_bot import MortalReviewBot
 
 _ANCHOR_70K = Path("artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth")
-_V4 = Path("artifacts/model_v4_20240308_best_min.pth")
+_EXT_MORTAL = Path("artifacts/external_mortal_20240308_best_min.pth")
 _V2_CANDIDATE = Path("artifacts/experiments/model_pool_2026_07/V2_population_mixed_v4_warmstart_2026_07/checkpoints/mortal_74000.pth")
 
 # Named local Mortal checkpoints. ``mortal`` prefers the promoted V2 candidate
@@ -15,9 +15,9 @@ _V2_CANDIDATE = Path("artifacts/experiments/model_pool_2026_07/V2_population_mix
 MORTAL_CHECKPOINTS: dict[str, Path] = {
     "mortal": _V2_CANDIDATE,
     "70k": _ANCHOR_70K,
-    "v4": _V4,
-    "weak": _V4,
-    "weak_mortal": _V4,
+    "ext_mortal": _EXT_MORTAL,
+    "weak": _EXT_MORTAL,
+    "weak_mortal": _EXT_MORTAL,
 }
 
 SUPPORTED_BOT_NAMES = {"rulebase", *MORTAL_CHECKPOINTS.keys()}
@@ -37,7 +37,7 @@ def resolve_bot_spec(
 
     A spec is interpreted as:
       * ``"rulebase"``           -> rule-based bot, no model
-      * a key in MORTAL_CHECKPOINTS (e.g. ``"mortal"``, ``"70k"``, ``"v4"``)
+      * a key in MORTAL_CHECKPOINTS (e.g. ``"mortal"``, ``"70k"``, ``"ext_mortal"``)
       * an explicit path ending in ``.pth/.pt/.ckpt`` (absolute, or resolved
         relative to the project root)
     """

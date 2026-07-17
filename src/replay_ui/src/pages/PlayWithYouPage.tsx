@@ -22,7 +22,7 @@ const NETWORK_OPTIONS: Array<{ value: NetworkId; label: string; hint: string }> 
   { value: "none", label: "none", hint: "不呼出" },
   { value: "mortal", label: "Mortal candidate", hint: "V2@74000 or 70k fallback" },
   { value: "70k", label: "Mortal 70k", hint: "70k anchor" },
-  { value: "weak_mortal", label: "Mortal v4", hint: "external v4" },
+  { value: "ext_mortal", label: "External Mortal", hint: "external reference" },
   { value: "custom", label: "自定义权重", hint: "绝对 .pth 路径" },
 ];
 
@@ -91,7 +91,7 @@ export function PlayWithYouPage() {
   const [speed, setSpeed] = useState<SpeedId>("normal");
   const [device, setDevice] = useState<DeviceId>("cuda");
   const [quantity, setQuantity] = useState<number>(3);
-  const [networks, setNetworks] = useState<string[]>(["mortal", "70k", "weak_mortal", "none"]);
+  const [networks, setNetworks] = useState<string[]>(["mortal", "70k", "ext_mortal", "none"]);
   const [customPaths, setCustomPaths] = useState<Record<number, string>>({});
 
   const [status, setStatus] = useState<PlayWithYouStatus | null>(null);

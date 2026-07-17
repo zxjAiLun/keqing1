@@ -171,7 +171,7 @@ def load_review_history(project_root: Path) -> list[dict]:
     grouped: dict[tuple[str, int], dict] = {}
     model_labels = {
         "70k": "70k",
-        "v4": "v4",
+        "ext_mortal": "ext_mortal",
         "V2_candidate": "V2 candidate",
     }
     if report_dir.exists():
@@ -202,7 +202,7 @@ def load_review_history(project_root: Path) -> list[dict]:
             item["teacher_report_paths"].append(report_path.relative_to(project_root).as_posix())
 
     model_order = {
-        "v4": 0,
+        "ext_mortal": 0,
         "70k": 1,
         "V2 candidate": 2,
     }

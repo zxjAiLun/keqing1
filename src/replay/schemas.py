@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
-BotType = Literal["mortal", "70k", "weak_mortal", "rulebase"]
+BotType = Literal["mortal", "70k", "ext_mortal", "rulebase"]
 
 
 class ReplaySubmitRequest(BaseModel):

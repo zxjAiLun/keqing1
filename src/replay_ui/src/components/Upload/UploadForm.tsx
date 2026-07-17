@@ -205,7 +205,7 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
   const [tenhou6Text, setTenhou6Text] = useState('');
   const [files, setFiles]         = useState<File[]>([]);
   const [playerId, setPlayerId]   = useState<string>('auto');
-  const [selectedModels, setSelectedModels] = useState<BotType[]>(['weak_mortal', '70k', 'mortal']);
+  const [selectedModels, setSelectedModels] = useState<BotType[]>(['ext_mortal', '70k', 'mortal']);
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState<string | null>(null);
   const [success, setSuccess]     = useState<string | null>(null);

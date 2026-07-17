@@ -143,11 +143,12 @@ def train_to_target_steps(
     os.environ["MORTAL_CFG"] = str(config_path.resolve())
 
     from config import config  # noqa: PLC0415
-    from dataloader import FileDatasetsIter, worker_init_fn  # noqa: PLC0415
+    from scripts.mortal.mainline_dataloader import FileDatasetsIter, worker_init_fn  # noqa: PLC0415
     from lr_scheduler import LinearWarmUpCosineAnnealingLR  # noqa: PLC0415
     from model import AuxNet, Brain, DQN  # noqa: PLC0415
 
     control = config["control"]
+    reward_mode = str(config.get("reward", {}).get("mode", "final_rank_mc"))
     version = int(control["version"])
     batch_size = int(control["batch_size"])
     opt_step_every = int(control["opt_step_every"])
@@ -319,6 +320,9 @@ def train_to_target_steps(
         "q_mean": 0.0,
         "target_mean": 0.0,
         "q_abs_err": 0.0,
+        "reward_target_mean": 0.0,
+        "reward_target_std": 0.0,
+        "reward_nonzero_rate": 0.0,
     }
     window_stats = {key: 0.0 for key in stats}
     window_count = 0
@@ -361,6 +365,10 @@ def train_to_target_steps(
             "torch_rng_state": torch.get_rng_state(),
             "cuda_rng_states": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             "initialization": initialization,
+            "training_contract": {
+                "reward_mode": reward_mode,
+                "rank_pts": [float(value) for value in config["env"]["pts"]],
+            },
         }
         torch.save(checkpoint, state_file)
         exposure_path.write_text(
@@ -371,6 +379,10 @@ def train_to_target_steps(
                     "data_stream": data_stream,
                     "archive_steps": sorted(archive_steps_set),
                     "initialization": initialization,
+                    "training_contract": {
+                        "reward_mode": reward_mode,
+                        "rank_pts": [float(value) for value in config["env"]["pts"]],
+                    },
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -410,6 +422,14 @@ def train_to_target_steps(
             avg["q_abs_err"],
             lr,
         )
+        logging.info(
+            "%s reward: mode=%s target_mean=%.4f target_std=%.4f nonzero_rate=%.4f",
+            prefix,
+            reward_mode,
+            avg["reward_target_mean"],
+            avg["reward_target_std"],
+            avg["reward_nonzero_rate"],
+        )
         writer.add_scalar("loss/total_window", avg["total_loss"], steps)
         writer.add_scalar("loss/dqn_window", avg["dqn_loss"], steps)
         writer.add_scalar("loss/cql_window", avg["cql_loss"], steps)
@@ -418,6 +438,9 @@ def train_to_target_steps(
         writer.add_scalar("q/q_mean_window", avg["q_mean"], steps)
         writer.add_scalar("q/target_mean_window", avg["target_mean"], steps)
         writer.add_scalar("q/q_abs_err_window", avg["q_abs_err"], steps)
+        writer.add_scalar("reward/target_mean_window", avg["reward_target_mean"], steps)
+        writer.add_scalar("reward/target_std_window", avg["reward_target_std"], steps)
+        writer.add_scalar("reward/nonzero_rate_window", avg["reward_nonzero_rate"], steps)
         writer.add_scalar("hparam/lr", lr, steps)
         writer.flush()
         window_stats = {key: 0.0 for key in window_stats}
@@ -466,6 +489,9 @@ def train_to_target_steps(
                 "q_mean": float(q.detach().to(torch.float32).mean().cpu()),
                 "target_mean": float(q_target_mc.detach().to(torch.float32).mean().cpu()),
                 "q_abs_err": float((q.detach().to(torch.float32) - q_target_mc.detach().to(torch.float32)).abs().mean().cpu()),
+                "reward_target_mean": float(q_target_mc.detach().mean().cpu()),
+                "reward_target_std": float(q_target_mc.detach().std(unbiased=False).cpu()),
+                "reward_nonzero_rate": float((q_target_mc.detach() != 0).to(torch.float32).mean().cpu()),
             }
             for key, value in batch_metrics.items():
                 stats[key] += value

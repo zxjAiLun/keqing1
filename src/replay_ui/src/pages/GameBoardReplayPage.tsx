@@ -23,7 +23,7 @@ import {
 } from './gameReplayStyles';
 
 const TEACHER_MODEL_ORDER: Record<string, number> = {
-  v4: 0,
+  ext_mortal: 0,
   '70k': 1,
   'V2 candidate': 2,
 };
