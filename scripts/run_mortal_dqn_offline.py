@@ -14,6 +14,7 @@ import os
 from os import path
 from pathlib import Path
 import random
+import subprocess
 import sys
 from typing import Any
 
@@ -50,6 +51,12 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="initialize model weights from a parent checkpoint with fresh optimizer and data stream",
+    )
+    parser.add_argument(
+        "--initialize-optimizer-from",
+        type=Path,
+        default=None,
+        help="load only Adam optimizer state from a checkpoint; requires --initialize-from and keeps a fresh data stream",
     )
     parser.add_argument(
         "--initial-steps",
@@ -89,6 +96,7 @@ def main() -> None:
         archive_dir=args.archive_dir,
         allow_legacy_data_replay=bool(args.allow_legacy_data_replay),
         initialize_from=args.initialize_from,
+        initialize_optimizer_from=args.initialize_optimizer_from,
         initial_steps=int(args.initial_steps),
     )
 
@@ -110,6 +118,70 @@ def _sha256_file(file_path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _git_revision(path: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    revision = result.stdout.strip()
+    return revision or None
+
+
+def _dataset_contract(config: dict[str, Any], file_list: list[str], player_names: list[str]) -> dict[str, Any]:
+    dataset = config["dataset"]
+    manifest = {
+        "version": int(config["control"]["version"]),
+        "globs": [str(value) for value in dataset["globs"]],
+        "file_list": [str(value) for value in file_list],
+        "player_names": sorted(str(value) for value in player_names),
+        "num_epochs": int(dataset["num_epochs"]),
+        "enable_augmentation": bool(dataset["enable_augmentation"]),
+        "augmented_first": bool(dataset["augmented_first"]),
+    }
+    file_index = Path(str(dataset["file_index"])).resolve()
+    return {
+        "file_count": len(file_list),
+        "file_index": str(file_index),
+        "file_index_sha256": _sha256_file(file_index) if file_index.exists() else None,
+        "manifest_sha256": _sha256_bytes(
+            json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ),
+        "player_names": manifest["player_names"],
+    }
+
+
+def _training_contract(
+    *,
+    reward_contract: dict[str, Any],
+    dataset_contract: dict[str, Any],
+    initialization: dict[str, Any] | None,
+    mortal_root: Path,
+) -> dict[str, Any]:
+    initialization_contract = dict(initialization or {"mode": "fresh_random"})
+    return {
+        "schema": "keqing.mortal.training_contract.v2",
+        # Keep these top-level fields for compatibility with the V1-V3 reports.
+        "reward_mode": reward_contract["mode"],
+        "rank_pts": list(reward_contract["rank_pts"]),
+        "reward": reward_contract,
+        "dataset": dataset_contract,
+        "initialization": initialization_contract,
+        "git_commit": _git_revision(_REPO_ROOT),
+        "mortal_revision": _git_revision(mortal_root.resolve()),
+        "libriichi_revision": _git_revision(mortal_root.resolve()),
+    }
+
+
 def train_to_target_steps(
     *,
     config_path: Path,
@@ -124,6 +196,7 @@ def train_to_target_steps(
     archive_dir: Path | None = None,
     allow_legacy_data_replay: bool = False,
     initialize_from: Path | None = None,
+    initialize_optimizer_from: Path | None = None,
     initial_steps: int = 0,
 ) -> dict[str, Any]:
     if target_steps <= 0:
@@ -132,6 +205,8 @@ def train_to_target_steps(
         raise ValueError(f"log_every must be positive, got {log_every}")
     if initial_steps < 0:
         raise ValueError(f"initial_steps must be non-negative, got {initial_steps}")
+    if initialize_optimizer_from is not None and initialize_from is None:
+        raise ValueError("--initialize-optimizer-from requires --initialize-from")
     random.seed(seed)
     torch.manual_seed(seed)
     mortal_python_dir = (mortal_root / "mortal").resolve()
@@ -143,7 +218,11 @@ def train_to_target_steps(
     os.environ["MORTAL_CFG"] = str(config_path.resolve())
 
     from config import config  # noqa: PLC0415
-    from scripts.mortal.mainline_dataloader import FileDatasetsIter, worker_init_fn  # noqa: PLC0415
+    from scripts.mortal.mainline_dataloader import (  # noqa: PLC0415
+        FileDatasetsIter,
+        reward_contract_from_config,
+        worker_init_fn,
+    )
     from lr_scheduler import LinearWarmUpCosineAnnealingLR  # noqa: PLC0415
     from model import AuxNet, Brain, DQN  # noqa: PLC0415
 
@@ -201,6 +280,7 @@ def train_to_target_steps(
             best_perf = dict(state["best_perf"])
             steps = int(state["steps"])
             loaded_data_stream = state.get("data_stream")
+            initialization = state.get("initialization")
             expected_python_rng_state = state.get("python_rng_state")
             restore_torch_rng_state = state.get("torch_rng_state")
             restore_cuda_rng_states = state.get("cuda_rng_states")
@@ -249,6 +329,34 @@ def train_to_target_steps(
             "scheduler": "fresh",
             "data_stream": "fresh",
         }
+        if initialize_optimizer_from is not None:
+            optimizer_parent_path = initialize_optimizer_from.resolve()
+            if not optimizer_parent_path.exists():
+                raise FileNotFoundError(
+                    f"--initialize-optimizer-from checkpoint does not exist: {optimizer_parent_path}"
+                )
+            optimizer_parent = torch.load(
+                optimizer_parent_path,
+                weights_only=True,
+                map_location=device,
+            )
+            if "optimizer" not in optimizer_parent:
+                raise RuntimeError(
+                    f"optimizer state is missing from --initialize-optimizer-from checkpoint: {optimizer_parent_path}"
+                )
+            optimizer.load_state_dict(optimizer_parent["optimizer"])
+            initialization.update(
+                {
+                    "mode": "weights_plus_optimizer_warm_start",
+                    "optimizer": "preserved",
+                    "optimizer_checkpoint": str(optimizer_parent_path),
+                    "optimizer_checkpoint_sha256": _sha256_file(optimizer_parent_path),
+                }
+            )
+            logging.info(
+                "loaded Adam optimizer state from %s; scheduler and data stream remain fresh",
+                optimizer_parent_path,
+            )
         logging.info(
             "initialized fresh experiment from %s; assigned global steps=%s with fresh optimizer/data stream",
             parent_path,
@@ -266,6 +374,9 @@ def train_to_target_steps(
     file_list = _load_or_build_file_index(config)
     logging.info("file list size: %s", f"{len(file_list):,}")
     dataset = config["dataset"]
+    player_names = _load_player_names(config)
+    reward_contract = reward_contract_from_config(config)
+    dataset_contract = _dataset_contract(config, file_list, player_names)
     loader_workers = int(dataset["num_workers"] if num_workers is None else num_workers)
     dataset_iter = FileDatasetsIter(
         version=version,
@@ -273,7 +384,7 @@ def train_to_target_steps(
         pts=config["env"]["pts"],
         file_batch_size=int(dataset["file_batch_size"]),
         reserve_ratio=float(dataset["reserve_ratio"]),
-        player_names=_load_player_names(config),
+        player_names=player_names,
         num_epochs=int(dataset["num_epochs"]),
         enable_augmentation=bool(dataset["enable_augmentation"]),
         augmented_first=bool(dataset["augmented_first"]),
@@ -365,10 +476,12 @@ def train_to_target_steps(
             "torch_rng_state": torch.get_rng_state(),
             "cuda_rng_states": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             "initialization": initialization,
-            "training_contract": {
-                "reward_mode": reward_mode,
-                "rank_pts": [float(value) for value in config["env"]["pts"]],
-            },
+            "training_contract": _training_contract(
+                reward_contract=reward_contract,
+                dataset_contract=dataset_contract,
+                initialization=initialization,
+                mortal_root=mortal_root,
+            ),
         }
         torch.save(checkpoint, state_file)
         exposure_path.write_text(
@@ -379,10 +492,12 @@ def train_to_target_steps(
                     "data_stream": data_stream,
                     "archive_steps": sorted(archive_steps_set),
                     "initialization": initialization,
-                    "training_contract": {
-                        "reward_mode": reward_mode,
-                        "rank_pts": [float(value) for value in config["env"]["pts"]],
-                    },
+                    "training_contract": _training_contract(
+                        reward_contract=reward_contract,
+                        dataset_contract=dataset_contract,
+                        initialization=initialization,
+                        mortal_root=mortal_root,
+                    ),
                 },
                 ensure_ascii=False,
                 indent=2,

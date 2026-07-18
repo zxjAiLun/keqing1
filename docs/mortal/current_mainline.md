@@ -21,3 +21,5 @@ V3 used the same 6,000-hanchan corpus and `reward.mode = "final_rank_mc"`. It wa
 Use `scripts/mortal/four_player_native.py` for CUDA native random-seat arenas and `scripts/mortal/build_platform_account_report.py` for per-account Pt/R and behavior summaries. Prefer average rank points, rank distribution, and behavior metrics over one-direction 1v3 gates.
 
 The promotion gate is a balanced model-pool league, not an automatic replay regeneration step. A new replay pool is created only when the next hypothesis changes the data distribution or training objective. The V3 1,000-hanchan league used five 200-hanchan lineups so each model family received exactly 1,000 seat-hanchans.
+
+The next diagnostic line is documented in [`reward_ab_2026_07.md`](reward_ab_2026_07.md): first compare Mortal GRP delta-Pt reward against final-rank MC with matched seeds, then isolate Adam moment reset versus preservation. No GRP A/B training is runnable until a real GRP checkpoint is restored.
