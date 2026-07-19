@@ -153,3 +153,13 @@ start_reviewer_browser_auto_game00000.cmd
 build/
 *.spec
 .workbench-launcher.pid
+
+# Curated Mortal experiment reports
+!reports/
+!reports/mortal/
+!reports/mortal/reward_ab_2026_07_epoch2/
+!reports/mortal/reward_ab_2026_07_epoch2/reward_ab_eval_1000h_summary.md
+!reports/mortal/reward_ab_2026_07_epoch2/reward_ab_eval_1000h_summary.json
+
+# Current Mortal reward research report
+!docs/mortal/reward_ab_2026_07.md

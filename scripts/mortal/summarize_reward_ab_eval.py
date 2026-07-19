@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -272,13 +273,16 @@ def main() -> None:
         bootstrap_reps=5000,
     )
     seed_means = [float(item["paired"]["mean_delta_pt"]) for item in paired_per_seed]
+    positive_seed_count = sum(value > 0 for value in seed_means)
+    seed_count = len(seed_means)
+    sign_test_p = sum(math.comb(seed_count, k) for k in range(positive_seed_count, seed_count + 1)) / (2 ** seed_count)
     recipe_summary = {
-        "training_seed_count": len(seed_means),
+        "training_seed_count": seed_count,
         "seed_mean_delta_pt": seed_means,
         "mean_of_seed_means_delta_pt": float(np.mean(seed_means)),
         "median_of_seed_means_delta_pt": float(np.median(seed_means)),
-        "positive_seed_count": sum(value > 0 for value in seed_means),
-        "seed_direction_sign_test_one_sided_p": float(0.5 ** len(seed_means)),
+        "positive_seed_count": positive_seed_count,
+        "seed_direction_sign_test_one_sided_p": float(sign_test_p),
         "interpretation": "seed-level uncertainty; n is the number of training seeds, not hanchans",
     }
 
