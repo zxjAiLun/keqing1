@@ -51,6 +51,8 @@ def main() -> None:
                     "batches_consumed": state.get("data_stream", {}).get("batches_consumed"),
                     "initialization_mode": contract.get("initialization", {}).get("mode"),
                     "parent_sha256": contract.get("initialization", {}).get("parent_sha256"),
+                    "git_commit": contract.get("git_commit"),
+                    "git_dirty": contract.get("git_dirty"),
                 }
             )
 
@@ -58,10 +60,15 @@ def main() -> None:
         raise SystemExit("one or more A/B checkpoints did not reach 72000")
     if {row["reward_mode"] for row in rows} != {"final_rank_mc", "mortal_grp_delta_pt"}:
         raise SystemExit("unexpected reward modes")
-    invariant_keys = ("file_count", "file_index_sha256", "manifest_sha256", "num_epochs", "initialization_mode", "parent_sha256")
+    invariant_keys = (
+        "file_count", "file_index_sha256", "manifest_sha256", "num_epochs",
+        "initialization_mode", "parent_sha256", "git_commit", "git_dirty",
+    )
     for key in invariant_keys:
         if len({row[key] for row in rows}) != 1:
             raise SystemExit(f"matched contract invariant failed: {key}")
+    if rows and rows[0]["git_dirty"] is not False:
+        raise SystemExit("training contracts must record git_dirty=false")
     for seed in seeds:
         pair = [row for row in rows if row["seed"] == seed]
         if len(pair) != 2 or pair[0]["data_seed"] != pair[1]["data_seed"]:

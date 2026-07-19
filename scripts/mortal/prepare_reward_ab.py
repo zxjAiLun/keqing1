@@ -21,7 +21,7 @@ from scripts.mortal.prepare_v2_population_mixed_warmstart import POOL_SPECS
 from scripts.mortal.prepare_v3_final_rank_mc_warmstart import _normalize_host_paths
 
 
-EXPERIMENT_ID = "reward_ab_2026_07_epoch2"
+DEFAULT_EXPERIMENT_ID = "reward_ab_2026_07_epoch2"
 DEFAULT_OUTPUT_ROOT = Path("artifacts/experiments/model_pool_2026_07")
 DEFAULT_DATA_ROOT = DEFAULT_OUTPUT_ROOT / "V2_data"
 PARENT_CHECKPOINT = Path("artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth")
@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-config", type=Path, default=Path("configs/mortal_offline_mainline.toml"))
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--experiment-id", default=DEFAULT_EXPERIMENT_ID)
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--parent-checkpoint", type=Path, default=PARENT_CHECKPOINT)
     parser.add_argument("--grp-checkpoint", type=Path, required=True)
@@ -136,7 +137,7 @@ def main() -> None:
             f"GRP checkpoint is required before preparing the A/B run: {grp_checkpoint}"
         )
 
-    output_root = args.output_root / EXPERIMENT_ID
+    output_root = args.output_root / args.experiment_id
     shared_dir = output_root / "shared"
     shared_file_index = shared_dir / "file_index.pth"
     base_config = _load_toml(args.base_config)
@@ -185,7 +186,7 @@ def main() -> None:
 
     manifest = {
         "schema": "keqing.mortal.reward_ab.v1",
-        "experiment_id": EXPERIMENT_ID,
+        "experiment_id": args.experiment_id,
         "parent_checkpoint": str(parent),
         "parent_init_mode": "weights_only_fresh_adam_fresh_stream",
         "grp_checkpoint": str(grp_checkpoint),

@@ -137,6 +137,21 @@ def _git_revision(path: Path) -> str | None:
     return revision or None
 
 
+def _git_dirty(path: Path) -> bool | None:
+    """Return whether tracked or untracked files differ from the checkout."""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return bool(result.stdout.strip())
+
+
 def _dataset_contract(config: dict[str, Any], file_list: list[str], player_names: list[str]) -> dict[str, Any]:
     dataset = config["dataset"]
     manifest = {
@@ -181,6 +196,7 @@ def _training_contract(
         "dataset": dataset_contract,
         "initialization": initialization_contract,
         "git_commit": _git_revision(_REPO_ROOT),
+        "git_dirty": _git_dirty(_REPO_ROOT),
         "mortal_revision": _git_revision(mortal_root.resolve()),
         "libriichi_revision": _git_revision(mortal_root.resolve()),
     }

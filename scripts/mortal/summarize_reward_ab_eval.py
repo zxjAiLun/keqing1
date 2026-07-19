@@ -141,6 +141,31 @@ def _bootstrap_mean_ci(values: np.ndarray, rng: np.random.Generator, reps: int) 
     return [float(np.quantile(means, 0.025)), float(np.quantile(means, 0.975))]
 
 
+def _hierarchical_delta_pt_ci(
+    per_seed_rows: list[list[dict[str, Any]]],
+    rng: np.random.Generator,
+    reps: int,
+) -> list[float]:
+    """Bootstrap seed pairs outside and hanchans inside, weighting seeds equally."""
+    if not per_seed_rows or any(not rows for rows in per_seed_rows):
+        raise ValueError("cannot hierarchically bootstrap an empty seed group")
+    seed_count = len(per_seed_rows)
+    seed_values = [
+        np.asarray([float(row["delta_pt"]) for row in rows], dtype=np.float64)
+        for rows in per_seed_rows
+    ]
+    outer_indices = rng.integers(0, seed_count, size=(reps, seed_count))
+    estimates = np.empty(reps, dtype=np.float64)
+    for rep in range(reps):
+        selected_means = []
+        for seed_index in outer_indices[rep]:
+            values = seed_values[int(seed_index)]
+            inner_indices = rng.integers(0, values.size, size=values.size)
+            selected_means.append(float(values[inner_indices].mean()))
+        estimates[rep] = float(np.mean(selected_means))
+    return [float(np.quantile(estimates, 0.025)), float(np.quantile(estimates, 0.975))]
+
+
 def _paired_summary(
     rows: list[dict[str, Any]],
     label: str,
@@ -272,6 +297,11 @@ def main() -> None:
         bootstrap_rng,
         bootstrap_reps=5000,
     )
+    hierarchical_ci = _hierarchical_delta_pt_ci(
+        [[row for row in _paired_rows(run_dir, args.expected_games)] for run_dir in run_dirs],
+        bootstrap_rng,
+        reps=5000,
+    )
     seed_means = [float(item["paired"]["mean_delta_pt"]) for item in paired_per_seed]
     eps = 1e-12
     non_tie_seed_means = [value for value in seed_means if abs(value) > eps]
@@ -308,6 +338,13 @@ def main() -> None:
         "pairwise": pairwise,
         "paired_per_seed": paired_per_seed,
         "pooled_paired": pooled_paired,
+        "hierarchical_paired": {
+            "delta_pt_bootstrap_95ci": hierarchical_ci,
+            "outer_cluster": "training_seed_pair",
+            "inner_cluster": "hanchan",
+            "seed_weighting": "equal",
+            "bootstrap_reps": 5000,
+        },
         "recipe_seed_summary": recipe_summary,
         "pooled": pooled,
         "interpretation": {
@@ -369,6 +406,7 @@ def main() -> None:
             f"- Seed-level mean delta Pt: `{[round(value, 2) for value in seed_means]}`.",
             f"- Positive non-tie seed count: `{recipe_summary['positive_seed_count']}/{recipe_summary['non_tie_seed_count']}`; one-sided sign-test p-value under the zero-direction null: `{recipe_summary['seed_direction_sign_test_one_sided_p']:.4f}`.",
             "- The hanchan bootstrap CI measures arena uncertainty conditional on these checkpoints; it does not remove the separate training-seed uncertainty.",
+            f"- Hierarchical seed-weighted bootstrap CI (outer training seed, inner hanchan): `[{hierarchical_ci[0]:+.2f}, {hierarchical_ci[1]:+.2f}]`.",
         ]
     )
     lines.extend(
