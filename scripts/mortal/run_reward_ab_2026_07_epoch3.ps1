@@ -28,7 +28,8 @@ $Groups = @(
 if (-not (Test-Path -LiteralPath $Python)) { throw "Windows venv Python is missing: $Python" }
 if (-not (Test-Path -LiteralPath $GrpCheckpoint)) { throw "Frozen GRP checkpoint is missing: $GrpCheckpoint" }
 if (-not (Test-Path -LiteralPath $ParentCheckpoint)) { throw "Parent checkpoint is missing: $ParentCheckpoint" }
-if ((git status --porcelain) -ne "") { throw "Refusing to start epoch3 on a dirty worktree" }
+$status = @(git status --porcelain 2>$null)
+if ($status.Count -ne 0) { throw "Refusing to start epoch3 on a dirty worktree: $($status -join '; ')" }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
