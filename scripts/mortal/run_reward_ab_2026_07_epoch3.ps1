@@ -37,8 +37,12 @@ function Invoke-Logged {
     param([string]$Name, [string[]]$Arguments)
     $LogPath = Join-Path $LogDir "$RunStamp`_$Name.log"
     "[$(Get-Date -Format o)] START $Name" | Tee-Object -FilePath $LogPath -Append
+    $PreviousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
     & $Python @Arguments 2>&1 | Tee-Object -FilePath $LogPath -Append
     $ExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $PreviousErrorAction
+    $Error.Clear()
     if ($ExitCode -ne 0) { throw "$Name failed with exit code $ExitCode. See $LogPath" }
     "[$(Get-Date -Format o)] DONE $Name" | Tee-Object -FilePath $LogPath -Append
 }
