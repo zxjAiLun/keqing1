@@ -221,6 +221,7 @@ export function sameReplayAction(
 
 type ReplayDecisionLike = {
   is_obs?: boolean;
+  comparison_exempt?: string | null;
   actor_to_move?: number | null;
   chosen?: ComparableAction | null;
   gt_action?: ComparableAction | null;
@@ -253,6 +254,7 @@ export function isReplayPlayerDecision(entry: ReplayDecisionLike, playerId: numb
 export function isReplayDiffForPlayer(entry: ReplayDecisionLike, playerId: number): boolean {
   return (
     isReplayPlayerDecision(entry, playerId) &&
+    !entry.comparison_exempt &&
     entry.gt_action !== null &&
     entry.gt_action !== undefined &&
     !sameReplayAction(entry.chosen, entry.gt_action)
@@ -265,6 +267,7 @@ export function isReplayReviewDiffForPlayer(
   activeTeacherModel?: string | null,
 ): boolean {
   if (!isReplayPlayerDecision(entry, playerId)) return false;
+  if (entry.comparison_exempt) return false;
 
   const teacherReviews = entry.teacher_reviews && entry.teacher_reviews.length > 0
     ? entry.teacher_reviews

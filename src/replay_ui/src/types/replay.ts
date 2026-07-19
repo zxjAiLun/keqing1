@@ -150,6 +150,9 @@ export interface DecisionLogEntry {
   value?: number;
   /** ground truth：玩家实际动作 */
   gt_action: Action | null;
+  /** 响应窗口被其他玩家更高优先级动作截断，不参与错误/一致率统计 */
+  comparison_exempt?: 'response_preempted' | string;
+  comparison_exempt_by?: Action | null;
   /** 观察步类型，仅 is_obs=true 时有意义 */
   obs_kind?: 'discard' | 'meld' | 'reach' | 'terminal';
   /** 当前棋盘快照语义，默认 after_action */

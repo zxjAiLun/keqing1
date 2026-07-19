@@ -126,7 +126,11 @@ def action_primary_tile(action: dict | None) -> str | None:
 
 
 def summarize_decision_matches(log: list[dict]) -> tuple[int, int]:
-    own_log = [entry for entry in log if not entry.get("is_obs")]
+    own_log = [
+        entry
+        for entry in log
+        if not entry.get("is_obs") and not entry.get("comparison_exempt")
+    ]
     total_ops = len(own_log)
     match_count = sum(
         1 for entry in own_log if same_action(entry.get("chosen"), entry.get("gt_action"))

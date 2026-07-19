@@ -404,7 +404,7 @@ export function GameBoardReplayPage() {
     [currentEntry, data, currentStep, playerNames, viewPlayerId, boardPhase],
   );
   // 只在打出前显示权重条；打出后/立直展示阶段不再显示。
-  const logitData = currentEntry && !currentEntry.is_obs && boardPhase === 'pre' && !isForcedRiichiTsumogiri
+  const baseLogitData = currentEntry && !currentEntry.is_obs && boardPhase === 'pre' && !isForcedRiichiTsumogiri
     ? buildLogitData(currentEntry)
     : undefined;
   const replayTeacherModels = useMemo(() => {
@@ -468,6 +468,24 @@ export function GameBoardReplayPage() {
     return baseHands.map((tiles, pid) => (pid === resultSummary.winner ? tiles : null));
   }, [replayHands, resultSummary, showOpponentHands]);
 
+  const effectiveReplayEntry = useMemo(() => {
+    if (!currentEntry || !replayHands?.[viewPlayerId]) return currentEntry;
+    const hand = replayHands[viewPlayerId];
+    const handCount = new Set(hand);
+    const candidates = currentEntry.candidates?.filter((candidate) => {
+      const action = candidate.action;
+      if (action.type !== 'dahai' && action.type !== 'kakan') return true;
+      return Boolean(action.pai && handCount.has(action.pai));
+    });
+    return { ...currentEntry, hand, candidates };
+  }, [currentEntry, replayHands, viewPlayerId]);
+  const effectiveBattleState = battleState && replayHands?.[viewPlayerId]
+    ? { ...battleState, hand: replayHands[viewPlayerId] }
+    : battleState;
+  const logitData = effectiveReplayEntry && !effectiveReplayEntry.is_obs && boardPhase === 'pre' && !isForcedRiichiTsumogiri
+    ? buildLogitData(effectiveReplayEntry)
+    : baseLogitData;
+
   if (loading) {
     return (
       <div style={centeredStatusStyle}>
@@ -492,11 +510,11 @@ export function GameBoardReplayPage() {
     <div style={gameReplayRootStyle}>
       {showStats && data && <StatsPanel data={data} onClose={() => setShowStats(false)} />}
 
-      {battleState ? (
+      {effectiveBattleState ? (
         <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
           <div style={{ flex: 1, minWidth: 0, minHeight: 0, position: 'relative' }}>
             <MahjongTable
-              state={battleState}
+              state={effectiveBattleState}
               onAction={() => {}}
               isMyTurn={false}
               selectedTile={chosenPai}
@@ -615,7 +633,7 @@ export function GameBoardReplayPage() {
                 </div>
               </div>
               <ReplayDecisionPanel
-                entry={isForcedRiichiTsumogiri ? null : currentEntry}
+                entry={isForcedRiichiTsumogiri ? null : effectiveReplayEntry}
                 step={currentStep}
                 totalSteps={totalSteps}
                 compact={false}
@@ -926,7 +944,9 @@ function applyReplayEventToHands(hands: string[][], ev: ReplayEvent) {
     for (const tile of consumed) removeTileOnce(hands[actor], tile);
     return;
   }
-  if (type === 'kakan' || type === 'kakan_accepted') {
+  // kakan is the declaration window. The added tile leaves the hand only
+  // once kakan_accepted is emitted.
+  if (type === 'kakan_accepted') {
     removeTileOnce(hands[actor], String(ev.pai ?? ''));
   }
 }
@@ -977,6 +997,12 @@ function applyEntryEventsToHands(
 
     if (type === 'tsumo') {
       const tsumoActor = Number(ev.actor ?? -1);
+      if (action.type === 'kakan' && tsumoActor === action.actor) {
+        applyReplayEventToHands(hands, ev);
+        cursor += 1;
+        if (phase !== 'post') return cursor;
+        continue;
+      }
       if ((action.type === 'dahai' || action.type === 'reach') && tsumoActor === action.actor) {
         applyReplayEventToHands(hands, ev);
         cursor += 1;
@@ -986,6 +1012,21 @@ function applyEntryEventsToHands(
         }
         if (phase !== 'post') return cursor;
         continue;
+      }
+      return cursor;
+    }
+
+    if (action.type === 'kakan') {
+      // A decision entry is created at the added tile's tsumo. Pre-phase stops
+      // after that draw; post-phase consumes the declaration and acceptance.
+      if (type === 'kakan' && eventMatchesAction(ev, action)) {
+        cursor += 1;
+        continue;
+      }
+      if (type === 'kakan_accepted' && Number(ev.actor ?? -1) === action.actor) {
+        applyReplayEventToHands(hands, ev);
+        cursor += 1;
+        return cursor;
       }
       return cursor;
     }

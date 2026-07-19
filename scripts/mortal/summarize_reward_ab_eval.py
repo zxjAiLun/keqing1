@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 
 RANK_POINTS = (90.0, 45.0, 0.0, -135.0)
@@ -90,6 +93,89 @@ def _fmt_pct(value: float) -> str:
     return f"{value:.2%}"
 
 
+def _paired_rows(run_dir: Path, expected_games: int) -> list[dict[str, Any]]:
+    """Read one F/G result from each hanchan, preserving the game as a cluster."""
+    path = run_dir / "platform_accounts" / "per_game_results.csv"
+    if not path.exists():
+        raise FileNotFoundError(path)
+    games: dict[str, dict[str, int]] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            label = str(row["model_label"])
+            if not (label.startswith("F_") or label.startswith("G_")):
+                continue
+            source_log = str(row["source_log"])
+            games.setdefault(source_log, {})[label[:1]] = int(row["rank"])
+    if len(games) != expected_games:
+        raise ValueError(f"{run_dir}: paired CSV has {len(games)} games, expected {expected_games}")
+    result = []
+    for source_log, ranks in sorted(games.items()):
+        if set(ranks) != {"F", "G"}:
+            raise ValueError(f"{run_dir}: missing F/G rank in {source_log}: {ranks}")
+        f_rank = ranks["F"]
+        g_rank = ranks["G"]
+        f_pt = RANK_POINTS[f_rank - 1]
+        g_pt = RANK_POINTS[g_rank - 1]
+        result.append(
+            {
+                "source_log": source_log,
+                "f_rank": f_rank,
+                "g_rank": g_rank,
+                "f_rank_pt": f_pt,
+                "g_rank_pt": g_pt,
+                "delta_pt": g_pt - f_pt,
+                "delta_rank": f_rank - g_rank,
+                "g_ahead": int(g_rank < f_rank),
+                "tie": int(g_rank == f_rank),
+            }
+        )
+    return result
+
+
+def _bootstrap_mean_ci(values: np.ndarray, rng: np.random.Generator, reps: int) -> list[float]:
+    if values.size == 0:
+        raise ValueError("cannot bootstrap an empty array")
+    indices = rng.integers(0, values.size, size=(reps, values.size))
+    means = values[indices].mean(axis=1)
+    return [float(np.quantile(means, 0.025)), float(np.quantile(means, 0.975))]
+
+
+def _paired_summary(
+    rows: list[dict[str, Any]],
+    label: str,
+    rng: np.random.Generator,
+    bootstrap_reps: int,
+) -> dict[str, Any]:
+    if not rows:
+        raise ValueError(f"no paired rows for {label}")
+    delta_pt = np.asarray([float(row["delta_pt"]) for row in rows], dtype=np.float64)
+    delta_rank = np.asarray([float(row["delta_rank"]) for row in rows], dtype=np.float64)
+    g_ahead = np.asarray([float(row["g_ahead"]) for row in rows], dtype=np.float64)
+    ties = np.asarray([float(row["tie"]) for row in rows], dtype=np.float64)
+    f_counts = [sum(int(row["f_rank"] == rank) for row in rows) for rank in range(1, 5)]
+    g_counts = [sum(int(row["g_rank"] == rank) for row in rows) for rank in range(1, 5)]
+    return {
+        "label": label,
+        "games": len(rows),
+        "mean_delta_pt": float(delta_pt.mean()),
+        "median_delta_pt": float(np.median(delta_pt)),
+        "mean_delta_rank": float(delta_rank.mean()),
+        "g_ahead_rate": float(g_ahead.mean()),
+        "tie_rate": float(ties.mean()),
+        "delta_pt_bootstrap_95ci": _bootstrap_mean_ci(delta_pt, rng, bootstrap_reps),
+        "delta_rank_bootstrap_95ci": _bootstrap_mean_ci(delta_rank, rng, bootstrap_reps),
+        "g_ahead_bootstrap_95ci": _bootstrap_mean_ci(g_ahead, rng, bootstrap_reps),
+        "f_rank_counts": f_counts,
+        "g_rank_counts": g_counts,
+        "rank_rate_diff_pp": [
+            100.0 * (g_count - f_count) / len(rows)
+            for f_count, g_count in zip(f_counts, g_counts, strict=True)
+        ],
+        "bootstrap_reps": bootstrap_reps,
+        "cluster": "hanchan",
+    }
+
+
 def main() -> None:
     args = parse_args()
     run_dirs = sorted(path for path in args.eval_root.glob("F_G_*") if path.is_dir())
@@ -98,6 +184,8 @@ def main() -> None:
 
     per_seed: list[dict[str, Any]] = []
     source_checks: list[dict[str, Any]] = []
+    paired_per_seed: list[dict[str, Any]] = []
+    bootstrap_rng = np.random.default_rng(20260719)
     for run_dir in run_dirs:
         metrics = _read_json(run_dir / "metrics.json")
         detailed = _read_json(run_dir / "detailed_stats.json")
@@ -120,6 +208,18 @@ def main() -> None:
             for label in labels
         }
         per_seed.append({"run": run_dir.name, "seed": int(seed), "models": rows})
+        paired_per_seed.append(
+            {
+                "run": run_dir.name,
+                "seed": int(seed),
+                "paired": _paired_summary(
+                    _paired_rows(run_dir, args.expected_games),
+                    run_dir.name,
+                    bootstrap_rng,
+                    bootstrap_reps=5000,
+                ),
+            }
+        )
         source_checks.append(
             {
                 "run": run_dir.name,
@@ -160,6 +260,28 @@ def main() -> None:
             }
         )
 
+    all_paired_rows = [
+        row
+        for run_dir in run_dirs
+        for row in _paired_rows(run_dir, args.expected_games)
+    ]
+    pooled_paired = _paired_summary(
+        all_paired_rows,
+        "pooled_hanchans",
+        bootstrap_rng,
+        bootstrap_reps=5000,
+    )
+    seed_means = [float(item["paired"]["mean_delta_pt"]) for item in paired_per_seed]
+    recipe_summary = {
+        "training_seed_count": len(seed_means),
+        "seed_mean_delta_pt": seed_means,
+        "mean_of_seed_means_delta_pt": float(np.mean(seed_means)),
+        "median_of_seed_means_delta_pt": float(np.median(seed_means)),
+        "positive_seed_count": sum(value > 0 for value in seed_means),
+        "seed_direction_sign_test_one_sided_p": float(0.5 ** len(seed_means)),
+        "interpretation": "seed-level uncertainty; n is the number of training seeds, not hanchans",
+    }
+
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     document = {
@@ -171,21 +293,27 @@ def main() -> None:
         "source_checks": source_checks,
         "per_seed": per_seed,
         "pairwise": pairwise,
+        "paired_per_seed": paired_per_seed,
+        "pooled_paired": pooled_paired,
+        "recipe_seed_summary": recipe_summary,
         "pooled": pooled,
         "interpretation": {
-            "scope": "250 hanchans per matched seed pair; screening evaluation, not final promotion evidence",
+            "scope": f"{args.expected_games} hanchans per matched seed pair; paired screening evaluation",
             "favorable_G_pairs_by_avg_rank_pt": sum(1 for row in pairwise if row["G_minus_F_avg_rank_pt"] > 0),
             "pair_count": len(pairwise),
+            "pooled_paired_delta_pt_ci": pooled_paired["delta_pt_bootstrap_95ci"],
         },
     }
-    (output_dir / "reward_ab_eval_250h_summary.json").write_text(
+    json_path = output_dir / f"reward_ab_eval_{args.expected_games}h_summary.json"
+    markdown_path = output_dir / f"reward_ab_eval_{args.expected_games}h_summary.md"
+    json_path.write_text(
         json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
     lines = [
-        "# Reward Semantics A/B: 250-Hanchan Screening",
+        f"# Reward Semantics A/B: {args.expected_games}-Hanchan Screening",
         "",
-        "This is a matched-seed native random-seat screening evaluation. It is not a promotion gate.",
+        "This is a matched-seed native random-seat screening evaluation.",
         "All rows are reported as separate F/G results; no two-way aggregate is used.",
         "",
         "## Per Pair",
@@ -201,6 +329,35 @@ def main() -> None:
             f"{row['G_minus_F_houjuu_pp']:+.2f}pp | {row['G_minus_F_fuuro_pp']:+.2f}pp | "
             f"{row['G_minus_F_riichi_pp']:+.2f}pp |"
         )
+    lines.extend(
+        [
+            "",
+            "## Paired Hanchan Differential",
+            "",
+            "`delta_pt = Pt(G) - Pt(F)` and `delta_rank = rank(F) - rank(G)`. Bootstrap resamples complete hanchans, not individual seats.",
+            "",
+            "| Scope | Games | Mean delta Pt | Median delta Pt | Mean delta rank | G ahead | 95% CI for mean delta Pt | Rank-rate diff (1st/2nd/3rd/4th) |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+        ]
+    )
+    for item in paired_per_seed + [{"run": "pooled_hanchans", "paired": pooled_paired}]:
+        row = item["paired"]
+        lines.append(
+            f"| {item['run']} | {row['games']} | {row['mean_delta_pt']:+.2f} | {row['median_delta_pt']:+.2f} | "
+            f"{row['mean_delta_rank']:+.3f} | {_fmt_pct(row['g_ahead_rate'])} | "
+            f"[{row['delta_pt_bootstrap_95ci'][0]:+.2f}, {row['delta_pt_bootstrap_95ci'][1]:+.2f}] | "
+            f"{[f'{value:+.2f}pp' for value in row['rank_rate_diff_pp']]} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Training-Seed View",
+            "",
+            f"- Seed-level mean delta Pt: `{[round(value, 2) for value in seed_means]}`.",
+            f"- Positive seed count: `{recipe_summary['positive_seed_count']}/{recipe_summary['training_seed_count']}`; one-sided sign-test p-value under the zero-direction null: `{recipe_summary['seed_direction_sign_test_one_sided_p']:.4f}`.",
+            "- The hanchan bootstrap CI measures arena uncertainty conditional on these checkpoints; it does not remove the separate training-seed uncertainty.",
+        ]
+    )
     lines.extend(
         [
             "",
@@ -223,11 +380,11 @@ def main() -> None:
             "## Reading",
             "",
             f"- G is ahead of F on average rank Pt in {document['interpretation']['favorable_G_pairs_by_avg_rank_pt']}/{len(pairwise)} matched pairs.",
-            "- The three-pair screen is only a direction check. Any promotion or recipe change requires a longer fixed-seed evaluation.",
+            "- This is a direction check; reward promotion still requires interpreting both the paired hanchan CI and the separate training-seed uncertainty.",
             "- The 70k and ext_mortal rows are controls for this lineup, not a claim that this screen replaces the final model-pool league.",
         ]
     )
-    (output_dir / "reward_ab_eval_250h_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(json.dumps({"runs": len(per_seed), "pooled": pooled, "pairwise": pairwise}, ensure_ascii=False, indent=2))
 
 

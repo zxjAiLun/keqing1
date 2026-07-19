@@ -215,6 +215,7 @@ export function ReplayDecisionPanel({
   }
 
   const { chosen, gt_action, candidates } = entry;
+  const comparisonExempt = Boolean(entry.comparison_exempt);
 
   const activeTeacherReview = teacherReviews.find((review) => review.model === selectedTeacherModel);
   const teacherExpected = teacherAction(activeTeacherReview);
@@ -240,7 +241,9 @@ export function ReplayDecisionPanel({
     ? jointReachCandidates
     : ensureVisibleCandidates(candidates, chosen, gt_action, teacherReviews, 12);
   const sorted = sortCandidatesForReviewer(visibleCandidates, selectedTeacherModel);
-  const actualActionForRows = usesJointReachCandidates
+  const actualActionForRows = comparisonExempt
+    ? null
+    : usesJointReachCandidates
     ? activeTeacherReview?.actual_action ?? null
     : gt_action;
 
@@ -258,6 +261,20 @@ export function ReplayDecisionPanel({
   return (
     <div style={panelStyle(compact)}>
       {teacherSelector}
+
+      {comparisonExempt && (
+        <div style={{
+          marginBottom: 8,
+          padding: '6px 8px',
+          border: '1px solid rgba(180, 83, 9, 0.24)',
+          borderRadius: 4,
+          background: 'rgba(245, 158, 11, 0.08)',
+          color: '#92400e',
+          fontSize: 11,
+        }}>
+          响应被其他玩家的更高优先级动作截断，本步不计入错误统计
+        </div>
+      )}
 
       {/* 权重表格 */}
       <div style={{ ...sectionStyle, flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>

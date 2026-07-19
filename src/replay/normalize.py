@@ -1,8 +1,51 @@
 from __future__ import annotations
 
 from inference.review import same_action
+from mahjong_env.tiles import normalize_tile
 
 _RESPONSE_ACTION_TYPES = {"chi", "pon", "daiminkan", "ankan", "kakan", "hora"}
+_RESPONSE_PRIORITY = {
+    "none": 0,
+    "chi": 1,
+    "pon": 2,
+    "daiminkan": 2,
+    "ankan": 2,
+    "kakan": 2,
+    "hora": 3,
+}
+
+
+def _same_response_source(left: dict, right: dict) -> bool:
+    """Whether two response actions refer to the same discard source."""
+    if left.get("target") is not None and right.get("target") is not None:
+        if int(left["target"]) != int(right["target"]):
+            return False
+    left_pai = left.get("pai")
+    right_pai = right.get("pai")
+    if left_pai is None or right_pai is None:
+        return True
+    return normalize_tile(str(left_pai)) == normalize_tile(str(right_pai))
+
+
+def _higher_priority_response_intercepted(
+    pending_action: dict,
+    current_action: dict,
+    player_id: int | None,
+) -> bool:
+    """Detect a response window closed by another player's higher-priority call."""
+    if not pending_action or not current_action:
+        return False
+    if current_action.get("actor") == player_id:
+        return False
+    pending_type = str(pending_action.get("type", ""))
+    current_type = str(current_action.get("type", ""))
+    if pending_type not in {"chi", "pon"}:
+        return False
+    if current_type not in {"pon", "daiminkan", "hora"}:
+        return False
+    if _RESPONSE_PRIORITY.get(current_type, 0) <= _RESPONSE_PRIORITY.get(pending_type, 0):
+        return False
+    return _same_response_source(pending_action, current_action)
 
 
 def normalize_replay_decisions(decisions: dict, meta: dict | None = None) -> dict:
@@ -34,6 +77,17 @@ def normalize_replay_decisions(decisions: dict, meta: dict | None = None) -> dic
             pending["gt_action"] = {"type": "none", "actor": player_id}
             pending_idx = None
         elif chosen.get("type") in _RESPONSE_ACTION_TYPES and has_none_candidate:
+            if _higher_priority_response_intercepted(chosen, current_action, player_id):
+                # The player had a real response opportunity, but the same
+                # discard was consumed by a higher-priority pon/kan/ron from
+                # another seat before this response could execute.  Keep the
+                # actual action as pass for board reconstruction, but exclude
+                # this decision from mistake and match accounting.
+                pending["comparison_exempt"] = "response_preempted"
+                pending["comparison_exempt_by"] = dict(current_action)
+                pending["gt_action"] = {"type": "none", "actor": player_id}
+                pending_idx = None
+                continue
             # 仅在后续条目明确确认了相同副露/和牌时，才把响应动作补成 chosen。
             # 否则保守地视为错过该响应窗口（实际为 none），避免把“可碰但没碰”
             # 误标成“实际碰了”，导致后续手牌/副露状态和动作标签互相矛盾。
@@ -47,9 +101,10 @@ def normalize_replay_decisions(decisions: dict, meta: dict | None = None) -> dic
             pending_idx = None
 
     own_log = [e for e in log if not e.get("is_obs")]
-    total_ops = len(own_log)
+    comparable_log = [entry for entry in own_log if not entry.get("comparison_exempt")]
+    total_ops = len(comparable_log)
     match_count = sum(
-        1 for e in own_log if same_action(e.get("chosen"), e.get("gt_action"))
+        1 for e in comparable_log if same_action(e.get("chosen"), e.get("gt_action"))
     )
     return {
         **decisions,

@@ -8,6 +8,8 @@ import sys
 import numpy as np
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse, parse_qs
+from urllib.request import urlopen, Request
 
 from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -514,6 +516,39 @@ _GUI_MORTAL_MODEL_LABELS = {
 }
 
 
+def _fetch_tenhou_url_events(text: str) -> tuple[list[dict], int]:
+    """从天凤链接下载牌谱并转为 mjai 事件列表。
+
+    Returns (events, tw) 其中 tw 为链接中指定的视角座位。
+    """
+    from convert.link_converter import parse_log_url
+    from replay.bot import _load_events_from_source
+
+    info = parse_log_url(text)
+    if info.get("site") != "tenhou":
+        raise ValueError("仅支持天凤牌谱链接（tenhou.net）")
+    log_id = info["log_id"]
+    tw = int(info.get("tw", "0"))
+
+    endpoint = f"https://tenhou.net/5/mjlog2json.cgi?{log_id}"
+    req = Request(endpoint, headers={
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://tenhou.net/",
+    })
+    with urlopen(req, timeout=30) as resp:
+        body = resp.read().decode("utf-8", errors="replace").strip()
+    if not body:
+        raise ValueError("天凤服务器返回空内容，牌谱可能不存在")
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        preview = body[:120].replace("\n", " ")
+        raise ValueError(f"天凤返回非 JSON 内容: '{preview}...'") from exc
+
+    events = _load_events_from_source(data, input_type="tenhou6")
+    return events, tw
+
+
 async def _events_from_replay_form(
     *,
     files: list[UploadFile],
@@ -534,7 +569,8 @@ async def _events_from_replay_form(
         raise ValueError("请上传文件或粘贴 JSON 文本")
 
     if input_type == "url":
-        raise ValueError("经典天凤 XML URL 导入已移除；请使用 Tenhou6 JSON、mjai JSON 或上传文件")
+        events, _tw = _fetch_tenhou_url_events(text)
+        return events
 
     if input_type == "tenhou6":
         from replay.bot import _load_events_from_source
@@ -916,7 +952,10 @@ async def replay(
             text = json_text.strip()
 
         if input_type == "url":
-            return JSONResponse(status_code=400, content={"error": "经典天凤 XML URL 导入已移除；请使用 Tenhou6 JSON 或 mjai JSON"})
+            events, tw = _fetch_tenhou_url_events(text)
+            if player_id == 0:
+                player_id = tw
+            bot = run_replay_single_raw(events, player_id=player_id, checkpoint=checkpoint or None, input_type="mjai", bot_type=bot_type)
 
         elif input_type == "tenhou6":
             data = json.loads(text)
@@ -999,6 +1038,14 @@ async def replay_multi_teacher(
         )
 
     try:
+        # 天凤链接时从 URL 提取 tw 作为默认视角
+        if input_type == "url" and player_id == 0 and json_text.strip():
+            try:
+                from convert.link_converter import parse_log_url
+                _info = parse_log_url(json_text.strip())
+                player_id = int(_info.get("tw", "0"))
+            except Exception:
+                pass
         events = await _events_from_replay_form(files=files, json_text=json_text, input_type=input_type)
         normalized_events = _normalize_replay_events(events)
         storage = get_storage()

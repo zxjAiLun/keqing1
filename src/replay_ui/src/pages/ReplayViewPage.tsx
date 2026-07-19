@@ -178,7 +178,9 @@ function CandidateTable({
 // 统计面板
 // ---------------------------------------------------------------------------
 export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () => void }) {
-  const log = data.log.filter(e => isReplayPlayerDecision(e, data.player_id));
+  const log = data.log.filter(
+    e => isReplayPlayerDecision(e, data.player_id) && !e.comparison_exempt,
+  );
   const fallbackTotal = log.length;
   const fallbackMatch = log.filter((e) => sameReplayAction(e.chosen, e.gt_action)).length;
   const teacherStats = (() => {
