@@ -22,4 +22,4 @@ Use `scripts/mortal/four_player_native.py` for CUDA native random-seat arenas an
 
 The promotion gate is a balanced model-pool league, not an automatic replay regeneration step. A new replay pool is created only when the next hypothesis changes the data distribution or training objective. The V3 1,000-hanchan league used five 200-hanchan lineups so each model family received exactly 1,000 seat-hanchans.
 
-The next diagnostic line is documented in [`reward_ab_2026_07.md`](reward_ab_2026_07.md): first compare Mortal GRP delta-Pt reward against final-rank MC with matched seeds, then isolate Adam moment reset versus preservation. No GRP A/B training is runnable until a real GRP checkpoint is restored.
+The next diagnostic line is documented in [`reward_ab_2026_07.md`](reward_ab_2026_07.md): first compare Mortal GRP delta-Pt reward against final-rank MC with matched seeds, then isolate Adam moment reset versus preservation. The project-owned `keqing_grp_v1` is frozen and ready for this A/B; it was trained only on an independent 2,000-hanchan corpus outside the formal 6,000-hanchan reward corpus.

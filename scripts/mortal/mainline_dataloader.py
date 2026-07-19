@@ -6,6 +6,7 @@ from __future__ import annotations
 import random
 import hashlib
 import json
+import pickle
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -73,7 +74,12 @@ def _build_reward_adapter(reward_mode: str, pts: np.ndarray, config_data: Mappin
     grp_config = config_data["grp"]
     grp = GRP(**grp_config["network"])
     state_file = Path(str(grp_config["state_file"])).resolve()
-    state = torch.load(state_file, weights_only=True, map_location=torch.device("cpu"))
+    try:
+        state = torch.load(state_file, weights_only=True, map_location=torch.device("cpu"))
+    except (pickle.UnpicklingError, RuntimeError):
+        # Project-owned GRP checkpoints also carry NumPy/Python RNG state.
+        # The path is already part of the explicit training contract.
+        state = torch.load(state_file, weights_only=False, map_location=torch.device("cpu"))
     grp.load_state_dict(state["model"])
     return RewardCalculator(
         grp,

@@ -157,6 +157,10 @@ def _dataset_contract(config: dict[str, Any], file_list: list[str], player_names
             json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ),
         "player_names": manifest["player_names"],
+        "num_epochs": manifest["num_epochs"],
+        "file_batch_size": int(dataset["file_batch_size"]),
+        "enable_augmentation": manifest["enable_augmentation"],
+        "augmented_first": manifest["augmented_first"],
     }
 
 

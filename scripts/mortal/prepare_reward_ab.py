@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -20,7 +21,7 @@ from scripts.mortal.prepare_v2_population_mixed_warmstart import POOL_SPECS
 from scripts.mortal.prepare_v3_final_rank_mc_warmstart import _normalize_host_paths
 
 
-EXPERIMENT_ID = "reward_ab_2026_07"
+EXPERIMENT_ID = "reward_ab_2026_07_epoch2"
 DEFAULT_OUTPUT_ROOT = Path("artifacts/experiments/model_pool_2026_07")
 DEFAULT_DATA_ROOT = DEFAULT_OUTPUT_ROOT / "V2_data"
 PARENT_CHECKPOINT = Path("artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth")
@@ -76,6 +77,14 @@ def _load_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(handle)
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _prepare_config(
     base_config: dict[str, Any],
     *,
@@ -98,7 +107,7 @@ def _prepare_config(
     dataset["file_index"] = str(shared_file_index.resolve())
     dataset["player_names_files"] = [str((run_dir / "ext_mortal_train_labels.txt").resolve())]
     dataset["num_workers"] = 0
-    dataset["num_epochs"] = 1
+    dataset["num_epochs"] = 2
     dataset["enable_augmentation"] = False
     dataset["augmented_first"] = False
     config.setdefault("reward", {})["mode"] = reward_mode
@@ -180,13 +189,14 @@ def main() -> None:
         "parent_checkpoint": str(parent),
         "parent_init_mode": "weights_only_fresh_adam_fresh_stream",
         "grp_checkpoint": str(grp_checkpoint),
+        "grp_checkpoint_sha256": _sha256_file(grp_checkpoint),
         "matched_seeds": list(seeds),
         "fixed_recipe": {
             "gamma": 1.0,
             "cql_min_q_weight": 5.0,
             "next_rank_weight": 0.2,
             "lr": 1e-4,
-            "dataset": "shared 6000-hanchan file index",
+            "dataset": "shared 6000-hanchan file index, num_epochs=2",
         },
         "runs": runs,
     }

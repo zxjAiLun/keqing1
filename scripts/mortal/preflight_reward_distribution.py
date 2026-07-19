@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
+import gzip
 import json
 import logging
 from pathlib import Path
@@ -48,6 +48,43 @@ def _quantiles(values: np.ndarray) -> dict[str, float]:
     }
 
 
+def _grp_rewards_by_game(config_data: dict, file_list: list[str], player_names: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    from model import GRP  # noqa: PLC0415
+    from libriichi.dataset import Grp  # noqa: PLC0415
+    from reward_calculator import RewardCalculator  # noqa: PLC0415
+    import torch  # noqa: PLC0415
+
+    grp_config = config_data["grp"]
+    grp = GRP(**grp_config["network"])
+    state = torch.load(grp_config["state_file"], weights_only=False, map_location=torch.device("cpu"))
+    grp.load_state_dict(state["model"])
+    reward_calc = RewardCalculator(
+        grp,
+        [float(value) for value in config_data["env"]["pts"]],
+        uniform_init=bool(grp_config.get("uniform_init", False)),
+    )
+    all_rewards: list[float] = []
+    game_abs_sums: list[float] = []
+    for index, file_path in enumerate(file_list, start=1):
+        with gzip.open(file_path, "rt", encoding="utf-8") as handle:
+            start_game = json.loads(next(handle))
+        names = start_game.get("names", [])
+        target_ids = [idx for idx, name in enumerate(names) if name in player_names]
+        if len(target_ids) != 1:
+            raise ValueError(f"expected one target player in {file_path}: names={names!r}")
+        game = Grp.load_gz_log_files([file_path])[0]
+        feature = game.take_feature()
+        rewards = np.asarray(
+            reward_calc.calc_delta_pt(target_ids[0], feature, game.take_rank_by_player()),
+            dtype=np.float64,
+        )
+        all_rewards.extend(float(value) for value in rewards)
+        game_abs_sums.append(float(np.abs(rewards).sum()))
+        if index % 100 == 0:
+            logging.info("scanned games=%s/%s", index, len(file_list))
+    return np.asarray(all_rewards, dtype=np.float64), np.asarray(game_abs_sums, dtype=np.float64)
+
+
 def main() -> None:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -87,20 +124,21 @@ def main() -> None:
         augmented_first=False,
     )
 
-    rewards: list[float] = []
-    samples = 0
-    for entry in dataset:
-        rewards.append(float(entry[4]))
-        samples += 1
-        if samples % 100000 == 0:
-            logging.info("scanned samples=%s", samples)
-
-    values = np.asarray(rewards, dtype=np.float64)
+    reward_mode = str(config_data.get("reward", {}).get("mode", "final_rank_mc"))
+    if reward_mode in {"grp", "mortal_grp_delta_pt"}:
+        values, game_abs_sums = _grp_rewards_by_game(config_data, file_list, player_names)
+    else:
+        rewards: list[float] = []
+        for entry in dataset:
+            rewards.append(float(entry[4]))
+        values = np.asarray(rewards, dtype=np.float64)
+        game_abs_sums = np.asarray([], dtype=np.float64)
     if not len(values):
         raise RuntimeError("reward preflight produced zero samples")
+    samples = len(values)
     contract = reward_contract_from_config(config_data)
     report = {
-        "schema": "keqing.mortal.reward_distribution_preflight.v1",
+        "schema": "keqing.mortal.reward_distribution_preflight.v2",
         "config": str(config_path),
         "reward_contract": contract,
         "data_seed": int(args.data_seed),
@@ -114,6 +152,15 @@ def main() -> None:
             "max": float(values.max()),
             "nonzero_rate": float(np.mean(values != 0)),
             "quantiles": _quantiles(values),
+            "abs_delta_pt": {
+                "quantiles": _quantiles(np.abs(values)),
+                "max": float(np.abs(values).max()),
+            },
+        },
+        "per_hanchan_abs_delta_pt": {
+            "hanchans": int(len(game_abs_sums)),
+            "quantiles": _quantiles(game_abs_sums),
+            "max": float(game_abs_sums.max()) if len(game_abs_sums) else None,
         },
         "passed": True,
     }
