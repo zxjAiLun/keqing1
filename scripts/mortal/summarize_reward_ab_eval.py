@@ -273,17 +273,26 @@ def main() -> None:
         bootstrap_reps=5000,
     )
     seed_means = [float(item["paired"]["mean_delta_pt"]) for item in paired_per_seed]
-    positive_seed_count = sum(value > 0 for value in seed_means)
-    seed_count = len(seed_means)
-    sign_test_p = sum(math.comb(seed_count, k) for k in range(positive_seed_count, seed_count + 1)) / (2 ** seed_count)
+    eps = 1e-12
+    non_tie_seed_means = [value for value in seed_means if abs(value) > eps]
+    positive_seed_count = sum(value > 0 for value in non_tie_seed_means)
+    seed_count = len(non_tie_seed_means)
+    sign_test_p = (
+        sum(math.comb(seed_count, k) for k in range(positive_seed_count, seed_count + 1)) / (2 ** seed_count)
+        if seed_count
+        else 1.0
+    )
     recipe_summary = {
-        "training_seed_count": seed_count,
+        "training_seed_count": len(seed_means),
         "seed_mean_delta_pt": seed_means,
+        "non_tie_seed_mean_delta_pt": non_tie_seed_means,
         "mean_of_seed_means_delta_pt": float(np.mean(seed_means)),
         "median_of_seed_means_delta_pt": float(np.median(seed_means)),
         "positive_seed_count": positive_seed_count,
+        "non_tie_seed_count": seed_count,
+        "tie_seed_count": len(seed_means) - seed_count,
         "seed_direction_sign_test_one_sided_p": float(sign_test_p),
-        "interpretation": "seed-level uncertainty; n is the number of training seeds, not hanchans",
+        "interpretation": "sign test excludes seed-level deltas within eps of zero; n is the number of non-tied training seeds, not hanchans",
     }
 
     output_dir = args.output_dir
@@ -358,7 +367,7 @@ def main() -> None:
             "## Training-Seed View",
             "",
             f"- Seed-level mean delta Pt: `{[round(value, 2) for value in seed_means]}`.",
-            f"- Positive seed count: `{recipe_summary['positive_seed_count']}/{recipe_summary['training_seed_count']}`; one-sided sign-test p-value under the zero-direction null: `{recipe_summary['seed_direction_sign_test_one_sided_p']:.4f}`.",
+            f"- Positive non-tie seed count: `{recipe_summary['positive_seed_count']}/{recipe_summary['non_tie_seed_count']}`; one-sided sign-test p-value under the zero-direction null: `{recipe_summary['seed_direction_sign_test_one_sided_p']:.4f}`.",
             "- The hanchan bootstrap CI measures arena uncertainty conditional on these checkpoints; it does not remove the separate training-seed uncertainty.",
         ]
     )

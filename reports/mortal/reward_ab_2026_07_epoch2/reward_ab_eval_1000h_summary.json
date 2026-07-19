@@ -581,11 +581,18 @@
       -0.18,
       0.135
     ],
+    "non_tie_seed_mean_delta_pt": [
+      5.625,
+      -0.18,
+      0.135
+    ],
     "mean_of_seed_means_delta_pt": 1.86,
     "median_of_seed_means_delta_pt": 0.135,
     "positive_seed_count": 2,
+    "non_tie_seed_count": 3,
+    "tie_seed_count": 0,
     "seed_direction_sign_test_one_sided_p": 0.5,
-    "interpretation": "seed-level uncertainty; n is the number of training seeds, not hanchans"
+    "interpretation": "sign test excludes seed-level deltas within eps of zero; n is the number of non-tied training seeds, not hanchans"
   },
   "pooled": {
     "70k": {

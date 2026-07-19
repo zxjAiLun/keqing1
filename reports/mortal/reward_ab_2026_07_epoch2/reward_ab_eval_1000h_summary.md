@@ -25,7 +25,7 @@ All rows are reported as separate F/G results; no two-way aggregate is used.
 ## Training-Seed View
 
 - Seed-level mean delta Pt: `[5.62, -0.18, 0.14]`.
-- Positive seed count: `2/3`; one-sided sign-test p-value under the zero-direction null: `0.5000`.
+- Positive non-tie seed count: `2/3`; one-sided sign-test p-value under the zero-direction null: `0.5000`.
 - The hanchan bootstrap CI measures arena uncertainty conditional on these checkpoints; it does not remove the separate training-seed uncertainty.
 
 ## Pooled Auxiliary View

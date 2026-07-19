@@ -56,7 +56,7 @@ The formal retry completed all six checkpoints in `reward_ab_2026_07_epoch2`:
 - G: `mortal_grp_delta_pt`, seeds `20260718/19/20`.
 - Every run reached step `72000`, consumed the same 6,000-file index for two epochs, and used the same 70k parent.
 - Every G run uses the frozen `keqing_grp_v1` SHA256 recorded in the audit.
-- The contract audit is [`reward_ab_audit.json`](../../artifacts/experiments/model_pool_2026_07/reward_ab_2026_07_epoch2/reward_ab_audit.json).
+- The contract audit remains a local-only artifact at `artifacts/experiments/model_pool_2026_07/reward_ab_2026_07_epoch2/reward_ab_audit.json`; raw audit artifacts are intentionally not uploaded.
 
 ## 1000-Hanchan Matched Evaluation
 
@@ -80,4 +80,4 @@ Pooled behavior remains close: G agari `20.49%` vs F `20.40%`, houjuu `12.22%` v
 
 Conclusion: `mortal_grp_delta_pt` remains a valid implemented reward alternative, but it does **not** pass the current evidence threshold for promotion to the default research reward. The arena-level CI includes zero and the training-seed result is mixed. Do not start Adam-preserved, LR, CQL, or architecture variants yet. The next controlled step is to add 2-3 new matched F/G training seeds, or explicitly stop the reward hypothesis and return to data/optimizer diagnostics.
 
-The complete paired report is [`reward_ab_eval_1000h_summary.md`](../../artifacts/experiments/model_pool_2026_07/reward_ab_2026_07_epoch2/eval_1000h/summary/reward_ab_eval_1000h_summary.md), with machine-readable output in the adjacent JSON file. The 250-hanchan screening remains under the original `eval_250h/summary/` directory for auditability.
+The complete paired report is [`reward_ab_eval_1000h_summary.md`](../../reports/mortal/reward_ab_2026_07_epoch2/reward_ab_eval_1000h_summary.md), with machine-readable output in the adjacent JSON file. The raw 250/1000-hanchan evaluation artifacts remain local-only under `artifacts/` for auditability.
