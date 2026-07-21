@@ -550,6 +550,13 @@ class Naki(Base):
         received = await send_to_mjai(sent)
 
         if actor == 0:
+            # After declaring a kan (ankan/kakan/daiminkan) the player must
+            # wait for the rinshan (dead-wall) draw before discarding.  Tenhou
+            # sends that draw as a separate T-message handled by Tsumo.process.
+            # Sending D here would be out-of-turn → ERR → disconnect.
+            if meld.meld_type in (Meld.ANKAN, Meld.DAIMINKAN, Meld.KAKAN):
+                return
+
             if received.get('type') == 'dahai':
                 try:
                     p = mjai_to_tenhou_one(
