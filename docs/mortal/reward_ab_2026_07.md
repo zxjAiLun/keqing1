@@ -81,3 +81,31 @@ Pooled behavior remains close: G agari `20.49%` vs F `20.40%`, houjuu `12.22%` v
 Conclusion: `mortal_grp_delta_pt` remains a valid implemented reward alternative, but it does **not** pass the current evidence threshold for promotion to the default research reward. The arena-level CI includes zero and the training-seed result is mixed. Do not start Adam-preserved, LR, CQL, or architecture variants yet. The next controlled step is to add 2-3 new matched F/G training seeds, or explicitly stop the reward hypothesis and return to data/optimizer diagnostics.
 
 The complete paired report is [`reward_ab_eval_1000h_summary.md`](../../reports/mortal/reward_ab_2026_07_epoch2/reward_ab_eval_1000h_summary.md), with machine-readable output in the adjacent JSON file. The raw 250/1000-hanchan evaluation artifacts remain local-only under `artifacts/` for auditability.
+
+## Epoch3 Seed Expansion And Six-Seed Result
+
+The planned follow-up added three new matched pairs without changing the recipe:
+
+- F/G seeds `20260721/22/23`, 70k weights-only warm start, fresh Adam, target step `72000`.
+- The same frozen GRP checkpoint, 6,000-file index, two epochs, and clean training commit were used for all six new checkpoints.
+- All six new contracts recorded `git_dirty=false`; the checkpoint audit passed.
+- Each new pair was evaluated for exactly 1,000 native random-seat hanchans with non-overlapping seed ranges `923000/924000/925000`.
+
+The new paired differences were:
+
+| Pair | F avg Pt | G avg Pt | G-F Pt |
+| --- | ---: | ---: | ---: |
+| `20260721` | -6.210 | +1.890 | +8.100 |
+| `20260722` | +0.585 | -2.475 | -3.060 |
+| `20260723` | -3.825 | -1.035 | +2.790 |
+
+Combining epoch2 and epoch3 gives six training-seed pairs and 6,000 paired hanchans:
+
+- Seed means: `[+5.625, -0.180, +0.135, +8.100, -3.060, +2.790]`.
+- Mean of seed means: `+2.235 Pt/局`; median: `+1.463 Pt/局`.
+- Positive non-tie seeds: `4/6`; exact one-sided sign-test p-value: `0.34375`.
+- Pooled hanchan bootstrap 95% CI: `[-1.25, +5.85] Pt/局`.
+- Equal-seed hierarchical bootstrap 95% CI: `[-2.37, +6.81] Pt/局`.
+- G finished ahead in `50.58%` of paired hanchans.
+
+Conclusion: the GRP reward still shows a positive central tendency, but the additional seeds do not establish a stable recipe improvement. Keep `final_rank_mc` as the default research reward, do not start Adam/LR/CQL variants, and do not promote a G checkpoint. The next valid choice is either 2-3 more pre-registered matched seed pairs to test training-seed variability, or stop reward expansion and move to data/optimizer diagnostics. The six-seed machine-readable summary is local-only at `artifacts/experiments/model_pool_2026_07/reward_ab_2026_07_epoch3/eval_1000h/summary_six_seeds/reward_ab_eval_1000h_summary.json`.

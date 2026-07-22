@@ -18,7 +18,14 @@ RANK_POINTS = (90.0, 45.0, 0.0, -135.0)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--eval-root", type=Path, required=True)
+    parser.add_argument(
+        "--eval-root",
+        type=Path,
+        action="append",
+        dest="eval_roots",
+        required=True,
+        help="evaluation root; repeat to combine matched seed pairs from multiple epochs",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--expected-games", type=int, default=250)
     return parser.parse_args()
@@ -204,9 +211,18 @@ def _paired_summary(
 
 def main() -> None:
     args = parse_args()
-    run_dirs = sorted(path for path in args.eval_root.glob("F_G_*") if path.is_dir())
+    eval_roots = [path.resolve() for path in args.eval_roots]
+    run_dirs = sorted(
+        path
+        for eval_root in eval_roots
+        for path in eval_root.glob("F_G_*")
+        if path.is_dir()
+    )
     if not run_dirs:
-        raise SystemExit(f"no F_G_* evaluation directories under {args.eval_root}")
+        raise SystemExit(f"no F_G_* evaluation directories under {eval_roots}")
+    run_names = [path.name for path in run_dirs]
+    if len(run_names) != len(set(run_names)):
+        raise ValueError(f"duplicate evaluation run names across roots: {run_names}")
 
     per_seed: list[dict[str, Any]] = []
     source_checks: list[dict[str, Any]] = []
@@ -237,6 +253,7 @@ def main() -> None:
         paired_per_seed.append(
             {
                 "run": run_dir.name,
+                "eval_root": str(run_dir.parent),
                 "seed": int(seed),
                 "paired": _paired_summary(
                     _paired_rows(run_dir, args.expected_games),
@@ -249,6 +266,7 @@ def main() -> None:
         source_checks.append(
             {
                 "run": run_dir.name,
+                "eval_root": str(run_dir.parent),
                 "games": log_count,
                 "metrics": str(run_dir / "metrics.json"),
                 "detailed_stats": str(run_dir / "detailed_stats.json"),
@@ -329,7 +347,8 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     document = {
         "schema": "keqing.mortal.reward_ab_eval_summary.v1",
-        "eval_root": str(args.eval_root),
+        "eval_root": str(eval_roots[0]) if len(eval_roots) == 1 else None,
+        "eval_roots": [str(path) for path in eval_roots],
         "expected_games_per_pair": args.expected_games,
         "run_count": len(per_seed),
         "rank_points": list(RANK_POINTS),
