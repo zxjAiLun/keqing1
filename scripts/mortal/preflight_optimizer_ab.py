@@ -112,8 +112,8 @@ def model_weights_equal(left: tuple[torch.nn.Module, ...], right: tuple[torch.nn
     return True
 
 
-def module_parameter_count(modules: tuple[torch.nn.Module, ...]) -> int:
-    return sum(parameter.numel() for module in modules for parameter in module.parameters())
+def module_parameter_tensor_count(modules: tuple[torch.nn.Module, ...]) -> int:
+    return sum(1 for module in modules for _ in module.parameters())
 
 
 def stream_preview(config: dict[str, Any], data_seed: int) -> dict[str, Any]:
@@ -220,7 +220,7 @@ def main() -> None:
     preserved_states = preserved_optimizer.state_dict()["state"]
     required_fields = {"step", "exp_avg", "exp_avg_sq"}
     state_field_ok = bool(preserved_states) and all(required_fields.issubset(entry) for entry in preserved_states.values())
-    expected_state_count = module_parameter_count(preserved_modules)
+    expected_state_count = module_parameter_tensor_count(preserved_modules)
     recipe_equal = comparable_recipe(fresh_config) == comparable_recipe(preserved_config)
     stream_fresh = stream_preview(fresh_config, int(args.data_seed))
     stream_preserved = stream_preview(preserved_config, int(args.data_seed))
@@ -266,7 +266,7 @@ def main() -> None:
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+    print(json.dumps({"passed": report["passed"], "output": str(output)}, ensure_ascii=False), flush=True)
     if not report["passed"]:
         raise SystemExit("optimizer preflight failed")
 
