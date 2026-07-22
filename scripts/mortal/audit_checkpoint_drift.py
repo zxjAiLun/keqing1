@@ -293,6 +293,11 @@ def q_metrics(parent_q: np.ndarray, candidate_q: np.ndarray, masks: np.ndarray) 
     signed_q_delta: list[float] = []
     q_scale_parent: list[float] = []
     q_scale_candidate: list[float] = []
+    q_offsets: list[float] = []
+    centered_abs_delta: list[float] = []
+    legal_std_parent: list[float] = []
+    legal_std_candidate: list[float] = []
+    legal_rank_agreement: list[float] = []
     for i, mask in enumerate(masks):
         valid = mask & np.isfinite(parent_q[i]) & np.isfinite(candidate_q[i])
         p = parent_q[i, valid]
@@ -307,6 +312,13 @@ def q_metrics(parent_q: np.ndarray, candidate_q: np.ndarray, masks: np.ndarray) 
         signed_q_delta.extend((c - p).tolist())
         q_scale_parent.append(float(np.mean(np.abs(p))))
         q_scale_candidate.append(float(np.mean(np.abs(c))))
+        p_offset = float(np.mean(p))
+        c_offset = float(np.mean(c))
+        q_offsets.append(c_offset - p_offset)
+        centered_abs_delta.extend(np.abs((c - c_offset) - (p - p_offset)).tolist())
+        legal_std_parent.append(float(np.std(p)))
+        legal_std_candidate.append(float(np.std(c)))
+        legal_rank_agreement.append(float(np.array_equal(np.argsort(p), np.argsort(c))))
     return {
         "states": float(len(parent_q)),
         "greedy_agreement_rate": float(np.mean(parent_greedy == candidate_greedy)),
@@ -315,6 +327,17 @@ def q_metrics(parent_q: np.ndarray, candidate_q: np.ndarray, masks: np.ndarray) 
         "mean_signed_q_delta": float(np.mean(signed_q_delta)) if signed_q_delta else 0.0,
         "parent_q_abs_mean": float(np.mean(q_scale_parent)) if q_scale_parent else 0.0,
         "candidate_q_abs_mean": float(np.mean(q_scale_candidate)) if q_scale_candidate else 0.0,
+        "q_offset_delta_mean": float(np.mean(q_offsets)) if q_offsets else 0.0,
+        "q_offset_abs_mean": float(np.mean(np.abs(q_offsets))) if q_offsets else 0.0,
+        "centered_q_abs_delta": float(np.mean(centered_abs_delta)) if centered_abs_delta else 0.0,
+        "parent_legal_q_std_mean": float(np.mean(legal_std_parent)) if legal_std_parent else 0.0,
+        "candidate_legal_q_std_mean": float(np.mean(legal_std_candidate)) if legal_std_candidate else 0.0,
+        "legal_q_std_ratio": float(np.mean(legal_std_candidate) / np.mean(legal_std_parent))
+        if legal_std_parent and np.mean(legal_std_parent) > 0
+        else 0.0,
+        "legal_action_rank_agreement_rate": float(np.mean(legal_rank_agreement))
+        if legal_rank_agreement
+        else 0.0,
         "parent_margin_mean": float(np.mean(margins_parent)) if margins_parent else 0.0,
         "candidate_margin_mean": float(np.mean(margins_candidate)) if margins_candidate else 0.0,
         "margin_delta_mean": float(np.mean(margins_candidate) - np.mean(margins_parent))
@@ -331,10 +354,14 @@ def parameter_drift(parent: dict[str, Any], candidate: dict[str, Any]) -> dict[s
         if not isinstance(parent_state, dict) or not isinstance(candidate_state, dict):
             result[output_key] = {"available": False}
             continue
-        diff_sq = 0.0
-        parent_sq = 0.0
-        abs_diff = 0.0
-        count = 0
+        param_diff_sq = 0.0
+        param_parent_sq = 0.0
+        param_abs_diff = 0.0
+        param_count = 0
+        buffer_diff_sq = 0.0
+        buffer_parent_sq = 0.0
+        buffer_abs_diff = 0.0
+        buffer_count = 0
         for key, parent_value in parent_state.items():
             if key not in candidate_state:
                 continue
@@ -343,15 +370,29 @@ def parameter_drift(parent: dict[str, Any], candidate: dict[str, Any]) -> dict[s
             if p.shape != c.shape:
                 continue
             diff = c - p
-            diff_sq += float(torch.sum(diff * diff))
-            parent_sq += float(torch.sum(p * p))
-            abs_diff += float(torch.sum(torch.abs(diff)))
-            count += p.numel()
+            is_buffer = key.endswith("running_mean") or key.endswith("running_var") or key.endswith("num_batches_tracked")
+            if is_buffer:
+                buffer_diff_sq += float(torch.sum(diff * diff))
+                buffer_parent_sq += float(torch.sum(p * p))
+                buffer_abs_diff += float(torch.sum(torch.abs(diff)))
+                buffer_count += p.numel()
+            else:
+                param_diff_sq += float(torch.sum(diff * diff))
+                param_parent_sq += float(torch.sum(p * p))
+                param_abs_diff += float(torch.sum(torch.abs(diff)))
+                param_count += p.numel()
         result[output_key] = {
-            "available": count > 0,
-            "parameter_count": count,
-            "relative_l2": math.sqrt(diff_sq / parent_sq) if parent_sq > 0 else None,
-            "mean_abs_delta": abs_diff / count if count else None,
+            "available": param_count > 0,
+            "parameter_count": param_count,
+            "trainable_parameter_relative_l2": math.sqrt(param_diff_sq / param_parent_sq)
+            if param_parent_sq > 0
+            else None,
+            "trainable_parameter_mean_abs_delta": param_abs_diff / param_count if param_count else None,
+            "floating_buffer_count": buffer_count,
+            "floating_buffer_relative_l2": math.sqrt(buffer_diff_sq / buffer_parent_sq)
+            if buffer_parent_sq > 0
+            else None,
+            "floating_buffer_mean_abs_delta": buffer_abs_diff / buffer_count if buffer_count else None,
         }
     return result
 
@@ -399,17 +440,18 @@ def write_markdown(report: dict[str, Any], path: Path) -> None:
         "",
         "## Parameter Drift",
         "",
-        "| checkpoint | brain relative L2 | DQN relative L2 | AuxNet relative L2 | greedy change vs 70k | mean abs Q delta |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| checkpoint | brain parameter L2 | DQN parameter L2 | AuxNet parameter L2 | greedy change | raw Q delta | centered Q delta | Q offset |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for label, row in report["checkpoints"].items():
         param = row["parameter_drift"]
         overall = row["overall"]
         lines.append(
-            f"| {label} | {param['brain'].get('relative_l2', 0):.6g} | "
-            f"{param['dqn'].get('relative_l2', 0):.6g} | "
-            f"{param['aux_net'].get('relative_l2', 0):.6g} | "
-            f"{overall['greedy_change_rate'] * 100:.3f}% | {overall['mean_abs_q_delta']:.6g} |"
+            f"| {label} | {param['brain'].get('trainable_parameter_relative_l2', 0):.6g} | "
+            f"{param['dqn'].get('trainable_parameter_relative_l2', 0):.6g} | "
+            f"{param['aux_net'].get('trainable_parameter_relative_l2', 0):.6g} | "
+            f"{overall['greedy_change_rate'] * 100:.3f}% | {overall['mean_abs_q_delta']:.6g} | "
+            f"{overall['centered_q_abs_delta']:.6g} | {overall['q_offset_abs_mean']:.6g} |"
         )
     lines.extend(["", "## Interpretation Inputs", "", "Strata are reported in JSON under `strata`; they are diagnostic slices, not promotion gates.", ""])
     path.write_text("\n".join(lines), encoding="utf-8")

@@ -273,6 +273,7 @@ def train_to_target_steps(
     )
     scheduler = LinearWarmUpCosineAnnealingLR(optimizer, **config["optim"]["scheduler"])
     scaler = GradScaler(device.type, enabled=bool(control["enable_amp"]))
+    fresh_optimizer_groups = _optimizer_group_metadata(optimizer)
     best_perf = {"avg_rank": 4.0, "avg_pt": -135.0}
     steps = 0
     loaded_data_stream: dict[str, Any] | None = None
@@ -365,6 +366,15 @@ def train_to_target_steps(
                     f"optimizer state is missing from --initialize-optimizer-from checkpoint: {optimizer_parent_path}"
                 )
             optimizer.load_state_dict(optimizer_parent["optimizer"])
+            if _sha256_file(parent_path) != _sha256_file(optimizer_parent_path):
+                raise RuntimeError(
+                    "preserved optimizer source must be the exact same checkpoint as --initialize-from"
+                )
+            _validate_preserved_optimizer(
+                optimizer,
+                fresh_groups=fresh_optimizer_groups,
+                expected_parameter_tensors=sum(len(group["params"]) for group in optimizer.param_groups),
+            )
             initialization.update(
                 {
                     "mode": "weights_plus_optimizer_warm_start",
@@ -682,6 +692,42 @@ def _optimizer_param_groups(all_models: tuple[nn.Module, ...], *, weight_decay: 
         {"params": decay_params, "weight_decay": float(weight_decay)},
         {"params": no_decay_params},
     ]
+
+
+def _optimizer_group_metadata(optimizer: optim.Optimizer) -> list[dict[str, Any]]:
+    def normalize(value: Any) -> Any:
+        if isinstance(value, tuple):
+            return [normalize(item) for item in value]
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().tolist()
+        return value
+
+    return [
+        {key: normalize(value) for key, value in group.items() if key != "params"}
+        for group in optimizer.param_groups
+    ]
+
+
+def _validate_preserved_optimizer(
+    optimizer: optim.Optimizer,
+    *,
+    fresh_groups: list[dict[str, Any]],
+    expected_parameter_tensors: int,
+) -> None:
+    loaded_groups = _optimizer_group_metadata(optimizer)
+    if loaded_groups != fresh_groups:
+        raise RuntimeError(
+            "preserved optimizer changed param-group hyperparameters; refusing to run an uncontrolled A/B"
+        )
+    state = optimizer.state_dict()["state"]
+    if len(state) != expected_parameter_tensors:
+        raise RuntimeError(
+            f"preserved optimizer state count {len(state)} does not match parameter tensor count "
+            f"{expected_parameter_tensors}"
+        )
+    required = {"step", "exp_avg", "exp_avg_sq"}
+    if any(not required.issubset(entry) for entry in state.values()):
+        raise RuntimeError("preserved optimizer is missing Adam step/moment tensors")
 
 
 def _load_or_build_file_index(config: dict[str, Any]) -> list[str]:
