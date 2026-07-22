@@ -24,8 +24,13 @@ function Invoke-Logged {
     )
     $LogPath = Join-Path $LogDir "$Name.log"
     "[$(Get-Date -Format o)] START $Name" | Tee-Object -FilePath $LogPath -Append
+    # Python logging uses stderr on Windows; keep it in the combined log without
+    # letting PowerShell's Stop preference terminate on an informational line.
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     & $Python @Arguments 2>&1 | Tee-Object -FilePath $LogPath -Append
     $ExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $PreviousErrorActionPreference
     if ($ExitCode -ne 0) {
         throw "$Name failed with exit code $ExitCode. See $LogPath"
     }
