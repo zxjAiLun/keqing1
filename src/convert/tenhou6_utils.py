@@ -217,6 +217,13 @@ def _convert_kyoku_to_events(kyoku: list[Any], names: list[str], rule: dict[str,
                 take_idx[actor] += 1
                 progressed = True
                 if "m" in take:
+                    # A daiminkan occupies a take slot, and its paired discard
+                    # slot holds a 0 placeholder (no normal discard happens on
+                    # a kan turn).  Consume it so the following rinshan draw
+                    # lines up with the real discard; otherwise the converter
+                    # later tries to decode 0 as a tile and crashes.
+                    if discard_idx[actor] < len(discards[actor]) and discards[actor][discard_idx[actor]] == 0:
+                        discard_idx[actor] += 1
                     continue
             else:
                 pai = _tile_from_tenhou6(take)
