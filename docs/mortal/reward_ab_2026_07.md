@@ -108,4 +108,19 @@ Combining epoch2 and epoch3 gives six training-seed pairs and 6,000 paired hanch
 - Equal-seed hierarchical bootstrap 95% CI: `[-2.37, +6.81] Pt/局`.
 - G finished ahead in `50.58%` of paired hanchans.
 
-Conclusion: the GRP reward still shows a positive central tendency, but the additional seeds do not establish a stable recipe improvement. Keep `final_rank_mc` as the default research reward, do not start Adam/LR/CQL variants, and do not promote a G checkpoint. The next valid choice is either 2-3 more pre-registered matched seed pairs to test training-seed variability, or stop reward expansion and move to data/optimizer diagnostics. The six-seed machine-readable summary is local-only at `artifacts/experiments/model_pool_2026_07/reward_ab_2026_07_epoch3/eval_1000h/summary_six_seeds/reward_ab_eval_1000h_summary.json`.
+Conclusion: the GRP reward still shows a positive central tendency, but the additional seeds do not establish a stable recipe improvement. Keep `final_rank_mc` as the conservative operational default, without claiming that it has been proven superior. Do not start more GRP seeds, Adam/LR/CQL variants, or promote a G checkpoint. The six-seed machine-readable summary is local-only at `artifacts/experiments/model_pool_2026_07/reward_ab_2026_07_epoch3/eval_1000h/summary_six_seeds/reward_ab_eval_1000h_summary.json`.
+
+## Checkpoint Drift Audit
+
+After closing the reward hypothesis, a pure analysis pass compared the 12 F/G checkpoints at step `72000` against the same 70k parent on a deterministic probe of `4096` states sampled from `128` arena hanchans. These logs are outside the 6000-file offline training index. The audit artifact is local-only at `artifacts/experiments/model_pool_2026_07/checkpoint_drift_audit/checkpoint_drift_audit.json` and the implementation is `scripts/mortal/audit_checkpoint_drift.py`.
+
+The main findings are:
+
+- Greedy action changes versus 70k are `7.7%` to `9.1%`, so the 2000 offline updates produce a measurable but not wholesale policy shift.
+- Brain relative parameter L2 is approximately `2.86%` for every run; DQN is `11.4%` to `11.9%`.
+- AuxNet drift is `16.4%` to `18.2%` for F and `11.1%` to `12.0%` for G.
+- Mean absolute Q drift is `2.10` to `2.56` for F and `3.06` to `3.41` for G. Mean margins also increase, approximately `+1.62` to `+1.99` for F and `+2.04` to `+2.37` for G.
+- Drift is not isolated to one late-game slice. Early/middle/late greedy-change rates are similar. Rank-4 and large-behind states have larger F Q drift than rank-1/ahead states, while G Q drift is comparatively flat.
+- States after the target player's riichi have very low greedy-change rates (`about 0.6%` to `0.8%`) and lower Q drift than the full probe, so the current audit does not support an `after-riichi`-specific optimizer claim.
+
+This separates the next questions. The checkpoints are not nearly identical, but the action-policy change is much smaller than the parameter/Q movement. That is consistent with value-scale and representation drift under the offline target, not proof that fresh Adam is the cause. The small six-seed sample also cannot support a drift-performance correlation. Therefore the next experiment, if run, must be one matched `final_rank_mc` fresh-Adam versus preserved-Adam comparison with all other variables fixed; no reward change is bundled into it. If that comparison remains seed-sensitive, stop local reward/optimizer tuning and move to a new data or project-owned lineage rather than opening another recipe grid.
