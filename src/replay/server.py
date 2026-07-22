@@ -14,6 +14,7 @@ from urllib.request import urlopen, Request
 from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from replay.normalize import normalize_replay_decisions
+from replay.external_reports import write_external_teacher_reports
 
 
 class _NumpyEncoder(json.JSONEncoder):
@@ -507,6 +508,19 @@ def _default_checkpoint_for_bot_type(bot_type: str) -> Path:
         "ext_mortal": project_root / "artifacts" / "external_mortal_20240308_best_min.pth",
     }
     return mapping[bot_type]
+
+
+def _external_review_links(naga_url: str = "", mortal_url: str = "") -> dict[str, str]:
+    links: dict[str, str] = {}
+    for key, raw_value in (("naga", naga_url), ("mortal", mortal_url)):
+        value = raw_value.strip()
+        if not value:
+            continue
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(f"{key} Review 链接必须是有效的 http/https URL")
+        links[key] = value
+    return links
 
 
 _GUI_MORTAL_MODEL_LABELS = {
@@ -1018,11 +1032,13 @@ async def replay(
 async def replay_multi_teacher(
     player_id: Annotated[int, Form()] = 0,
     model_types: Annotated[list[str], Form()] = [],
+    naga_url: Annotated[str, Form()] = "",
+    mortal_url: Annotated[str, Form()] = "",
     files: Annotated[list[UploadFile], File()] = [],
     json_text: Annotated[str, Form()] = "",
     input_type: Annotated[str, Form()] = "url",
 ):
-    """Run a replay with local Mortal checkpoints and attach local Q/P overlays."""
+    """Run a replay with local Mortal checkpoints and attach local + external Q/P overlays."""
     from replay.api import run_replay_single_raw
     from replay.bot import render_replay_json
 
@@ -1038,6 +1054,7 @@ async def replay_multi_teacher(
         )
 
     try:
+        external_links = _external_review_links(naga_url, mortal_url)
         # 天凤链接时从 URL 提取 tw 作为默认视角
         if input_type == "url" and player_id == 0 and json_text.strip():
             try:
@@ -1076,7 +1093,7 @@ async def replay_multi_teacher(
             bot_type=base_model,
             player_names=base_decisions.get("player_names"),
             checkpoint=str(checkpoints[base_model]),
-            external_review_links={},
+            external_review_links=external_links,
         )
         base_decisions["replay_id"] = replay_id
 
@@ -1090,6 +1107,17 @@ async def replay_multi_teacher(
                 decisions=decisions_by_model[model_type],
             )
             report_paths.append(report_path)
+
+        if external_links:
+            report_paths.extend(
+                write_external_teacher_reports(
+                    replay_id=replay_id,
+                    player_id=player_id,
+                    decisions=base_decisions,
+                    links=external_links,
+                    output_dir=BASE_DIR.parent.parent / "artifacts" / "replay_model_reviews",
+                )
+            )
 
         attached = _attach_teacher_report_overlays(base_decisions, report_paths)
         project_root = BASE_DIR.parent.parent.resolve()
@@ -1105,7 +1133,7 @@ async def replay_multi_teacher(
             }
             for model_type in selected_models
         ]
-        attached["external_review_links"] = {}
+        attached["external_review_links"] = external_links
         return Response(
             content=json.dumps(_json_safe(attached), cls=_NumpyEncoder, ensure_ascii=False, allow_nan=False),
             media_type="application/json",

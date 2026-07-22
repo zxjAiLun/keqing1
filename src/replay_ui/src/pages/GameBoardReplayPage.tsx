@@ -22,12 +22,6 @@ import {
   sidePanelContainerStyle,
 } from './gameReplayStyles';
 
-const TEACHER_MODEL_ORDER: Record<string, number> = {
-  ext_mortal: 0,
-  '70k': 1,
-  'V2 candidate': 2,
-};
-
 function isForcedRiichiTsumogiriEntry(entry: ReplayData['log'][number] | null | undefined): boolean {
   const action = entry?.gt_action ?? entry?.chosen;
   return Boolean(
@@ -422,9 +416,8 @@ export function GameBoardReplayPage() {
       logEntry.teacher_reviews?.forEach((review) => addModel(review.model));
       addModel(logEntry.teacher_review?.model);
     });
-    return models.sort((left, right) => (
-      (TEACHER_MODEL_ORDER[left] ?? 100) - (TEACHER_MODEL_ORDER[right] ?? 100)
-    ));
+    // 保持插入顺序：selected_teacher_models 在前，与牌局里紫色 bar 的顺序一致。
+    return models;
   }, [data]);
   const replayTeacherModelsKey = replayTeacherModels.join('\n');
 
@@ -479,9 +472,20 @@ export function GameBoardReplayPage() {
     });
     return { ...currentEntry, hand, candidates };
   }, [currentEntry, replayHands, viewPlayerId]);
-  const effectiveBattleState = battleState && replayHands?.[viewPlayerId]
-    ? { ...battleState, hand: replayHands[viewPlayerId] }
-    : battleState;
+  const effectiveBattleState = useMemo(() => {
+    if (!battleState || !replayHands?.[viewPlayerId]) return battleState;
+    let hand = replayHands[viewPlayerId];
+    // pre 阶段 replayHands 含刚摸到的那张牌（14 张），而 MahjongTable 约定主手牌为 13 张、
+    // 摸牌单独走 tsumo_pai。若不去掉这张，摸到的牌会在手牌中间和最右侧各出现一次。
+    const drawn = battleState.tsumo_pai;
+    if (boardPhase === 'pre' && drawn) {
+      const drawIndex = hand.indexOf(drawn);
+      if (drawIndex >= 0) {
+        hand = [...hand.slice(0, drawIndex), ...hand.slice(drawIndex + 1)];
+      }
+    }
+    return { ...battleState, hand };
+  }, [battleState, replayHands, viewPlayerId, boardPhase]);
   const logitData = effectiveReplayEntry && !effectiveReplayEntry.is_obs && boardPhase === 'pre' && !isForcedRiichiTsumogiri
     ? buildLogitData(effectiveReplayEntry)
     : baseLogitData;
@@ -643,6 +647,7 @@ export function GameBoardReplayPage() {
                 availableTeacherModels={replayTeacherModels}
                 activeTeacherModel={activeTeacherModel}
                 onActiveTeacherModelChange={setActiveTeacherModel}
+                hideWeights={boardPhase === 'post'}
               />
             </div>
           )}

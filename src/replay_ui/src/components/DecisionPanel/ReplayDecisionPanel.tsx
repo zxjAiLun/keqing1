@@ -15,6 +15,8 @@ interface ReplayDecisionPanelProps {
   availableTeacherModels?: string[];
   activeTeacherModel?: string | null;
   onActiveTeacherModelChange?: (model: string | null) => void;
+  /** 为 true 时隐藏候选动作权重表格（如 post 阶段） */
+  hideWeights?: boolean;
 }
 
 /** 候选动作的显示值：final_score（统一口径） */
@@ -142,6 +144,7 @@ export function ReplayDecisionPanel({
   availableTeacherModels = [],
   activeTeacherModel: controlledActiveTeacherModel,
   onActiveTeacherModelChange,
+  hideWeights = false,
 }: ReplayDecisionPanelProps) {
   const teacherReviews = useMemo(
     () => entry
@@ -276,7 +279,8 @@ export function ReplayDecisionPanel({
         </div>
       )}
 
-      {/* 权重表格 */}
+      {/* 权重表格（post 阶段隐藏） */}
+      {!hideWeights && (
       <div style={{ ...sectionStyle, flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
           <span style={{ fontSize: 12, fontWeight: 800, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
@@ -367,6 +371,7 @@ export function ReplayDecisionPanel({
           )}
         </div>
       </div>
+      )}
 
       {playerNames.length > 0 && onSwitchPlayer && currentPlayerId !== undefined && (
         <>
