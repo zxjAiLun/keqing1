@@ -163,3 +163,6 @@ build/
 
 # Current Mortal reward research report
 !docs/mortal/reward_ab_2026_07.md
+
+# Current Mortal optimizer A/B research report
+!docs/mortal/optimizer_ab_2026_07.md
