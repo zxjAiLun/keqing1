@@ -1,22 +1,23 @@
 param(
     [ValidateSet("Screen", "Full")]
-    [string]$Stage = "Screen"
+    [string]$Stage = "Screen",
+    [string]$ExperimentId = "optimizer_ab_2026_07_epoch1",
+    [int[]]$Seeds = @(20260724, 20260725, 20260726),
+    [int]$SeedStartBase = 940000
 )
 
 $ErrorActionPreference = "Stop"
 $Repo = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 Set-Location $Repo
 $Python = Join-Path $Repo ".venv-win\Scripts\python.exe"
-$ExpDir = Join-Path $Repo "artifacts\experiments\model_pool_2026_07\optimizer_ab_2026_07_epoch1"
+$ExpDir = Join-Path $Repo "artifacts\experiments\model_pool_2026_07\$ExperimentId"
 $EvalDir = Join-Path $ExpDir "eval_1000h"
 $LogDir = Join-Path $EvalDir "eval_logs"
 $Parent = Join-Path $Repo "artifacts\mortal_training\checkpoints\mortal_default_70k_promoted_candidate.pth"
 $External = Join-Path $Repo "artifacts\external_mortal_20240308_best_min.pth"
-$Seeds = @(20260724, 20260725, 20260726)
-$SeedStarts = @{
-    20260724 = 940000
-    20260725 = 941000
-    20260726 = 942000
+$SeedStarts = @{}
+for ($Index = 0; $Index -lt $Seeds.Count; $Index++) {
+    $SeedStarts[$Seeds[$Index]] = $SeedStartBase + (1000 * $Index)
 }
 $Games = if ($Stage -eq "Screen") { 250 } else { 1000 }
 

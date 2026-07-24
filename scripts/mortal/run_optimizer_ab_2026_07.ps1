@@ -1,15 +1,16 @@
 param(
-    [switch]$FirstPairOnly
+    [switch]$FirstPairOnly,
+    [string]$ExperimentId = "optimizer_ab_2026_07_epoch1",
+    [int[]]$Seeds = @(20260724, 20260725, 20260726)
 )
 
 $ErrorActionPreference = "Stop"
 $Repo = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 Set-Location $Repo
 $Python = Join-Path $Repo ".venv-win\Scripts\python.exe"
-$ExpDir = Join-Path $Repo "artifacts\experiments\model_pool_2026_07\optimizer_ab_2026_07_epoch1"
+$ExpDir = Join-Path $Repo "artifacts\experiments\model_pool_2026_07\$ExperimentId"
 $Parent = Join-Path $Repo "artifacts\mortal_training\checkpoints\mortal_default_70k_promoted_candidate.pth"
 $LogDir = Join-Path $ExpDir "pipeline_logs"
-$Seeds = @(20260724, 20260725, 20260726)
 $ArchiveSteps = "70001,70010,70100,70500,71000,72000"
 
 if (-not (Test-Path -LiteralPath $Python)) { throw "Windows venv Python is missing: $Python" }

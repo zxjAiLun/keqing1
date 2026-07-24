@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,8 @@ def _paired_rows(run_dir: Path, expected_games: int) -> list[dict[str, Any]]:
                 key = "fresh"
             elif label.startswith("preserved_"):
                 key = "preserved"
+            elif label == "70k":
+                key = "70k"
             else:
                 continue
             source = str(row["source_log"])
@@ -78,19 +81,26 @@ def _paired_rows(run_dir: Path, expected_games: int) -> list[dict[str, Any]]:
         raise ValueError(f"{run_dir}: found {len(games)} paired games, expected {expected_games}")
     rows = []
     for source, values in sorted(games.items()):
-        if set(values) != {"fresh", "preserved"}:
+        if set(values) != {"70k", "fresh", "preserved"}:
             raise ValueError(f"{run_dir}: incomplete pair in {source}: {values}")
+        anchor = values["70k"]
         fresh = values["fresh"]
         preserved = values["preserved"]
         rows.append(
             {
                 "source_log": source,
+                "70k_rank": anchor["rank"],
+                "70k_final_score": anchor["final_score"],
                 "fresh_rank": fresh["rank"],
                 "preserved_rank": preserved["rank"],
                 "fresh_final_score": fresh["final_score"],
                 "preserved_final_score": preserved["final_score"],
                 "delta_pt": preserved["pt"] - fresh["pt"],
                 "delta_rank": fresh["rank"] - preserved["rank"],
+                "preserved_minus_70k_pt": preserved["pt"] - anchor["pt"],
+                "fresh_minus_70k_pt": fresh["pt"] - anchor["pt"],
+                "preserved_minus_70k_rank": preserved["rank"] - anchor["rank"],
+                "fresh_minus_70k_rank": fresh["rank"] - anchor["rank"],
                 "preserved_ahead": int(preserved["rank"] < fresh["rank"]),
                 "tie": int(preserved["rank"] == fresh["rank"]),
             }
@@ -123,6 +133,65 @@ def _paired_summary(rows: list[dict[str, Any]], rng: np.random.Generator, reps: 
         ],
         "cluster": "complete_hanchan",
         "bootstrap_reps": reps,
+    }
+
+
+def _comparison_summary(
+    rows: list[dict[str, Any]],
+    candidate: str,
+    baseline: str,
+    rng: np.random.Generator,
+    reps: int,
+) -> dict[str, Any]:
+    """Summarize one candidate against the same 70k seat in each hanchan."""
+    pt_key = f"{candidate}_minus_{baseline}_pt"
+    rank_key = f"{candidate}_minus_{baseline}_rank"
+    delta_pt = np.asarray([row[pt_key] for row in rows], dtype=np.float64)
+    delta_rank = np.asarray([row[rank_key] for row in rows], dtype=np.float64)
+    candidate_ranks = np.asarray([row[f"{candidate}_rank"] for row in rows], dtype=np.int64)
+    baseline_ranks = np.asarray([row[f"{baseline}_rank"] for row in rows], dtype=np.int64)
+    ahead = (candidate_ranks < baseline_ranks).astype(np.float64)
+    ties = (candidate_ranks == baseline_ranks).astype(np.float64)
+    candidate_counts = [int(np.sum(candidate_ranks == rank)) for rank in range(1, 5)]
+    baseline_counts = [int(np.sum(baseline_ranks == rank)) for rank in range(1, 5)]
+    return {
+        "candidate": candidate,
+        "baseline": baseline,
+        "games": len(rows),
+        "mean_delta_pt_candidate_minus_baseline": float(delta_pt.mean()),
+        "median_delta_pt_candidate_minus_baseline": float(np.median(delta_pt)),
+        "mean_delta_rank_candidate_minus_baseline": float(delta_rank.mean()),
+        "candidate_ahead_rate": float(ahead.mean()),
+        "tie_rate": float(ties.mean()),
+        "delta_pt_bootstrap_95ci": _bootstrap_ci(delta_pt, rng, reps),
+        "delta_rank_bootstrap_95ci": _bootstrap_ci(delta_rank, rng, reps),
+        "candidate_ahead_bootstrap_95ci": _bootstrap_ci(ahead, rng, reps),
+        "candidate_rank_counts": candidate_counts,
+        "baseline_rank_counts": baseline_counts,
+        "rank_rate_diff_pp_candidate_minus_baseline": [
+            100.0 * (candidate_count - baseline_count) / len(rows)
+            for candidate_count, baseline_count in zip(candidate_counts, baseline_counts, strict=True)
+        ],
+        "cluster": "complete_hanchan",
+        "bootstrap_reps": reps,
+    }
+
+
+def _exact_sign_test(seed_means: list[float], eps: float = 1e-12) -> dict[str, Any]:
+    non_ties = [value for value in seed_means if abs(value) > eps]
+    positive_count = sum(value > 0 for value in non_ties)
+    count = len(non_ties)
+    p_value = (
+        sum(math.comb(count, k) for k in range(positive_count, count + 1)) / (2**count)
+        if count
+        else 1.0
+    )
+    return {
+        "positive_seed_count": positive_count,
+        "non_tie_seed_count": count,
+        "tie_seed_count": len(seed_means) - count,
+        "one_sided_p": float(p_value),
+        "null": "each non-tied seed direction is independently positive with probability 0.5",
     }
 
 
@@ -168,6 +237,10 @@ def main() -> None:
     rng = np.random.default_rng(20260722)
     per_seed: list[dict[str, Any]] = []
     paired_arrays: list[np.ndarray] = []
+    baseline_arrays: dict[str, list[np.ndarray]] = {
+        "preserved_vs_70k": [],
+        "fresh_vs_70k": [],
+    }
     for run_dir in run_dirs:
         metrics = _read_json(run_dir / "metrics.json")
         run = metrics["run"]
@@ -181,7 +254,15 @@ def main() -> None:
         preserved = next(label for label in labels if label.startswith("preserved_"))
         rows = _paired_rows(run_dir, args.expected_games)
         paired = _paired_summary(rows, rng, args.bootstrap_reps)
+        preserved_vs_70k = _comparison_summary(rows, "preserved", "70k", rng, args.bootstrap_reps)
+        fresh_vs_70k = _comparison_summary(rows, "fresh", "70k", rng, args.bootstrap_reps)
         paired_arrays.append(np.asarray([row["delta_pt"] for row in rows], dtype=np.float64))
+        baseline_arrays["preserved_vs_70k"].append(
+            np.asarray([row["preserved_minus_70k_pt"] for row in rows], dtype=np.float64)
+        )
+        baseline_arrays["fresh_vs_70k"].append(
+            np.asarray([row["fresh_minus_70k_pt"] for row in rows], dtype=np.float64)
+        )
         per_seed.append(
             {
                 "run": run_dir.name,
@@ -203,13 +284,32 @@ def main() -> None:
                     "preserved": _model_snapshot(run_dir, preserved),
                 },
                 "paired": paired,
+                "baseline_comparisons": {
+                    "preserved_vs_70k": preserved_vs_70k,
+                    "fresh_vs_70k": fresh_vs_70k,
+                },
             }
         )
 
     all_rows = [row for run_dir in run_dirs for row in _paired_rows(run_dir, args.expected_games)]
     pooled = _paired_summary(all_rows, rng, args.bootstrap_reps)
     hierarchical = _hierarchical_ci(paired_arrays, rng, args.bootstrap_reps)
+    baseline_pooled = {
+        name: _comparison_summary(
+            all_rows,
+            "preserved" if name.startswith("preserved") else "fresh",
+            "70k",
+            rng,
+            args.bootstrap_reps,
+        )
+        for name in baseline_arrays
+    }
+    baseline_hierarchical = {
+        name: _hierarchical_ci(values, rng, args.bootstrap_reps)
+        for name, values in baseline_arrays.items()
+    }
     seed_means = [item["paired"]["mean_delta_pt_preserved_minus_fresh"] for item in per_seed]
+    sign_test = _exact_sign_test(seed_means)
     document = {
         "schema": "keqing.mortal.optimizer_ab_eval_summary.v1",
         "eval_root": str(eval_root),
@@ -225,11 +325,24 @@ def main() -> None:
             "seed_weighting": "equal",
             "bootstrap_reps": args.bootstrap_reps,
         },
+        "baseline_comparisons": {
+            name: {
+                "pooled": baseline_pooled[name],
+                "hierarchical_delta_pt_bootstrap_95ci": baseline_hierarchical[name],
+                "outer_cluster": "training_seed",
+                "inner_cluster": "complete_hanchan",
+                "seed_weighting": "equal",
+            }
+            for name in baseline_arrays
+        },
         "recipe_summary": {
             "seed_mean_delta_pt": seed_means,
             "mean_of_seed_means_delta_pt": float(np.mean(seed_means)),
             "median_of_seed_means_delta_pt": float(np.median(seed_means)),
-            "positive_seed_count": sum(value > 0 for value in seed_means),
+            "positive_seed_count": sign_test["positive_seed_count"],
+            "non_tie_seed_count": sign_test["non_tie_seed_count"],
+            "tie_seed_count": sign_test["tie_seed_count"],
+            "seed_direction_sign_test_one_sided_p": sign_test["one_sided_p"],
             "interpretation": "delta_pt is preserved Adam minus fresh Adam; hanchan and training-seed uncertainty are reported separately",
         },
     }
@@ -268,14 +381,35 @@ def main() -> None:
             f"- Pooled mean delta Pt: `{pooled['mean_delta_pt_preserved_minus_fresh']:+.3f}`; hanchan bootstrap 95% CI: `[{pooled['delta_pt_bootstrap_95ci'][0]:+.3f}, {pooled['delta_pt_bootstrap_95ci'][1]:+.3f}]`.",
             f"- Seed means: `{[round(value, 3) for value in seed_means]}`; mean of seed means: `{np.mean(seed_means):+.3f}`.",
             f"- Equal-seed hierarchical bootstrap 95% CI: `[{hierarchical[0]:+.3f}, {hierarchical[1]:+.3f}]`.",
-            f"- Preserved is ahead by average Pt in `{sum(value > 0 for value in seed_means)}/{len(seed_means)}` training seeds.",
+            f"- Preserved is ahead by average Pt in `{sign_test['positive_seed_count']}/{sign_test['non_tie_seed_count']}` non-tied training seeds; exact one-sided sign-test `p={sign_test['one_sided_p']:.3f}`.",
             "",
-            "## Controls and Behavior",
+            "## Against 70k Anchor",
             "",
-            "| Seed | Model | Avg rank | Avg Pt | Agari | Houjuu | Fuuro | Riichi | After-riichi A/H | After-fuuro A/H |",
-            "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+            "These are complete-hanchan paired comparisons inside the same four-model lineup. A negative rank delta means the candidate finished better than 70k.",
+            "",
+            "| Seed | Preserved - 70k Pt | Fresh - 70k Pt | Preserved - 70k rank | Fresh - 70k rank |",
+            "| ---: | ---: | ---: | ---: | ---: |",
         ]
     )
+    for item in per_seed:
+        preserved = item["baseline_comparisons"]["preserved_vs_70k"]
+        fresh = item["baseline_comparisons"]["fresh_vs_70k"]
+        lines.append(
+            f"| {item['seed']} | {preserved['mean_delta_pt_candidate_minus_baseline']:+.3f} | "
+            f"{fresh['mean_delta_pt_candidate_minus_baseline']:+.3f} | "
+            f"{preserved['mean_delta_rank_candidate_minus_baseline']:+.3f} | "
+            f"{fresh['mean_delta_rank_candidate_minus_baseline']:+.3f} |"
+        )
+    for name, label in (("preserved_vs_70k", "Pooled preserved - 70k"), ("fresh_vs_70k", "Pooled fresh - 70k")):
+        summary = baseline_pooled[name]
+        ci = baseline_hierarchical[name]
+        lines.extend(
+            [
+                "",
+                f"- {label}: mean Pt `{summary['mean_delta_pt_candidate_minus_baseline']:+.3f}`, hanchan CI `[{summary['delta_pt_bootstrap_95ci'][0]:+.3f}, {summary['delta_pt_bootstrap_95ci'][1]:+.3f}]`, equal-seed hierarchical CI `[{ci[0]:+.3f}, {ci[1]:+.3f}]`.",
+            ]
+        )
+    lines.extend(["", "## Controls and Behavior", "", "| Seed | Model | Avg rank | Avg Pt | Agari | Houjuu | Fuuro | Riichi | After-riichi A/H | After-fuuro A/H |", "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |"])
     for item in per_seed:
         for label in ("70k", "ext_mortal", "fresh", "preserved"):
             model = item["models"][label]
