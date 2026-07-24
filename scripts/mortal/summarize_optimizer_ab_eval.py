@@ -18,7 +18,13 @@ RANK_POINTS = (90.0, 45.0, 0.0, -135.0)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--eval-root", type=Path, required=True)
+    parser.add_argument(
+        "--eval-root",
+        type=Path,
+        action="append",
+        required=True,
+        help="evaluation root; repeat to combine matched training-seed batches",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--expected-games", type=int, default=1000)
     parser.add_argument("--bootstrap-reps", type=int, default=5000)
@@ -230,10 +236,14 @@ def _fmt_pct(value: float) -> str:
 
 def main() -> None:
     args = parse_args()
-    eval_root = args.eval_root.resolve()
-    run_dirs = sorted(eval_root.glob("lineup_*") )
-    if len(run_dirs) != 3:
-        raise ValueError(f"expected three lineup directories under {eval_root}, found {len(run_dirs)}")
+    eval_roots = [root.resolve() for root in args.eval_root]
+    run_dirs = sorted(
+        run_dir
+        for eval_root in eval_roots
+        for run_dir in eval_root.glob("lineup_*")
+    )
+    if len(run_dirs) < 3:
+        raise ValueError(f"expected at least three lineup directories under {eval_roots}, found {len(run_dirs)}")
     rng = np.random.default_rng(20260722)
     per_seed: list[dict[str, Any]] = []
     paired_arrays: list[np.ndarray] = []
@@ -312,7 +322,8 @@ def main() -> None:
     sign_test = _exact_sign_test(seed_means)
     document = {
         "schema": "keqing.mortal.optimizer_ab_eval_summary.v1",
-        "eval_root": str(eval_root),
+        "eval_root": str(eval_roots[0]) if len(eval_roots) == 1 else [str(root) for root in eval_roots],
+        "eval_roots": [str(root) for root in eval_roots],
         "expected_games_per_seed": args.expected_games,
         "training_seed_count": len(per_seed),
         "rank_points": list(RANK_POINTS),
@@ -427,7 +438,7 @@ def main() -> None:
             "## Decision Scope",
             "",
             "This evaluates the optimizer state-transfer variable only. It does not promote a checkpoint to the serving/default model and does not establish that preserved Adam is a generally better optimizer recipe.",
-            "The final decision must consider the three seed-level effects together with the hierarchical interval; the pooled hanchan interval alone does not represent training-seed uncertainty.",
+            f"The final decision must consider all {len(per_seed)} seed-level effects together with the hierarchical interval; the pooled hanchan interval alone does not represent training-seed uncertainty.",
         ]
     )
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
