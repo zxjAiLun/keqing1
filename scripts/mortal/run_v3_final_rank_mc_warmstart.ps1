@@ -37,6 +37,7 @@ if ($PrepareOnly) { exit 0 }
 
 if ($RunTraining) {
     $StatePath = Join-Path $ExpDir "mortal.pth"
+    $ParentCheckpoint = "artifacts\mortal_training\checkpoints\mortal_default_70k_promoted_candidate.pth"
     $Train = @(
         "uv", "run", "--no-sync", "python", "scripts/run_mortal_dqn_offline.py",
         "--config", "$ExpDir\config.toml", "--target-steps", "74000",
@@ -45,7 +46,8 @@ if ($RunTraining) {
     )
     if (-not (Test-Path $StatePath)) {
         $Train += @(
-            "--initialize-from", "artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth",
+            "--initialize-from", $ParentCheckpoint,
+            "--initialize-optimizer-from", $ParentCheckpoint,
             "--initial-steps", "70000"
         )
     }

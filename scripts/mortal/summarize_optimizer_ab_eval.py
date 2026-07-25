@@ -237,6 +237,8 @@ def _fmt_pct(value: float) -> str:
 def main() -> None:
     args = parse_args()
     eval_roots = [root.resolve() for root in args.eval_root]
+    if len(eval_roots) != len(set(eval_roots)):
+        raise ValueError(f"duplicate evaluation roots: {eval_roots}")
     run_dirs = sorted(
         run_dir
         for eval_root in eval_roots
@@ -244,6 +246,9 @@ def main() -> None:
     )
     if len(run_dirs) < 3:
         raise ValueError(f"expected at least three lineup directories under {eval_roots}, found {len(run_dirs)}")
+    run_names = [run_dir.name for run_dir in run_dirs]
+    if len(run_names) != len(set(run_names)):
+        raise ValueError(f"duplicate lineup directories across evaluation roots: {run_names}")
     rng = np.random.default_rng(20260722)
     per_seed: list[dict[str, Any]] = []
     paired_arrays: list[np.ndarray] = []
@@ -319,6 +324,9 @@ def main() -> None:
         for name, values in baseline_arrays.items()
     }
     seed_means = [item["paired"]["mean_delta_pt_preserved_minus_fresh"] for item in per_seed]
+    seeds = [int(item["seed"]) for item in per_seed]
+    if len(seeds) != len(set(seeds)):
+        raise ValueError(f"duplicate training seeds across lineup directories: {seeds}")
     sign_test = _exact_sign_test(seed_means)
     document = {
         "schema": "keqing.mortal.optimizer_ab_eval_summary.v1",

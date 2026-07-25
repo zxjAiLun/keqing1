@@ -50,7 +50,7 @@ def _parse_args() -> argparse.Namespace:
         "--initialize-from",
         type=Path,
         default=None,
-        help="initialize model weights from a parent checkpoint with fresh optimizer and data stream",
+        help="initialize model weights from a parent checkpoint; optimizer/data stay fresh unless --initialize-optimizer-from is also supplied",
     )
     parser.add_argument(
         "--initialize-optimizer-from",
@@ -348,6 +348,7 @@ def train_to_target_steps(
             "loaded_aux_net": "aux_net" in parent,
             "optimizer": "fresh",
             "scheduler": "fresh",
+            "scaler": "fresh",
             "data_stream": "fresh",
         }
         if initialize_optimizer_from is not None:
@@ -387,11 +388,18 @@ def train_to_target_steps(
                 "loaded Adam optimizer state from %s; scheduler and data stream remain fresh",
                 optimizer_parent_path,
             )
-        logging.info(
-            "initialized fresh experiment from %s; assigned global steps=%s with fresh optimizer/data stream",
-            parent_path,
-            steps,
-        )
+        if initialize_optimizer_from is None:
+            logging.info(
+                "initialized weights-only continuation from %s; assigned global steps=%s with fresh optimizer/scheduler/scaler/data stream",
+                parent_path,
+                steps,
+            )
+        else:
+            logging.info(
+                "initialized weights-plus-optimizer continuation from %s; assigned global steps=%s with preserved Adam and fresh scheduler/scaler/data stream",
+                parent_path,
+                steps,
+            )
 
     if steps >= target_steps:
         logging.info("Mortal already at steps=%s, target_steps=%s; no training needed", steps, target_steps)
