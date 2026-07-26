@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -32,6 +34,12 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--model-label", default="ext_mortal")
+    parser.add_argument(
+        "--player-names",
+        nargs=4,
+        metavar=("TRAIN", "OPP1", "OPP2", "OPP3"),
+        help="optional per-seat log names for pure selfplay; all four use the same engine",
+    )
     parser.add_argument("--mortal-root", type=Path, default=Path("third_party/Mortal"))
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -108,6 +116,43 @@ def _completed_prefix(log_dir: Path, seed_start: int, seed_key: int, total_games
     return completed
 
 
+def _random_train_seat(seed: int, key: int) -> int:
+    rotated_key = ((key << 13) & ((1 << 64) - 1)) | (key >> 51)
+    return int((seed ^ rotated_key) % 4)
+
+
+def _rewrite_aliases_for_batch(log_dir: Path, seed_start: int, seed_key: int, count: int, names: list[str]) -> None:
+    """Fallback for an older locally installed libriichi extension.
+
+    The current Rust extension writes aliases directly.  This keeps the Python
+    runner usable if a stale `riichi.pyd` still exposes the older py_selfplay
+    signature.
+    """
+    if len(names) != 4:
+        raise ValueError("player names must contain exactly four aliases")
+    for offset in range(count):
+        seed = seed_start + offset
+        path = log_dir / f"{seed}_{seed_key}.json.gz"
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            lines = handle.readlines()
+        start_game = json.loads(lines[0])
+        train_seat = _random_train_seat(seed, seed_key)
+        aliases = [""] * 4
+        opponent_index = 1
+        for seat in range(4):
+            if seat == train_seat:
+                aliases[seat] = names[0]
+            else:
+                aliases[seat] = names[opponent_index]
+                opponent_index += 1
+        start_game["names"] = aliases
+        lines[0] = json.dumps(start_game, ensure_ascii=False, separators=(",", ":")) + "\n"
+        temp_path = path.with_name(path.name + ".tmp")
+        with gzip.open(temp_path, "wt", encoding="utf-8") as handle:
+            handle.writelines(lines)
+        os.replace(temp_path, path)
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.require_cuda and not torch.cuda.is_available():
         raise SystemExit("CUDA required but torch.cuda.is_available() is False")
@@ -142,7 +187,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     batch_size = requested_batch_size or (total_games if progress_every <= 0 else max(1, progress_every))
     if batch_size <= 0:
         raise ValueError("--native-batch-games must be positive when provided")
-    rank_counts = [completed, completed, completed, completed]
+    all_seat_rank_counts = [completed * 4, completed * 4, completed * 4, completed * 4]
     started_at = time.monotonic()
     while completed < total_games:
         count = min(batch_size, total_games - completed)
@@ -153,15 +198,35 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             file=sys.stderr,
             flush=True,
         )
-        batch_counts = list(
-            env.py_selfplay(
-                engine=engine,
-                seed_start=(batch_seed_start, int(args.seed_key)),
-                game_count=count,
+        try:
+            batch_counts = list(
+                env.py_selfplay(
+                    engine=engine,
+                    seed_start=(batch_seed_start, int(args.seed_key)),
+                    game_count=count,
+                    player_names=args.player_names,
+                )
             )
-        )
+        except TypeError:
+            if args.player_names is None:
+                raise
+            print("[selfplay] installed libriichi lacks player_names; rewriting aliases in Python", flush=True)
+            batch_counts = list(
+                env.py_selfplay(
+                    engine=engine,
+                    seed_start=(batch_seed_start, int(args.seed_key)),
+                    game_count=count,
+                )
+            )
+            _rewrite_aliases_for_batch(
+                log_dir,
+                batch_seed_start,
+                int(args.seed_key),
+                count,
+                list(args.player_names),
+            )
         for index, value in enumerate(batch_counts):
-            rank_counts[index] += int(value)
+            all_seat_rank_counts[index] += int(value)
         completed += count
         elapsed = time.monotonic() - started_at
         generated = completed - initial_completed
@@ -174,7 +239,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             flush=True,
         )
 
-    metrics = summarize_rank_counts_with_references(rank_counts, rank_points=rank_points)
+    metrics = {}
     document = build_metrics_document(
         run={
             "kind": "native_selfplay",
@@ -185,6 +250,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "seed_key": int(args.seed_key),
             "games": total_games,
             "native_batch_games": int(batch_size),
+            "all_seat_rank_counts": all_seat_rank_counts,
             "device": str(args.device),
             "model_load_time_sec": model_load_time,
             "rank_points_profile": rank_points_profile,
@@ -211,6 +277,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         rank_pts=rank_points,
         rank_points_profile=rank_points_profile,
     )
+    train_raw = stat_report["players"][str(args.model_label)]["raw"]
+    train_rank_counts = [int(train_raw[f"rank_{rank}"]) for rank in range(1, 5)]
+    metrics = {str(args.model_label): summarize_rank_counts_with_references(train_rank_counts, rank_points=rank_points)}
+    document["metrics"] = metrics
     document["artifacts"]["detailed_stats_json"] = str(args.output_dir / "detailed_stats.json")
     document["artifacts"]["detailed_stats_md"] = str(args.output_dir / "detailed_stats.md")
     document["detailed_stats_schema"] = stat_report["schema"]

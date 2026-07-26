@@ -201,10 +201,10 @@ def load_file_list(path: Path) -> list[Path]:
 
 def phase_bucket(kyoku: int) -> str:
     if kyoku < 4:
-        return "east"
+        return "early"
     if kyoku < 8:
-        return "south"
-    return "extension"
+        return "middle"
+    return "late"
 
 
 def score_gap_bucket(score_gap: float) -> str:
@@ -251,6 +251,13 @@ def decision_hash(record: DecisionRecord) -> bytes:
     digest.update(np.ascontiguousarray(record.obs, dtype=np.float32).tobytes())
     digest.update(np.ascontiguousarray(record.mask, dtype=np.bool_).tobytes())
     digest.update(int(record.action).to_bytes(2, "little", signed=False))
+    return digest.digest()
+
+
+def state_hash(record: DecisionRecord) -> bytes:
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(np.ascontiguousarray(record.obs, dtype=np.float32).tobytes())
+    digest.update(np.ascontiguousarray(record.mask, dtype=np.bool_).tobytes())
     return digest.digest()
 
 
@@ -426,8 +433,8 @@ def write_markdown(report: dict[str, Any], path: Path) -> None:
         "",
         "## Exact Decision Repeats",
         "",
-        f"- Unique `(obs, legal_mask, behavior_action)` hashes: `{duplicates['unique_decision_count']}`.",
-        f"- Exact duplicate decisions: `{duplicates['duplicate_decision_count']}` (`{duplicates['duplicate_decision_rate']:.2%}`).",
+        f"- Unique `(obs, legal_mask, behavior_action)` hashes: `{duplicates['unique_decision_count']}`; exact duplicate rate: `{duplicates['duplicate_decision_rate']:.2%}`.",
+        f"- Unique `(obs, legal_mask)` hashes: `{duplicates['unique_state_count']}`; state-only duplicate rate: `{duplicates['state_duplicate_rate']:.2%}`.",
         "",
         "## Highest-Variance Target Buckets",
         "",
@@ -513,6 +520,7 @@ def main() -> None:
     support_overall = SupportAccumulator()
     support_strata: dict[str, SupportAccumulator] = {}
     decision_hashes: Counter[bytes] = Counter()
+    state_hashes: Counter[bytes] = Counter()
     malformed: list[dict[str, str]] = []
     total_decisions = 0
     trainable_perspectives = 0
@@ -545,6 +553,7 @@ def main() -> None:
             shanten_counts[shanten_bucket(record.shanten)] += 1
             target_counts[record.target] += 1
             decision_hashes[decision_hash(record)] += 1
+            state_hashes[state_hash(record)] += 1
             target_buckets.setdefault(bucket_key(record), BucketAccumulator()).update(record)
             support_strata.setdefault(support_key(record), SupportAccumulator()).update(q=q, record=record)
             support_overall.update(q=q, record=record)
@@ -557,7 +566,7 @@ def main() -> None:
                 "source_log": str(file_path),
                 "decisions": len(records),
                 "kyoku_count": max(record.kyoku for record in records) + 1,
-                "extension": any(record.phase == "extension" for record in records),
+                "late_phase": any(record.phase == "late" for record in records),
                 "final_rank": records[0].target_rank,
                 "target": records[0].target,
             }
@@ -658,6 +667,11 @@ def main() -> None:
             "duplicate_decision_count": total_decisions - unique_decisions,
             "duplicate_decision_rate": (total_decisions - unique_decisions) / total_decisions if total_decisions else 0.0,
             "max_exact_repeat_count": max(decision_hashes.values(), default=0),
+            "state_hash_definition": "blake2b(obs float32 bytes + legal mask bytes)",
+            "unique_state_count": len(state_hashes),
+            "state_duplicate_count": total_decisions - len(state_hashes),
+            "state_duplicate_rate": (total_decisions - len(state_hashes)) / total_decisions if total_decisions else 0.0,
+            "max_state_repeat_count": max(state_hashes.values(), default=0),
         },
         "hanchans": hanchan_rows,
         "scope_notes": [
