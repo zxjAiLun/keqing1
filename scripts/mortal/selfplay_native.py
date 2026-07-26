@@ -58,6 +58,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--enable-amp", action="store_true")
     parser.add_argument("--no-platform-report", action="store_true")
+    parser.add_argument("--defer-reports", action="store_true", help="generate logs only; build reports in a final pass")
     add_rank_point_args(parser)
     return parser.parse_args()
 
@@ -238,6 +239,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             file=sys.stderr,
             flush=True,
         )
+
+    if args.defer_reports:
+        print(f"[selfplay] log generation complete: {completed}/{total_games}; reports deferred", flush=True)
+        return {"completed_games": completed, "log_dir": str(log_dir)}
 
     metrics = {}
     document = build_metrics_document(
