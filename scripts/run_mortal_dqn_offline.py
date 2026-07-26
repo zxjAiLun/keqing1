@@ -328,7 +328,25 @@ def train_to_target_steps(
         parent_path = initialize_from.resolve()
         if not parent_path.exists():
             raise FileNotFoundError(f"--initialize-from checkpoint does not exist: {parent_path}")
-        parent = torch.load(parent_path, weights_only=True, map_location=device)
+        parent_sha256 = _sha256_file(parent_path)
+        optimizer_parent_path: Path | None = None
+        optimizer_parent_sha256: str | None = None
+        if initialize_optimizer_from is not None:
+            optimizer_parent_path = initialize_optimizer_from.resolve()
+            if not optimizer_parent_path.exists():
+                raise FileNotFoundError(
+                    f"--initialize-optimizer-from checkpoint does not exist: {optimizer_parent_path}"
+                )
+            optimizer_parent_sha256 = _sha256_file(optimizer_parent_path)
+            if parent_sha256 != optimizer_parent_sha256:
+                raise RuntimeError(
+                    "preserved optimizer source must be the exact same checkpoint as --initialize-from"
+                )
+
+        # Keep the temporary checkpoint and its Adam moments on CPU. State loading
+        # casts optimizer tensors to the live parameter device, then the payload
+        # can be released before dataset construction and the training loop.
+        parent = torch.load(parent_path, weights_only=True, map_location="cpu")
         try:
             mortal.load_state_dict(parent["mortal"])
             dqn.load_state_dict(parent["current_dqn"])
@@ -342,7 +360,7 @@ def train_to_target_steps(
         initialization = {
             "mode": "weights_only_warm_start",
             "parent_checkpoint": str(parent_path),
-            "parent_sha256": _sha256_file(parent_path),
+            "parent_sha256": parent_sha256,
             "parent_steps": int(parent.get("steps", 0)),
             "initial_steps": int(initial_steps),
             "loaded_aux_net": "aux_net" in parent,
@@ -351,26 +369,14 @@ def train_to_target_steps(
             "scaler": "fresh",
             "data_stream": "fresh",
         }
-        if initialize_optimizer_from is not None:
-            optimizer_parent_path = initialize_optimizer_from.resolve()
-            if not optimizer_parent_path.exists():
-                raise FileNotFoundError(
-                    f"--initialize-optimizer-from checkpoint does not exist: {optimizer_parent_path}"
-                )
-            optimizer_parent = torch.load(
-                optimizer_parent_path,
-                weights_only=True,
-                map_location=device,
-            )
-            if "optimizer" not in optimizer_parent:
+        if optimizer_parent_path is not None:
+            if "optimizer" not in parent:
                 raise RuntimeError(
                     f"optimizer state is missing from --initialize-optimizer-from checkpoint: {optimizer_parent_path}"
                 )
-            optimizer.load_state_dict(optimizer_parent["optimizer"])
-            if _sha256_file(parent_path) != _sha256_file(optimizer_parent_path):
-                raise RuntimeError(
-                    "preserved optimizer source must be the exact same checkpoint as --initialize-from"
-                )
+            # The preflight above established byte identity, so reuse the
+            # already-loaded parent payload instead of loading it a second time.
+            optimizer.load_state_dict(parent["optimizer"])
             _validate_preserved_optimizer(
                 optimizer,
                 fresh_groups=fresh_optimizer_groups,
@@ -381,13 +387,14 @@ def train_to_target_steps(
                     "mode": "weights_plus_optimizer_warm_start",
                     "optimizer": "preserved",
                     "optimizer_checkpoint": str(optimizer_parent_path),
-                    "optimizer_checkpoint_sha256": _sha256_file(optimizer_parent_path),
+                    "optimizer_checkpoint_sha256": optimizer_parent_sha256,
                 }
             )
             logging.info(
                 "loaded Adam optimizer state from %s; scheduler and data stream remain fresh",
                 optimizer_parent_path,
             )
+        del parent
         if initialize_optimizer_from is None:
             logging.info(
                 "initialized weights-only continuation from %s; assigned global steps=%s with fresh optimizer/scheduler/scaler/data stream",
