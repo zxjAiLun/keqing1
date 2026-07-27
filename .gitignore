@@ -169,3 +169,6 @@ build/
 
 # Current Mortal replay distribution audit
 !docs/mortal/data_distribution_audit_2026_07.md
+
+# Current Mortal mixed-vs-pure data route report
+!docs/mortal/data_route_ab_2026_07.md
