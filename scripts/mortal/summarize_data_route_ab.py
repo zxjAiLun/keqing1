@@ -324,6 +324,9 @@ def summarize(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("duplicate training seeds")
     if set(seeds) != set(DEFAULT_SEEDS):
         raise ValueError(f"expected pre-registered seeds {DEFAULT_SEEDS}, got {tuple(seeds)}")
+    source_hashes = [item["source_results_sha256"] for item in loaded]
+    if len(source_hashes) != len(set(source_hashes)):
+        raise ValueError("duplicate evaluation result payloads")
     loaded.sort(key=lambda item: int(item["eval_dir_name"].removeprefix("seed_")))
 
     pair_keys = (

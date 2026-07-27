@@ -172,3 +172,6 @@ build/
 
 # Current Mortal mixed-vs-pure data route report
 !docs/mortal/data_route_ab_2026_07.md
+
+# Current Mortal objective learnability audit
+!docs/mortal/objective_learnability_2026_07.md
