@@ -62,6 +62,31 @@ def test_legal_mean_uses_only_legal_actions() -> None:
     assert torch.allclose(result["legal_q_mean"], expected)
 
 
+def test_single_legal_action_has_finite_zero_margin() -> None:
+    q_out = torch.tensor([[2.0, -torch.inf, -torch.inf]], requires_grad=True)
+    masks = torch.tensor([[True, False, False]])
+    actions = torch.tensor([0])
+    targets = torch.tensor([1.0])
+    next_rank_logits = torch.zeros(1, 4, requires_grad=True)
+    result = compute_objective_losses(
+        q_out=q_out,
+        masks=masks,
+        actions=actions,
+        q_target_mc=targets,
+        next_rank_logits=next_rank_logits,
+        player_ranks=torch.tensor([0]),
+        mode="legal_mean_mc",
+        cql_weight=5.0,
+        aux_weight=0.2,
+    )
+    assert torch.isfinite(result["total_loss"])
+    assert torch.isfinite(result["legal_q_mean"]).all()
+    assert torch.isfinite(result["legal_q_std"]).all()
+    assert torch.isfinite(result["centered_advantage_abs_mean"]).all()
+    assert torch.isfinite(result["greedy_margin"]).all()
+    assert result["greedy_margin"].item() == 0.0
+
+
 def test_cql_is_invariant_to_per_row_common_offset() -> None:
     fixture = _fixture()
     kwargs = _kwargs(*fixture)

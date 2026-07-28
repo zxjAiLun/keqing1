@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--control-config", type=Path, required=True)
     parser.add_argument("--variant-config", type=Path, required=True)
     parser.add_argument("--parent", type=Path, required=True)
+    parser.add_argument("--data-seed", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -43,6 +44,21 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def git_value(*args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    value = result.stdout.strip()
+    return value or None
 
 
 def normalized_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -172,16 +188,34 @@ def main() -> None:
         raise ValueError(f"parent checkpoint must be at step 70000, got {steps}")
     if "optimizer" not in state:
         raise ValueError("parent checkpoint has no Adam optimizer state")
-    data_seed = 20260803
-    control_batches = batch_hash(args.control_config, data_seed, 2)
-    variant_batches = batch_hash(args.variant_config, data_seed, 2)
+    current_git_commit = git_value("rev-parse", "HEAD")
+    git_dirty = bool(git_value("status", "--porcelain", "--untracked-files=all"))
+    if git_dirty:
+        raise ValueError("working tree is dirty; commit before running objective preflight")
+    control_config_path = args.control_config.resolve()
+    variant_config_path = args.variant_config.resolve()
+    control_file_index = Path(str(control_config["dataset"]["file_index"])).resolve()
+    variant_file_index = Path(str(variant_config["dataset"]["file_index"])).resolve()
+    if control_file_index != variant_file_index:
+        raise ValueError("control and variant use different file indexes")
+    if not control_file_index.exists():
+        raise FileNotFoundError(control_file_index)
+    control_labels = [Path(str(value)).resolve() for value in control_config["dataset"]["player_names_files"]]
+    variant_labels = [Path(str(value)).resolve() for value in variant_config["dataset"]["player_names_files"]]
+    if len(control_labels) != len(variant_labels):
+        raise ValueError("control and variant label-file counts differ")
+    if any(path.read_bytes() != other.read_bytes() for path, other in zip(control_labels, variant_labels, strict=True)):
+        raise ValueError("control and variant label-file contents differ")
+    control_batches = batch_hash(control_config_path, args.data_seed, 2)
+    variant_batches = batch_hash(variant_config_path, args.data_seed, 2)
     if control_batches != variant_batches:
         raise ValueError("control and variant first data batches differ")
     report = {
         "schema": "keqing.mortal.legal_mean_value_preflight.v1",
         "passed": True,
-        "control_config": str(args.control_config.resolve()),
-        "variant_config": str(args.variant_config.resolve()),
+        "control_config": str(control_config_path),
+        "variant_config": str(variant_config_path),
+        "data_seed": args.data_seed,
         "parent": str(parent),
         "parent_sha256": sha256_file(parent),
         "parent_tensor_digest": checkpoint_tensor_digest(state),
@@ -191,8 +225,23 @@ def main() -> None:
         "control_objective": control_mode,
         "variant_objective": variant_mode,
         "config_equal_except_objective_and_run_paths": True,
+        "fingerprints": {
+            "control_config_sha256": sha256_file(control_config_path),
+            "variant_config_sha256": sha256_file(variant_config_path),
+            "parent_sha256": sha256_file(parent),
+            "file_index": str(control_file_index),
+            "file_index_sha256": sha256_file(control_file_index),
+            "control_label_files": [
+                {"path": str(path), "sha256": sha256_file(path)} for path in control_labels
+            ],
+            "variant_label_files": [
+                {"path": str(path), "sha256": sha256_file(path)} for path in variant_labels
+            ],
+            "git_commit": current_git_commit,
+            "git_dirty": git_dirty,
+        },
         "first_data_batches": {
-            "data_seed": data_seed,
+            "data_seed": args.data_seed,
             "batch_count": 2,
             "control": control_batches,
             "variant": variant_batches,

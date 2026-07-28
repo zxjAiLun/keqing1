@@ -65,7 +65,8 @@ def compute_objective_losses(
 
     row_index = torch.arange(batch_size, device=q_out.device)
     behavior_q = q_out[row_index, actions]
-    legal_count = masks.sum(dim=-1).clamp_min(1).to(q_out.dtype)
+    legal_count_int = masks.sum(dim=-1)
+    legal_count = legal_count_int.clamp_min(1).to(q_out.dtype)
     legal_q_sum = q_out.masked_fill(~masks, 0.0).sum(dim=-1)
     legal_q_mean = legal_q_sum / legal_count
 
@@ -89,7 +90,12 @@ def compute_objective_losses(
         legal_q_centered.abs().masked_fill(~masks, 0.0).sum(dim=-1) / legal_count
     )
     top_two = q_out.masked_fill(~masks, -torch.inf).topk(k=min(2, q_out.shape[-1]), dim=-1).values
-    greedy_margin = top_two[:, 0] - top_two[:, 1] if top_two.shape[-1] >= 2 else torch.zeros_like(legal_q_mean)
+    raw_margin = top_two[:, 0] - top_two[:, 1] if top_two.shape[-1] >= 2 else torch.zeros_like(legal_q_mean)
+    greedy_margin = torch.where(
+        legal_count_int >= 2,
+        raw_margin,
+        torch.zeros_like(legal_q_mean),
+    )
 
     return {
         "value_loss": value_loss,

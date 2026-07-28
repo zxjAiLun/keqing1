@@ -10,6 +10,7 @@ import gzip
 import hashlib
 import json
 import logging
+import math
 import os
 from os import path
 from pathlib import Path
@@ -678,6 +679,14 @@ def train_to_target_steps(
                 aux_weight=float(config["aux"]["next_rank_weight"]),
             )
             loss = objective_losses["total_loss"]
+            if not bool(torch.isfinite(loss).all().item()):
+                raise RuntimeError(f"non-finite objective loss at step {steps + 1}: mode={objective_mode}")
+            if any(
+                not bool(torch.isfinite(value).all().item())
+                for value in objective_losses.values()
+                if isinstance(value, torch.Tensor)
+            ):
+                raise RuntimeError(f"non-finite objective diagnostic at step {steps + 1}: mode={objective_mode}")
 
         scaler.scale(loss / opt_step_every).backward()
         with torch.inference_mode():
@@ -706,6 +715,8 @@ def train_to_target_steps(
                 "reward_nonzero_rate": float((q_target_mc.detach() != 0).to(torch.float32).mean().cpu()),
                 }
             )
+            if not all(math.isfinite(float(value)) for value in batch_metrics.values()):
+                raise RuntimeError(f"non-finite batch metric at step {steps + 1}: mode={objective_mode}")
             for key, value in batch_metrics.items():
                 stats[key] += value
                 window_stats[key] += value

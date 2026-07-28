@@ -31,10 +31,52 @@ function Invoke-Logged {
     "[$(Get-Date -Format o)] DONE $Name" | Tee-Object -FilePath $LogPath -Append
 }
 
+function Get-Sha256 {
+    param([string]$Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Assert-Preflight {
+    param(
+        [int]$Seed,
+        [string]$PreflightPath,
+        [string]$ControlConfig,
+        [string]$VariantConfig
+    )
+    if (-not (Test-Path -LiteralPath $PreflightPath)) { throw "missing preflight JSON: $PreflightPath" }
+    $Report = Get-Content -LiteralPath $PreflightPath -Raw | ConvertFrom-Json
+    if (-not [bool]$Report.passed) { throw "preflight did not pass for seed $Seed" }
+    if ([int]$Report.data_seed -ne $Seed) { throw "preflight data seed mismatch for seed $Seed" }
+    if (-not [bool]$Report.first_data_batches.identical) { throw "preflight batch hashes differ for seed $Seed" }
+    if ([bool]$Report.fingerprints.git_dirty) { throw "preflight recorded dirty git state for seed $Seed" }
+    $CurrentCommit = (& git rev-parse HEAD).Trim()
+    if ($Report.fingerprints.git_commit -ne $CurrentCommit) { throw "git commit changed after preflight for seed $Seed" }
+    $ParentHash = Get-Sha256 $Parent
+    if ($Report.fingerprints.parent_sha256 -ne $ParentHash) { throw "parent SHA changed after preflight for seed $Seed" }
+    if ($Report.fingerprints.control_config_sha256 -ne (Get-Sha256 $ControlConfig)) { throw "control config changed after preflight for seed $Seed" }
+    if ($Report.fingerprints.variant_config_sha256 -ne (Get-Sha256 $VariantConfig)) { throw "variant config changed after preflight for seed $Seed" }
+    if ($Report.fingerprints.file_index_sha256 -ne (Get-Sha256 $Report.fingerprints.file_index)) { throw "file index changed after preflight for seed $Seed" }
+    foreach ($Entry in @($Report.fingerprints.control_label_files) + @($Report.fingerprints.variant_label_files)) {
+        if ($Entry.sha256 -ne (Get-Sha256 $Entry.path)) { throw "label file changed after preflight: $($Entry.path)" }
+    }
+}
+
 $PairSeeds = $Seeds
 if ($FirstPairOnly) { $PairSeeds = @($Seeds[0]) }
 
 foreach ($Seed in $PairSeeds) {
+    $ControlConfig = Join-Path $ExpDir "C_behavior_action_mc\seed_$Seed\config.toml"
+    $VariantConfig = Join-Path $ExpDir "V_legal_mean_mc\seed_$Seed\config.toml"
+    $Preflight = Join-Path $ExpDir "preflight\preflight_$Seed.json"
+    Invoke-Logged "preflight_$Seed" @(
+        "scripts\mortal\preflight_legal_mean_objective.py",
+        "--control-config", $ControlConfig,
+        "--variant-config", $VariantConfig,
+        "--parent", $Parent,
+        "--data-seed", "$Seed",
+        "--output", $Preflight
+    )
+    Assert-Preflight $Seed $Preflight $ControlConfig $VariantConfig
     foreach ($Group in @("C_behavior_action_mc", "V_legal_mean_mc")) {
         $RunDir = Join-Path $ExpDir "$Group\seed_$Seed"
         $Config = Join-Path $RunDir "config.toml"
@@ -62,6 +104,27 @@ foreach ($Seed in $PairSeeds) {
         }
         Invoke-Logged "$Group`_$Seed" $Arguments
     }
+}
+
+foreach ($Seed in $PairSeeds) {
+    $ControlRun = Join-Path $ExpDir "C_behavior_action_mc\seed_$Seed"
+    $VariantRun = Join-Path $ExpDir "V_legal_mean_mc\seed_$Seed"
+    $Verification = Join-Path $ExpDir "preflight\verification_$Seed.json"
+    $CurrentCommit = (& git rev-parse HEAD).Trim()
+    Invoke-Logged "verification_$Seed" @(
+        "scripts\mortal\verify_legal_mean_value_run.py",
+        "--run-dir", $ControlRun,
+        "--peer-run-dir", $VariantRun,
+        "--expected-objective", "behavior_action_mc",
+        "--expected-peer-objective", "legal_mean_mc",
+        "--expected-seed", "$Seed",
+        "--parent", $Parent,
+        "--expected-git-commit", $CurrentCommit,
+        "--output", $Verification
+    )
+    $VerificationReport = Get-Content -LiteralPath $Verification -Raw | ConvertFrom-Json
+    if (-not [bool]$VerificationReport.passed) { throw "correctness verification failed for seed $Seed" }
+    if (-not [bool]$VerificationReport.data_stream_identical) { throw "data stream mismatch for seed $Seed" }
 }
 
 foreach ($Seed in $PairSeeds) {
