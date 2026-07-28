@@ -14,6 +14,14 @@ import torch
 
 
 ARCHIVE_STEPS = (70001, 70010, 70100, 70500, 71000, 72000)
+DATA_STREAM_COMPARISON_FIELDS = (
+    "schema",
+    "data_seed",
+    "dataset_file_count",
+    "num_workers",
+    "batches_consumed",
+    "samples_consumed",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,6 +60,11 @@ def assert_finite(value: Any, label: str) -> None:
     elif isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
             assert_finite(item, f"{label}[{index}]")
+
+
+def canonical_data_stream(data_stream: dict[str, Any]) -> dict[str, Any]:
+    """Return fields that describe the consumed stream, excluding resume provenance."""
+    return {key: data_stream.get(key) for key in DATA_STREAM_COMPARISON_FIELDS}
 
 
 def validate_run(
@@ -143,10 +156,15 @@ def main() -> None:
         parent_sha=parent_sha,
         expected_git_commit=args.expected_git_commit,
     )
-    if current["data_stream"] != peer["data_stream"]:
-        raise ValueError("control and variant data stream metadata differ")
+    current_stream = canonical_data_stream(current["data_stream"])
+    peer_stream = canonical_data_stream(peer["data_stream"])
+    if current_stream != peer_stream:
+        raise ValueError(
+            "control and variant consumed data stream differs: "
+            f"control={current_stream!r} variant={peer_stream!r}"
+        )
     report = {
-        "schema": "keqing.mortal.legal_mean_value_run_verification.v1",
+        "schema": "keqing.mortal.legal_mean_value_run_verification.v2",
         "passed": True,
         "parent": str(args.parent.resolve()),
         "parent_sha256": parent_sha,
@@ -154,6 +172,11 @@ def main() -> None:
         "control": current,
         "variant": peer,
         "data_stream_identical": True,
+        "data_stream_comparison_fields": list(DATA_STREAM_COMPARISON_FIELDS),
+        "resume_provenance_differs": (
+            current["data_stream"].get("resume_skipped_batches")
+            != peer["data_stream"].get("resume_skipped_batches")
+        ),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
