@@ -19,9 +19,10 @@ DQN/CQL/next-rank gradient signals on one fixed small batch per checkpoint.
 | S0 pure `ext_mortal` | 964,091 | 0.0813 | 2.2449 | 0.1841 | 3.4% |
 
 The target distribution is centered near zero but has a standard deviation of
-about 2.2 Pt. On the sampled decisions, the 70k parent explains only a small
-part of the final-rank MC target variation. This is a learnability warning:
-the target is not a clean local action-value label, even though the corpus is
+about 2.2 Pt. On the sampled decisions, the 70k parent has strict OLS R^2 of
+about 6.7% for M0 and 3.4% for S0; the identity-Q explained-variance ratios
+are reported separately by the audit. This is a learnability warning: the
+target is not a clean local action-value label, even though the corpus is
 complete and non-duplicated.
 
 The target variability is not limited to late decisions. M0 target standard

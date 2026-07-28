@@ -114,20 +114,29 @@ class RegressionStats:
         intercept = mean_y - slope * mean_x if slope is not None else None
         residual_mean = self.sum_residual / self.count
         residual_var = max(0.0, self.sum_residual_sq / self.count - residual_mean * residual_mean)
-        explained = 1.0 - residual_var / var_y if var_y > 0 else None
+        pearson_r_squared = pearson * pearson if pearson is not None else None
+        identity_residual_variance_ratio = residual_var / var_y if var_y > 0 else None
+        identity_explained = (
+            1.0 - identity_residual_variance_ratio
+            if identity_residual_variance_ratio is not None
+            else None
+        )
         return {
             "count": self.count,
             "q_mean": mean_x,
             "q_std": math.sqrt(var_x),
             "target_mean": mean_y,
             "target_std": math.sqrt(var_y),
-            "pearson": pearson,
-            "spearman": _spearman(self.sample_x, self.sample_y),
+            "pearson_r": pearson,
+            "ols_r_squared": pearson_r_squared,
+            "prefix_sample_spearman": _spearman(self.sample_x, self.sample_y),
+            "prefix_sample_count": len(self.sample_x),
             "linear_slope": slope,
             "linear_intercept": intercept,
-            "residual_target_minus_q_mean": residual_mean,
-            "residual_target_minus_q_std": math.sqrt(residual_var),
-            "linear_explained_variance": explained,
+            "identity_residual_target_minus_q_mean": residual_mean,
+            "identity_residual_target_minus_q_std": math.sqrt(residual_var),
+            "identity_residual_variance_ratio": identity_residual_variance_ratio,
+            "identity_explained_variance": identity_explained,
         }
 
 
@@ -674,10 +683,13 @@ def _build_markdown(report: dict[str, Any]) -> str:
                 "",
                 f"- Parent behavior-action agreement: `{route['parent_calibration']['agreement_rate']:.4%}`.",
                 f"- Mean greedy margin: `{route['parent_calibration']['mean_greedy_margin']:.6f}`.",
-                f"- Pearson Q/target: `{_fmt_optional(overall.get('pearson'))}`; "
-                f"Spearman: `{_fmt_optional(overall.get('spearman'))}`.",
-                f"- Target minus Q mean/std: `{_fmt_optional(overall.get('residual_target_minus_q_mean'))}` / "
-                f"`{_fmt_optional(overall.get('residual_target_minus_q_std'))}`.",
+                f"- Pearson Q/target: `{_fmt_optional(overall.get('pearson_r'))}`; "
+                f"OLS R^2: `{_fmt_optional(overall.get('ols_r_squared'))}`; "
+                f"prefix Spearman: `{_fmt_optional(overall.get('prefix_sample_spearman'))}`.",
+                f"- Identity target-minus-Q mean/std: "
+                f"`{_fmt_optional(overall.get('identity_residual_target_minus_q_mean'))}` / "
+                f"`{_fmt_optional(overall.get('identity_residual_target_minus_q_std'))}`; "
+                f"identity explained variance: `{_fmt_optional(overall.get('identity_explained_variance'))}`.",
                 "",
             ]
         )
@@ -859,7 +871,7 @@ def main() -> None:
         ),
     }
     report = {
-        "schema": "keqing.mortal.objective_learnability_audit.v1",
+        "schema": "keqing.mortal.objective_learnability_audit.v2",
         "analysis_only": True,
         "device": str(device),
         "parent": {

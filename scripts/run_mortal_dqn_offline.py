@@ -182,6 +182,7 @@ def _dataset_contract(config: dict[str, Any], file_list: list[str], player_names
 def _training_contract(
     *,
     reward_contract: dict[str, Any],
+    objective_contract: dict[str, Any],
     dataset_contract: dict[str, Any],
     initialization: dict[str, Any] | None,
     mortal_root: Path,
@@ -193,6 +194,7 @@ def _training_contract(
         "reward_mode": reward_contract["mode"],
         "rank_pts": list(reward_contract["rank_pts"]),
         "reward": reward_contract,
+        "objective": objective_contract,
         "dataset": dataset_contract,
         "initialization": initialization_contract,
         "git_commit": _git_revision(_REPO_ROOT),
@@ -243,11 +245,17 @@ def train_to_target_steps(
         reward_contract_from_config,
         worker_init_fn,
     )
+    from scripts.mortal.objective import (  # noqa: PLC0415
+        compute_objective_losses,
+        objective_contract_from_config,
+    )
     from lr_scheduler import LinearWarmUpCosineAnnealingLR  # noqa: PLC0415
     from model import AuxNet, Brain, DQN  # noqa: PLC0415
 
     control = config["control"]
     reward_mode = str(config.get("reward", {}).get("mode", "final_rank_mc"))
+    objective_contract = objective_contract_from_config(config)
+    objective_mode = objective_contract["mode"]
     version = int(control["version"])
     batch_size = int(control["batch_size"])
     opt_step_every = int(control["opt_step_every"])
@@ -468,7 +476,9 @@ def train_to_target_steps(
 
     writer = SummaryWriter(str(control["tensorboard_dir"]))
     stats = {
+        "value_loss": 0.0,
         "dqn_loss": 0.0,
+        "preference_loss": 0.0,
         "cql_loss": 0.0,
         "next_rank_loss": 0.0,
         "total_loss": 0.0,
@@ -476,6 +486,14 @@ def train_to_target_steps(
         "q_mean": 0.0,
         "target_mean": 0.0,
         "q_abs_err": 0.0,
+        "value_abs_err": 0.0,
+        "legal_q_mean": 0.0,
+        "legal_q_std": 0.0,
+        "behavior_q": 0.0,
+        "behavior_centered_advantage": 0.0,
+        "greedy_margin": 0.0,
+        "value_target_abs_error": 0.0,
+        "centered_advantage_abs_mean": 0.0,
         "reward_target_mean": 0.0,
         "reward_target_std": 0.0,
         "reward_nonzero_rate": 0.0,
@@ -488,8 +506,6 @@ def train_to_target_steps(
     resolved_archive_dir = Path(archive_dir) if archive_dir is not None else Path(state_file).parent / "checkpoints"
     exposure_path = Path(state_file).parent / "data_exposure.json"
     optimizer.zero_grad(set_to_none=True)
-    mse = nn.MSELoss()
-    ce = nn.CrossEntropyLoss()
     mortal.train()
     dqn.train()
     aux_net.train()
@@ -523,6 +539,7 @@ def train_to_target_steps(
             "initialization": initialization,
             "training_contract": _training_contract(
                 reward_contract=reward_contract,
+                objective_contract=objective_contract,
                 dataset_contract=dataset_contract,
                 initialization=initialization,
                 mortal_root=mortal_root,
@@ -539,6 +556,7 @@ def train_to_target_steps(
                     "initialization": initialization,
                     "training_contract": _training_contract(
                         reward_contract=reward_contract,
+                        objective_contract=objective_contract,
                         dataset_contract=dataset_contract,
                         initialization=initialization,
                         mortal_root=mortal_root,
@@ -566,20 +584,23 @@ def train_to_target_steps(
         lr = float(scheduler.get_last_lr()[0])
         logging.info(
             "%s: steps=%s/%s window=%s "
-            "loss_total=%.6f dqn_loss=%.6f cql_loss=%.6f next_rank_loss=%.6f "
-            "next_rank_acc=%.4f q_mean=%.4f target_mean=%.4f q_abs_err=%.4f lr=%.8g",
+            "objective=%s loss_total=%.6f value_loss=%.6f cql_loss=%.6f next_rank_loss=%.6f "
+            "next_rank_acc=%.4f behavior_q=%.4f legal_q_mean=%.4f target_mean=%.4f "
+            "value_abs_err=%.4f lr=%.8g",
             prefix,
             steps,
             target_steps,
             window_count,
+            objective_mode,
             avg["total_loss"],
-            avg["dqn_loss"],
+            avg["value_loss"],
             avg["cql_loss"],
             avg["next_rank_loss"],
             avg["next_rank_acc"],
-            avg["q_mean"],
+            avg["behavior_q"],
+            avg["legal_q_mean"],
             avg["target_mean"],
-            avg["q_abs_err"],
+            avg["value_abs_err"],
             lr,
         )
         logging.info(
@@ -591,13 +612,26 @@ def train_to_target_steps(
             avg["reward_nonzero_rate"],
         )
         writer.add_scalar("loss/total_window", avg["total_loss"], steps)
+        writer.add_scalar("loss/value_window", avg["value_loss"], steps)
         writer.add_scalar("loss/dqn_window", avg["dqn_loss"], steps)
+        writer.add_scalar("loss/preference_window", avg["preference_loss"], steps)
         writer.add_scalar("loss/cql_window", avg["cql_loss"], steps)
         writer.add_scalar("loss/next_rank_window", avg["next_rank_loss"], steps)
         writer.add_scalar("acc/next_rank_window", avg["next_rank_acc"], steps)
         writer.add_scalar("q/q_mean_window", avg["q_mean"], steps)
+        writer.add_scalar("q/legal_q_mean_window", avg["legal_q_mean"], steps)
+        writer.add_scalar("q/legal_q_std_window", avg["legal_q_std"], steps)
+        writer.add_scalar("q/behavior_q_window", avg["behavior_q"], steps)
+        writer.add_scalar(
+            "q/behavior_centered_advantage_window", avg["behavior_centered_advantage"], steps
+        )
+        writer.add_scalar("q/greedy_margin_window", avg["greedy_margin"], steps)
         writer.add_scalar("q/target_mean_window", avg["target_mean"], steps)
         writer.add_scalar("q/q_abs_err_window", avg["q_abs_err"], steps)
+        writer.add_scalar("q/value_abs_err_window", avg["value_abs_err"], steps)
+        writer.add_scalar(
+            "q/centered_advantage_abs_mean_window", avg["centered_advantage_abs_mean"], steps
+        )
         writer.add_scalar("reward/target_mean_window", avg["reward_target_mean"], steps)
         writer.add_scalar("reward/target_std_window", avg["reward_target_std"], steps)
         writer.add_scalar("reward/nonzero_rate_window", avg["reward_nonzero_rate"], steps)
@@ -631,28 +665,47 @@ def train_to_target_steps(
         with torch.autocast(device.type, enabled=bool(control["enable_amp"])):
             phi = mortal(obs)
             q_out = dqn(phi, masks)
-            q = q_out[range(batch_size), actions]
-            dqn_loss = 0.5 * mse(q, q_target_mc)
-            cql_loss = q_out.logsumexp(-1).mean() - q.mean()
             (next_rank_logits,) = aux_net(phi)
-            next_rank_loss = ce(next_rank_logits, player_ranks)
-            loss = dqn_loss + cql_loss * float(config["cql"]["min_q_weight"]) + next_rank_loss * float(config["aux"]["next_rank_weight"])
+            objective_losses = compute_objective_losses(
+                q_out=q_out,
+                masks=masks,
+                actions=actions,
+                q_target_mc=q_target_mc,
+                next_rank_logits=next_rank_logits,
+                player_ranks=player_ranks,
+                mode=objective_mode,
+                cql_weight=float(config["cql"]["min_q_weight"]),
+                aux_weight=float(config["aux"]["next_rank_weight"]),
+            )
+            loss = objective_losses["total_loss"]
 
         scaler.scale(loss / opt_step_every).backward()
         with torch.inference_mode():
             batch_metrics = {
-                "dqn_loss": float(dqn_loss.detach().cpu()),
-                "cql_loss": float(cql_loss.detach().cpu()),
-                "next_rank_loss": float(next_rank_loss.detach().cpu()),
-                "total_loss": float(loss.detach().cpu()),
+                key: float(value.detach().to(torch.float32).mean().cpu())
+                for key, value in objective_losses.items()
+                if key.endswith("_loss") or key in {
+                    "legal_q_mean",
+                    "legal_q_std",
+                    "behavior_q",
+                    "behavior_centered_advantage",
+                    "greedy_margin",
+                    "value_target_abs_error",
+                    "value_abs_err",
+                    "centered_advantage_abs_mean",
+                }
+            }
+            batch_metrics.update(
+                {
                 "next_rank_acc": float((next_rank_logits.argmax(-1) == player_ranks).to(torch.float64).mean().detach().cpu()),
-                "q_mean": float(q.detach().to(torch.float32).mean().cpu()),
+                "q_mean": float(objective_losses["behavior_q"].detach().to(torch.float32).mean().cpu()),
                 "target_mean": float(q_target_mc.detach().to(torch.float32).mean().cpu()),
-                "q_abs_err": float((q.detach().to(torch.float32) - q_target_mc.detach().to(torch.float32)).abs().mean().cpu()),
+                "q_abs_err": float(objective_losses["value_abs_err"].detach().to(torch.float32).mean().cpu()),
                 "reward_target_mean": float(q_target_mc.detach().mean().cpu()),
                 "reward_target_std": float(q_target_mc.detach().std(unbiased=False).cpu()),
                 "reward_nonzero_rate": float((q_target_mc.detach() != 0).to(torch.float32).mean().cpu()),
-            }
+                }
+            )
             for key, value in batch_metrics.items():
                 stats[key] += value
                 window_stats[key] += value
@@ -680,7 +733,7 @@ def train_to_target_steps(
     log_train_metrics(prefix="Mortal final train metrics")
     if trained_steps:
         for key, value in stats.items():
-            namespace = "acc" if key.endswith("_acc") else ("q" if key.startswith("q_") or key.startswith("target_") else "loss")
+            namespace = "loss" if key.endswith("_loss") else ("acc" if key.endswith("_acc") else "q")
             writer.add_scalar(f"{namespace}/{key}", value / trained_steps, steps)
         writer.add_scalar("hparam/lr", scheduler.get_last_lr()[0], steps)
         writer.flush()

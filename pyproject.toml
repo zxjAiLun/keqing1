@@ -31,6 +31,7 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 python_files = [
     "test_mortal_eval_metrics.py",
+    "test_mortal_objective.py",
     "test_rulebase_bot.py",
     "test_replay_action_semantics_matrix.py",
     "test_replay_actionspec_alignment.py",
