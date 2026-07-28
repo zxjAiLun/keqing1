@@ -78,4 +78,3 @@ expansion than control, and no systematic degradation against 70k.
 This first A/B does not promote a checkpoint. A recipe promotion requires a
 later six-seed replication; only then may a separately trained candidate be
 entered into the model-pool promotion gate.
-
