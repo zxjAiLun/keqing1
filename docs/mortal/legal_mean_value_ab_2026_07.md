@@ -144,3 +144,6 @@ Each run uses `--native-batch-games 25`, `--progress-every 25`,
 required, and AMP disabled. The lineup is `70k`, `ext_mortal`,
 `C_behavior_action_mc`, and `V_legal_mean_mc`. The 25-game CUDA smoke and
 the batch benchmark are excluded from the formal strength summary.
+
+The reproducible Windows launcher is
+[`run_legal_mean_value_eval_2026_07.ps1`](../../scripts/mortal/run_legal_mean_value_eval_2026_07.ps1).
