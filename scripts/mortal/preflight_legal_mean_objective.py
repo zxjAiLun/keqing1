@@ -75,6 +75,8 @@ def checkpoint_tensor_digest(state: dict[str, Any]) -> str:
 
 def _batch_hash_child(config_path: Path, data_seed: int, batch_count: int) -> None:
     os.environ["MORTAL_CFG"] = str(config_path.resolve())
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
     if str(MORTAL_PYTHON_ROOT) not in sys.path:
         sys.path.insert(0, str(MORTAL_PYTHON_ROOT))
     from config import config  # noqa: PLC0415
