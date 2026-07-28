@@ -2,8 +2,11 @@
 
 ## Status
 
-This is a pre-registered objective experiment. The implementation and
-preflight are committed; long training has not been started by this change.
+This is a pre-registered objective experiment. The implementation, seed-aware
+preflight, finite-diagnostic guards, and Windows pipeline are committed.
+All three matched seeds have completed both objectives through step 72000 and
+passed the archive/data-stream correctness gate. No checkpoint promotion has
+been made.
 
 The only planned variable is where the `final_rank_mc` target is applied to
 the legal Q table:
@@ -36,6 +39,20 @@ The Windows runner is
 [`run_legal_mean_value_ab_2026_07.ps1`](../../scripts/mortal/run_legal_mean_value_ab_2026_07.ps1).
 Run [`preflight_legal_mean_objective.py`](../../scripts/mortal/preflight_legal_mean_objective.py)
 for each matched pair before training.
+
+## Training Result
+
+The three pair verifications are stored under the ignored local experiment
+artifact directory:
+
+`artifacts/experiments/model_pool_2026_07/legal_mean_value_ab_2026_07/preflight/verification_20260803.json`
+
+and the corresponding `20260804` and `20260805` files. Each pair reached
+`72000`, consumed `2000` batches / `1024000` samples per arm, and contains all
+six required archive checkpoints. The first pair was trained at commit
+`b1eb568`; the later two at `8c130c1`. The latter is a verifier-only fix and
+does not change the training/objective implementation; the per-checkpoint
+contract records this provenance explicitly.
 
 ## Required Checks
 
@@ -78,3 +95,11 @@ expansion than control, and no systematic degradation against 70k.
 This first A/B does not promote a checkpoint. A recipe promotion requires a
 later six-seed replication; only then may a separately trained candidate be
 entered into the model-pool promotion gate.
+
+Before the formal 3 x 1000-hanchan evaluation, a 25-hanchan CUDA smoke was
+completed with the same lineup and rank points `[90,45,0,-135]`. It generated
+25 native logs plus `metrics.json`, detailed stats, and platform-account
+artifacts. Its observed throughput was about 25 hanchans per 8 minutes with
+the current Python-engine four-player path, so the formal evaluation remains
+pending a batch-throughput decision; the smoke result is not a strength
+judgement.
