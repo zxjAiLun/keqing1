@@ -103,3 +103,44 @@ artifacts. Its observed throughput was about 25 hanchans per 8 minutes with
 the current Python-engine four-player path, so the formal evaluation remains
 pending a batch-throughput decision; the smoke result is not a strength
 judgement.
+
+## Native Batch Performance Gate
+
+The same 100 benchmark seeds (`1300000` through `1300099`) were run with
+`--profile`, CUDA, AMP disabled, and no platform report:
+
+| protocol | games | native batch | wall time | throughput |
+|---|---:|---:|---:|---:|
+| B25 | 100 | 25 | 977.4 s | 6.14 games/min |
+| B100 | 100 | 100 | 301.0 s | 19.93 games/min |
+| B250 | 250 | 250 | 305.6 s | 49.08 games/min |
+
+The larger batches are materially faster, but they are not interchangeable
+with B25 for this evaluator. Canonical event-log equality was:
+
+- B25 vs B100: `98/100`.
+- B25 vs B250 (first 100 seeds): `98/100`.
+- B100 vs B250 (first 100 seeds): `100/100`.
+
+The first divergence occurs with the same seed and same first action, but
+slightly different Q values because the inference batch changes from 4 to 24;
+the later trajectory then diverges. Therefore B100/B250 are not adopted as a
+semantic-preserving optimization, and AMP/compile changes remain disabled.
+The formal evaluation protocol is fixed to B25. Benchmark artifacts are kept
+locally under
+`artifacts/experiments/model_pool_2026_07/legal_mean_value_ab_2026_07/eval_batch_benchmark/`.
+
+The registered formal evaluation uses the same four-model random-seat lineup
+for each training seed:
+
+| training seed | candidate model | evaluation seed range | output |
+|---:|---|---:|---|
+| 20260803 | C/V seed 20260803 | 1400000-1400999 | `eval_1000h/seed_20260803/` |
+| 20260804 | C/V seed 20260804 | 1410000-1410999 | `eval_1000h/seed_20260804/` |
+| 20260805 | C/V seed 20260805 | 1420000-1420999 | `eval_1000h/seed_20260805/` |
+
+Each run uses `--native-batch-games 25`, `--progress-every 25`,
+`--seed-key 8192`, random seats, rank points `[90,45,0,-135]`, CUDA
+required, and AMP disabled. The lineup is `70k`, `ext_mortal`,
+`C_behavior_action_mc`, and `V_legal_mean_mc`. The 25-game CUDA smoke and
+the batch benchmark are excluded from the formal strength summary.
