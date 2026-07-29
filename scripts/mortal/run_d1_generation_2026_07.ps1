@@ -38,33 +38,39 @@ foreach ($Entry in $ModelPaths.GetEnumerator()) {
 $MortalRevision = (& git -C (Join-Path $Repo "third_party\Mortal") rev-parse HEAD 2>$null).Trim()
 if (-not $MortalRevision) { $MortalRevision = "working-tree" }
 $ManifestPath = Join-Path $Experiment "manifest.json"
+$ExpectedManifest = [ordered]@{
+    schema = "keqing.mortal.d1_generation_manifest.v1"
+    experiment_id = "D1_project_owned_population_2026_07"
+    git_commit = $GitCommit
+    git_dirty = $false
+    mortal_revision = $MortalRevision
+    models = $ModelPaths
+    model_sha256 = $ModelSha
+    labels = @("K0_70k", "ext_mortal", "V3_74000", "V2_74000")
+    trainable_label = "K0_70k"
+    seed_key = 8192
+    generation_protocol = "B250"
+    rank_points = @(90, 45, 0, -135)
+    amp = $false
+    seat_mode = "random"
+    total_games = 6000
+    shard_games = 250
+    shard_seed_start = 1600000
+    smoke_seed_start = 1599000
+}
 if (Test-Path -LiteralPath $ManifestPath) {
     $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
     if ($Manifest.git_commit -ne $GitCommit -or $Manifest.git_dirty -ne $false) {
-        throw "existing D1 manifest does not match current clean commit"
+        $ExistingLogs = @(Get-ChildItem -LiteralPath $DataRoot -Recurse -Filter *.json.gz -ErrorAction SilentlyContinue)
+        if ($ExistingLogs.Count -gt 0) {
+            throw "existing D1 manifest does not match current clean commit while data already exists"
+        }
+        $ExpectedManifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
+        $Manifest = $ExpectedManifest
     }
 } else {
-    $Manifest = [ordered]@{
-        schema = "keqing.mortal.d1_generation_manifest.v1"
-        experiment_id = "D1_project_owned_population_2026_07"
-        git_commit = $GitCommit
-        git_dirty = $false
-        mortal_revision = $MortalRevision
-        models = $ModelPaths
-        model_sha256 = $ModelSha
-        labels = @("K0_70k", "ext_mortal", "V3_74000", "V2_74000")
-        trainable_label = "K0_70k"
-        seed_key = 8192
-        generation_protocol = "B250"
-        rank_points = @(90, 45, 0, -135)
-        amp = $false
-        seat_mode = "random"
-        total_games = 6000
-        shard_games = 250
-        shard_seed_start = 1600000
-        smoke_seed_start = 1599000
-    }
-    $Manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
+    $ExpectedManifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
+    $Manifest = $ExpectedManifest
 }
 
 if ($Mode -eq "Smoke") {
