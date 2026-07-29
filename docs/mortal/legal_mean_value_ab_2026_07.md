@@ -154,3 +154,32 @@ The reproducible Windows launcher is
 It writes a frozen `protocol.json` before starting the first game; the file
 records the evaluator commit, clean-worktree status, model SHA256 values,
 runtime, GPU, and all seed/rank/batch settings.
+
+## B250 Result
+
+The three registered B250 evaluations completed with 1000 hanchans per
+training seed. The machine-readable summary is local-only at
+`artifacts/experiments/model_pool_2026_07/legal_mean_value_ab_2026_07/eval_b250_1000h/summary/legal_mean_value_b250_summary.json`, with the readable report beside it.
+
+The primary paired objective comparison is `V-C`, where `V` is
+`legal_mean_mc` and `C` is `behavior_action_mc`:
+
+| Training seed | V-C Pt |
+|---:|---:|
+| 20260803 | +1.575 |
+| 20260804 | -8.550 |
+| 20260805 | +4.950 |
+
+The pooled mean is `-0.675 Pt` per hanchan, with hanchan bootstrap 95% CI
+`[-5.565, +4.245]` and equal-seed hierarchical bootstrap 95% CI
+`[-9.060, +7.005]`. Two of three seed means are positive, but the exact
+one-sided sign-test is `p=0.5`; this is not evidence for promoting
+`legal_mean_mc`.
+
+Against the 70k anchor, `V-70k` is `+2.715 Pt` and `C-70k` is `+3.390 Pt`
+on the pooled center, with both hierarchical intervals including zero. The
+variant therefore does not show an advantage over the control objective and
+does not promote a checkpoint. Behaviorally, V is slightly lower than C in
+agari, fuuro, and riichi rates and slightly lower in houjuu, without a
+corresponding paired strength improvement. Keep `behavior_action_mc` as the
+operational objective and close this objective A/B.
