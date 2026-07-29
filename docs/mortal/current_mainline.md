@@ -41,3 +41,11 @@ The mixed-versus-pure data route is documented in [`data_route_ab_2026_07.md`](d
 The final-rank MC objective audit is documented in [`objective_learnability_2026_07.md`](objective_learnability_2026_07.md). Across the retained M0 and S0 corpora, the target standard deviation is about 2.2 Pt and strict OLS R^2 for the 70k parent is about 3.4--6.7% on the sampled decisions. Both 72k candidates show material common-Q-offset and margin drift. This closes pure-selfplay expansion and moves the next hypothesis to one controlled, project-owned objective variant; do not open a broad reward, optimizer, LR, CQL, or data grid.
 
 The next controlled objective is documented in [`legal_mean_value_ab_2026_07.md`](legal_mean_value_ab_2026_07.md). It keeps `final_rank_mc`, M0, preserved 70k Adam and the existing network fixed, and compares behavior-action MC against legal-mean MC on three pre-registered matched seeds. This is an objective A/B, not a checkpoint promotion.
+
+That objective A/B is now closed: `legal_mean_mc` is rejected, while
+`behavior_action_mc` remains the operational objective. The analysis-only
+training drift audit shows reduced scalar-Q offset but larger centered
+advantage and greedy-margin expansion, without a paired strength gain. The
+next experiment is the single-variable project-owned D1 data lineage in
+[`project_owned_d1_2026_07.md`](project_owned_d1_2026_07.md); do not open
+another objective, reward, optimizer, LR, or CQL variant first.

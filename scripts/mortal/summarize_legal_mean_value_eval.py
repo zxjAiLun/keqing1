@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -14,6 +15,8 @@ import numpy as np
 
 
 RANK_POINTS = (90.0, 45.0, 0.0, -135.0)
+EXPECTED_TRAINING_SEEDS = (20260803, 20260804, 20260805)
+EXPECTED_EVAL_SEED_STARTS = (1500000, 1510000, 1520000)
 BEHAVIOR_FIELDS = (
     "agari_rate",
     "houjuu_rate",
@@ -44,6 +47,14 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"expected JSON object: {path}")
     return value
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _bootstrap_ci(values: np.ndarray, rng: np.random.Generator, reps: int) -> list[float]:
@@ -105,7 +116,10 @@ def _read_paired_rows(run_dir: Path, expected_games: int) -> list[dict[str, Any]
             if key is None:
                 continue
             source = str(row["source_log"])
-            games.setdefault(source, {})[key] = {
+            values = games.setdefault(source, {})
+            if key in values:
+                raise ValueError(f"{path}: duplicate source/model row: {source} / {key}")
+            values[key] = {
                 "rank": int(row["rank"]),
                 "final_score": int(row["final_score"]),
                 "pt": RANK_POINTS[int(row["rank"]) - 1],
@@ -185,13 +199,24 @@ def main() -> None:
     if len(run_dirs) != 3:
         raise ValueError(f"expected three seed directories under {eval_root}, found {len(run_dirs)}")
     protocol = _read_json(eval_root / "protocol.json")
-    if protocol.get("native_batch_games") != args.expected_batch or protocol.get("git_dirty") is not False:
+    registered_starts = tuple(
+        int(protocol.get("evaluation_seed_starts", {}).get(str(seed), -1))
+        for seed in EXPECTED_TRAINING_SEEDS
+    )
+    if (
+        protocol.get("native_batch_games") != args.expected_batch
+        or protocol.get("git_dirty") is not False
+        or tuple(int(value) for value in protocol.get("training_seeds", [])) != EXPECTED_TRAINING_SEEDS
+        or registered_starts != EXPECTED_EVAL_SEED_STARTS
+        or tuple(float(value) for value in protocol.get("rank_points", [])) != RANK_POINTS
+    ):
         raise ValueError("protocol metadata does not match clean B250 contract")
     rng = np.random.default_rng(20260729)
     per_seed: list[dict[str, Any]] = []
     comparisons: dict[str, list[np.ndarray]] = {"V-C": [], "V-70k": [], "C-70k": []}
     all_rows: list[dict[str, Any]] = []
     seeds: list[int] = []
+    all_sources: list[str] = []
 
     for run_dir in run_dirs:
         metrics = _read_json(run_dir / "metrics.json")
@@ -202,6 +227,7 @@ def main() -> None:
             or run.get("device") != "cuda"
             or run.get("seat_mode") != "random"
             or run.get("seed_key") != 8192
+            or tuple(float(value) for value in metrics.get("rank_points_values", [])) != RANK_POINTS
         ):
             raise ValueError(f"{run_dir}: evaluation contract mismatch")
         log_count = len(list((run_dir / "logs").glob("*.json.gz")))
@@ -211,6 +237,22 @@ def main() -> None:
         all_rows.extend(rows)
         seed = int(run_dir.name.split("_", 1)[1])
         seeds.append(seed)
+        all_sources.extend(row["source_log"] for row in rows)
+        if int(run["seed_start"]) != EXPECTED_EVAL_SEED_STARTS[len(seeds) - 1]:
+            raise ValueError(f"{run_dir}: unexpected evaluation seed start {run['seed_start']}")
+        expected_labels = {
+            "70k",
+            "ext_mortal",
+            f"C_behavior_action_mc_{seed}",
+            f"V_legal_mean_mc_{seed}",
+        }
+        if set(run["models"]) != expected_labels:
+            raise ValueError(f"{run_dir}: model labels do not match registered lineup")
+        for label, path_text in run["models"].items():
+            checkpoint = Path(path_text)
+            expected_hash = protocol.get("model_sha256", {}).get(label)
+            if expected_hash is None or _sha256(checkpoint) != expected_hash:
+                raise ValueError(f"{run_dir}: model SHA256 mismatch for {label}")
         labels = {key: next(label for label in metrics["metrics"] if _model_key(label) == key) for key in ("C", "V")}
         model_snapshots = {key: _snapshot(run_dir, label) for key, label in (("70k", "70k"), ("ext_mortal", "ext_mortal"), *labels.items())}
         seed_comparisons = {
@@ -234,12 +276,19 @@ def main() -> None:
                     "metrics": str(run_dir / "metrics.json"),
                     "detailed_stats": str(run_dir / "detailed_stats.json"),
                     "platform_accounts": (run_dir / "platform_accounts").is_dir(),
+                    "per_game_results_sha256": _sha256(
+                        run_dir / "platform_accounts" / "per_game_results.csv"
+                    ),
                 },
             }
         )
 
     if len(seeds) != len(set(seeds)):
         raise ValueError(f"duplicate training seeds: {seeds}")
+    if tuple(sorted(seeds)) != EXPECTED_TRAINING_SEEDS:
+        raise ValueError(f"unexpected training seeds: {seeds}")
+    if len(all_sources) != len(set(all_sources)):
+        raise ValueError("duplicate source logs across training seeds")
 
     pooled = {
         key: _comparison(all_rows, *key.split("-"), rng, args.bootstrap_reps)

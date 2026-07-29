@@ -183,3 +183,19 @@ does not promote a checkpoint. Behaviorally, V is slightly lower than C in
 agari, fuuro, and riichi rates and slightly lower in houjuu, without a
 corresponding paired strength improvement. Keep `behavior_action_mc` as the
 operational objective and close this objective A/B.
+
+## Training Drift Closeout
+
+The analysis-only TensorBoard audit is stored locally at
+`artifacts/experiments/model_pool_2026_07/legal_mean_value_ab_2026_07/drift_audit/legal_mean_training_drift.md`.
+Across all three seeds, V kept the `legal_q_mean` scalar closer to zero while
+ending with a larger centered behavior advantage and larger greedy margin than
+C. In other words, the variant reduced the common-Q offset proxy but expanded
+relative action separation; the B250 paired result shows that this calibration
+change did not improve strength.
+
+Seed `20260803` contains three conflicting duplicate TensorBoard scalar steps
+from a resume overlap. The audit records those conflicts and uses the latest
+event-file values; seeds `20260804` and `20260805` have no conflicting
+duplicates. No checkpoint selection or additional training is based on this
+audit.
