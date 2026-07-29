@@ -15,10 +15,10 @@ $DataRoot = Join-Path $Experiment "data"
 $Parent = Join-Path $Repo "artifacts\mortal_training\checkpoints\mortal_default_70k_promoted_candidate.pth"
 $External = Join-Path $Repo "artifacts\external_mortal_20240308_best_min.pth"
 $V3 = Join-Path $Repo "artifacts\experiments\model_pool_2026_07\V3_final_rank_mc_warmstart_2026_07\checkpoints\mortal_74000.pth"
-$Grp = Join-Path $Repo "artifacts\experiments\model_pool_2026_07\keqing_grp_v1\keqing_grp_v1.pth"
+$V2 = Join-Path $Repo "artifacts\experiments\model_pool_2026_07\V2_population_mixed_v4_warmstart_2026_07\checkpoints\mortal_74000.pth"
 
 if (-not (Test-Path -LiteralPath $Python)) { throw "Windows Python is missing: $Python" }
-foreach ($Path in @($Parent, $External, $V3, $Grp)) {
+foreach ($Path in @($Parent, $External, $V3, $V2)) {
     if (-not (Test-Path -LiteralPath $Path)) { throw "D1 checkpoint is missing: $Path" }
 }
 $GitCommit = (& git rev-parse HEAD).Trim()
@@ -29,7 +29,7 @@ $ModelPaths = [ordered]@{
     "K0_70k" = $Parent
     "ext_mortal" = $External
     "V3_74000" = $V3
-    "grp_v1" = $Grp
+    "V2_74000" = $V2
 }
 $ModelSha = [ordered]@{}
 foreach ($Entry in $ModelPaths.GetEnumerator()) {
@@ -52,7 +52,7 @@ if (Test-Path -LiteralPath $ManifestPath) {
         mortal_revision = $MortalRevision
         models = $ModelPaths
         model_sha256 = $ModelSha
-        labels = @("K0_70k", "ext_mortal", "V3_74000", "grp_v1")
+        labels = @("K0_70k", "ext_mortal", "V3_74000", "V2_74000")
         trainable_label = "K0_70k"
         seed_key = 8192
         generation_protocol = "B250"
@@ -101,7 +101,7 @@ $Args = @(
     "--model", "K0_70k=$Parent",
     "--model", "ext_mortal=$External",
     "--model", "V3_74000=$V3",
-    "--model", "grp_v1=$Grp",
+    "--model", "V2_74000=$V2",
     "--output-dir", $Output,
     "--device", "cuda",
     "--require-cuda",

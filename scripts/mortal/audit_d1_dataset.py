@@ -13,7 +13,7 @@ from typing import Any
 
 
 LOG_NAME_RE = re.compile(r"^(?P<seed>\d+)_(?P<key>\d+)(?:_[a-d])?\.json\.gz$")
-EXPECTED_LABELS = {"K0_70k", "ext_mortal", "V3_74000", "grp_v1"}
+EXPECTED_LABELS = {"K0_70k", "ext_mortal", "V3_74000", "V2_74000"}
 
 
 def parse_args() -> argparse.Namespace:

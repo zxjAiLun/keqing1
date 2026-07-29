@@ -40,14 +40,16 @@ Generate exactly 6,000 independent hanchans with
 | `K0_70k` | 70k promoted candidate | trainable project-owned perspective |
 | `ext_mortal` | external Mortal checkpoint | external reference style |
 | `V3_74000` | project V3 step 74,000 | frozen project continuation style |
-| `grp_v1` | frozen `keqing_grp_v1` | frozen alternative project style |
+| `V2_74000` | project V2 step 74,000 Mortal checkpoint | frozen alternative project style |
 
 Use random seats, one log per seed, `seed_key=8192`, B250 generation, CUDA
 required, AMP disabled, and rank points `[90,45,0,-135]`. The registered
 generation seed range is `1600000-1605999`; it must not overlap any existing
 pool. Only the `K0_70k` player name is admitted to the D1 training view. The
 other three models are environment opponents and are not learned into the
-training target.
+training target. The project-owned `keqing_grp_v1` checkpoint is a final-rank
+predictor rather than a playable Mortal policy, so it remains an analysis
+model and is not placed in this arena.
 
 The data audit must report:
 
