@@ -21,7 +21,7 @@ if (-not (Test-Path -LiteralPath $Python)) { throw "Windows Python is missing: $
 foreach ($Path in @($Parent, $External, $V3, $V2)) {
     if (-not (Test-Path -LiteralPath $Path)) { throw "D1 checkpoint is missing: $Path" }
 }
-$GitCommit = (& git rev-parse HEAD).Trim()
+$GitCommit = (& git log -1 --format=%H -- scripts/mortal/run_d1_generation_2026_07.ps1 scripts/mortal/audit_d1_dataset.py).Trim()
 if ((& git status --porcelain) -join "") { throw "D1 generation requires a clean Git worktree" }
 New-Item -ItemType Directory -Force -Path $Experiment, $DataRoot | Out-Null
 
