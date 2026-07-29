@@ -100,9 +100,8 @@ Before the formal 3 x 1000-hanchan evaluation, a 25-hanchan CUDA smoke was
 completed with the same lineup and rank points `[90,45,0,-135]`. It generated
 25 native logs plus `metrics.json`, detailed stats, and platform-account
 artifacts. Its observed throughput was about 25 hanchans per 8 minutes with
-the current Python-engine four-player path, so the formal evaluation remains
-pending a batch-throughput decision; the smoke result is not a strength
-judgement.
+the current Python-engine four-player path. The smoke result is not a
+strength judgement.
 
 ## Native Batch Performance Gate
 
@@ -124,26 +123,34 @@ with B25 for this evaluator. Canonical event-log equality was:
 
 The first divergence occurs with the same seed and same first action, but
 slightly different Q values because the inference batch changes from 4 to 24;
-the later trajectory then diverges. Therefore B100/B250 are not adopted as a
-semantic-preserving optimization, and AMP/compile changes remain disabled.
-The formal evaluation protocol is fixed to B25. Benchmark artifacts are kept
-locally under
+the later trajectory then diverges. This is a batch-dependent floating-point
+protocol difference, not evidence that B25 is more correct. B250 is therefore
+adopted as the default research arena, while B25 is reserved for final
+candidate confirmation. AMP/compile changes remain disabled. Benchmark
+artifacts are kept locally under
 `artifacts/experiments/model_pool_2026_07/legal_mean_value_ab_2026_07/eval_batch_benchmark/`.
 
-The registered formal evaluation uses the same four-model random-seat lineup
+The completed B25 run is retained as a legacy protocol artifact under
+`artifacts/experiments/model_pool_2026_07/legal_mean_value_ab_2026_07/eval_1000h/`.
+It is excluded from the B250 summary and is not combined with B250 games.
+
+The registered B250 research evaluation uses the same four-model random-seat lineup
 for each training seed:
 
 | training seed | candidate model | evaluation seed range | output |
 |---:|---|---:|---|
-| 20260803 | C/V seed 20260803 | 1400000-1400999 | `eval_1000h/seed_20260803/` |
-| 20260804 | C/V seed 20260804 | 1410000-1410999 | `eval_1000h/seed_20260804/` |
-| 20260805 | C/V seed 20260805 | 1420000-1420999 | `eval_1000h/seed_20260805/` |
+| 20260803 | C/V seed 20260803 | 1500000-1500999 | `eval_b250_1000h/seed_20260803/` |
+| 20260804 | C/V seed 20260804 | 1510000-1510999 | `eval_b250_1000h/seed_20260804/` |
+| 20260805 | C/V seed 20260805 | 1520000-1520999 | `eval_b250_1000h/seed_20260805/` |
 
-Each run uses `--native-batch-games 25`, `--progress-every 25`,
+Each run uses `--native-batch-games 250`, `--progress-every 25`,
 `--seed-key 8192`, random seats, rank points `[90,45,0,-135]`, CUDA
 required, and AMP disabled. The lineup is `70k`, `ext_mortal`,
 `C_behavior_action_mc`, and `V_legal_mean_mc`. The 25-game CUDA smoke and
-the batch benchmark are excluded from the formal strength summary.
+the B25 legacy run are excluded from the B250 strength summary.
 
 The reproducible Windows launcher is
 [`run_legal_mean_value_eval_2026_07.ps1`](../../scripts/mortal/run_legal_mean_value_eval_2026_07.ps1).
+It writes a frozen `protocol.json` before starting the first game; the file
+records the evaluator commit, clean-worktree status, model SHA256 values,
+runtime, GPU, and all seed/rank/batch settings.
