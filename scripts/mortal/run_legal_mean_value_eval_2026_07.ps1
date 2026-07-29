@@ -25,9 +25,9 @@ if ($NativeBatchGames -ne 250) { throw "Research evaluation must use native batc
 if ($Seeds.Count -ne 3) { throw "Formal evaluation requires exactly three training seeds" }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-$SeedStarts = @{}
+$SeedStarts = [ordered]@{}
 for ($Index = 0; $Index -lt $Seeds.Count; $Index++) {
-    $SeedStarts[$Seeds[$Index]] = $SeedStartBase + (10000 * $Index)
+    $SeedStarts[([string]$Seeds[$Index])] = $SeedStartBase + (10000 * $Index)
 }
 
 $GitCommit = (& git rev-parse HEAD).Trim()
@@ -105,7 +105,7 @@ foreach ($Seed in $Seeds) {
         "--output-dir", $RunDir,
         "--device", "cuda",
         "--require-cuda",
-        "--seed-start", "$($SeedStarts[$Seed])",
+        "--seed-start", "$($SeedStarts[[string]$Seed])",
         "--seed-key", "8192",
         "--games", "$Games",
         "--seat-mode", "random",
@@ -115,7 +115,7 @@ foreach ($Seed in $Seeds) {
         "--profile"
     )
     if ($Resume) { $Args += "--resume" }
-    Invoke-Logged -TrainingSeed $Seed -EvalSeedStart $SeedStarts[$Seed] -Arguments $Args
+    Invoke-Logged -TrainingSeed $Seed -EvalSeedStart $SeedStarts[[string]$Seed] -Arguments $Args
 }
 
 "legal_mean_value formal eval completed: games=$Games native_batch=$NativeBatchGames seeds=$($Seeds -join ',')" | Tee-Object -FilePath (Join-Path $LogDir "formal_eval.done")
