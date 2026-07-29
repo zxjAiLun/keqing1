@@ -31,9 +31,22 @@ $ModelPaths = [ordered]@{
     "V3_74000" = $V3
     "V2_74000" = $V2
 }
+function Get-Sha256([string]$Path) {
+    $Hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $Stream = [System.IO.File]::OpenRead($Path)
+        try {
+            return ([System.BitConverter]::ToString($Hasher.ComputeHash($Stream))).Replace("-", "").ToLowerInvariant()
+        } finally {
+            $Stream.Dispose()
+        }
+    } finally {
+        $Hasher.Dispose()
+    }
+}
 $ModelSha = [ordered]@{}
 foreach ($Entry in $ModelPaths.GetEnumerator()) {
-    $ModelSha[$Entry.Key] = (Get-FileHash -Algorithm SHA256 -LiteralPath $Entry.Value).Hash.ToLowerInvariant()
+    $ModelSha[$Entry.Key] = Get-Sha256 $Entry.Value
 }
 $MortalRevision = (& git -C (Join-Path $Repo "third_party\Mortal") rev-parse HEAD 2>$null).Trim()
 if (-not $MortalRevision) { $MortalRevision = "working-tree" }
