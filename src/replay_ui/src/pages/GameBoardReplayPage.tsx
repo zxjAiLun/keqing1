@@ -1,11 +1,12 @@
 // src/replay_ui/src/pages/GameBoardReplayPage.tsx
-import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import { MahjongTable } from '../components/BattleBoard/MahjongTable';
 import { Tile } from '../components/BattleBoard/Tile';
 import { ReplayDecisionPanel } from '../components/DecisionPanel/ReplayDecisionPanel';
-import { StatsPanel } from './ReplayViewPage';
+import { ReplayStatsDialog } from '../components/ReviewWorkspace/ReplayStatsDialog';
+import { ReplayWorkspaceNavigation } from '../components/ReviewWorkspace/ReplayWorkspaceNavigation';
 import { entryToBattleState, buildLogitData, hasReplayPostAction, hasReplayReachPhase, isCollapsibleResponsePassStep, type ReplayBoardPhase } from '../utils/replayAdapter';
 import { useReplayPlayer } from '../hooks/useReplayPlayer';
 import { replayApi } from '../api/replayApi';
@@ -18,10 +19,15 @@ import {
   backLinkButtonStyle,
   centeredStatusStyle,
   errorStatusTextStyle,
-  gameReplayRootStyle,
   mutedStatusTextStyle,
-  sidePanelContainerStyle,
 } from './gameReplayStyles';
+import '../components/ReviewWorkspace/reviewWorkspace.css';
+
+const REPLAY_BOARD_PHASE_LABELS: Record<ReplayBoardPhase, string> = {
+  pre: '动作前',
+  reach: '立直',
+  post: '动作后',
+};
 
 function isForcedRiichiTsumogiriEntry(entry: ReplayData['log'][number] | null | undefined): boolean {
   const action = entry?.gt_action ?? entry?.chosen;
@@ -76,8 +82,9 @@ export function GameBoardReplayPage() {
   const [noMeld, setNoMeld] = useState(false);
   const [autoTsumogiri, setAutoTsumogiri] = useState(false);
   const [showStats, setShowStats] = useState(false);
-  const [narrowLayout, setNarrowLayout] = useState(false);
+  const [activeDrawer, setActiveDrawer] = useState<'left' | 'right' | null>(null);
   const [boardPhase, setBoardPhase] = useState<ReplayBoardPhase>('pre');
+  const boardViewportRef = useRef<HTMLDivElement>(null);
   const [showOpponentHands, setShowOpponentHands] = useState(false);
   const [activeTeacherModel, setActiveTeacherModel] = useState<string | null>(null);
   const lastAppliedReplaySearchRef = useRef<string | null>(null);
@@ -196,7 +203,12 @@ export function GameBoardReplayPage() {
     if (hasUnappliedUrlTarget) return;
 
     const nextParams = new URLSearchParams(location.search);
-    nextParams.set('id', replayIdFromRoute);
+    // canonical 路由下 replayId 已在 path 中，清掉冗余的 ?id=；legacy 路由继续保留 query id
+    if (replayIdFromPath) {
+      nextParams.delete('id');
+    } else {
+      nextParams.set('id', replayIdFromRoute);
+    }
     nextParams.set('player_id', String(viewPlayerId));
     nextParams.set('step', String(currentStep));
     nextParams.set('phase', boardPhase);
@@ -204,7 +216,7 @@ export function GameBoardReplayPage() {
     if (nextSearch !== location.search) {
       navigate({ pathname: location.pathname, search: nextSearch }, { replace: true });
     }
-  }, [boardPhase, currentStep, data, location.pathname, location.search, navigate, replayIdFromRoute, requestedPlayerId, viewPlayerId]);
+  }, [boardPhase, currentStep, data, location.pathname, location.search, navigate, replayIdFromPath, replayIdFromRoute, requestedPlayerId, viewPlayerId]);
 
   const moveBoardStep = useCallback((direction: 1 | -1) => {
     if (!data || !currentEntry) return;
@@ -336,11 +348,21 @@ export function GameBoardReplayPage() {
     }
   }, [data, currentStep, goToStep, isOwnDiscardStep, resetBoardPhase]);
 
-  // 键盘快捷键
+  // 键盘快捷键（Stats dialog / 抽屉打开时不响应回放导航；Escape 关闭覆盖层）
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.key === 'Escape') {
+        if (showStats || activeDrawer) {
+          e.preventDefault();
+          setShowStats(false);
+          setActiveDrawer(null);
+        }
+        return;
+      }
+      if (showStats || activeDrawer) return;
+      const target = e.target as HTMLElement;
+      const tag = target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) return;
       // 提前拦截方向键和空格，防止页面滚动
       if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' ','h','j','k','l'].includes(e.key)) {
         e.preventDefault();
@@ -355,25 +377,21 @@ export function GameBoardReplayPage() {
     // useCapture=true 确保在其他元素之前捕获
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
-  }, [handleStepBackward, handleStepForward, moveBoardStep]);
+  }, [handleStepBackward, handleStepForward, moveBoardStep, showStats, activeDrawer]);
 
-  // 滚轮事件
+  // 滚轮步进只在牌桌区域生效：左右面板、Stats dialog 与 ctrl+滚轮（浏览器缩放）不被拦截
   useEffect(() => {
+    const el = boardViewportRef.current;
+    if (!el) return;
     const handler = (e: WheelEvent) => {
+      if (e.ctrlKey) return;
       e.preventDefault();
       if (e.deltaY > 0) moveBoardStep(1);
       else moveBoardStep(-1);
     };
-    window.addEventListener('wheel', handler, { passive: false });
-    return () => window.removeEventListener('wheel', handler);
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
   }, [moveBoardStep]);
-
-  useEffect(() => {
-    const updateLayout = () => setNarrowLayout(window.innerWidth < 1120);
-    updateLayout();
-    window.addEventListener('resize', updateLayout);
-    return () => window.removeEventListener('resize', updateLayout);
-  }, []);
 
   // 优先使用后端返回的真实玩家名，fallback 到 P0/P1/P2/P3
   const playerNames = normalizeReplayPlayerNames(data);
@@ -512,14 +530,84 @@ export function GameBoardReplayPage() {
     );
   }
 
-  return (
-    <div style={gameReplayRootStyle}>
-      {showStats && data && <StatsPanel data={data} onClose={() => setShowStats(false)} />}
+  const phaseLabel = REPLAY_BOARD_PHASE_LABELS[boardPhase];
+  const leftPanelId = 'review-workspace-left-panel';
+  const rightPanelId = 'review-workspace-right-panel';
 
-      {effectiveBattleState ? (
-        <div style={{ display: 'flex', height: '100%', minHeight: 0 }}>
-          <div style={{ flex: 1, minWidth: 0, minHeight: 0, position: 'relative' }}>
-            <MahjongTable
+  return (
+    <div className="review-workspace-shell">
+      {showStats && data && <ReplayStatsDialog data={data} onClose={() => setShowStats(false)} />}
+
+      <div className="review-workspace-grid">
+        <aside
+          className="review-workspace-left"
+          id={leftPanelId}
+          data-open={activeDrawer === 'left'}
+          aria-label="回放导航"
+        >
+          <div className="review-workspace-panel-header review-workspace-drawer-only">
+            <span>回放导航</span>
+            <button
+              type="button"
+              className="review-workspace-panel-header__close"
+              onClick={() => setActiveDrawer(null)}
+              aria-label="关闭回放导航"
+            >×</button>
+          </div>
+          <div className="review-workspace-panel-body">
+            <ReplayWorkspaceNavigation
+              onBack={() => navigate(routes.home)}
+              onShowStats={() => setShowStats(true)}
+              kyokuOrder={data.kyoku_order}
+              currentKyoku={currentKyoku}
+              onGoToKyoku={handleGoToKyoku}
+              kyokuLabel={kyokuLabel}
+              currentStep={currentStep}
+              totalSteps={totalSteps}
+              boardPhase={boardPhase}
+              onGoToStep={handleGoToStep}
+              onPrevKyoku={() => handleGoToKyoku(Math.max(0, currentKyoku - 1))}
+              onNextKyoku={() => handleGoToKyoku(Math.min(totalKyoku - 1, currentKyoku + 1))}
+              prevKyokuDisabled={currentKyoku === 0}
+              nextKyokuDisabled={currentKyoku === totalKyoku - 1}
+              onPrevStep={handleStepBackward}
+              onNextStep={handleStepForward}
+              prevStepDisabled={currentStep === 0 && boardPhase === 'pre'}
+              nextStepDisabled={currentStep === totalSteps - 1 && !currentHasPostPhase && !currentHasReachPhase}
+              onPrevOwnDiscard={jumpToPrevOwnDiscard}
+              onNextOwnDiscard={jumpToNextOwnDiscard}
+              onPrevDiff={jumpToPrevDiff}
+              onNextDiff={jumpToNextDiff}
+              playerNames={playerNames}
+              viewPlayerId={viewPlayerId}
+              perspectiveDisabled={!replayIdFromRoute}
+              onSwitchPerspective={switchPerspective}
+            />
+          </div>
+        </aside>
+
+        <div className="review-workspace-center">
+          <div className="review-workspace-compact-toolbar">
+            <button
+              type="button"
+              className="review-workspace-compact-toolbar__button"
+              aria-expanded={activeDrawer === 'left'}
+              aria-controls={leftPanelId}
+              onClick={() => setActiveDrawer((current) => (current === 'left' ? null : 'left'))}
+            >回放导航</button>
+            <span>{kyokuLabel || '回放'} · {currentStep + 1}/{totalSteps}</span>
+            <button
+              type="button"
+              className="review-workspace-compact-toolbar__button"
+              aria-expanded={activeDrawer === 'right'}
+              aria-controls={rightPanelId}
+              onClick={() => setActiveDrawer((current) => (current === 'right' ? null : 'right'))}
+            >决策分析</button>
+          </div>
+          <div className="review-workspace-board" ref={boardViewportRef}>
+            {effectiveBattleState ? (
+              <>
+                <MahjongTable
               state={effectiveBattleState}
               onAction={() => {}}
               isMyTurn={false}
@@ -556,197 +644,65 @@ export function GameBoardReplayPage() {
               </div>
             )}
 
-          </div>
-
-          {!narrowLayout && (
-            <div style={sidePanelContainerStyle}>
-              <div style={replaySideControlsStyle}>
-                <div style={replaySideHeaderStyle}>
-                  <button onClick={() => navigate(routes.home)} style={replaySideUtilityButtonStyle}>返回</button>
-                  <button
-                    onClick={() => setShowStats(true)}
-                    style={replaySideUtilityButtonStyle}
-                    title="统计"
-                  >
-                    统计
-                  </button>
-                </div>
-
-                <div style={replaySideMetaStyle}>
-                  <span>{kyokuLabel || '回放'}</span>
-                  <span>{currentStep + 1}/{totalSteps}{boardPhase === 'post' ? ' 后' : boardPhase === 'reach' ? ' 立直' : ' 前'}</span>
-                </div>
-
-                <input
-                  type="range"
-                  min={0}
-                  max={totalSteps - 1}
-                  value={currentStep}
-                  onChange={e => handleGoToStep(parseInt(e.target.value))}
-                  style={replaySideSliderStyle}
-                />
-
-                <div style={replaySideButtonGridStyle}>
-                  <button
-                    onClick={() => handleGoToKyoku(Math.max(0, currentKyoku - 1))}
-                    disabled={currentKyoku === 0}
-                    style={replaySideButtonStyle(currentKyoku === 0)}
-                  >
-                    &lt; 上局
-                  </button>
-                  <button
-                    onClick={() => handleGoToKyoku(Math.min(totalKyoku - 1, currentKyoku + 1))}
-                    disabled={currentKyoku === totalKyoku - 1}
-                    style={replaySideButtonStyle(currentKyoku === totalKyoku - 1)}
-                  >
-                    下局 &gt;
-                  </button>
-                  <button onClick={handleStepBackward} disabled={currentStep === 0 && boardPhase === 'pre'} style={replaySideButtonStyle(currentStep === 0 && boardPhase === 'pre')} title="上一步">
-                    &lt; 上一步
-                  </button>
-                  <button onClick={handleStepForward} disabled={currentStep === totalSteps - 1 && !currentHasPostPhase && !currentHasReachPhase} style={replaySideButtonStyle(currentStep === totalSteps - 1 && !currentHasPostPhase && !currentHasReachPhase)} title="下一步">
-                    下一步 &gt;
-                  </button>
-                  <button onClick={jumpToPrevOwnDiscard} style={replaySideButtonStyle(false)} title="上一自己打牌">
-                    &lt; 上一自己
-                  </button>
-                  <button onClick={jumpToNextOwnDiscard} style={replaySideButtonStyle(false)} title="下一自己打牌">
-                    下一自己 &gt;
-                  </button>
-                  <button onClick={jumpToPrevDiff} style={replaySideButtonStyle(false)}>
-                    &lt; 上错
-                  </button>
-                  <button onClick={jumpToNextDiff} style={replaySideButtonStyle(false)}>
-                    下错 &gt;
-                  </button>
-                </div>
-
-                <div style={replayPerspectiveGridStyle}>
-                  {playerNames.map((name, idx) => {
-                    const active = idx === viewPlayerId;
-                    return (
-                      <button
-                        key={idx}
-                        onClick={() => switchPerspective(idx)}
-                        disabled={!replayIdFromRoute || active}
-                        style={replayPerspectiveButtonStyle(active, !replayIdFromRoute || active)}
-                        title={`切换到 ${name}`}
-                      >
-                        P{idx} {replayPlayerDisplayName(playerNames, idx)}
-                      </button>
-                    );
-                  })}
-                </div>
+              </>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>选择一个步骤</p>
               </div>
-              <ReplayDecisionPanel
-                entry={isForcedRiichiTsumogiri ? null : effectiveReplayEntry}
-                step={currentStep}
-                totalSteps={totalSteps}
-                compact={false}
-                playerNames={playerNames}
-                currentPlayerId={viewPlayerId}
-                localReviewerLabel={localReviewerLabel}
-                availableTeacherModels={replayTeacherModels}
-                activeTeacherModel={activeTeacherModel}
-                onActiveTeacherModelChange={setActiveTeacherModel}
-                hideWeights={boardPhase === 'post'}
-              />
-            </div>
-          )}
+            )}
+          </div>
+        </div>
 
-        </div>
-      ) : (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-          <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>选择一个步骤</p>
-        </div>
+        <aside
+          className="review-workspace-right"
+          id={rightPanelId}
+          data-open={activeDrawer === 'right'}
+          aria-label="决策分析"
+        >
+          <div className="review-workspace-panel-header">
+            <span>决策分析</span>
+            <button
+              type="button"
+              className="review-workspace-panel-header__close review-workspace-drawer-only"
+              onClick={() => setActiveDrawer(null)}
+              aria-label="关闭决策分析"
+            >×</button>
+          </div>
+          <div className="review-workspace-right-meta">
+            当前视角：P{viewPlayerId} {replayPlayerDisplayName(playerNames, viewPlayerId)} · {phaseLabel}
+          </div>
+          <div className="review-workspace-right-body">
+            <ReplayDecisionPanel
+              entry={isForcedRiichiTsumogiri ? null : effectiveReplayEntry}
+              step={currentStep}
+              totalSteps={totalSteps}
+              compact={false}
+              playerNames={playerNames}
+              currentPlayerId={viewPlayerId}
+              localReviewerLabel={localReviewerLabel}
+              availableTeacherModels={replayTeacherModels}
+              activeTeacherModel={activeTeacherModel}
+              onActiveTeacherModelChange={setActiveTeacherModel}
+              hideWeights={boardPhase === 'post'}
+            />
+          </div>
+        </aside>
+      </div>
+
+      {activeDrawer && (
+        <button
+          type="button"
+          className="review-workspace-scrim"
+          aria-label="关闭面板"
+          onClick={() => setActiveDrawer(null)}
+        />
       )}
     </div>
   );
 }
 
-const replaySideControlsStyle: CSSProperties = {
-  flexShrink: 0,
-  padding: 10,
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 8,
-  background: 'var(--card-bg)',
-  borderBottom: '1px solid var(--sidepanel-border)',
-};
 
-const replaySideHeaderStyle: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: '1fr 1fr',
-  gap: 6,
-};
 
-const replaySideMetaStyle: CSSProperties = {
-  display: 'flex',
-  justifyContent: 'space-between',
-  alignItems: 'center',
-  gap: 8,
-  color: 'var(--text-primary)',
-  fontSize: 12,
-  fontWeight: 700,
-  fontFamily: 'Menlo, Consolas, monospace',
-};
-
-const replaySideSliderStyle: CSSProperties = {
-  width: '100%',
-  accentColor: 'var(--accent)',
-};
-
-const replaySideButtonGridStyle: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: '1fr 1fr',
-  gap: 6,
-};
-
-const replayPerspectiveGridStyle: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: '1fr 1fr',
-  gap: 5,
-};
-
-const replaySideUtilityButtonStyle: CSSProperties = {
-  minHeight: 28,
-  border: '1px solid var(--border)',
-  background: 'var(--page-bg)',
-  color: 'var(--text-primary)',
-  borderRadius: 3,
-  fontSize: 12,
-  fontWeight: 700,
-  cursor: 'pointer',
-};
-
-function replaySideButtonStyle(disabled: boolean): CSSProperties {
-  return {
-    minHeight: 34,
-    border: '1px solid var(--border)',
-    background: disabled ? 'var(--card-bg)' : 'var(--page-bg)',
-    color: disabled ? 'var(--text-muted)' : 'var(--text-primary)',
-    borderRadius: 3,
-    fontSize: 13,
-    fontWeight: 800,
-    cursor: disabled ? 'default' : 'pointer',
-  };
-}
-
-function replayPerspectiveButtonStyle(active: boolean, disabled: boolean): CSSProperties {
-  return {
-    minHeight: 26,
-    border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
-    background: active ? 'rgba(52, 152, 219, 0.12)' : 'var(--page-bg)',
-    color: active ? 'var(--accent)' : 'var(--text-secondary)',
-    borderRadius: 3,
-    fontSize: 11,
-    fontWeight: active ? 800 : 650,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-    cursor: disabled ? 'default' : 'pointer',
-  };
-}
 
 type ReplayEvent = Record<string, unknown>;
 
