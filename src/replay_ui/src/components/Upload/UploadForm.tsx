@@ -141,6 +141,20 @@ function validateExternalReviewUrl(kind: ExternalReviewKind, rawValue: string): 
   if (parsed.hostname.toLowerCase() !== host) {
     return `${label} 链接必须来自 ${host}`;
   }
+  // 结构校验与后端 external_reports.resolve_external_report_url 对齐
+  if (kind === 'naga') {
+    const hasReportId = Boolean(parsed.searchParams.get('report_id')?.trim());
+    const hasReportPath = parsed.pathname.startsWith('/reports/') && parsed.pathname.endsWith('.json');
+    if (!hasReportId && !hasReportPath) {
+      return 'NAGA Review 链接中未找到 report_id 或有效报告路径';
+    }
+  } else {
+    const hasDataPath = Boolean(parsed.searchParams.get('data')?.trim());
+    const hasReportPath = parsed.pathname.startsWith('/report/') && parsed.pathname.endsWith('.json');
+    if (!hasDataPath && !hasReportPath) {
+      return 'Mortal Review 链接中未找到 data 报告路径';
+    }
+  }
   return null;
 }
 
@@ -249,6 +263,15 @@ function JsonReplayInput({
     onFilesChange(next ? [next] : []);
   };
 
+  const removeFile = (name: string) => {
+    if (disabled) return;
+    onFilesChange(files.filter(p => p.name !== name));
+    // 同时清空原生 file input 的值，确保移除后可以重新选择同一个文件
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
   return (
     <div>
       {/* 拖拽上传区（单文件） */}
@@ -287,11 +310,23 @@ function JsonReplayInput({
           {files.map(f => (
             <div key={f.name} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'var(--page-bg)', border: '1px solid var(--border)', borderRadius: 999, padding: '4px 10px', fontSize: 12, color: 'var(--text-secondary)' }}>
               📄 {f.name}（{formatFileSize(f.size)}）
-              <span
+              <button
+                type="button"
                 title="移除文件"
-                onClick={() => { if (!disabled) onFilesChange(files.filter(p => p.name !== f.name)); }}
-                style={{ cursor: disabled ? 'not-allowed' : 'pointer', color: 'var(--text-muted)', fontWeight: 'bold' }}
-              >×</span>
+                aria-label={`移除文件 ${f.name}`}
+                onClick={() => removeFile(f.name)}
+                disabled={disabled}
+                style={{
+                  border: 'none',
+                  background: 'none',
+                  padding: 0,
+                  fontSize: 13,
+                  lineHeight: 1,
+                  cursor: disabled ? 'not-allowed' : 'pointer',
+                  color: 'var(--text-muted)',
+                  fontWeight: 'bold',
+                }}
+              >×</button>
             </div>
           ))}
         </div>
@@ -468,7 +503,9 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
   const [tenhouUrl, setTenhouUrl] = useState('');
   const [mjaiText, setMjaiText]   = useState('');
   const [tenhou6Text, setTenhou6Text] = useState('');
-  const [files, setFiles]         = useState<File[]>([]);
+  // 文件状态按 Tab 隔离：tenhou6 文件只属于 tenhou6 Tab，mjai 文件只属于 mjai Tab
+  const [tenhou6Files, setTenhou6Files] = useState<File[]>([]);
+  const [mjaiFiles, setMjaiFiles] = useState<File[]>([]);
   const [playerId, setPlayerId]   = useState<string>('auto');
   const [selectedModels, setSelectedModels] = useState<BotType[]>(['ext_mortal', '70k', 'mortal']);
   const [nagaUrl, setNagaUrl] = useState('');
@@ -478,10 +515,12 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
   const [success, setSuccess]     = useState<string | null>(null);
 
   const activeText = inputType === 'tenhou_url' ? tenhouUrl : inputType === 'tenhou6_json' ? tenhou6Text : mjaiText;
+  // 当前 Tab 的文件（天凤链接 Tab 不携带任何文件）
+  const activeFiles = inputType === 'tenhou6_json' ? tenhou6Files : inputType === 'mjai_json' ? mjaiFiles : [];
   const tenhouUrlIsTenhou6Json = inputType === 'tenhou_url' && isTenhou6JsonLinkText(tenhouUrl);
   const playerIdValue = tenhouUrlIsTenhou6Json && playerId === 'auto' ? '0' : playerId;
-  // 后端同时收到文件和文本时只读取文件，前端按 Tab 将二者限制为互斥
-  const sourceConflict = inputType !== 'tenhou_url' && files.length > 0 && activeText.trim().length > 0;
+  // 后端同时收到文件和文本时只读取文件，前端按 Tab 将二者限制为互斥（只检查当前 Tab）
+  const sourceConflict = inputType !== 'tenhou_url' && activeFiles.length > 0 && activeText.trim().length > 0;
 
   // 切换输入类型时重置视角默认值与错误，但保留各 Tab 已输入的文本与已选文件
   const switchInputType = (t: InputType) => {
@@ -505,7 +544,7 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
     const text = activeText.trim();
     const hasSource = inputType === 'tenhou_url'
       ? text.length > 0
-      : text.length > 0 || files.length > 0;
+      : text.length > 0 || activeFiles.length > 0;
     if (!hasSource) {
       setError({ source: '输入', text: TAB_EMPTY_ERRORS[inputType] });
       return;
@@ -548,7 +587,7 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
           formData.append('input_type', 'url');
         }
       } else if (inputType === 'tenhou6_json') {
-        if (files.length === 0) {
+        if (tenhou6Files.length === 0) {
           let data: Record<string, unknown>;
           try {
             data = parseTenhou6TextInput(text);
@@ -558,9 +597,9 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
           formData.append('json_text', JSON.stringify(data));
         }
         formData.append('input_type', 'tenhou6');
-        for (const f of files) formData.append('files', f);
+        for (const f of tenhou6Files) formData.append('files', f);
       } else {
-        if (files.length === 0) {
+        if (mjaiFiles.length === 0) {
           const lines = text.split('\n').filter(l => l.trim());
           let events;
           try {
@@ -575,7 +614,7 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
           formData.append('json_text', JSON.stringify(events));
         }
         formData.append('input_type', 'mjai');
-        for (const f of files) formData.append('files', f);
+        for (const f of mjaiFiles) formData.append('files', f);
       }
 
       if (playerIdValue !== 'auto') formData.append('player_id', playerIdValue);
@@ -661,8 +700,8 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
           <JsonReplayInput
             text={tenhou6Text}
             onTextChange={setTenhou6Text}
-            files={files}
-            onFilesChange={setFiles}
+            files={tenhou6Files}
+            onFilesChange={setTenhou6Files}
             placeholder={TAB_PLACEHOLDERS.tenhou6_json}
             hint={TAB_INPUT_HINTS.tenhou6_json}
             fileAccept={JSON_TAB_FILE_ACCEPT.tenhou6_json}
@@ -674,8 +713,8 @@ export function UploadForm({ onDataLoaded, onUploadStart }: UploadFormProps) {
           <JsonReplayInput
             text={mjaiText}
             onTextChange={setMjaiText}
-            files={files}
-            onFilesChange={setFiles}
+            files={mjaiFiles}
+            onFilesChange={setMjaiFiles}
             placeholder={TAB_PLACEHOLDERS.mjai_json}
             hint={TAB_INPUT_HINTS.mjai_json}
             fileAccept={JSON_TAB_FILE_ACCEPT.mjai_json}
