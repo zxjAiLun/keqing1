@@ -59,10 +59,20 @@ from gateway.api.playwithyou import router as playwithyou_router
 app.include_router(playwithyou_router)
 
 # ========== 静态资源 ==========
-app.mount("/tiles", StaticFiles(directory=BASE_DIR.parent.parent / "tiles" / "riichi-mahjong-tiles" / "Regular"), name="tiles")
+
+_REPLAY_UI_DIR = BASE_DIR.parent / "replay_ui"
+_REACT_DIST = _REPLAY_UI_DIR / "dist"
+
+_TILE_DIR_CANDIDATES = (
+    _REACT_DIST / "tiles",
+    _REPLAY_UI_DIR / "public" / "tiles",
+)
+_TILE_DIR = next((path for path in _TILE_DIR_CANDIDATES if path.is_dir()), None)
+
+if _TILE_DIR is not None:
+    app.mount("/tiles", StaticFiles(directory=str(_TILE_DIR)), name="tiles")
 
 # 挂载 React 构建产物（生产环境）
-_REACT_DIST = BASE_DIR.parent / "replay_ui" / "dist"
 if _REACT_DIST.exists():
     app.mount("/assets", StaticFiles(directory=str(_REACT_DIST / "assets")), name="assets")
 
