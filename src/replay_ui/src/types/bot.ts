@@ -1,1 +1,1 @@
-export type BotType = 'xmodel1' | 'keqingv4' | 'mortal' | 'rulebase';
+export type BotType = 'mortal' | '70k' | 'ext_mortal' | 'rulebase';

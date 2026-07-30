@@ -25,7 +25,7 @@ import type { BattleState, Action, DiscardEntry, MeldEntry } from "../../types/b
 import type { LogitTileData } from "../../utils/replayAdapter";
 import { BAKAZE_CN, JIKAZE_CN } from "../../utils/constants";
 import { sortHand } from "../../utils/tileUtils";
-import { buildMeldDisplayTiles, getSeatModel, type SeatPosition } from "./seatLayout";
+import { buildMeldDisplayTiles, getSeatModel, type LayoutAxis, type SeatPosition } from "./seatLayout";
 import { TABLECLOTH_OPTIONS } from "./tableclothOptions";
 import type { TableclothId } from "./tableclothOptions";
 
@@ -52,8 +52,10 @@ function chunkDiscards(discards: DiscardEntry[], cols: number): DiscardEntry[][]
 const SELF_HAND_GAP = HAND_TILE_GAP;
 const SELF_HAND_DRAW_GAP = HAND_DRAW_GAP;
 const SELF_HAND_RESERVED_WIDTH = TILE_SIZES.large.w * 14 + SELF_HAND_GAP * 12 + SELF_HAND_DRAW_GAP;
-const SELF_HAND_BAR_MAX_HEIGHT = 60;
-const SELF_HAND_BAR_WIDTH = 24;
+const SELF_HAND_BAR_MAX_HEIGHT = Math.round(TILE_SIZES.large.h * 1.05);
+const SELF_HAND_BAR_WIDTH = TILE_SIZES.large.w * 0.8;
+const SELF_HAND_BAR_MIN_VISIBLE_PCT = 1;
+const SELF_HAND_TEACHER_BAR_GAP = 2;
 
 function normalizeOrientation(orientation: number): 0 | 90 | 180 | 270 {
   const normalized = ((orientation % 360) + 360) % 360;
@@ -65,6 +67,17 @@ function getTileBox(size: "small" | "normal" | "large", orientation: 0 | 90 | 18
   const dim = TILE_SIZES[size];
   const sideways = orientation === 90 || orientation === 270;
   return { width: sideways ? dim.h : dim.w, height: sideways ? dim.w : dim.h };
+}
+
+function decisionFrameStyle(color: string, inset: number): React.CSSProperties {
+  return {
+    position: "absolute",
+    inset,
+    border: `2px solid ${color}`,
+    borderRadius: 4,
+    pointerEvents: "none",
+    zIndex: 4,
+  };
 }
 
 function OrientedTile({
@@ -286,6 +299,20 @@ function getDisplayedOpponentTiles(position: SeatPosition, hand: string[]): stri
   return position === "east" || position === "west" ? tiles.reverse() : tiles;
 }
 
+function getOpponentDrawGapStyle(
+  position: SeatPosition,
+  axis: LayoutAxis,
+  reverse: boolean,
+  gap: number,
+) {
+  if (axis === "row") {
+    return { [reverse ? "marginRight" : "marginLeft"]: gap };
+  }
+  if (position === "east") return { marginBottom: gap };
+  if (position === "west") return { marginTop: gap };
+  return { [reverse ? "marginBottom" : "marginTop"]: gap };
+}
+
 function getOpponentDiscardHole(
   position: SeatPosition,
   hand: string[],
@@ -327,7 +354,12 @@ function MeldBlock({ pid, meld, position }: { pid: number; meld: MeldEntry; posi
     : position === "east" ? "translate(4px, 2px)"
     : "translate(-4px, -2px)";
   return (
-    <div style={{ display: "flex", flexDirection: flowDirection, gap: position === "south" ? 4 : 3 }}>
+    <div style={{
+      display: "flex",
+      flexDirection: flowDirection,
+      gap: position === "south" ? 4 : 3,
+      alignItems: position === "south" ? "flex-end" : "center",
+    }}>
       {displayTiles.map((entry, idx) => {
         const orientation = entry.rotated ? rotatedOrientation : meldOrientation;
         const stackedTile = displayTiles.find((candidate) => candidate.stackedOn === idx);
@@ -392,10 +424,7 @@ function ConcealedHand({
   const gap = position === "north" ? HAND_TILE_GAP_TIGHT : HAND_TILE_GAP;
   const drawGap = HAND_DRAW_GAP;
   const { width, height } = getTileBox("normal", concealedOrientation);
-  const drawGapStyle =
-    concealedAxis === "row"
-      ? { [concealedReverse ? "marginRight" : "marginLeft"]: drawGap }
-      : { [concealedReverse ? "marginBottom" : "marginTop"]: drawGap };
+  const drawGapStyle = getOpponentDrawGapStyle(position, concealedAxis, concealedReverse, drawGap);
   const reservedMainSpan = count * (concealedAxis === "row" ? width : height) + Math.max(count - 1, 0) * gap;
   const reservedCrossSpan = concealedAxis === "row" ? height : width;
   const reservedTotalSpan = reservedMainSpan + drawGap + (concealedAxis === "row" ? width : height);
@@ -403,6 +432,39 @@ function ConcealedHand({
     concealedAxis === "row"
       ? { width: reservedTotalSpan, height: reservedCrossSpan }
       : { width: reservedCrossSpan, height: reservedTotalSpan };
+  const mainBackTiles = (
+    <>
+      {discardHole !== "draw" && Array.from({ length: count + (discardHole !== null ? 1 : 0) }, (_, idx) => {
+        const isHole = discardHole !== null && idx === discardHole;
+        const tileZIndex = concealedReverse ? idx + 1 : count - idx;
+        return (
+          <div key={idx} style={{ width, height, flexShrink: 0, position: "relative", zIndex: tileZIndex, opacity: isHole ? 0 : 1, transition: "opacity var(--table-transition-fast)" }}>
+            {!isHole && <TileBack size="normal" orientation={concealedOrientation} />}
+          </div>
+        );
+      })}
+      {discardHole === "draw" && Array.from({ length: count }, (_, idx) => {
+        const tileZIndex = concealedReverse ? idx + 1 : count - idx;
+        return (
+          <div key={idx} style={{ width, height, flexShrink: 0, position: "relative", zIndex: tileZIndex }}>
+            <TileBack size="normal" orientation={concealedOrientation} />
+          </div>
+        );
+      })}
+    </>
+  );
+  const drawBackTile = (
+    <>
+      {showDrawTile && (
+        <div style={{ ...drawGapStyle, position: "relative", flexShrink: 0 }}>
+          <TileBack size="normal" orientation={concealedOrientation} />
+        </div>
+      )}
+      {discardHole === "draw" && !showDrawTile && (
+        <div style={{ ...drawGapStyle, width, height, flexShrink: 0 }} />
+      )}
+    </>
+  );
   return (
     <div
       style={{
@@ -430,31 +492,9 @@ function ConcealedHand({
             alignItems: concealedAxis === "row" ? "center" : concealedReverse ? "flex-end" : "flex-start",
           }}
         >
-          {discardHole !== "draw" && Array.from({ length: count + (discardHole !== null ? 1 : 0) }, (_, idx) => {
-            const isHole = discardHole !== null && idx === discardHole;
-            const tileZIndex = concealedReverse ? idx + 1 : count - idx;
-            return (
-              <div key={idx} style={{ width, height, flexShrink: 0, position: "relative", zIndex: tileZIndex, opacity: isHole ? 0 : 1, transition: "opacity var(--table-transition-fast)" }}>
-                {!isHole && <TileBack size="normal" orientation={concealedOrientation} />}
-              </div>
-            );
-          })}
-          {discardHole === "draw" && Array.from({ length: count }, (_, idx) => {
-            const tileZIndex = concealedReverse ? idx + 1 : count - idx;
-            return (
-              <div key={idx} style={{ width, height, flexShrink: 0, position: "relative", zIndex: tileZIndex }}>
-                <TileBack size="normal" orientation={concealedOrientation} />
-              </div>
-            );
-          })}
-          {showDrawTile && (
-            <div style={{ ...drawGapStyle, position: "relative", flexShrink: 0 }}>
-              <TileBack size="normal" orientation={concealedOrientation} />
-            </div>
-          )}
-          {discardHole === "draw" && !showDrawTile && (
-            <div style={{ ...drawGapStyle, width, height, flexShrink: 0 }} />
-          )}
+          {concealedAxis === "column" ? drawBackTile : null}
+          {mainBackTiles}
+          {concealedAxis === "row" ? drawBackTile : null}
         </div>
       </div>
     </div>
@@ -488,25 +528,9 @@ function RevealedOpponentHand({
   const gap = HAND_TILE_GAP;
   const drawGap = HAND_DRAW_GAP;
   const { width, height } = getTileBox("normal", revealedOrientation);
-  const drawGapStyle =
-    revealedAxis === "row"
-      ? { [revealedReverse ? "marginRight" : "marginLeft"]: drawGap }
-      : { [revealedReverse ? "marginBottom" : "marginTop"]: drawGap };
-  return (
-    <div
-      onClick={onClick}
-      style={{
-        display: "flex",
-        flexDirection: flowDirection,
-        gap,
-        padding:
-          position === "north" ? "0 2px 0"
-          : position === "east" ? "0 2px 0"
-          : position === "west" ? "0 2px 0"
-          : "0 0 0",
-        cursor: onClick ? "pointer" : undefined,
-      }}
-    >
+  const drawGapStyle = getOpponentDrawGapStyle(position, revealedAxis, revealedReverse, drawGap);
+  const mainRevealedTiles = (
+    <>
       {discardHole !== "draw" && Array.from({ length: mainTiles.length + (discardHole !== null ? 1 : 0) }, (_, idx) => {
         const isHole = discardHole !== null && idx === discardHole;
         const tile = isHole ? null : mainTiles[idx - (discardHole !== null && idx > discardHole ? 1 : 0)];
@@ -524,6 +548,10 @@ function RevealedOpponentHand({
           orientation={revealedOrientation}
         />
       ))}
+    </>
+  );
+  const revealedDrawTile = (
+    <>
       {showDrawTile && drawTile && (
         <div style={{ ...drawGapStyle, flexShrink: 0 }}>
           <OrientedTile tile={drawTile} size="normal" orientation={revealedOrientation} />
@@ -532,6 +560,26 @@ function RevealedOpponentHand({
       {discardHole === "draw" && !showDrawTile && (
         <div style={{ ...drawGapStyle, width, height, flexShrink: 0 }} />
       )}
+    </>
+  );
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        display: "flex",
+        flexDirection: flowDirection,
+        gap,
+        padding:
+          position === "north" ? "0 2px 0"
+          : position === "east" ? "0 2px 0"
+          : position === "west" ? "0 2px 0"
+          : "0 0 0",
+        cursor: onClick ? "pointer" : undefined,
+      }}
+    >
+      {revealedAxis === "column" ? revealedDrawTile : null}
+      {mainRevealedTiles}
+      {revealedAxis === "row" ? revealedDrawTile : null}
     </div>
   );
 }
@@ -548,6 +596,9 @@ function PlayerZone({
   highlightIdx,
   onTileClick,
   logitData,
+  activeTeacherModel,
+  hideLogitHints,
+  onSelfHandHintToggle,
   showReplayDrawTile,
   concealedCount,
   revealedHand,
@@ -565,6 +616,9 @@ function PlayerZone({
   highlightIdx?: number | null;
   onTileClick?: (tile: string, idx: number) => void;
   logitData?: LogitTileData[];
+  activeTeacherModel?: string | null;
+  hideLogitHints?: boolean;
+  onSelfHandHintToggle?: () => void;
   showReplayDrawTile?: boolean;
   concealedCount?: number;
   revealedHand?: string[] | null;
@@ -581,6 +635,8 @@ function PlayerZone({
     const sortedHand = useMemo(() => {
       return sortHand([...hand], null);
     }, [hand, tsumoPai]);
+    const hasLogitHints = Boolean(logitData?.length);
+    const showLogitHints = hasLogitHints && !hideLogitHints;
 
     return (
       <div style={{ display: "flex", flexDirection: "row", alignItems: "flex-end", gap: 12 }}>
@@ -588,9 +644,16 @@ function PlayerZone({
         {/* 手牌区：固定宽度，左对齐。Melds在手牌右下方 */}
         <div style={{ display: "flex", flexDirection: "row", alignItems: "flex-end", gap: 8 }}>
           {/* 手牌：固定宽度区域，左对齐 */}
-          <div style={{ position: "relative", width: SELF_HAND_RESERVED_WIDTH }}>
+          <div
+            onClick={hasLogitHints ? onSelfHandHintToggle : undefined}
+            style={{
+              position: "relative",
+              width: SELF_HAND_RESERVED_WIDTH,
+              cursor: hasLogitHints ? "pointer" : undefined,
+            }}
+          >
             {/* 柱状图层（回放模式，绝对定位在手牌上方） */}
-            {logitData && logitData.length > 0 && (
+            {showLogitHints && (
               <div style={{
                 position: "absolute", bottom: "100%", left: 0,
                 display: "flex", gap: SELF_HAND_GAP, paddingBottom: 3,
@@ -598,29 +661,67 @@ function PlayerZone({
                 width: SELF_HAND_RESERVED_WIDTH,
               }}>
                 {(() => {
-                  const maxPct = Math.max(...logitData.map((item) => item.pct), 1);
+                  const visibleLogitData = logitData ?? [];
+                  const maxPct = Math.max(...visibleLogitData.map((item) => item.pct), 1);
                   return [...sortedHand, ...(tsumoPai ? [tsumoPai] : [])].map((tile, i) => {
-                    const d = logitData.find(x => x.pai === tile && x.isTsumo === (tsumoPai ? i === sortedHand.length : false))
-                      ?? logitData.find(x => x.pai === tile);
+                    const d = visibleLogitData.find(x => x.pai === tile && x.isTsumo === (tsumoPai ? i === sortedHand.length : false))
+                      ?? visibleLogitData.find(x => x.pai === tile);
                     const normalizedPct = d ? d.pct / maxPct : 0;
-                    const h = d ? Math.max(4, Math.round(normalizedPct * SELF_HAND_BAR_MAX_HEIGHT)) : 2;
-                    const barColor = d?.isChosen && d?.isGt ? "#8e44ad"
+                    const localHeight = d && d.pct >= SELF_HAND_BAR_MIN_VISIBLE_PCT
+                      ? Math.round(normalizedPct * SELF_HAND_BAR_MAX_HEIGHT)
+                      : 0;
+                    const localBarColor = d?.isChosen && d?.isGt ? "#8e44ad"
                       : d?.isChosen ? "#e74c3c"
                       : d?.isGt ? "#27ae60"
                       : d?.score !== undefined ? "var(--accent)"
-                      : "rgba(150,150,150,0.25)";
+                      : "transparent";
+                    const teacherBars = d?.teacherBars ?? [];
+                    const teacherBarWidth = teacherBars.length > 0
+                      ? Math.max(2, (SELF_HAND_BAR_WIDTH - SELF_HAND_TEACHER_BAR_GAP * (teacherBars.length - 1)) / teacherBars.length)
+                      : SELF_HAND_BAR_WIDTH;
                     return (
                       <div key={`bar-${tile}-${i}`} style={{
                         width: TILE_SIZES.large.w,
                         marginLeft: i === sortedHand.length && tsumoPai ? SELF_HAND_DRAW_GAP : 0,
                         display: "flex", alignItems: "flex-end", justifyContent: "center", flexShrink: 0,
                       }}>
-                        <div style={{
-                          width: SELF_HAND_BAR_WIDTH, height: h,
-                          background: barColor,
-                          borderRadius: "2px 2px 0 0",
-                          transition: "height 0.15s ease",
-                        }} />
+                        {teacherBars.length > 0 ? (
+                          <div style={{
+                            width: SELF_HAND_BAR_WIDTH,
+                            display: "flex",
+                            alignItems: "flex-end",
+                            justifyContent: "center",
+                            gap: SELF_HAND_TEACHER_BAR_GAP,
+                          }}>
+                            {teacherBars.map((bar) => {
+                              const height = bar.pct >= SELF_HAND_BAR_MIN_VISIBLE_PCT
+                                ? Math.round((bar.pct / 100) * SELF_HAND_BAR_MAX_HEIGHT)
+                                : 0;
+                              const isActiveTeacher = !activeTeacherModel || bar.model === activeTeacherModel;
+                              return (
+                                <div
+                                  key={bar.model}
+                                  style={{
+                                    width: teacherBarWidth,
+                                    height,
+                                    background: height > 0
+                                      ? isActiveTeacher ? "#8e44ad" : "#9ca3af"
+                                      : "transparent",
+                                    borderRadius: "2px 2px 0 0",
+                                    transition: "height 0.15s ease, background 0.15s ease",
+                                  }}
+                                />
+                              );
+                            })}
+                          </div>
+                        ) : localHeight > 0 ? (
+                          <div style={{
+                            width: SELF_HAND_BAR_WIDTH, height: localHeight,
+                            background: localBarColor,
+                            borderRadius: "2px 2px 0 0",
+                            transition: "height 0.15s ease",
+                          }} />
+                        ) : null}
                       </div>
                     );
                   });
@@ -628,28 +729,34 @@ function PlayerZone({
               </div>
             )}
             {/* 手牌：左对齐 */}
-            <div style={{ display: "flex", gap: SELF_HAND_GAP, flexWrap: "nowrap", transform: "translateY(-2px)", width: SELF_HAND_RESERVED_WIDTH }}>
-              {sortedHand.map((tile, i) => (
-                <div key={`${tile}-${i}`} style={{ width: TILE_SIZES.large.w, height: TILE_SIZES.large.h, flexShrink: 0 }}>
-                  <Tile tile={tile} size="large" selected={i === highlightIdx} onClick={() => onTileClick?.(tile, i)} />
-                </div>
-              ))}
+            <div style={{ display: "flex", gap: SELF_HAND_GAP, flexWrap: "nowrap", width: SELF_HAND_RESERVED_WIDTH }}>
+              {sortedHand.map((tile, i) => {
+                const d = logitData?.find(x => x.pai === tile && !x.isTsumo) ?? logitData?.find(x => x.pai === tile);
+                const showDecisionFrames = showLogitHints;
+                return (
+                  <div key={`${tile}-${i}`} style={{ width: TILE_SIZES.large.w, height: TILE_SIZES.large.h, flexShrink: 0, position: "relative" }}>
+                    <Tile tile={tile} size="large" selected={!showDecisionFrames && i === highlightIdx} onClick={() => onTileClick?.(tile, i)} />
+                    {showDecisionFrames && d?.isChosen && (
+                      <div style={decisionFrameStyle("#8e44ad", 0)} />
+                    )}
+                    {showDecisionFrames && d?.isGt && (
+                      <div style={decisionFrameStyle("#27ae60", d?.isChosen ? 4 : 0)} />
+                    )}
+                  </div>
+                );
+              })}
               {tsumoPai && (
                 <div
                   style={{
                     width: TILE_SIZES.large.w,
                     height: TILE_SIZES.large.h,
-                    outline: "2px solid var(--gold)",
-                    outlineOffset: "1px",
-                    borderRadius: 2,
                     flexShrink: 0,
                     cursor: onTileClick ? "pointer" : undefined,
                     marginLeft: SELF_HAND_DRAW_GAP,
-                    transition: "outline var(--table-transition-mid)",
                   }}
                   onClick={() => onTileClick?.(tsumoPai, sortedHand.length)}
                 >
-                  <Tile tile={tsumoPai} size="large" selected={sortedHand.length === highlightIdx} />
+                  <Tile tile={tsumoPai} size="large" selected={!showLogitHints && sortedHand.length === highlightIdx} />
                 </div>
               )}
             </div>
@@ -805,29 +912,51 @@ function formatScoreDelta(delta: number): string {
   return delta > 0 ? `+${delta.toLocaleString()}` : delta.toLocaleString();
 }
 
+function getJikazeLabel(pid: number, oya: number): string {
+  return JIKAZE_CN[((pid - oya) % 4 + 4) % 4] ?? "";
+}
+
 function ScoreMarker({
-  value,
+  score,
+  diffText,
+  jikaze,
   color,
   style,
 }: {
-  value: string;
+  score: number;
+  diffText?: string;
+  jikaze: string;
   color: string;
   style: React.CSSProperties;
 }) {
+  const sign = score < 0 ? "-" : "";
+  const scoreText = Math.abs(score).toLocaleString().replace(/,/g, "");
+  const scoreMain = sign + (scoreText.length > 2 ? scoreText.slice(0, -2) : scoreText);
+  const scoreSuffix = scoreText.length > 2 ? scoreText.slice(-2) : "";
   return (
     <div
       style={{
         position: "absolute",
         display: "flex",
         alignItems: "center",
-        gap: 2,
+        gap: 3,
         pointerEvents: "none",
         ...style,
       }}
     >
-      <span style={{ fontSize: 10, fontWeight: 600, color, fontFamily: "Menlo, monospace" }}>
-        {value}
+      <span style={{ fontSize: 10, fontWeight: 800, color }}>
+        {jikaze}
       </span>
+      {diffText ? (
+        <span style={{ fontSize: 10, fontWeight: 700, color, fontFamily: "Menlo, monospace" }}>
+          {diffText}
+        </span>
+      ) : (
+        <span style={{ display: "inline-flex", alignItems: "baseline", color, fontFamily: "Menlo, monospace" }}>
+          <span style={{ fontSize: 13, fontWeight: 800 }}>{scoreMain}</span>
+          {scoreSuffix && <span style={{ fontSize: 8, fontWeight: 700 }}>{scoreSuffix}</span>}
+        </span>
+      )}
     </div>
   );
 }
@@ -891,6 +1020,7 @@ function CenterPanel({
   kyoku,
   honba,
   scores,
+  oya,
   humanId,
   topPid,
   leftPid,
@@ -902,6 +1032,7 @@ function CenterPanel({
   kyoku: number;
   honba: number;
   scores: number[];
+  oya: number;
   humanId: number;
   topPid: number;
   leftPid: number;
@@ -910,15 +1041,14 @@ function CenterPanel({
   onToggleScoreMode: () => void;
 }) {
   const baseScore = scores[humanId] ?? 0;
-  const scoreText = (pid: number) =>
+  const diffText = (pid: number) =>
     showScoreDiff
       ? formatScoreDelta((scores[pid] ?? 0) - baseScore)
-      : (scores[pid] ?? 0).toLocaleString();
+      : undefined;
 
   return (
     <div
       onClick={onToggleScoreMode}
-      title={showScoreDiff ? "点击切换为四家点数" : "点击切换为与当前主视角的分差"}
       style={{
         position: "absolute",
         top: "50%", left: "50%",
@@ -936,25 +1066,33 @@ function CenterPanel({
     >
       {/* 顶部：对面（北）分数 */}
       <ScoreMarker
-        value={scoreText(topPid)}
+        score={scores[topPid] ?? 0}
+        diffText={diffText(topPid)}
+        jikaze={getJikazeLabel(topPid, oya)}
         color={SEAT_COLORS[topPid]}
         style={{ top: 4, left: "50%", transform: "translateX(-50%)" }}
       />
       {/* 左侧：左家（东）分数 */}
       <ScoreMarker
-        value={scoreText(leftPid)}
+        score={scores[leftPid] ?? 0}
+        diffText={diffText(leftPid)}
+        jikaze={getJikazeLabel(leftPid, oya)}
         color={SEAT_COLORS[leftPid]}
         style={{ left: 3, top: "50%", transform: "translateY(-50%) rotate(90deg)", transformOrigin: "left center" }}
       />
       {/* 右侧：右家（西）分数 */}
       <ScoreMarker
-        value={scoreText(rightPid)}
+        score={scores[rightPid] ?? 0}
+        diffText={diffText(rightPid)}
+        jikaze={getJikazeLabel(rightPid, oya)}
         color={SEAT_COLORS[rightPid]}
         style={{ right: 3, top: "50%", transform: "translateY(-50%) rotate(270deg)", transformOrigin: "right center" }}
       />
       {/* 底部：自家（南）分数 */}
       <ScoreMarker
-        value={scoreText(humanId)}
+        score={scores[humanId] ?? 0}
+        diffText={diffText(humanId)}
+        jikaze={getJikazeLabel(humanId, oya)}
         color={SEAT_COLORS[humanId]}
         style={{ bottom: 4, left: "50%", transform: "translateX(-50%)" }}
       />
@@ -994,6 +1132,7 @@ export function MahjongTable({
   actionPending,
   mode = "battle",
   logitData,
+  activeTeacherModel,
   revealedOpponentHands,
   onToggleOpponentHands,
 }: {
@@ -1013,22 +1152,34 @@ export function MahjongTable({
   actionPending?: boolean;
   mode?: "battle" | "replay";
   logitData?: LogitTileData[];
-  revealedOpponentHands?: string[][] | null;
+  activeTeacherModel?: string | null;
+  revealedOpponentHands?: Array<string[] | null> | null;
   onToggleOpponentHands?: () => void;
 }) {
   const [reachPending, setReachPending] = useState(false);
   const [tableScale, setTableScale] = useState(1);
   const [showScoreDiff, setShowScoreDiff] = useState(false);
+  const [hideSelfHandLogitHints, setHideSelfHandLogitHints] = useState(false);
   const boardViewportRef = useRef<HTMLDivElement | null>(null);
   const {
     player_info, hand, tsumo_pai, discards, melds, reached,
-    dora_markers, scores, actor_to_move, bakaze, kyoku, honba,
+    dora_markers, scores, actor_to_move, bakaze, kyoku, honba, oya,
   } = state;
 
   const humanId  = state.human_player_id;
   const oppRight = (humanId + 1) % 4;
   const oppTop   = (humanId + 2) % 4;
   const oppLeft  = (humanId + 3) % 4;
+  const terminalWinner = state.round_result?.type === "hora" && state.round_result.actor !== undefined
+    ? Number(state.round_result.actor)
+    : -1;
+  const terminalRevealedHands = useMemo(() => {
+    if (terminalWinner < 0 || !state.revealed_hands) return null;
+    const hands = [null, null, null, null] as Array<string[] | null>;
+    hands[terminalWinner] = state.revealed_hands[terminalWinner] ?? null;
+    return hands;
+  }, [terminalWinner, state.revealed_hands]);
+  const effectiveRevealedOpponentHands = revealedOpponentHands ?? terminalRevealedHands;
 
   const [tablecloth, setTablecloth]             = useState<TableclothId>("default");
   const showActionBar = mode === "battle" && isMyTurn && !reachPending && !state.pending_reach[humanId] && !suppressActionBar;
@@ -1042,14 +1193,25 @@ export function MahjongTable({
   const topShowExtraTile = hasPendingExtraTile(state, oppTop);
   const leftShowExtraTile = hasPendingExtraTile(state, oppLeft);
   const rightShowExtraTile = hasPendingExtraTile(state, oppRight);
-  const topDiscardHole = getOpponentDiscardHole("north", revealedOpponentHands?.[oppTop] ?? [], discards[oppTop] || [], state.last_discard, oppTop, topConcealedCount);
-  const leftDiscardHole = getOpponentDiscardHole("east", revealedOpponentHands?.[oppLeft] ?? [], discards[oppLeft] || [], state.last_discard, oppLeft, leftConcealedCount);
-  const rightDiscardHole = getOpponentDiscardHole("west", revealedOpponentHands?.[oppRight] ?? [], discards[oppRight] || [], state.last_discard, oppRight, rightConcealedCount);
+  const topDiscardHole = getOpponentDiscardHole("north", effectiveRevealedOpponentHands?.[oppTop] ?? [], discards[oppTop] || [], state.last_discard, oppTop, topConcealedCount);
+  const leftDiscardHole = getOpponentDiscardHole("east", effectiveRevealedOpponentHands?.[oppLeft] ?? [], discards[oppLeft] || [], state.last_discard, oppLeft, leftConcealedCount);
+  const rightDiscardHole = getOpponentDiscardHole("west", effectiveRevealedOpponentHands?.[oppRight] ?? [], discards[oppRight] || [], state.last_discard, oppRight, rightConcealedCount);
   const claimedDiscardFlags = useMemo(
     () => buildClaimedDiscardFlags(discards, melds),
     [discards, melds],
   );
   const canToggleOpponentHands = mode === "replay" && Boolean(onToggleOpponentHands);
+  const selfHandLogitKey = useMemo(() => {
+    if (!logitData?.length) return "";
+    return logitData
+      .map((item) => {
+        const teacherKey = (item.teacherBars ?? [])
+          .map((bar) => `${bar.model}:${bar.pct.toFixed(3)}`)
+          .join(",");
+        return `${item.pai}:${item.isTsumo ? 1 : 0}:${item.pct.toFixed(3)}:${teacherKey}`;
+      })
+      .join("|");
+  }, [logitData]);
 
   // 赤宝牌归一化：5mr->5m, 5pr->5p, 5sr->5s
   const normTile = (t: string) => t === "5mr" ? "5m" : t === "5pr" ? "5p" : t === "5sr" ? "5s" : t;
@@ -1146,16 +1308,21 @@ export function MahjongTable({
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
+  useEffect(() => {
+    setHideSelfHandLogitHints(false);
+  }, [selfHandLogitKey]);
+
   const tableBg = TABLECLOTH_OPTIONS.find(t => t.id === tablecloth)?.color ?? "#1a2744";
+  const viewportBg = "var(--page-bg)";
 
   return (
-    <div className="flex flex-col h-full overflow-hidden" style={{ background: "var(--page-bg)" }}>
+    <div className="flex flex-col h-full overflow-hidden" style={{ background: viewportBg }}>
 
       {/* 牌桌主体 */}
       <div ref={boardViewportRef} style={{
         flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center",
         padding: 0, position: "relative",
-        background: "var(--page-bg)",
+        background: viewportBg,
         transition: "background var(--transition)",
       }}>
         <div style={{
@@ -1179,6 +1346,7 @@ export function MahjongTable({
             kyoku={kyoku}
             honba={honba}
             scores={scores}
+            oya={oya}
             humanId={humanId}
             topPid={oppTop}
             leftPid={oppLeft}
@@ -1205,7 +1373,7 @@ export function MahjongTable({
             position="north"
             color={SEAT_COLORS[oppTop]}
             playerName={player_info[oppTop]?.name || `P${oppTop}`}
-            jikaze={JIKAZE_CN[oppTop]}
+            jikaze={getJikazeLabel(oppTop, oya)}
             reached={reached[oppTop]}
             isActive={actor_to_move === oppTop}
             style={{ left: `calc(50% - ${CENTER_SIZE / 2 + 132}px)`, top: `calc(50% - ${CENTER_SIZE / 2 + 20}px)` }}
@@ -1214,7 +1382,7 @@ export function MahjongTable({
             position="east"
             color={SEAT_COLORS[oppLeft]}
             playerName={player_info[oppLeft]?.name || `P${oppLeft}`}
-            jikaze={JIKAZE_CN[oppLeft]}
+            jikaze={getJikazeLabel(oppLeft, oya)}
             reached={reached[oppLeft]}
             isActive={actor_to_move === oppLeft}
             style={{ left: `calc(50% - ${CENTER_SIZE / 2 + 132}px)`, top: `calc(50% + ${CENTER_SIZE / 2 + 12}px)` }}
@@ -1223,7 +1391,7 @@ export function MahjongTable({
             position="west"
             color={SEAT_COLORS[oppRight]}
             playerName={player_info[oppRight]?.name || `P${oppRight}`}
-            jikaze={JIKAZE_CN[oppRight]}
+            jikaze={getJikazeLabel(oppRight, oya)}
             reached={reached[oppRight]}
             isActive={actor_to_move === oppRight}
             style={{ left: `calc(50% + ${CENTER_SIZE / 2 + 22}px)`, top: `calc(50% - ${CENTER_SIZE / 2 + 20}px)` }}
@@ -1232,7 +1400,7 @@ export function MahjongTable({
             position="south"
             color={SEAT_COLORS[humanId]}
             playerName={player_info[humanId]?.name || `P${humanId}`}
-            jikaze={JIKAZE_CN[humanId]}
+            jikaze={getJikazeLabel(humanId, oya)}
             reached={reached[humanId]}
             isActive={actor_to_move === humanId}
             style={{ left: `calc(50% + ${CENTER_SIZE / 2 + 22}px)`, top: `calc(50% + ${CENTER_SIZE / 2 + 12}px)` }}
@@ -1247,6 +1415,9 @@ export function MahjongTable({
               isHuman={true} highlightTile={selectedTile} highlightIdx={selectedTileIdx}
               onTileClick={mode === "replay" ? undefined : handleTileClick}
               logitData={logitData}
+              activeTeacherModel={activeTeacherModel}
+              hideLogitHints={hideSelfHandLogitHints}
+              onSelfHandHintToggle={() => setHideSelfHandLogitHints((v) => !v)}
             />
           </div>
 
@@ -1298,7 +1469,7 @@ export function MahjongTable({
               isHuman={false}
               concealedCount={topConcealedCount}
               showReplayDrawTile={topShowExtraTile}
-              revealedHand={revealedOpponentHands?.[oppTop] ?? null}
+              revealedHand={effectiveRevealedOpponentHands?.[oppTop] ?? null}
               discardHole={topDiscardHole}
               onOpponentHandToggle={canToggleOpponentHands ? onToggleOpponentHands : undefined}
             />
@@ -1312,7 +1483,7 @@ export function MahjongTable({
               isHuman={false}
               concealedCount={leftConcealedCount}
               showReplayDrawTile={leftShowExtraTile}
-              revealedHand={revealedOpponentHands?.[oppLeft] ?? null}
+              revealedHand={effectiveRevealedOpponentHands?.[oppLeft] ?? null}
               discardHole={leftDiscardHole}
               onOpponentHandToggle={canToggleOpponentHands ? onToggleOpponentHands : undefined}
             />
@@ -1326,7 +1497,7 @@ export function MahjongTable({
               isHuman={false}
               concealedCount={rightConcealedCount}
               showReplayDrawTile={rightShowExtraTile}
-              revealedHand={revealedOpponentHands?.[oppRight] ?? null}
+              revealedHand={effectiveRevealedOpponentHands?.[oppRight] ?? null}
               discardHole={rightDiscardHole}
               onOpponentHandToggle={canToggleOpponentHands ? onToggleOpponentHands : undefined}
             />

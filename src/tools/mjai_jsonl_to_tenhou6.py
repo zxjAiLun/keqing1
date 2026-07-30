@@ -1,354 +1,248 @@
+"""Convert mjai JSONL event streams to tenhou.net/6 JSON.
+
+The converter targets reviewer input smoke tests. It preserves complete hanchan
+action order well enough for mjai-reviewer's convlog to read the generated
+Tenhou6 JSON back into mjai events.
+"""
+
 from __future__ import annotations
 
-import argparse
+import gzip
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Iterable, Sequence
+
+_TSUMOGIRI = 60
+_ROUND_OFFSET = {"E": 0, "S": 4, "W": 8, "N": 12}
+_HONORS = {"E": 41, "S": 42, "W": 43, "N": 44, "P": 45, "F": 46, "C": 47}
 
 
-HONOR_TO_CODE = {
-    "E": 41,
-    "S": 42,
-    "W": 43,
-    "N": 44,
-    "P": 45,
-    "F": 46,
-    "C": 47,
-}
+class Tenhou6Kyoku:
+    def __init__(self, event: dict[str, Any]):
+        bakaze = str(event.get("bakaze", "E"))
+        kyoku = int(event.get("kyoku", 1))
+        self.meta = [_ROUND_OFFSET.get(bakaze, 0) + kyoku - 1, int(event.get("honba", 0)), int(event.get("kyotaku", 0))]
+        self.scores = [int(score) for score in event.get("scores", [25000, 25000, 25000, 25000])]
+        self.dora_indicators = [_tile_to_tenhou6(str(event["dora_marker"]))] if event.get("dora_marker") else []
+        self.ura_indicators: list[int] = []
+        self.haipai = [[_tile_to_tenhou6(str(tile)) for tile in hand] for hand in event.get("tehais", [[], [], [], []])]
+        while len(self.haipai) < 4:
+            self.haipai.append([])
+        self.takes: list[list[int | str]] = [[], [], [], []]
+        self.discards: list[list[int | str]] = [[], [], [], []]
+        self.results: list[Any] = []
+        self.last_draw: list[int | None] = [None, None, None, None]
+        self.reach_pending: list[bool] = [False, False, False, False]
 
-SUIT_BASE = {
-    "m": 10,
-    "p": 20,
-    "s": 30,
-}
-
-
-def mjai_tile_to_tenhou_code(tile: str) -> int:
-    """
-    Convert mjai tile string (e.g. "5p", "5pr", "E") into tenhou.net/6 tile code.
-    Red 5 tiles:
-      5mr -> 51, 5pr -> 52, 5sr -> 53
-    """
-    if tile in HONOR_TO_CODE:
-        return HONOR_TO_CODE[tile]
-
-    if len(tile) == 2 and tile[0].isdigit() and tile[1] in SUIT_BASE:
-        num = int(tile[0])
-        return SUIT_BASE[tile[1]] + num
-
-    if len(tile) == 3 and tile[0].isdigit() and tile[2] == "r" and tile[1] in SUIT_BASE:
-        num = int(tile[0])
-        if num != 5:
-            return SUIT_BASE[tile[1]] + num
-        return 50 + {"m": 1, "p": 2, "s": 3}[tile[1]]
-
-    raise ValueError(f"unsupported mjai tile: {tile!r}")
+    def as_tenhou6(self) -> list[Any]:
+        entry: list[Any] = [self.meta, self.scores, self.dora_indicators, self.ura_indicators]
+        for seat in range(4):
+            entry.append(self.haipai[seat])
+            entry.append(self.takes[seat])
+            entry.append(self.discards[seat])
+        entry.append(self.results)
+        return entry
 
 
-def dora_indicator_code(tile: str) -> int:
-    """
-    Convert dora indicator tile to tenhou code.
-    Red 5 tiles should be preserved as red 5 codes (51/52/53).
-    e.g. "5pr" -> 52, "5mr" -> 51, "5sr" -> 53
-    """
-    if len(tile) == 3 and tile[0] == "5" and tile[2] == "r" and tile[1] in SUIT_BASE:
-        return 50 + {"m": 1, "p": 2, "s": 3}[tile[1]]
-    return mjai_tile_to_tenhou_code(tile)
+def _tile_to_tenhou6(tile: str) -> int:
+    tile = tile.strip()
+    if tile in _HONORS:
+        return _HONORS[tile]
+    if len(tile) < 2:
+        raise ValueError(f"invalid tile {tile!r}")
+    number = int(tile[0])
+    suit = tile[1]
+    is_red = len(tile) >= 3 and tile[2] == "r"
+    if is_red and number == 5:
+        if suit == "m":
+            return 51
+        if suit == "p":
+            return 52
+        if suit == "s":
+            return 53
+    if suit == "m":
+        return 10 + number
+    if suit == "p":
+        return 20 + number
+    if suit == "s":
+        return 30 + number
+    raise ValueError(f"invalid tile suit in {tile!r}")
 
 
-def mjai_tile_to_two_digits(tile: str) -> str:
-    return f"{mjai_tile_to_tenhou_code(tile):02d}"
+def _code(tile: str | int) -> str:
+    value = tile if isinstance(tile, int) else _tile_to_tenhou6(tile)
+    return f"{int(value):02d}"
 
 
-def encode_chi(actor: int, target: int, pai: str, consumed: List[str]) -> str:
-    # tenhou format: "c" + called tile + two consumed tiles
-    c = [mjai_tile_to_two_digits(t) for t in consumed]
-    return "c" + mjai_tile_to_two_digits(pai) + c[0] + c[1]
+def _relative_target(actor: int, target: int) -> int:
+    rel = (int(target) - int(actor)) % 4
+    if rel not in {1, 2, 3}:
+        raise ValueError(f"invalid call target actor={actor}, target={target}")
+    return rel
 
 
-def encode_pon(actor: int, target: int, pai: str, consumed: List[str]) -> str:
-    # tenhou format (see mjai-reviewer/convlog/src/conv.rs):
-    # - from kamicha: "p" + pai + c0 + c1
-    # - from toimen : c0 + "p" + pai + c1
-    # - from shimocha: c0 + c1 + "p" + pai
-    c0 = mjai_tile_to_two_digits(consumed[0])
-    c1 = mjai_tile_to_two_digits(consumed[1])
-    pp = mjai_tile_to_two_digits(pai)
-
-    # kamicha = (actor + 3) % 4, toimen = (actor + 2) % 4, shimocha = (actor + 1) % 4
-    if target == (actor + 3) % 4:
-        return "p" + pp + c0 + c1
-    if target == (actor + 2) % 4:
-        return c0 + "p" + pp + c1
-    return c0 + c1 + "p" + pp
+def _pon_like_meld(marker: str, actor: int, target: int, called: str, consumed: Sequence[str]) -> str:
+    rel = _relative_target(actor, target)
+    called_code = _code(called)
+    consumed_codes = [_code(tile) for tile in consumed]
+    if len(consumed_codes) < 2:
+        raise ValueError(f"{marker} meld needs at least two consumed tiles")
+    if rel == 3:
+        return f"{marker}{called_code}{consumed_codes[0]}{consumed_codes[1]}"
+    if rel == 2:
+        return f"{consumed_codes[0]}{marker}{called_code}{consumed_codes[1]}"
+    return f"{consumed_codes[0]}{consumed_codes[1]}{marker}{called_code}"
 
 
-def encode_daiminkan(actor: int, target: int, pai: str, consumed: List[str]) -> str:
-    # consumed must be 3 tiles (excluding called pai).
-    c = [mjai_tile_to_two_digits(t) for t in consumed]
-    pp = mjai_tile_to_two_digits(pai)
-
-    # See conv.rs mapping for where the 'm' appears.
-    if target == (actor + 3) % 4:
-        # m + pai + c0 + c1 + c2
-        return "m" + pp + c[0] + c[1] + c[2]
-    if target == (actor + 2) % 4:
-        # c0 + m + pai + c1 + c2
-        return c[0] + "m" + pp + c[1] + c[2]
-    # c0 + c1 + c2 + m + pai
-    return c[0] + c[1] + c[2] + "m" + pp
+def _chi_meld(called: str, consumed: Sequence[str]) -> str:
+    if len(consumed) != 2:
+        raise ValueError("chi meld needs exactly two consumed tiles")
+    return f"c{_code(called)}{_code(consumed[0])}{_code(consumed[1])}"
 
 
-def encode_reach_discard(pai: str, tsumogiri: bool) -> str:
-    # Reach discard item in tenhou6: "r" + two digits, or "r60" for tsumogiri.
-    if tsumogiri:
-        return "r60"
-    return "r" + mjai_tile_to_two_digits(pai)
+def _daiminkan_meld(actor: int, target: int, called: str, consumed: Sequence[str]) -> str:
+    rel = _relative_target(actor, target)
+    tiles = [_code(tile) for tile in [called, *consumed]]
+    if len(tiles) != 4:
+        raise ValueError("daiminkan meld needs four tiles")
+    if rel == 3:
+        return "m" + "".join(tiles)
+    if rel == 2:
+        return f"{tiles[1]}m{tiles[0]}{tiles[2]}{tiles[3]}"
+    return f"{tiles[1]}{tiles[2]}m{tiles[0]}{tiles[3]}"
 
 
-def encode_ankan(event: Dict[str, Any]) -> str:
-    # tenhou6 ankan in discards: "<c0><c1><c2>a<pai>"
-    pai = event["pai"]
-    consumed = event.get("consumed", [])
-    if len(consumed) != 4:
-        raise ValueError(f"ankan expected 4 consumed tiles, got {len(consumed)}")
-    c = [mjai_tile_to_two_digits(t) for t in consumed[:3]]
-    return c[0] + c[1] + c[2] + "a" + mjai_tile_to_two_digits(pai)
+def _ankan_meld(consumed: Sequence[str]) -> str:
+    tiles = [_code(tile) for tile in consumed]
+    if len(tiles) != 4:
+        raise ValueError("ankan meld needs four consumed tiles")
+    return f"{tiles[0]}{tiles[1]}{tiles[2]}a{tiles[3]}"
 
 
-def encode_kakan(event: Dict[str, Any]) -> str:
-    # tenhou6 kakan in discards: "k" + <pai> + <c0><c1><c2>
-    pai = event["pai"]
-    consumed = event.get("consumed", [])
-    if len(consumed) != 3:
-        # Some logs may store 3 consumed tiles; keep strict for now.
-        raise ValueError(f"kakan expected 3 consumed tiles, got {len(consumed)}")
-    c = [mjai_tile_to_two_digits(t) for t in consumed]
-    return "k" + mjai_tile_to_two_digits(pai) + c[0] + c[1] + c[2]
+def _kakan_meld(added: str, consumed: Sequence[str]) -> str:
+    tiles = [_code(tile) for tile in [added, *consumed]]
+    if len(tiles) != 4:
+        raise ValueError("kakan meld needs one added tile and three consumed tiles")
+    return f"k{tiles[0]}{tiles[1]}{tiles[2]}{tiles[3]}"
 
 
-def load_jsonl(path: str | Path) -> List[Dict[str, Any]]:
-    events: List[Dict[str, Any]] = []
-    with Path(path).open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            events.append(json.loads(line))
-    return events
+def _score_label(event: dict[str, Any]) -> str:
+    actor = int(event.get("actor", 0))
+    target = int(event.get("target", actor))
+    deltas = [int(delta) for delta in event.get("deltas", [0, 0, 0, 0])]
+    if target == actor or event.get("tsumo"):
+        losses = sorted(abs(delta) for seat, delta in enumerate(deltas) if seat != actor and delta < 0)
+        if not losses:
+            return f"{max([0, *deltas])}点"
+        if len(set(losses)) == 1:
+            return f"30符1飜{losses[0]}点∀"
+        return f"30符1飜{losses[0]}-{losses[-1]}点"
+    payment = abs(deltas[target]) if 0 <= target < len(deltas) else max([0, *deltas])
+    return f"30符1飜{payment}点"
 
 
-def convert_mjai_jsonl_to_tenhou6(events: List[Dict[str, Any]]) -> Dict[str, Any]:
-    names: Optional[List[str]] = None
-    aka51 = aka52 = aka53 = False
+def _hora_detail(event: dict[str, Any]) -> list[Any]:
+    actor = int(event.get("actor", 0))
+    target = int(event.get("target", actor))
+    return [actor, target, actor, _score_label(event)]
 
-    # First pass: detect red tiles for rule flags (best-effort).
-    for ev in events:
-        if ev.get("type") == "start_kyoku" and isinstance(ev.get("tehais"), list):
-            for hand in ev["tehais"]:
-                for t in hand:
-                    if isinstance(t, str) and t.endswith("r") and t.startswith("5") and len(t) == 3:
-                        suit = t[1]
-                        if suit == "m":
-                            aka51 = True
-                        elif suit == "p":
-                            aka52 = True
-                        elif suit == "s":
-                            aka53 = True
 
-        if ev.get("type") == "start_game" and isinstance(ev.get("names"), list):
-            names = [str(x) for x in ev["names"]]
+def convert_mjai_jsonl_to_tenhou6(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    names = ["NoName", "NoName", "NoName", "NoName"]
+    logs: list[list[Any]] = []
+    kyoku: Tenhou6Kyoku | None = None
 
-    if names is None:
-        names = ["A", "B", "C", "D"]
-
-    aka = int(aka51 or aka52 or aka53)
-
-    log: List[List[Any]] = []
-    kyoku_active = False
-    kyoku_obj: List[Any] = []
-
-    # per-kyoku buffers - use dict to allow modification in nested scope
-    state: Dict[str, Any] = {
-        "kyoku_meta": [0, 0, 0],
-        "scores": [25000, 25000, 25000, 25000],
-        "dora_indicators": [],
-        "ura_indicators": [],
-        "haipai": [[] for _ in range(4)],
-        "takes": [[] for _ in range(4)],
-        "discards": [[] for _ in range(4)],
-        "reach_pending": [False, False, False, False],
-        "results": None,
-    }
-
-    def reset_kyoku() -> None:
-        nonlocal kyoku_active, kyoku_obj
-        kyoku_obj = []
-        kyoku_active = True
-        state["kyoku_meta"] = [0, 0, 0]
-        state["scores"] = [25000, 25000, 25000, 25000]
-        state["dora_indicators"] = []
-        state["ura_indicators"] = []
-        state["haipai"] = [[] for _ in range(4)]
-        state["takes"] = [[] for _ in range(4)]
-        state["discards"] = [[] for _ in range(4)]
-        state["reach_pending"] = [False, False, False, False]
-        state["results"] = None
-
-    def finalize_kyoku() -> None:
-        nonlocal kyoku_active, kyoku_obj
-        if not kyoku_active:
-            return
-        if state["results"] is None:
-            state["results"] = ["流局", [0, 0, 0, 0]]
-        kyoku_obj = [
-            state["kyoku_meta"],
-            state["scores"],
-            state["dora_indicators"],
-            state["ura_indicators"],
-            state["haipai"][0],
-            state["takes"][0],
-            state["discards"][0],
-            state["haipai"][1],
-            state["takes"][1],
-            state["discards"][1],
-            state["haipai"][2],
-            state["takes"][2],
-            state["discards"][2],
-            state["haipai"][3],
-            state["takes"][3],
-            state["discards"][3],
-            state["results"],
-        ]
-        log.append(kyoku_obj)
-        kyoku_active = False
-
-    for ev in events:
-        t = ev.get("type")
-        if t == "start_kyoku":
-            if kyoku_active:
-                finalize_kyoku()
-            reset_kyoku()
-            bakaze = ev.get("bakaze", "E")
-            bakaze_offset = {"E": 0, "S": 4, "W": 8, "N": 12}.get(bakaze, 0)
-            kyoku_num = bakaze_offset + int(ev["kyoku"]) - 1
-            state["kyoku_meta"] = [kyoku_num, int(ev["honba"]), int(ev["kyotaku"])]
-            state["scores"] = [int(x) for x in ev.get("scores", state["scores"])]
-
-            dora_marker = ev.get("dora_marker")
-            if isinstance(dora_marker, str) and dora_marker:
-                state["dora_indicators"] = [dora_indicator_code(dora_marker)]
+    for event in events:
+        event_type = event.get("type")
+        if event_type == "start_game":
+            raw_names = event.get("names")
+            if isinstance(raw_names, list) and len(raw_names) >= 4:
+                names = [str(name) for name in raw_names[:4]]
+        elif event_type == "start_kyoku":
+            if kyoku is not None:
+                logs.append(kyoku.as_tenhou6())
+            kyoku = Tenhou6Kyoku(event)
+        elif event_type == "tsumo" and kyoku is not None:
+            actor = int(event["actor"])
+            tile = _tile_to_tenhou6(str(event["pai"]))
+            kyoku.takes[actor].append(tile)
+            kyoku.last_draw[actor] = tile
+        elif event_type == "reach" and kyoku is not None:
+            kyoku.reach_pending[int(event["actor"])] = True
+        elif event_type == "dahai" and kyoku is not None:
+            actor = int(event["actor"])
+            tile = _tile_to_tenhou6(str(event["pai"]))
+            if kyoku.reach_pending[actor]:
+                kyoku.discards[actor].append(f"r{_TSUMOGIRI:02d}" if bool(event.get("tsumogiri")) else f"r{tile:02d}")
+                kyoku.reach_pending[actor] = False
+            elif bool(event.get("tsumogiri")):
+                kyoku.discards[actor].append(_TSUMOGIRI)
             else:
-                state["dora_indicators"] = []
-            state["ura_indicators"] = []
+                kyoku.discards[actor].append(tile)
+            kyoku.last_draw[actor] = None
+        elif event_type == "chi" and kyoku is not None:
+            actor = int(event["actor"])
+            kyoku.takes[actor].append(_chi_meld(str(event["pai"]), [str(tile) for tile in event.get("consumed", [])]))
+        elif event_type == "pon" and kyoku is not None:
+            actor = int(event["actor"])
+            kyoku.takes[actor].append(_pon_like_meld("p", actor, int(event["target"]), str(event["pai"]), [str(tile) for tile in event.get("consumed", [])]))
+        elif event_type == "daiminkan" and kyoku is not None:
+            actor = int(event["actor"])
+            kyoku.takes[actor].append(_daiminkan_meld(actor, int(event["target"]), str(event["pai"]), [str(tile) for tile in event.get("consumed", [])]))
+        elif event_type == "ankan" and kyoku is not None:
+            actor = int(event["actor"])
+            kyoku.discards[actor].append(_ankan_meld([str(tile) for tile in event.get("consumed", [])]))
+        elif event_type == "kakan" and kyoku is not None:
+            actor = int(event["actor"])
+            kyoku.discards[actor].append(_kakan_meld(str(event["pai"]), [str(tile) for tile in event.get("consumed", [])]))
+        elif event_type == "dora" and kyoku is not None:
+            kyoku.dora_indicators.append(_tile_to_tenhou6(str(event["dora_marker"])))
+        elif event_type == "hora" and kyoku is not None:
+            if event.get("ura_markers"):
+                kyoku.ura_indicators.extend(_tile_to_tenhou6(str(tile)) for tile in event.get("ura_markers", []))
+            if not kyoku.results:
+                kyoku.results.append("和了")
+            kyoku.results.append([int(delta) for delta in event.get("deltas", [0, 0, 0, 0])])
+            kyoku.results.append(_hora_detail(event))
+        elif event_type == "ryukyoku" and kyoku is not None:
+            kyoku.results = ["流局", [int(delta) for delta in event.get("deltas", [0, 0, 0, 0])], []]
+        elif event_type == "end_kyoku":
+            if kyoku is not None:
+                logs.append(kyoku.as_tenhou6())
+                kyoku = None
+        elif event_type == "end_game":
+            pass
 
-            tehais = ev.get("tehais", [])
-            if isinstance(tehais, list) and len(tehais) == 4:
-                for pid in range(4):
-                    for tile in tehais[pid]:
-                        if tile == "?":
-                            continue
-                        if not isinstance(tile, str):
-                            raise ValueError(f"unexpected tile type in tehais: {tile!r}")
-                        state["haipai"][pid].append(mjai_tile_to_tenhou_code(tile))
-
-        elif t in {"tsumo", "chi", "pon", "daiminkan"} and kyoku_active:
-            actor = int(ev["actor"])
-            if t == "tsumo":
-                state["takes"][actor].append(mjai_tile_to_tenhou_code(ev["pai"]))
-            elif t == "chi":
-                state["takes"][actor].append(encode_chi(actor, int(ev["target"]), ev["pai"], ev["consumed"]))
-            elif t == "pon":
-                state["takes"][actor].append(encode_pon(actor, int(ev["target"]), ev["pai"], ev["consumed"]))
-            elif t == "daiminkan":
-                state["takes"][actor].append(
-                    encode_daiminkan(actor, int(ev["target"]), ev["pai"], ev["consumed"])
-                )
-
-        elif t == "reach" and kyoku_active:
-            state["reach_pending"][int(ev["actor"])] = True
-
-        elif t == "dora" and kyoku_active:
-            dora_marker = ev.get("dora_marker")
-            if isinstance(dora_marker, str) and dora_marker:
-                state["dora_indicators"].append(dora_indicator_code(dora_marker))
-
-        elif t == "dahai" and kyoku_active:
-            actor = int(ev["actor"])
-            pai = ev.get("pai")
-            tsumogiri = bool(ev.get("tsumogiri", False))
-            if pai is None:
-                pai = "?"
-
-            if state["reach_pending"][actor]:
-                state["discards"][actor].append(encode_reach_discard(str(pai), tsumogiri))
-                state["reach_pending"][actor] = False
-            else:
-                if tsumogiri:
-                    state["discards"][actor].append(60)
-                else:
-                    state["discards"][actor].append(mjai_tile_to_tenhou_code(str(pai)))
-
-        elif t in {"ankan", "kakan"} and kyoku_active:
-            actor = int(ev["actor"])
-            if t == "ankan":
-                state["discards"][actor].append(encode_ankan(ev))
-            else:
-                state["discards"][actor].append(encode_kakan(ev))
-
-        elif t == "hora" and kyoku_active:
-            sd = ev.get("score_delta") or ev.get("deltas")
-            if not isinstance(sd, list) or len(sd) != 4:
-                sd = [0, 0, 0, 0]
-            actor = int(ev.get("actor", 0))
-            target = int(ev.get("target", 0))
-            from_who = int(ev.get("from_who", target))
-            ura_markers = ev.get("ura_markers")
-            if isinstance(ura_markers, list) and ura_markers:
-                state["ura_indicators"] = [mjai_tile_to_tenhou_code(m) if not isinstance(m, int) else m for m in ura_markers]
-            state["results"] = ["和了", [int(x) for x in sd], [actor, target, from_who, ""]]
-
-        elif t == "ryukyoku" and kyoku_active:
-            sd = ev.get("deltas") or ev.get("score_delta")
-            if not isinstance(sd, list) or len(sd) != 4:
-                sd = [0, 0, 0, 0]
-            state["results"] = ["流局", [int(x) for x in sd]]
-
-        elif t == "end_kyoku" and kyoku_active:
-            finalize_kyoku()
-
-    if kyoku_active:
-        finalize_kyoku()
+    if kyoku is not None:
+        logs.append(kyoku.as_tenhou6())
 
     return {
-        "ver": 2.3,
-        "ref": "mjai_export",
-        "rule": {
-            "disp": "般南喰赤",
-            "aka": aka,
-            "aka51": int(aka51),
-            "aka52": int(aka52),
-            "aka53": int(aka53),
-        },
+        "title": ["Mortal", ""],
         "name": names,
-        # tenhou viewer usually tolerates missing sc; keep a placeholder.
-        "sc": [0, 0, 0, 0, 0, 0, 0, 0],
-        "log": log,
+        "rule": {"disp": "Mortal", "aka": 1},
+        "log": logs,
     }
+
+
+def load_mjai_jsonl(path: Path) -> list[dict[str, Any]]:
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input-jsonl", required=True)
-    parser.add_argument("--output-json", required=True)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Convert mjai JSONL to tenhou.net/6 JSON")
+    parser.add_argument("input", type=Path)
+    parser.add_argument("output", type=Path)
     args = parser.parse_args()
 
-    events = load_jsonl(args.input_jsonl)
-    out = convert_mjai_jsonl_to_tenhou6(events)
-    Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.output_json).write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+    result = convert_mjai_jsonl_to_tenhou6(load_mjai_jsonl(args.input))
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    print(f"converted {args.input} -> {args.output} ({len(result['log'])} kyoku)")
 
 
 if __name__ == "__main__":
     main()
-

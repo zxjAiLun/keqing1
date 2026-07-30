@@ -5,7 +5,7 @@ import { Loader2 } from 'lucide-react';
 import type { ReplayData } from '../types/replay';
 import type { DecisionLogEntry } from '../types/replay';
 import { replayApi } from '../api/replayApi';
-import { actionLabel, sameReplayAction } from '../utils/tileUtils';
+import { actionLabel, isReplayPlayerDecision, isReplayReviewDiffForPlayer, sameReplayAction } from '../utils/tileUtils';
 import { CN_BAKAZE, SEAT_NAMES_CN } from '../utils/constants';
 import { normalizeReplayPlayerNames, replayPlayerDisplayName } from '../utils/replayNames';
 
@@ -32,20 +32,50 @@ function tileUrl(name: string) {
 interface TileWithMeta {
   name: string;
   logit?: number;
+  prob?: number;
   minLogit: number;
   logitRange: number;
   isTsumo: boolean;
+}
+
+function softmaxProbabilities(scores: number[]): number[] {
+  if (scores.length === 0) return [];
+  const maxScore = Math.max(...scores);
+  const exps = scores.map((score) => Math.exp(score - maxScore));
+  const total = exps.reduce((sum, value) => sum + value, 0);
+  if (!Number.isFinite(total) || total <= 0) return scores.map(() => 0);
+  return exps.map((value) => value / total);
+}
+
+function candidateScore(c: { logit: number; beam_score?: number; final_score?: number }): number {
+  return c.final_score ?? c.beam_score ?? c.logit;
+}
+
+function candidateProbabilities(candidates: Array<{ logit: number; beam_score?: number; final_score?: number; prob?: number }>): number[] {
+  const fallback = softmaxProbabilities(candidates.map(candidateScore));
+  return candidates.map((candidate, idx) => (
+    typeof candidate.prob === 'number' && Number.isFinite(candidate.prob)
+      ? candidate.prob
+      : fallback[idx] ?? 0
+  ));
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function buildSortedTiles(entry: DecisionLogEntry): TileWithMeta[] {
   const hand = entry.hand || [];
   const tsumo_pai = entry.tsumo_pai || null;
   const tileLogit: Record<string, number> = {};
+  const tileProb: Record<string, number> = {};
   let minLogit = 0, maxLogit = 1;
   if (entry.candidates && entry.candidates.length) {
-    entry.candidates.forEach(c => {
+    const probs = candidateProbabilities(entry.candidates);
+    entry.candidates.forEach((c, idx) => {
       if (c.action && c.action.type === 'dahai' && c.action.pai) {
         tileLogit[c.action.pai] = c.logit;
+        tileProb[c.action.pai] = probs[idx] ?? 0;
       }
     });
     const vals = Object.values(tileLogit);
@@ -59,6 +89,7 @@ function buildSortedTiles(entry: DecisionLogEntry): TileWithMeta[] {
   return sorted.map(name => ({
     name,
     logit: tileLogit[name],
+    prob: tileProb[name],
     minLogit,
     logitRange,
     isTsumo: name === tsumo_pai,
@@ -67,7 +98,9 @@ function buildSortedTiles(entry: DecisionLogEntry): TileWithMeta[] {
 
 function barHeight(tile: TileWithMeta): number {
   if (tile.logit === undefined) return 0;
-  const pct = Math.max(1, (tile.logit - tile.minLogit) / tile.logitRange * 100);
+  const pct = tile.prob !== undefined
+    ? Math.max(1, tile.prob * 100)
+    : Math.max(1, (tile.logit - tile.minLogit) / tile.logitRange * 100);
   return Math.max(3, Math.round(pct / 100 * MAX_BAR_H));
 }
 
@@ -96,12 +129,13 @@ function CandidateTable({
   chosen,
   gtAction,
 }: {
-  candidates: Array<{ action: import('../types/replay').Action; logit: number; beam_score?: number; final_score?: number }>;
+  candidates: Array<{ action: import('../types/replay').Action; logit: number; beam_score?: number; final_score?: number; prob?: number }>;
   chosen: import('../types/replay').Action | null;
   gtAction: import('../types/replay').Action | null;
 }) {
   const hasFinal = candidates.some(c => c.final_score !== undefined);
   const hasBeam = candidates.some(c => c.beam_score !== undefined);
+  const probs = candidateProbabilities(candidates);
   return (
     <div style={{ marginTop: 6, fontSize: 11, overflowX: 'auto' }}>
       <table style={{ borderCollapse: 'collapse', width: '100%' }}>
@@ -111,6 +145,7 @@ function CandidateTable({
             <th style={{ padding: '2px 8px', textAlign: 'right', color: '#475569', borderBottom: '1px solid #e2e8f0', fontFamily: 'monospace' }}>Logit</th>
             {hasFinal && <th style={{ padding: '2px 8px', textAlign: 'right', color: '#475569', borderBottom: '1px solid #e2e8f0', fontFamily: 'monospace' }}>Final</th>}
             {hasBeam && <th style={{ padding: '2px 8px', textAlign: 'right', color: '#475569', borderBottom: '1px solid #e2e8f0', fontFamily: 'monospace' }}>Beam</th>}
+            <th style={{ padding: '2px 8px', textAlign: 'right', color: '#475569', borderBottom: '1px solid #e2e8f0', fontFamily: 'monospace' }}>P</th>
             <th style={{ padding: '2px 8px', borderBottom: '1px solid #e2e8f0' }}></th>
           </tr>
         </thead>
@@ -128,6 +163,7 @@ function CandidateTable({
                 <td style={{ padding: '2px 8px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #f1f5f9' }}>{c.logit >= 0 ? '+' : ''}{c.logit.toFixed(3)}</td>
                 {hasFinal && <td style={{ padding: '2px 8px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #f1f5f9' }}>{c.final_score !== undefined ? (c.final_score >= 0 ? '+' : '') + c.final_score.toFixed(3) : '—'}</td>}
                 {hasBeam && <td style={{ padding: '2px 8px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #f1f5f9' }}>{c.beam_score !== undefined ? (c.beam_score >= 0 ? '+' : '') + c.beam_score.toFixed(3) : '—'}</td>}
+                <td style={{ padding: '2px 8px', textAlign: 'right', fontFamily: 'monospace', borderBottom: '1px solid #f1f5f9' }}>{((probs[i] ?? 0) * 100).toFixed(1)}%</td>
                 <td style={{ padding: '2px 8px', fontSize: 10, color: '#666', borderBottom: '1px solid #f1f5f9', whiteSpace: 'nowrap' }}>{marks}</td>
               </tr>
             );
@@ -142,30 +178,113 @@ function CandidateTable({
 // 统计面板
 // ---------------------------------------------------------------------------
 export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () => void }) {
-  const log = data.log.filter(e => !e.is_obs);
-  const total = log.length;
-  const match = log.filter((e) => sameReplayAction(e.chosen, e.gt_action)).length;
-  const pct = total ? (match / total * 100).toFixed(1) : '0.0';
-  const dahaiCount = log.filter(e => e.chosen?.type === 'dahai').length;
-  const dahaiRate = total ? ((dahaiCount / total) * 100).toFixed(0) : '0';
+  const log = data.log.filter(
+    e => isReplayPlayerDecision(e, data.player_id) && !e.comparison_exempt,
+  );
+  const fallbackTotal = log.length;
+  const fallbackMatch = log.filter((e) => sameReplayAction(e.chosen, e.gt_action)).length;
+  const teacherStats = (() => {
+    const stats = new Map<string, {
+      model: string;
+      total: number;
+      match: number;
+      badMove: number;
+      ratingScores: number[];
+      similarityScores: number[];
+    }>();
 
-  const byType: Record<string, { total: number; match: number }> = {};
-  log.forEach(e => {
-    const t = e.chosen?.type || '?';
-    if (!byType[t]) byType[t] = { total: 0, match: 0 };
-    byType[t].total++;
-    if (sameReplayAction(e.chosen, e.gt_action)) byType[t].match++;
-  });
-  const labels: Record<string, string> = { dahai:'打牌', none:'过', reach:'立直', chi:'吃', pon:'碰', daiminkan:'大明杠', ankan:'暗杠', kakan:'加杠', hora:'胡', ryukyoku:'流局' };
+    const ensure = (model: string) => {
+      const key = model || 'model';
+      let item = stats.get(key);
+      if (!item) {
+        item = { model: key, total: 0, match: 0, badMove: 0, ratingScores: [], similarityScores: [] };
+        stats.set(key, item);
+      }
+      return item;
+    };
 
-  const byTile: Record<string, { total: number; match: number }> = {};
-  log.forEach(e => {
-    if (e.chosen?.type !== 'dahai') return;
-    const t = e.chosen?.pai || '?';
-    if (!byTile[t]) byTile[t] = { total: 0, match: 0 };
-    byTile[t].total++;
-    if (e.gt_action?.type === 'dahai' && sameReplayAction(e.chosen, e.gt_action)) byTile[t].match++;
-  });
+    for (const entry of log) {
+      const reviews = entry.teacher_reviews && entry.teacher_reviews.length > 0
+        ? entry.teacher_reviews
+        : entry.teacher_review ? [entry.teacher_review] : [];
+      for (const review of reviews) {
+        const model = review.model || 'model';
+        const item = ensure(model);
+        const actual = review.actual_action ?? entry.gt_action;
+        const expected = review.expected_action ?? review.top1?.action ?? null;
+        const isImplicitPass = entry.gt_action == null && actual?.type === 'none';
+        if (actual && expected && !isImplicitPass) {
+          item.total += 1;
+          if (sameReplayAction(expected, actual)) item.match += 1;
+        }
+
+        if (!actual || isImplicitPass) continue;
+        const qValues: number[] = [];
+        let actualQ = finiteNumber(review.actual_q);
+        let actualProb = finiteNumber(review.actual_prob);
+        let expectedProb = finiteNumber(review.expected_prob ?? review.top1?.prob ?? review.best_prob);
+        for (const candidate of entry.candidates ?? []) {
+          const teachers = candidate.teachers ?? (candidate.teacher ? [candidate.teacher] : []);
+          const teacher = teachers.find((value) => value.model === model);
+          const q = finiteNumber(teacher?.q_value);
+          const prob = finiteNumber(teacher?.prob);
+          if (q !== null) {
+            qValues.push(q);
+            if (actualQ === null && sameReplayAction(candidate.action, actual)) {
+              actualQ = q;
+            }
+          }
+          if (prob !== null) {
+            if (actualProb === null && sameReplayAction(candidate.action, actual)) {
+              actualProb = prob;
+            }
+            if (expected && expectedProb === null && sameReplayAction(candidate.action, expected)) {
+              expectedProb = prob;
+            }
+          }
+        }
+        if (expected && actualProb !== null && expectedProb !== null) {
+          const penalty = sameReplayAction(expected, actual) ? 0 : Math.abs(actualProb - expectedProb);
+          item.similarityScores.push(Math.max(0, Math.min(1, 1 - penalty)));
+          if (!sameReplayAction(expected, actual) && actualProb < 0.05) {
+            item.badMove += 1;
+          }
+        }
+        if (actualQ === null || qValues.length < 2) continue;
+        if (!qValues.some((value) => value === actualQ)) qValues.push(actualQ);
+        const minQ = Math.min(...qValues);
+        const maxQ = Math.max(...qValues);
+        const range = maxQ - minQ;
+        if (range <= 0) continue;
+        item.ratingScores.push((actualQ - minQ) / range);
+      }
+    }
+
+    const modelOrder: Record<string, number> = {
+      ext_mortal: 0,
+      '70k': 1,
+      'V2 candidate': 2,
+    };
+    return Array.from(stats.values()).map((item) => {
+      const pct = item.total ? item.match / item.total * 100 : 0;
+      const rating = item.ratingScores.length
+        ? Math.round(1000 * 100 * Math.pow(item.ratingScores.reduce((sum, value) => sum + value, 0) / item.ratingScores.length, 2)) / 1000
+        : null;
+      const similarity = item.similarityScores.length
+        ? item.similarityScores.reduce((sum, value) => sum + value, 0) / item.similarityScores.length * 100
+        : null;
+      return {
+        ...item,
+        pct,
+        rating: rating === null ? null : Math.round(rating * 10) / 10,
+        similarity: similarity === null ? null : Math.round(similarity * 10) / 10,
+        badMoveRate: item.total ? item.badMove / item.total * 100 : 0,
+      };
+    }).sort((left, right) => (modelOrder[left.model] ?? 100) - (modelOrder[right.model] ?? 100));
+  })();
+
+  const hasTeacherStats = teacherStats.length > 0;
+  const fallbackPct = fallbackTotal ? fallbackMatch / fallbackTotal * 100 : 0;
 
   return (
     <>
@@ -176,27 +295,11 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
           <button className="stats-close" onClick={onClose}>×</button>
         </div>
         <div className="stats-body">
-          <div className="match-rate-bar">
-            <div className="pct">{pct}%</div>
-            <div className="sub">Bot 与玩家一致率 ({match} / {total})</div>
-          </div>
-
-          {data.rating !== null && data.rating !== undefined && (
-            <div style={{ textAlign: 'center', margin: '8px 0 4px' }}>
-              <span style={{ fontSize: 28, fontWeight: 700, color: data.rating >= 80 ? '#27ae60' : data.rating >= 60 ? '#3498db' : '#e74c3c' }}>
-                {data.rating.toFixed(1)}
-              </span>
-              <span style={{ fontSize: 13, color: '#64748b', marginLeft: 4 }}>/ 100 Rating</span>
-              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>基于 logit 差距的相似度评分</div>
-            </div>
-          )}
-
           <div className="stats-summary">
             {[
-              { val: total, lbl: '总决策数' },
-              { val: match, lbl: '匹配数' },
+              { val: hasTeacherStats ? teacherStats.length : 1, lbl: 'Review 模型数' },
+              { val: fallbackTotal, lbl: '总决策数' },
               { val: data.kyoku_order?.length || 0, lbl: '总局数' },
-              { val: `${dahaiRate}%`, lbl: '打牌占比' },
             ].map(item => (
               <div key={item.lbl} className="stats-card">
                 <div className="val">{item.val}</div>
@@ -205,44 +308,76 @@ export function StatsPanel({ data, onClose }: { data: ReplayData; onClose: () =>
             ))}
           </div>
 
-          {Object.entries(byType).length > 0 && (
-            <div className="stats-section-title">各动作准确率</div>
-          )}
-          {Object.entries(byType).map(([t, v]) => {
-            const p = v.total ? Math.round(v.match / v.total * 100) : 0;
-            const barClr = p > 70 ? '#27ae60' : p > 40 ? '#3498db' : '#e74c3c';
-            return (
-              <div key={t} className="stats-row">
-                <span className="lbl">{labels[t] || t}</span>
-                <div className="stats-bar-bg">
-                  <div className="stats-bar-fg" style={{ width: `${p}%`, background: barClr }}>{p}%</div>
-                </div>
-                <span className="val">{v.match}/{v.total}</span>
-              </div>
-            );
-          })}
-
-          {Object.keys(byTile).length > 0 && (
-            <div className="stats-section-title">打牌详情 Top10</div>
-          )}
-          {Object.entries(byTile).sort((a, b) => b[1].total - a[1].total).slice(0, 10).map(([t, v]) => {
-            const p = v.total ? Math.round(v.match / v.total * 100) : 0;
-            const barClr = p > 70 ? '#27ae60' : p > 40 ? '#3498db' : '#e74c3c';
-            return (
-              <div key={t} className="stats-row">
-                <span className="lbl">{t}</span>
-                <div className="stats-bar-bg">
-                  <div className="stats-bar-fg" style={{ width: `${p}%`, background: barClr }}>{p}%</div>
-                </div>
-                <span className="val">{v.match}/{v.total}</span>
-              </div>
-            );
-          })}
+          <div className="stats-section-title">模型 Review 统计</div>
+          <table style={{
+            width: '100%',
+            borderCollapse: 'collapse',
+            fontSize: 13,
+          }}>
+            <thead>
+              <tr style={{ color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' }}>
+                <th style={statsThStyle}>模型</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>类似度</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>一致率</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>恶手率</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>Rating</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>Match</th>
+                <th style={{ ...statsThStyle, textAlign: 'right' }}>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(hasTeacherStats ? teacherStats : [{
+                model: data.model_label || data.bot_type || 'Bot',
+                total: fallbackTotal,
+                match: fallbackMatch,
+                pct: fallbackPct,
+                similarity: null,
+                rating: data.rating,
+                badMove: 0,
+                badMoveRate: null,
+                ratingScores: [],
+                similarityScores: [],
+              }]).map((item) => {
+                const pct = item.total ? item.match / item.total * 100 : 0;
+                return (
+                  <tr key={item.model} style={{ borderBottom: '1px solid var(--border)' }}>
+                    <td style={statsTdStyle} title={item.model}>{item.model}</td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>
+                      {item.similarity === null || item.similarity === undefined ? '—' : `${item.similarity.toFixed(1)}%`}
+                    </td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>{pct.toFixed(1)}%</td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>
+                      {item.badMoveRate === null || item.badMoveRate === undefined ? '—' : `${item.badMoveRate.toFixed(1)}%`}
+                    </td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>
+                      {item.rating === null || item.rating === undefined ? '—' : item.rating.toFixed(1)}
+                    </td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>{item.match}</td>
+                    <td style={{ ...statsTdStyle, textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>{item.total}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
     </>
   );
 }
+
+const statsThStyle: React.CSSProperties = {
+  padding: '7px 8px',
+  fontSize: 11,
+  fontWeight: 800,
+  textTransform: 'uppercase',
+  letterSpacing: '0.04em',
+};
+
+const statsTdStyle: React.CSSProperties = {
+  padding: '8px',
+  color: 'var(--text-primary)',
+  fontWeight: 700,
+};
 
 // ---------------------------------------------------------------------------
 // 单步卡片
@@ -418,6 +553,13 @@ export function ReplayViewPage() {
   const replayId = replayIdFromRoute ?? replayIdFromQuery;
   const playerIdFromQuery = Number(params.get('player_id') ?? '0');
   const requestedPlayerId = Number.isFinite(playerIdFromQuery) ? playerIdFromQuery : 0;
+  const teacherReportFromQuery = params.get('teacher_report') || params.get('teacher_report_path');
+  const teacherReportsFromQuery = params
+    .getAll('teacher_reports')
+    .flatMap((value) => value.split(','))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const teacherReportsKey = teacherReportsFromQuery.join('\n');
   const initialData = routeState?.replayData && !replayIdFromQuery ? routeState.replayData : null;
   const initialError = initialData || replayId ? null : '未找到回放数据，请从首页上传牌谱';
 
@@ -435,7 +577,7 @@ export function ReplayViewPage() {
     let cancelled = false;
     const loadReplay = async () => {
       try {
-        const loaded = await replayApi.get(replayId, requestedPlayerId);
+        const loaded = await replayApi.get(replayId, requestedPlayerId, teacherReportFromQuery, teacherReportsFromQuery);
         if (!cancelled) {
           setData(loaded);
           setError(null);
@@ -452,7 +594,7 @@ export function ReplayViewPage() {
     return () => {
       cancelled = true;
     };
-  }, [data, replayId, requestedPlayerId]);
+  }, [data, replayId, requestedPlayerId, teacherReportFromQuery, teacherReportsKey]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -472,11 +614,7 @@ export function ReplayViewPage() {
   }) : [];
 
   const isDiff = useCallback((e: DecisionLogEntry) =>
-    data !== null &&
-    !e.is_obs &&
-    e.actor_to_move === data.player_id &&
-    e.gt_action !== null &&
-    !sameReplayAction(e.chosen, e.gt_action)
+    data !== null && isReplayReviewDiffForPlayer(e, data.player_id)
   , [data]);
 
   const jumpToPrevDiff = useCallback(() => {

@@ -1,30 +1,27 @@
 # Mortal Training Runbook
 
-Updated: 2026-05-04 (status note; original runbook 2026-04-28)
+Updated: 2026-05-09 (status note; original runbook 2026-04-28)
 
 This runbook follows the local `third_party/Mortal` Git repository. Do not use
 `xmodel`, `xmodel1`, or `keqingv4` checkpoints, logits, scores, or rollout
 outputs as teacher sources.
 
-## 2026-05-04 Status Note
+## 2026-05-09 Status Note
 
 This runbook remains the operational Mortal training reference, but its
-KeqingRL teacher-probe sections are now historical diagnostics. The active
-KeqingRL student handoff is:
+KeqingRL teacher-probe and student-handoff sections are historical diagnostics.
+The active strength route is no longer KeqingRL imitation. It is Mortal-native
+continued training, fine-tuning, selfplay training, reward/GRP/rank-point
+experimentation, and checkpoint evaluation using Mortal/libriichi encoding.
 
 ```text
-docs/keqingrl/keqingrl_mortal_action_q_handoff_2026_05_04.md
+libriichi state / Mortal obs_repr
+-> Mortal Brain encoder
+-> Mortal Dueling DQN action-value head
+-> optional future policy / value / rank heads on the same backbone
 ```
 
-The current KeqingRL growth path is direct Mortal Action-Q imitation with:
-
-```text
-scripts/run_keqingrl_mortal_imitation.py
-teacher_source=mortal-action-q
-Mortal checkpoint=artifacts/mortal_training/mortal.pth
-```
-
-Current best student checkpoint:
+The old best KeqingRL student checkpoint is retained only as archive evidence:
 
 ```text
 reports/keqingrl_mortal_action_q_imitation_train_20260430_source93_step20000_allseats_lr003_cont1/checkpoint_config_000/policy_iter_0004.pt
@@ -36,7 +33,13 @@ fail_closed=0
 
 Do not read older discard-only, terminal-poor, or paired-proxy notes as the
 current training gate. They explain how the project got here; they do not
-override the 2026-05-04 handoff.
+override the 2026-05-09 Mortal-native mainline.
+
+The current control document for this pivot is:
+
+```text
+docs/mortal/mainline_pivot_2026_05_09.md
+```
 
 ## Repository Contract
 
@@ -220,6 +223,37 @@ uv run python scripts/run_mortal_dqn_offline.py \
   --config artifacts/mortal_training/config.toml \
   --target-steps 400 \
   --num-workers 0
+```
+
+For unattended continued training, start the same runner in a detached session
+from the repository root. Set `TARGET_STEPS` to the desired absolute checkpoint
+step, not the number of additional steps:
+
+```bash
+TARGET_STEPS=80000
+LOG="logs/mortal_dqn_to_${TARGET_STEPS}_$(date +%Y%m%d%H%M%S).log"
+mkdir -p logs
+setsid bash -lc "cd /mnt/e/AUbuntuProject/project/keqing1; \
+  export TMPDIR=/tmp; \
+  echo \"wrapper start \$(date)\"; \
+  uv run python scripts/run_mortal_dqn_offline.py \
+    --config artifacts/mortal_training/config.toml \
+    --target-steps ${TARGET_STEPS} \
+    --num-workers 1 \
+    --log-every 50; \
+  rc=\$?; echo \"wrapper exit \$rc \$(date)\"; exit \$rc" \
+  > "$LOG" 2>&1 < /dev/null &
+echo "pid=$!"
+echo "log=$LOG"
+```
+
+Use `TMPDIR=/tmp` for detached runs on this WSL workspace; otherwise PyTorch
+DataLoader workers can fail while creating multiprocessing sockets on the
+mounted project drive. To check progress later:
+
+```bash
+tail -f "$LOG"
+pgrep -af 'run_mortal_dqn_offline|python.*mortal'
 ```
 
 It saves the same checkpoint keys needed by the KeqingRL teacher runtime:

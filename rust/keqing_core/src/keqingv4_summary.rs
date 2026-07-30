@@ -1339,9 +1339,12 @@ pub fn enumerate_keqingv4_reach_discards(snapshot: &Value, actor: usize) -> Vec<
         let normalized = strip_aka(tile);
         *hand.entry(normalized).or_insert(0) += 1;
     }
-    if let Some(tsumo) = snapshot.get("tsumo_pai").and_then(Value::as_str) {
-        let normalized = strip_aka(tsumo);
-        *hand.entry(normalized).or_insert(0) += 1;
+    let concealed_tile_count: u8 = hand.values().copied().sum();
+    if concealed_tile_count % 3 == 1 {
+        if let Some(tsumo) = snapshot.get("tsumo_pai").and_then(Value::as_str) {
+            let normalized = strip_aka(tsumo);
+            *hand.entry(normalized).or_insert(0) += 1;
+        }
     }
     if hand.is_empty() {
         return Vec::new();

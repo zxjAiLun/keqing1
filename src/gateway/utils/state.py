@@ -22,5 +22,8 @@ class State:
         self.wait: set[int] = set()
         # 天凤分配的实际座位号（从 UN 消息解析）
         self.seat: int = 0
+        # 四位玩家名（从 UN 消息解析），供 start_game 的 names 字段使用
+        # （原生 libriichi Bot 要求 names 为长度 4 的数组）
+        self.names: list[str] = ["", "", "", ""]
         # 已发出荣和/自摸请求，等待天凤确认，忽略后续事件
         self.hora_pending: bool = False

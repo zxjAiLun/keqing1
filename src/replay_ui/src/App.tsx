@@ -3,12 +3,15 @@ import { MainLayout } from './components/Layout/MainLayout';
 import { DashboardPage } from './pages/DashboardPage';
 import { HomePage } from './pages/HomePage';
 import { ReviewPage } from './pages/ReviewPage';
+import { ReviewHistoryPage } from './pages/ReviewHistoryPage';
 import { ReplayViewPage } from './pages/ReplayViewPage';
 import { GameBoardPage } from './pages/GameBoardPage';
 import { GameBoardReplayPage } from './pages/GameBoardReplayPage';
 import { BattlePage } from './pages/BattlePage';
 import { BotBattlePage } from './pages/BotBattlePage';
+import { PlayWithYouPage } from './pages/PlayWithYouPage';
 import { SelfplayAnomaliesPage } from './pages/SelfplayAnomaliesPage';
+import { MortalDecisionReviewPage } from './pages/MortalDecisionReviewPage';
 import { ThemeProvider } from './context/ThemeContext';
 import './styles/globals.css';
 
@@ -21,8 +24,12 @@ export default function App() {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/battle" element={<BattlePage />} />
             <Route path="/bot-battle" element={<BotBattlePage />} />
+          <Route path="/play-with-you" element={<PlayWithYouPage />} />
             <Route path="/review" element={<ReviewPage />} />
+            <Route path="/review-history" element={<ReviewHistoryPage />} />
             <Route path="/selfplay-anomalies" element={<SelfplayAnomaliesPage />} />
+            <Route path="/mortal-review" element={<MortalDecisionReviewPage />} />
+            <Route path="/keqingrl-review" element={<MortalDecisionReviewPage />} />
             <Route path="/game" element={<GameBoardPage />} />
             <Route path="/game-replay" element={<GameBoardReplayPage />} />
             <Route path="/replay" element={<ReplayViewPage />} />

@@ -1,5 +1,10 @@
 // src/replay_ui/src/api/replayApi.ts
-import type { ReplayData, ReplayMeta, SelfplayAnomalyReplayGroup } from '../types/replay';
+import type {
+  ReplayData,
+  ReplayMeta,
+  ReviewHistoryItem,
+  SelfplayAnomalyReplayGroup,
+} from '../types/replay';
 import type { BotType } from '../types/bot';
 import { DEFAULT_BOT_TYPE } from '../utils/botCatalog';
 
@@ -61,11 +66,27 @@ export const replayApi = {
   list: (): Promise<ReplayMeta[]> =>
     api<ReplayMeta[]>('/replay/list'),
 
+  listReviewHistory: (): Promise<ReviewHistoryItem[]> =>
+    api<ReviewHistoryItem[]>('/replay/review-history'),
+
   /** 获取回放完整数据 */
-  get: (replayId: string, playerId?: number): Promise<ReplayData> =>
-    api<ReplayData>(
-      `/replay/${encodeURIComponent(replayId)}${playerId !== undefined ? `?player_id=${playerId}` : ''}`
-    ),
+  get: (
+    replayId: string,
+    playerId?: number,
+    teacherReport?: string | null,
+    teacherReports: string[] = [],
+  ): Promise<ReplayData> => {
+    const params = new URLSearchParams();
+    if (playerId !== undefined) params.set('player_id', String(playerId));
+    if (teacherReport) params.set('teacher_report', teacherReport);
+    for (const report of teacherReports) {
+      if (report.trim()) params.append('teacher_reports', report.trim());
+    }
+    const query = params.toString();
+    return api<ReplayData>(
+      `/replay/${encodeURIComponent(replayId)}${query ? `?${query}` : ''}`
+    );
+  },
 
   /** 获取回放元信息 */
   getMeta: (replayId: string): Promise<ReplayMeta> =>

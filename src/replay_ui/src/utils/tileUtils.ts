@@ -80,7 +80,7 @@ export function actionLabel(action: { type: string; pai?: string; tsumogiri?: bo
     case 'dahai':
       return action.tsumogiri ? `摸切 ${action.pai}` : `打 ${action.pai}`;
     case 'reach':
-      return '立直';
+      return action.pai ? `${action.pai} 立直` : '立直';
     case 'reach_accepted':
       return '立直接受';
     case 'chi': {
@@ -143,8 +143,11 @@ function normalizedConsumedKey(consumed: string[] | undefined): string {
 export function actionComparableKey(action: ComparableAction | null | undefined): string {
   if (!action) return '';
   const type = normalizeReplayActionType(action.type);
-  if (type === 'none' || type === 'reach' || type === 'ryukyoku') {
+  if (type === 'none' || type === 'ryukyoku') {
     return JSON.stringify({ type });
+  }
+  if (type === 'reach') {
+    return JSON.stringify({ type, pai: action.pai ? normalizeTileKeepAka(action.pai) : null });
   }
   if (type === 'dahai') {
     return JSON.stringify({
@@ -184,8 +187,12 @@ export function sameReplayAction(
   const typeB = normalizeReplayActionType(b.type);
   if (typeA !== typeB) return false;
 
-  if (typeA === 'none' || typeA === 'reach' || typeA === 'ryukyoku') {
+  if (typeA === 'none' || typeA === 'ryukyoku') {
     return true;
+  }
+  if (typeA === 'reach') {
+    if (!a.pai && !b.pai) return true;
+    return Boolean(a.pai && b.pai && normalizeTileKeepAka(a.pai) === normalizeTileKeepAka(b.pai));
   }
 
   if (typeA === 'dahai') {
@@ -210,4 +217,82 @@ export function sameReplayAction(
   }
 
   return actionComparableKey(a) === actionComparableKey(b);
+}
+
+type ReplayDecisionLike = {
+  is_obs?: boolean;
+  comparison_exempt?: string | null;
+  actor_to_move?: number | null;
+  chosen?: ComparableAction | null;
+  gt_action?: ComparableAction | null;
+  candidates?: Array<{ action?: ComparableAction | null }>;
+  teacher_review?: TeacherReviewLike | null;
+  teacher_reviews?: TeacherReviewLike[];
+};
+
+type TeacherReviewLike = {
+  model?: string | null;
+  actual_action?: ComparableAction | null;
+  expected_action?: ComparableAction | null;
+  is_equal?: boolean | null;
+  q_loss?: number | null;
+  top1?: { action?: ComparableAction | null } | null;
+};
+
+function actionBelongsToPlayer(action: ComparableAction | null | undefined, playerId: number): boolean {
+  return action?.actor === playerId;
+}
+
+export function isReplayPlayerDecision(entry: ReplayDecisionLike, playerId: number): boolean {
+  if (entry.is_obs) return false;
+  if (entry.actor_to_move === playerId) return true;
+  if (actionBelongsToPlayer(entry.chosen, playerId)) return true;
+  if (actionBelongsToPlayer(entry.gt_action, playerId)) return true;
+  return Boolean(entry.candidates?.some((candidate) => actionBelongsToPlayer(candidate.action, playerId)));
+}
+
+export function isReplayDiffForPlayer(entry: ReplayDecisionLike, playerId: number): boolean {
+  return (
+    isReplayPlayerDecision(entry, playerId) &&
+    !entry.comparison_exempt &&
+    entry.gt_action !== null &&
+    entry.gt_action !== undefined &&
+    !sameReplayAction(entry.chosen, entry.gt_action)
+  );
+}
+
+export function isReplayReviewDiffForPlayer(
+  entry: ReplayDecisionLike,
+  playerId: number,
+  activeTeacherModel?: string | null,
+): boolean {
+  if (!isReplayPlayerDecision(entry, playerId)) return false;
+  if (entry.comparison_exempt) return false;
+
+  const teacherReviews = entry.teacher_reviews && entry.teacher_reviews.length > 0
+    ? entry.teacher_reviews
+    : entry.teacher_review ? [entry.teacher_review] : [];
+  if (teacherReviews.length === 0) {
+    return isReplayDiffForPlayer(entry, playerId);
+  }
+
+  const review = activeTeacherModel
+    ? teacherReviews.find((item) => item.model === activeTeacherModel) ?? teacherReviews[0]
+    : teacherReviews[0];
+  if (!review) return false;
+  const actualAction = review.actual_action
+    ?? (entry.gt_action == null && entry.chosen?.type === 'none' ? entry.chosen : null);
+  const expectedAction = review.expected_action ?? review.top1?.action ?? null;
+  if (actualAction && expectedAction && sameReplayAction(actualAction, expectedAction)) {
+    return false;
+  }
+  if (review.is_equal === false) return true;
+  if (typeof review.q_loss === 'number' && Number.isFinite(review.q_loss) && review.q_loss > 1e-9) {
+    return true;
+  }
+
+  if (actualAction && expectedAction) {
+    return !sameReplayAction(actualAction, expectedAction);
+  }
+  return false;
 }

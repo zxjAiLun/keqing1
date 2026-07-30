@@ -56,10 +56,10 @@ def test_normalize_replay_decisions_fills_response_gt_action_from_confirmed_acti
         ],
     }
 
-    normalized = normalize_replay_decisions(decisions, meta={"bot_type": "xmodel1"})
+    normalized = normalize_replay_decisions(decisions, meta={"bot_type": "mortal"})
 
     assert normalized["log"][0]["gt_action"]["type"] == "chi"
-    assert normalized["bot_type"] == "xmodel1"
+    assert normalized["bot_type"] == "mortal"
     assert normalized["match_count"] == 1
 
 
@@ -95,4 +95,52 @@ def test_normalize_replay_decisions_marks_unconfirmed_response_as_none():
     normalized = normalize_replay_decisions(decisions)
 
     assert normalized["log"][0]["gt_action"] == {"type": "none", "actor": 2}
+    assert normalized["match_count"] == 0
+
+
+def test_normalize_replay_decisions_exempts_chi_preempted_by_pon():
+    decisions = {
+        "player_id": 0,
+        "log": [
+            {
+                "is_obs": False,
+                "chosen": {
+                    "type": "chi",
+                    "actor": 0,
+                    "target": 3,
+                    "pai": "5s",
+                    "consumed": ["6s", "7s"],
+                },
+                "gt_action": None,
+                "candidates": [
+                    {"action": {"type": "chi", "actor": 0, "target": 3, "pai": "5s"}},
+                    {"action": {"type": "none"}},
+                ],
+            },
+            {
+                "is_obs": True,
+                "chosen": {
+                    "type": "pon",
+                    "actor": 1,
+                    "target": 3,
+                    "pai": "5s",
+                    "consumed": ["5s", "5sr"],
+                },
+                "gt_action": {
+                    "type": "pon",
+                    "actor": 1,
+                    "target": 3,
+                    "pai": "5s",
+                    "consumed": ["5s", "5sr"],
+                },
+            },
+        ],
+    }
+
+    normalized = normalize_replay_decisions(decisions)
+
+    pending = normalized["log"][0]
+    assert pending["gt_action"] == {"type": "none", "actor": 0}
+    assert pending["comparison_exempt"] == "response_preempted"
+    assert normalized["total_ops"] == 0
     assert normalized["match_count"] == 0

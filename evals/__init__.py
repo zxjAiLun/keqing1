@@ -1,2 +1,0 @@
-"""Evaluation harness package."""
-

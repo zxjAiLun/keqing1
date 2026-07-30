@@ -1,5 +1,20 @@
 from mahjong_env.scoring import HoraResult
 from replay.server import _normalize_replay_events
+from replay.server import _resolve_focus_replay_step
+
+
+def test_resolve_focus_replay_step_exact_and_nearest():
+    decisions = {
+        "log": [
+            {"source_event_index": 10},
+            {"source_event_index": 20},
+            {"source_event_index": 40},
+        ]
+    }
+
+    assert _resolve_focus_replay_step(decisions, 20) == (1, "exact")
+    assert _resolve_focus_replay_step(decisions, 23) == (1, "nearest")
+    assert _resolve_focus_replay_step(decisions, None) == (None, "missing")
 
 
 def test_normalize_replay_events_injects_legacy_kakan_accepted_before_followup_draw():

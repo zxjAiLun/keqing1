@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from mahjong_env.legal_actions import enumerate_legal_action_specs
+from mahjong_env.final_rank import final_ranks
 from mahjong_env.scoring import score_hora
 from mahjong_env.feature_tracker import SnapshotFeatureTracker
 from mahjong_env.state import GameState, PlayerState, TileStateError
@@ -61,6 +62,8 @@ def _shuffle_wall(seed: Optional[int] = None) -> List[str]:
 class BattleConfig:
     player_count: int = 4
     players: List[Dict] = field(default_factory=list)  # [{id, name, type}]
+    game_length: str = "hanchan"  # hanchan | tonpu
+    initial_score: int = 25000
     target_score: int = 30000
     allow_west_round: bool = True
     allow_agari_yame: bool = True
@@ -78,7 +81,7 @@ class BattleRoom:
     rinshan_index: int = 0
     dora_indicator_tiles: List[str] = field(default_factory=list)
     ura_indicator_tiles: List[str] = field(default_factory=list)
-    phase: str = "waiting"  # waiting | playing | ended
+    phase: str = "waiting"  # waiting | playing | hand_result | ended
     winner: Optional[int] = None
     human_player_id: int = 0  # 人类玩家所在的座位，-1 表示全Bot模式
     events: List[Dict] = field(default_factory=list)  # mjai 格式事件日志
@@ -86,6 +89,9 @@ class BattleRoom:
     pending_kakan: Optional[Dict] = None
     replay_draw_actor: Optional[int] = None  # 当前展示中的“摸到第14张”状态
     bot_event_cursor: Dict[int, int] = field(default_factory=dict)
+    rating_recorded: bool = False
+    round_result: Optional[Dict] = None
+    game_result: Optional[Dict] = None
     last_heartbeat: float = field(
         default_factory=lambda: __import__("time").time()
     )  # 最后心跳时间
@@ -145,11 +151,22 @@ class BattleManager:
         """检查游戏是否应该结束。"""
         if min(room.state.scores) < 0:
             return True
-        if room.state.bakaze not in ("S", "W"):
+
+        base_last_bakaze = "E" if room.config.game_length == "tonpu" else "S"
+        overtime_last_bakaze = "S" if room.config.game_length == "tonpu" else "W"
+        wind_order = ["E", "S", "W"]
+        try:
+            current_wind_index = wind_order.index(room.state.bakaze)
+            base_wind_index = wind_order.index(base_last_bakaze)
+            overtime_wind_index = wind_order.index(overtime_last_bakaze)
+        except ValueError:
             return False
 
         is_all_last = room.state.kyoku == 4
         if not is_all_last:
+            return False
+
+        if current_wind_index < base_wind_index:
             return False
 
         target_score = room.config.target_score
@@ -160,7 +177,7 @@ class BattleManager:
         dealer_is_top = current_oya in top_players
         renchan = self._is_renchan(room)
 
-        if room.state.bakaze == "S":
+        if current_wind_index == base_wind_index:
             if renchan:
                 if (
                     room.config.allow_agari_yame
@@ -169,9 +186,12 @@ class BattleManager:
                 ):
                     return True
                 return False
-            return max_score >= target_score and (room.state.bakaze != "W")
+            return max_score >= target_score
 
-        # West round: stop once target reached on all-last or once renchan ends there.
+        if current_wind_index < overtime_wind_index:
+            return False
+
+        # Overtime round: stop once the all-last dealer ends renchan or chooses agari-yame.
         if renchan:
             if (
                 room.config.allow_agari_yame
@@ -181,6 +201,24 @@ class BattleManager:
                 return True
             return False
         return True
+
+    def can_continue(self, room: BattleRoom) -> bool:
+        return room.phase == "hand_result" and not self.is_game_ended(room)
+
+    def finalize_game(self, room: BattleRoom, rating_updates: Optional[List[Dict]] = None) -> Dict:
+        if room.events and room.events[-1].get("type") != "end_game":
+            room.events.append({"type": "end_game"})
+        ranks = [rank + 1 for rank in final_ranks(room.state.scores, initial_oya=0)]
+        result = {
+            "final_scores": room.state.scores[:],
+            "ranks": ranks,
+            "rating_updates": rating_updates or [],
+        }
+        room.phase = "ended"
+        room.game_result = result
+        room.state.actor_to_move = None
+        room.replay_draw_actor = None
+        return result
 
     def _expected_oya_for_kyoku(self, room: BattleRoom) -> int:
         return (room.state.kyoku - 1) % 4
@@ -251,6 +289,9 @@ class BattleManager:
         room.state.last_tsumo_raw = [None, None, None, None]
         room.state.remaining_wall = room.remaining_wall()
         room.replay_draw_actor = None
+        room.winner = None
+        room.round_result = None
+        room.game_result = None
 
         for pid in range(4):
             room.state.players[pid] = PlayerState()
@@ -610,7 +651,7 @@ class BattleManager:
         """流局处理
         tenpai: 哪些玩家听牌，默认None表示无人听牌
         """
-        room.phase = "ended"
+        room.phase = "hand_result"
         room.replay_draw_actor = None
 
         if tenpai is None:
@@ -645,19 +686,19 @@ class BattleManager:
         room.pending_rinshan = False
         room.pending_kakan = None
 
-        room.events.append(
-            {
-                "type": "ryukyoku",
-                "deltas": deltas,
-                "scores": room.state.scores[:],
-                "honba": room.state.honba,
-                "state_honba": room.state.honba,
-                "kyotaku": room.state.kyotaku,
-                "state_kyotaku": room.state.kyotaku,
-                "oya": room.state.oya,
-                "tenpai_players": tenpai[:],
-            }
-        )
+        result = {
+            "type": "ryukyoku",
+            "deltas": deltas,
+            "scores": room.state.scores[:],
+            "honba": room.state.honba,
+            "state_honba": room.state.honba,
+            "kyotaku": room.state.kyotaku,
+            "state_kyotaku": room.state.kyotaku,
+            "oya": room.state.oya,
+            "tenpai_players": tenpai[:],
+        }
+        room.round_result = result
+        room.events.append(result)
         room.events.append({"type": "end_kyoku"})
 
     def hora(
@@ -669,7 +710,7 @@ class BattleManager:
         is_tsumo: bool = False,
         is_chankan: bool = False,
     ) -> Dict:
-        room.phase = "ended"
+        room.phase = "hand_result"
         room.winner = actor
         room.replay_draw_actor = None
         oya = room.state.oya
@@ -710,28 +751,28 @@ class BattleManager:
         room.pending_rinshan = False
         room.pending_kakan = None
 
-        room.events.append(
-            {
-                "type": "hora",
-                "actor": actor,
-                "target": target,
-                "pai": pai,
-                "is_tsumo": is_tsumo,
-                "deltas": deltas,
-                "scores": room.state.scores[:],
-                "han": scoring.han,
-                "fu": scoring.fu,
-                "yaku": scoring.yaku,
-                "yaku_details": scoring.yaku_details,
-                "cost": scoring.cost,
-                "honba": hora_honba,
-                "state_honba": room.state.honba,
-                "kyotaku": hora_kyotaku,
-                "state_kyotaku": room.state.kyotaku,
-                "oya": room.state.oya,
-                "ura_dora_markers": ura_dora_markers,
-            }
-        )
+        result = {
+            "type": "hora",
+            "actor": actor,
+            "target": target,
+            "pai": pai,
+            "is_tsumo": is_tsumo,
+            "deltas": deltas,
+            "scores": room.state.scores[:],
+            "han": scoring.han,
+            "fu": scoring.fu,
+            "yaku": scoring.yaku,
+            "yaku_details": scoring.yaku_details,
+            "cost": scoring.cost,
+            "honba": hora_honba,
+            "state_honba": room.state.honba,
+            "kyotaku": hora_kyotaku,
+            "state_kyotaku": room.state.kyotaku,
+            "oya": room.state.oya,
+            "ura_dora_markers": ura_dora_markers,
+        }
+        room.round_result = result
+        room.events.append(result)
         room.events.append({"type": "end_kyoku"})
 
         return {
@@ -832,7 +873,7 @@ class BattleManager:
 
     def prepare_turn(self, room: BattleRoom, actor: int) -> Optional[str]:
         """为 actor 准备回合：如需摸牌则摸牌，返回摸到的牌（或 None）。
-        适用于 bot 和人类，流局时返回 None 并设置 room.phase=ended。"""
+        适用于 bot 和人类，流局时返回 None 并设置 room.phase=hand_result。"""
         last_discard = room.state.last_discard
         is_response = last_discard and last_discard.get("actor") != actor
         is_kakan_response = room.state.last_kakan and room.state.last_kakan.get("actor") != actor
@@ -958,7 +999,7 @@ class BattleManager:
 
         # 准备回合（摸牌/流局判断）
         self.prepare_turn(room, actor)
-        if room.phase == "ended":
+        if room.phase != "playing":
             return None
 
         # 枚举合法动作并验证
@@ -1029,9 +1070,25 @@ class BattleManager:
                     action_dict["actor"] = player_id if spec.actor is None else spec.actor
                 legal_actions.append(action_dict)
 
+        revealed_hands = None
+        if room.phase in ("hand_result", "ended"):
+            revealed_hands = []
+            for player in room.state.players:
+                tiles: List[str] = []
+                for tile, count in sorted(player.hand.items()):
+                    tiles.extend([str(tile)] * int(count))
+                revealed_hands.append(tiles)
+            result = room.round_result or {}
+            if result.get("type") == "hora" and not result.get("is_tsumo"):
+                actor = int(result.get("actor", -1))
+                pai = result.get("pai")
+                if 0 <= actor < len(revealed_hands) and pai:
+                    revealed_hands[actor] = [*revealed_hands[actor], str(pai)]
+
         return {
             "game_id": room.game_id,
             "phase": room.phase,
+            "game_length": room.config.game_length,
             "winner": room.winner,
             "bakaze": room.state.bakaze,
             "kyoku": room.state.kyoku,
@@ -1055,6 +1112,10 @@ class BattleManager:
             "legal_actions": legal_actions,
             "remaining_wall": room.remaining_wall(),
             "human_player_id": room.human_player_id,
+            "round_result": room.round_result,
+            "game_result": room.game_result,
+            "can_continue": self.can_continue(room),
+            "revealed_hands": revealed_hands,
             "player_info": [
                 {
                     "player_id": pid,

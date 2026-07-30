@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 
 import pytest
 
@@ -10,6 +11,8 @@ from gateway.tenhou_bridge import (
     is_valid_tenhou_room,
     normalize_tenhou_room,
 )
+from gateway.tenhou_bridge import TenhouBridge
+from gateway.utils.state import State
 
 
 def test_room_validation_accepts_numeric_and_lobby_rooms() -> None:
@@ -49,3 +52,27 @@ def test_from_env_rejects_non_object_helo_json(monkeypatch) -> None:
 
     with pytest.raises(ValueError):
         TenhouBridgeConfig.from_env()
+
+
+def test_bridge_does_not_reconnect_after_connect_failure(monkeypatch) -> None:
+    calls = []
+
+    class FailingConnection:
+        async def __aenter__(self):
+            calls.append("connect")
+            raise OSError("simulated network drop")
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        "gateway.tenhou_bridge.websockets.connect", lambda *_args, **_kwargs: FailingConnection()
+    )
+
+    async def send_to_mjai(_message):
+        return {"type": "none"}
+
+    bridge = TenhouBridge(state=State("NoName", "L2147_9"), send_to_mjai=send_to_mjai)
+    with pytest.raises(OSError, match="simulated network drop"):
+        asyncio.run(bridge.run())
+    assert calls == ["connect"]

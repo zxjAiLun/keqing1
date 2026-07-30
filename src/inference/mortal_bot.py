@@ -8,12 +8,40 @@ from typing import Any, Optional
 
 import torch
 
-from inference import DefaultDecisionContextBuilder, DefaultRuntimeReviewExporter
+from inference.default_context import DefaultDecisionContextBuilder
+from inference.review import DefaultRuntimeReviewExporter
 from inference.contracts import DecisionResult, ModelAuxOutputs, ScoredCandidate
-from inference.runtime_bot import enumerate_legal_actions, inject_shanten_waits
-from keqingrl.mortal_teacher import MORTAL_ACTION_SPACE, MORTAL_DISCARD_ID_TO_TILE
+from mahjong_env.legal_actions import enumerate_legal_actions
 from mahjong_env.state import GameState
 from mahjong_env.tiles import normalize_tile
+
+MORTAL_ACTION_SPACE = 46
+MORTAL_DISCARD_ID_TO_TILE = (
+    "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m",
+    "1p", "2p", "3p", "4p", "5p", "6p", "7p", "8p", "9p",
+    "1s", "2s", "3s", "4s", "5s", "6s", "7s", "8s", "9s",
+    "E", "S", "W", "N", "P", "F", "C",
+    "5mr", "5pr", "5sr",
+)
+_MORTAL_UNSUPPORTED_ANNOUNCE_EVENTS = {"kakan_accepted"}
+
+
+def sanitize_event_for_mortal(event: dict[str, Any]) -> dict[str, Any] | None:
+    event_type = str(event.get("type", ""))
+    if event_type in _MORTAL_UNSUPPORTED_ANNOUNCE_EVENTS:
+        return None
+    if event_type == "none" and "actor" in event:
+        return None
+    return dict(event)
+
+
+def inject_shanten_waits(snap: dict, *, hand_list: list, melds_list: list, model_version: str) -> None:
+    from mahjong_env.replay import _calc_shanten_waits
+
+    shanten, waits_cnt, waits_tiles, _ = _calc_shanten_waits(hand_list, melds_list)
+    snap["shanten"] = shanten
+    snap["waits_count"] = waits_cnt
+    snap["waits_tiles"] = waits_tiles
 
 
 class MortalReviewBot:
@@ -35,6 +63,8 @@ class MortalReviewBot:
         enable_rule_based_agari_guard: bool = True,
         enable_review_log: bool = True,
         model_version: Optional[str] = None,
+        shared_mortal_engine: Any | None = None,
+        shared_model: Any | None = None,
     ) -> None:
         self.player_id = int(player_id)
         self.verbose = bool(verbose)
@@ -47,8 +77,8 @@ class MortalReviewBot:
         self._enable_review_log = bool(enable_review_log)
         self.decision_log: list[dict[str, Any]] = []
         self.game_state = GameState()
-        self.model = None
-        self._mortal_engine = None
+        self.model = shared_model
+        self._mortal_engine = shared_mortal_engine
 
         self._mortal_bot = self._load_native_mortal_bot(
             enable_amp=self._enable_amp,
@@ -85,14 +115,19 @@ class MortalReviewBot:
 
     @torch.no_grad()
     def react(self, event: dict[str, Any], gt_action: Optional[dict] = None) -> Optional[dict]:
-        line = json.dumps(event, ensure_ascii=False)
+        sanitized_event = sanitize_event_for_mortal(event)
+        line = json.dumps(sanitized_event, ensure_ascii=False) if sanitized_event is not None else None
         if not self._enable_review_log:
+            if line is None:
+                return None
             reaction_line = self._mortal_bot.react(line)
             if reaction_line is None:
                 return None
             return json.loads(reaction_line)
 
         ctx = self._context_builder.build(self.game_state, self.player_id, event)
+        if line is None:
+            return None
         reaction_line = self._mortal_bot.react(line)
         if ctx is None:
             return None
@@ -103,7 +138,7 @@ class MortalReviewBot:
         if reaction_line is None and not non_none:
             return {"type": "none", "actor": self.player_id}
         if reaction_line is None:
-            raise RuntimeError(f"Mortal did not return a reaction for review decision event: {event}")
+            return None
 
         reaction = json.loads(reaction_line)
         meta = dict(reaction.pop("meta", {}) or {})
@@ -124,6 +159,9 @@ class MortalReviewBot:
         )
         entry["mortal_meta"] = {
             "mask_bits": meta.get("mask_bits"),
+            "q_values": [float(value) for value in (meta.get("q_values") or [])],
+            "expanded_q_values": list(q_values),
+            "action_mask": list(action_mask),
             "is_greedy": meta.get("is_greedy"),
             "shanten": meta.get("shanten"),
             "at_furiten": meta.get("at_furiten"),

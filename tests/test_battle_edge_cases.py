@@ -203,7 +203,7 @@ def test_prepare_turn_uses_logical_remaining_wall_after_kan():
     drawn = manager.prepare_turn(room, 1)
 
     assert drawn is None
-    assert room.phase == "ended"
+    assert room.phase == "hand_result"
     assert room.events[-2]["type"] == "ryukyoku"
     assert room.wall_index == before_wall_index
 
@@ -741,8 +741,8 @@ def test_multiple_ron_not_simultaneously_processed():
     finally:
         gateway.battle.score_hora = original
 
-    # hora 后 phase 变为 ended，游戏结束
-    assert room.phase == "ended"
+    # hora 后先进入单局结算态，整场终局由续局状态机判断
+    assert room.phase == "hand_result"
     assert room.winner == 1
 
 

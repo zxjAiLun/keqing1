@@ -1,13 +1,16 @@
 // src/replay_ui/src/pages/BattlePage.tsx
 import { useState, useCallback, useEffect, useRef } from "react";
+import type { CSSProperties } from "react";
 import { MahjongTable } from "../components/BattleBoard/MahjongTable";
-import { startBattle, doAction, closeBattle, fetchWithTimeout } from "../api/battleApi";
+import { Tile } from "../components/BattleBoard/Tile";
+import { startBattle, doAction, closeBattle, fetchWithTimeout, nextKyoku } from "../api/battleApi";
 import { useAutoActions } from "../hooks/useAutoActions";
 import { useBattlePolling } from "../hooks/useBattlePolling";
 import { useConnectionManager } from "../hooks/useConnectionManager";
 import type { BattleState, Action, StartBattleRequest } from "../types/battle";
 import type { BotType } from "../types/bot";
-import { BOT_CATALOG, DEFAULT_BOT_TYPE, getBotCatalogEntry } from "../utils/botCatalog";
+import { DEFAULT_BOT_TYPE, GUI_BOT_CATALOG, getBotCatalogEntry } from "../utils/botCatalog";
+import { sortHand } from "../utils/tileUtils";
 
 export function BattlePage() {
   const [gameId, setGameId] = useState<string | null>(null);
@@ -21,6 +24,8 @@ export function BattlePage() {
   const [autoHora, setAutoHora] = useState(true);       // 自动胡牌，默认开
   const [noMeld, setNoMeld] = useState(false);           // 不响应附露，默认关
   const [autoTsumogiri, setAutoTsumogiri] = useState(false); // 自动摸切，默认关
+  const [gameLength, setGameLength] = useState<"tonpu" | "hanchan">("hanchan");
+  const [nextCountdown, setNextCountdown] = useState(5);
   const pendingActionRef = useRef(false);
   const humanPlayerId = state?.human_player_id ?? 0;
   const forcedAutoTsumogiri =
@@ -32,7 +37,7 @@ export function BattlePage() {
     setLoading(true);
     setError(null);
     try {
-      const req: StartBattleRequest = { player_name: playerName, bot_count: 3, bot_model: botModel };
+      const req: StartBattleRequest = { player_name: playerName, bot_count: 3, bot_model: botModel, game_length: gameLength };
       const res = await startBattle(req);
       setGameId(res.game_id);
       setState(res.state);
@@ -41,7 +46,7 @@ export function BattlePage() {
     } finally {
       setLoading(false);
     }
-  }, [playerName, botModel]);
+  }, [playerName, botModel, gameLength]);
 
   const handleAction = useCallback(
     async (action: Action) => {
@@ -77,6 +82,23 @@ export function BattlePage() {
       URL.revokeObjectURL(url);
     } catch {
       alert("导出失败");
+    }
+  }, [gameId]);
+
+  const handleNextKyoku = useCallback(async () => {
+    if (!gameId || pendingActionRef.current) return;
+    pendingActionRef.current = true;
+    setLoading(true);
+    try {
+      const res = await nextKyoku(gameId);
+      setState(res.state);
+      setSelectedTile(null);
+      setSelectedTileIdx(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "续局失败");
+    } finally {
+      setLoading(false);
+      pendingActionRef.current = false;
     }
   }, [gameId]);
 
@@ -127,6 +149,23 @@ export function BattlePage() {
     onStateUpdate: setState,
   });
 
+  useEffect(() => {
+    if (state?.phase !== "hand_result" || !state.can_continue) return;
+    setNextCountdown(5);
+    const startedAt = Date.now();
+    const intervalId = window.setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      setNextCountdown(Math.max(0, 5 - elapsed));
+    }, 250);
+    const timeoutId = window.setTimeout(() => {
+      handleNextKyoku();
+    }, 5000);
+    return () => {
+      window.clearInterval(intervalId);
+      window.clearTimeout(timeoutId);
+    };
+  }, [state?.phase, state?.can_continue, state?.bakaze, state?.kyoku, state?.honba, handleNextKyoku]);
+
   // 退出对局
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
   const handleQuit = useCallback(async () => {
@@ -153,42 +192,46 @@ export function BattlePage() {
     return (
       <div
         style={{
-          background: '#f0f2f5',
-          minHeight: '100%',
+          background: 'var(--page-bg)',
+          height: '100%',
+          overflow: 'auto',
+          padding: 14,
           display: 'flex',
           flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 24,
+          gap: 12,
         }}
       >
-        {/* 麻将图标 + 旋转动画 */}
         <div
           style={{
-            width: 64,
-            height: 64,
-            borderRadius: 16,
-            background: 'linear-gradient(135deg, #1e4a7a 0%, #0f2d4a 100%)',
             display: 'flex',
+            justifyContent: 'space-between',
             alignItems: 'center',
-            justifyContent: 'center',
-            boxShadow: '0 8px 24px rgba(30,74,122,0.3)',
-            marginBottom: 8,
-            animation: loading ? "spinIcon 1.5s linear infinite" : "floatIcon 3s ease-in-out infinite",
+            gap: 12,
+            flexWrap: 'wrap',
           }}
         >
-          <span style={{ color: '#fff', fontWeight: 700, fontSize: 24 }}>麻</span>
+          <div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: 'var(--text-primary)' }}>人机对战</div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>紧凑设置栏，启动后牌桌占满工作区。</div>
+          </div>
+          <button
+            onClick={startNewGame}
+            disabled={loading}
+            className="btn-primary"
+            style={{ height: 34, padding: '0 16px', fontSize: 13 }}
+          >
+            {loading ? '启动中...' : '开始对战'}
+          </button>
         </div>
-        <h1 style={{ fontSize: 28, fontWeight: 700, color: '#1f2937' }}>Keqing1 人机对战</h1>
 
         <div
+          className="card"
           style={{
-            background: '#fff',
-            border: '1px solid #e5e7eb',
-            borderRadius: 12,
-            padding: 20,
-            width: 320,
-            boxShadow: '0 4px 16px rgba(0,0,0,0.07)',
+            padding: 12,
+            display: 'grid',
+            gridTemplateColumns: 'minmax(180px, 240px) 1fr',
+            gap: 12,
+            alignItems: 'start',
           }}
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -200,78 +243,75 @@ export function BattlePage() {
               style={{
                 width: '100%',
                 padding: '9px 12px',
-                border: '1px solid #d1d5db',
-                borderRadius: 8,
-                fontSize: 14,
-                background: '#f9fafb',
-                color: '#1f2937',
+                border: '1px solid var(--border)',
+                borderRadius: 7,
+                fontSize: 13,
+                background: 'var(--card-bg)',
+                color: 'var(--text-primary)',
                 outline: 'none',
-                transition: 'border-color 0.15s',
               }}
-              onFocus={(e) => (e.target.style.borderColor = '#3498db')}
-              onBlur={(e) => (e.target.style.borderColor = '#d1d5db')}
             />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <label style={{ fontSize: 12, color: '#6b7280', fontWeight: 500 }}>对手模型</label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {BOT_CATALOG.map((bot) => (
+              <label style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 700 }}>规则长度</label>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                {([
+                  ["tonpu", "东风"],
+                  ["hanchan", "半庄"],
+                ] as const).map(([value, label]) => (
+                  <button
+                    key={value}
+                    onClick={() => setGameLength(value)}
+                    style={{
+                      height: 32,
+                      borderRadius: 6,
+                      border: `1px solid ${gameLength === value ? 'var(--accent)' : 'var(--border)'}`,
+                      background: gameLength === value ? 'rgba(52,152,219,0.10)' : 'var(--card-bg)',
+                      color: gameLength === value ? 'var(--accent)' : 'var(--text-primary)',
+                      fontSize: 13,
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <label style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 700 }}>对手模型</label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 6 }}>
+                {GUI_BOT_CATALOG.map((bot) => (
                   <button
                     key={bot.value}
                     onClick={() => setBotModel(bot.value)}
                     style={{
-                      padding: '10px 12px',
-                      borderRadius: 8,
+                      padding: '8px 10px',
+                      borderRadius: 7,
                       fontSize: 13,
                       fontWeight: 500,
-                      border: `2px solid ${botModel === bot.value ? '#1e4a7a' : '#d1d5db'}`,
-                      background: botModel === bot.value ? '#eff6ff' : '#f9fafb',
-                      color: '#374151',
-                      cursor: 'pointer', transition: 'all 0.15s',
+                      border: `1px solid ${botModel === bot.value ? 'var(--accent)' : 'var(--border)'}`,
+                      background: botModel === bot.value ? 'rgba(52,152,219,0.10)' : 'var(--card-bg)',
+                      color: 'var(--text-primary)',
+                      cursor: 'pointer',
                       textAlign: 'left',
                     }}
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center' }}>
                       <span style={{ fontWeight: 700 }}>{bot.label}</span>
-                      <span style={{ fontSize: 11, color: botModel === bot.value ? '#1e4a7a' : '#6b7280' }}>{bot.badge}</span>
+                      <span style={{ fontSize: 11, color: botModel === bot.value ? 'var(--accent)' : 'var(--text-muted)' }}>{bot.badge}</span>
                     </div>
-                    <div style={{ marginTop: 3, fontSize: 12, color: '#6b7280' }}>{bot.description}</div>
+                    <div style={{ marginTop: 3, fontSize: 11, color: 'var(--text-muted)' }}>{bot.description}</div>
                   </button>
                 ))}
               </div>
-              <div style={{ fontSize: 12, color: '#6b7280' }}>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                 当前选择：{selectedBot.label}，{selectedBot.description}
               </div>
             </div>
-            <button
-              onClick={startNewGame}
-              disabled={loading}
-              style={{
-                width: '100%',
-                padding: '10px',
-                borderRadius: 8,
-                border: 'none',
-                background: loading
-                  ? 'linear-gradient(135deg, #9ca3af 0%, #8b9298 100%)'
-                  : 'linear-gradient(135deg, #1e4a7a 0%, #0f2d4a 100%)',
-                color: '#fff',
-                fontSize: 15,
-                fontWeight: 600,
-                cursor: loading ? 'not-allowed' : 'pointer',
-                boxShadow: loading ? 'none' : '0 4px 12px rgba(30,74,122,0.25)',
-                transition: 'all 0.2s',
-              }}
-            >
-              {loading ? (
-                <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-                  <span style={{ animation: "dotPulse 1.2s ease-in-out infinite" }}>●</span>
-                  洗牌中...
-                </span>
-              ) : '开始对战'}
-            </button>
             {error && (
               <div style={{
-                fontSize: 13, textAlign: 'center', color: '#dc2626',
-                background: '#fef2f2', padding: '6px 10px', borderRadius: 6, border: '1px solid #fecaca'
+                fontSize: 13, color: 'var(--error)',
+                padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)'
               }}>
                 {error}
               </div>
@@ -279,163 +319,12 @@ export function BattlePage() {
           </div>
         </div>
 
-        <p style={{ fontSize: 13, color: '#9ca3af' }}>默认主线为 xmodel1；也可切到 keqingv4、mortal 或 rulebase。</p>
-
-        <style>{`
-          @keyframes spinIcon { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-          @keyframes floatIcon { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
-          @keyframes dotPulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
-        `}</style>
-      </div>
-    );
-  }
-
-  if (state.phase === "ended") {
-    const winner = state.winner;
-    const isWinner = winner === state.human_player_id;
-
-    return (
-      <div
-        style={{
-          background: 'var(--page-bg)',
-          minHeight: '100%',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 24,
-        }}
-      >
-        {/* 天凤风格终局面板 */}
-        <div
-          style={{
-            background: 'var(--result-panel-bg)',
-            border: '1px solid var(--result-panel-border)',
-            borderRadius: 8,
-            boxShadow: 'var(--result-panel-shadow)',
-            padding: '24px 28px 20px',
-            width: 480,
-            maxWidth: '92%',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 16,
-          }}
-        >
-          {/* 标题行 */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--result-title)' }}>
-              {isWinner ? '和了' : `和了 · ${state.player_info[winner ?? 0]?.name}`}
-            </div>
-            <div style={{
-              width: 36, height: 36, borderRadius: '50%',
-              background: isWinner
-                ? 'linear-gradient(135deg, #d4a853 0%, #b8922e 100%)'
-                : 'rgba(255,255,255,0.1)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0,
-            }}>
-              <span style={{ color: '#fff', fontWeight: 700, fontSize: 16 }}>
-                {isWinner ? '勝' : '負'}
-              </span>
-            </div>
-          </div>
-
-          {/* 排名列表 */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {[...state.scores.entries()].sort(([, a], [, b]) => b - a).map(([pid, score], rank) => {
-              const isHuman = pid === state.human_player_id;
-              const delta = score - (state.scores[state.human_player_id] ?? 0);
-              const rankLabel = ['1位', '2位', '3位', '4位'][rank];
-              return (
-                <div key={pid} style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  padding: '7px 10px',
-                  borderRadius: 5,
-                  background: isHuman ? 'rgba(255,255,255,0.06)' : 'transparent',
-                  border: isHuman ? '1px solid rgba(255,255,255,0.1)' : '1px solid transparent',
-                }}>
-                  <span style={{ fontSize: 11, color: 'var(--result-muted)', width: 24, flexShrink: 0 }}>{rankLabel}</span>
-                  <span style={{ fontSize: 13, color: isHuman ? 'var(--result-title)' : 'var(--result-muted)', flex: 1 }}>
-                    {state.player_info[pid]?.name ?? `Player ${pid}`}
-                  </span>
-                  <span style={{
-                    fontFamily: 'Menlo, monospace',
-                    fontSize: 13,
-                    color: pid === state.human_player_id
-                      ? (delta >= 0 ? 'var(--result-positive)' : 'var(--result-negative)')
-                      : 'var(--result-muted)',
-                  }}>
-                    {pid === state.human_player_id
-                      ? `${delta >= 0 ? '+' : ''}${delta.toLocaleString()} → `
-                      : ''}{score.toLocaleString()}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* 操作按钮 */}
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button
-            onClick={async () => {
-              if (gameId) await closeBattle(gameId);
-              setState(null);
-              setGameId(null);
-              setSelectedTile(null);
-            }}
-            style={{
-              padding: '8px 20px',
-              borderRadius: 6,
-              border: '1px solid var(--result-panel-border)',
-              background: 'var(--result-panel-bg)',
-              color: 'var(--result-muted)',
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
-          >
-            再来一局
-          </button>
-          <button
-            onClick={() => downloadExport("mjai")}
-            style={{
-              padding: '8px 16px',
-              borderRadius: 6,
-              border: '1px solid rgba(52,152,219,0.4)',
-              background: 'transparent',
-              color: 'rgba(52,152,219,0.8)',
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
-          >
-            Mjai Log
-          </button>
-          <button
-            onClick={() => downloadExport("tenhou6")}
-            style={{
-              padding: '8px 16px',
-              borderRadius: 6,
-              border: '1px solid rgba(39,174,96,0.4)',
-              background: 'transparent',
-              color: 'rgba(39,174,96,0.8)',
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
-          >
-            Tenhou6
-          </button>
-        </div>
       </div>
     );
   }
 
   return (
-    <div style={{ height: '100%', padding: 16, background: '#f0f2f5', position: 'relative' }}>
+    <div style={{ height: '100%', background: 'var(--page-bg)', position: 'relative', overflow: 'hidden' }}>
       <MahjongTable
         state={state}
         onAction={handleAction}
@@ -450,18 +339,54 @@ export function BattlePage() {
         actionPending={loading}
       />
 
-      {/* 退出按钮 */}
-      <button
-        onClick={() => setShowQuitConfirm(true)}
+      <div
         style={{
-          position: 'absolute', top: 24, right: 24, zIndex: 100,
-          padding: '6px 14px', borderRadius: 6, border: '1px solid #e74c3c',
-          background: 'rgba(255,255,255,0.9)', color: '#e74c3c',
-          fontSize: 13, fontWeight: 600, cursor: 'pointer',
+          position: 'absolute',
+          top: 10,
+          right: 10,
+          zIndex: 100,
+          display: 'flex',
+          gap: 6,
+          flexWrap: 'wrap',
+          justifyContent: 'flex-end',
         }}
       >
-        退出对局
-      </button>
+        <span style={{
+          padding: '5px 8px',
+          borderRadius: 6,
+          border: '1px solid var(--overlay-border)',
+          background: 'var(--overlay-bg)',
+          color: 'var(--control-muted)',
+          fontSize: 12,
+        }}>
+          {selectedBot.label} · {connStatus}
+        </span>
+        <button onClick={() => downloadExport("mjai")} style={battleToolButtonStyle}>Mjai</button>
+        <button onClick={() => downloadExport("tenhou6")} style={battleToolButtonStyle}>Tenhou6</button>
+        <button
+          onClick={() => setShowQuitConfirm(true)}
+          style={{ ...battleToolButtonStyle, borderColor: '#e74c3c', color: '#e74c3c' }}
+        >
+          退出
+        </button>
+      </div>
+
+      {(state.phase === "hand_result" || state.phase === "ended") && (
+        <BattleResultOverlay
+          state={state}
+          loading={loading}
+          nextCountdown={nextCountdown}
+          onNext={handleNextKyoku}
+          onRestart={async () => {
+            if (gameId) await closeBattle(gameId);
+            setState(null);
+            setGameId(null);
+            setSelectedTile(null);
+            setSelectedTileIdx(null);
+          }}
+          onExport={downloadExport}
+        />
+      )}
 
       {/* 退出确认对话框 */}
       {showQuitConfirm && (
@@ -523,3 +448,203 @@ export function BattlePage() {
     </div>
   );
 }
+
+function BattleResultOverlay({
+  state,
+  loading,
+  nextCountdown,
+  onNext,
+  onRestart,
+  onExport,
+}: {
+  state: BattleState;
+  loading: boolean;
+  nextCountdown: number;
+  onNext: () => void;
+  onRestart: () => void | Promise<void>;
+  onExport: (format: "mjai" | "tenhou6") => void;
+}) {
+  const round = state.round_result;
+  const isFinal = state.phase === "ended";
+  const resultScores = round?.scores ?? state.game_result?.final_scores ?? state.scores;
+  const deltas = round?.deltas ?? [0, 0, 0, 0];
+  const title = round?.type === "ryukyoku"
+    ? "流局"
+    : round?.type === "hora"
+      ? `${round.fu ?? 0}符${round.han ?? 0}翻`
+      : "对局结束";
+  const subtitle = round?.type === "hora"
+    ? `${state.player_info[round.actor ?? 0]?.name ?? `P${round.actor ?? 0}`} 和了`
+    : round?.type === "ryukyoku"
+      ? "本局流局"
+      : "最终结算";
+  const ratingByName = new Map(
+    (state.game_result?.rating_updates ?? []).map((item) => [item.display_name, item])
+  );
+  const rankedSeats = [...resultScores.entries()].sort((left, right) => right[1] - left[1]);
+  const winner = round?.type === "hora" && round.actor !== undefined ? Number(round.actor) : null;
+  const winTile = round?.type === "hora" ? round.pai ?? null : null;
+  const winnerTiles = winner != null ? [...(state.revealed_hands?.[winner] ?? [])] : [];
+  const handWithoutWin = winTile ? removeOneTileForDisplay(winnerTiles, winTile) : winnerTiles;
+  const yakuLines = round?.type === "hora"
+    ? formatYakuDetails(round.yaku_details, round.yaku)
+    : [];
+
+  return (
+    <div style={resultOverlayBackdropStyle}>
+      <div style={resultOverlayPanelStyle}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 16 }}>
+          <div style={{ color: "#f7f7f7", fontSize: 30, fontWeight: 500 }}>{isFinal ? "最终结算" : title}</div>
+          <div style={{ color: "rgba(255,255,255,0.72)", fontSize: 14 }}>{subtitle}</div>
+        </div>
+
+        {winner != null && winnerTiles.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            {sortHand(handWithoutWin, null).map((tile, idx) => (
+              <Tile key={`${tile}-${idx}`} tile={tile} size="small" />
+            ))}
+            {winTile && (
+              <div style={{ marginLeft: 8, outline: "2px solid #ff4d4f", outlineOffset: 1, borderRadius: 3 }}>
+                <Tile tile={winTile} size="small" />
+              </div>
+            )}
+          </div>
+        )}
+
+        {yakuLines.length ? (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: "4px 14px", color: "rgba(255,255,255,0.84)", fontSize: 15, lineHeight: 1.5 }}>
+            {yakuLines.map((line, idx) => (
+              <span key={`${line}-${idx}`}>{line}</span>
+            ))}
+          </div>
+        ) : null}
+
+        <div style={{ display: "grid", gap: 6 }}>
+          {rankedSeats.map(([pid, score], rank) => {
+            const player = state.player_info[pid];
+            const delta = deltas[pid] ?? 0;
+            const rating = ratingByName.get(player?.name ?? "");
+            return (
+              <div key={pid} style={resultRowStyle}>
+                <span style={{ color: "rgba(255,255,255,0.62)", width: 34 }}>{rank + 1}位</span>
+                <span style={{ flex: 1 }}>{player?.name ?? `P${pid}`}</span>
+                <span style={{ width: 90, textAlign: "right" }}>{score.toLocaleString()}</span>
+                <span style={{ width: 86, textAlign: "right", color: delta >= 0 ? "#00d4d8" : "#ff4d4f" }}>
+                  {delta === 0 ? "" : `${delta > 0 ? "+" : ""}${delta.toLocaleString()}`}
+                </span>
+                {isFinal && (
+                  <span style={{ width: 112, textAlign: "right", color: rating && rating.rating_delta >= 0 ? "#00d4d8" : "#ff4d4f" }}>
+                    {rating ? `${rating.rating_delta >= 0 ? "+" : ""}${rating.rating_delta.toFixed(1)} R` : ""}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
+          {!isFinal && state.can_continue && (
+            <button onClick={onNext} disabled={loading} style={resultPrimaryButtonStyle}>
+              下一局 {nextCountdown}
+            </button>
+          )}
+          {isFinal && (
+            <button onClick={onRestart} style={resultPrimaryButtonStyle}>再来一场</button>
+          )}
+          <button onClick={() => onExport("mjai")} style={resultSecondaryButtonStyle}>Mjai</button>
+          <button onClick={() => onExport("tenhou6")} style={resultSecondaryButtonStyle}>Tenhou6</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function removeOneTileForDisplay(tiles: string[], target: string): string[] {
+  const normalizedTarget = normalizeAkaForDisplay(target);
+  const copy = [...tiles];
+  const index = copy.findIndex((tile) => normalizeAkaForDisplay(tile) === normalizedTarget);
+  if (index >= 0) copy.splice(index, 1);
+  return copy;
+}
+
+function normalizeAkaForDisplay(tile: string): string {
+  if (tile === "5mr") return "5m";
+  if (tile === "5pr") return "5p";
+  if (tile === "5sr") return "5s";
+  return tile;
+}
+
+function formatYakuDetails(
+  details: NonNullable<BattleState["round_result"]>["yaku_details"] | undefined,
+  fallback: string[] | undefined,
+): string[] {
+  if (Array.isArray(details) && details.length > 0) {
+    return details.map((detail) => {
+      const name = detail.name || detail.key || "役";
+      const han = Number(detail.han ?? 0);
+      return han > 0 ? `${name} ${han}番` : name;
+    });
+  }
+  return (fallback ?? []).map((name) => String(name));
+}
+
+const battleToolButtonStyle: CSSProperties = {
+  padding: '5px 9px',
+  borderRadius: 6,
+  border: '1px solid var(--overlay-border)',
+  background: 'var(--overlay-bg)',
+  color: 'var(--control-muted)',
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: 'pointer',
+};
+
+const resultOverlayBackdropStyle: CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  zIndex: 150,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  background: "rgba(0,0,0,0.42)",
+};
+
+const resultOverlayPanelStyle: CSSProperties = {
+  width: 620,
+  maxWidth: "92vw",
+  padding: "28px 32px 24px",
+  border: "1px solid rgba(255,255,255,0.28)",
+  background: "rgba(5,12,18,0.88)",
+  boxShadow: "0 18px 56px rgba(0,0,0,0.34)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 18,
+};
+
+const resultRowStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  minHeight: 31,
+  color: "#f5f5f5",
+  fontSize: 18,
+  fontWeight: 500,
+  fontVariantNumeric: "tabular-nums",
+};
+
+const resultPrimaryButtonStyle: CSSProperties = {
+  height: 34,
+  padding: "0 16px",
+  border: "1px solid rgba(255,255,255,0.52)",
+  background: "rgba(255,255,255,0.16)",
+  color: "#fff",
+  fontSize: 13,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
+const resultSecondaryButtonStyle: CSSProperties = {
+  ...resultPrimaryButtonStyle,
+  background: "transparent",
+  color: "rgba(255,255,255,0.78)",
+};

@@ -13,6 +13,13 @@ from mahjong_env.state import apply_event
 from inference.contracts import DecisionContext
 
 
+def _same_hand_snapshot(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Compare hand contents without depending on tile ordering."""
+    from collections import Counter
+
+    return Counter(left.get("hand") or []) == Counter(right.get("hand") or [])
+
+
 class DefaultDecisionContextBuilder:
     def __init__(
         self,
@@ -46,6 +53,13 @@ class DefaultDecisionContextBuilder:
             raise
         if not isinstance(snapshot, dict):
             raise RuntimeError("Rust replay snapshot contract drift: payload must be a dict")
+        # The Python state is the authoritative replay state.  This also guards
+        # against a native extension built before a newly supported event (for
+        # example kakan_accepted) was added: stale native hands would otherwise
+        # leak illegal candidates into the review log.
+        python_snapshot = state.snapshot(actor)
+        if not _same_hand_snapshot(snapshot, python_snapshot):
+            return python_snapshot
         return snapshot
 
     def build(self, state, actor: int, event: dict[str, Any]) -> Optional[DecisionContext]:
@@ -74,7 +88,7 @@ class DefaultDecisionContextBuilder:
             pre_apply_hand = pre_snap.get("hand", [])
             pre_apply_melds = (pre_snap.get("melds") or [[], [], [], []])[actor]
             apply_event(state, event)
-        elif etype in ("chi", "pon", "daiminkan") and event.get("actor") == actor:
+        elif etype in ("chi", "pon") and event.get("actor") == actor:
             pre_snap = self._snapshot_for_actor(state, actor)
             pre_apply_hand = pre_snap.get("hand", [])
             pre_apply_melds = (pre_snap.get("melds") or [[], [], [], []])[actor]

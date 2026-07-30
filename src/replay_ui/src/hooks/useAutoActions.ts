@@ -15,7 +15,10 @@ export function useAutoActions({
   noMeld,
   autoTsumogiri,
 }: UseAutoActionsOptions) {
-  const isMyTurn = Boolean(state?.needs_input);
+  const isMyTurn = Boolean(
+    state?.needs_input &&
+    state.actor_to_move === (state.human_player_id ?? 0)
+  );
   const legalActions = isMyTurn ? (state?.legal_actions ?? []) : [];
 
   const hasHora    = isMyTurn && legalActions.some(a => a.type === "hora");

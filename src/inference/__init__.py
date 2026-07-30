@@ -1,61 +1,8 @@
-from inference.adapters import InferenceAdapter, RuntimeReviewExporter
-from inference.default_context import DefaultDecisionContextBuilder
-from inference.context import DecisionContextBuilder
-from inference.contracts import (
-    DecisionContext,
-    DecisionResult,
-    ModelAuxOutputs,
-    ModelForwardResult,
-    ScoredCandidate,
-    Xmodel1RuntimeOutputs,
-)
-from inference.keqing_adapter import KeqingModelAdapter
-from inference.review import (
-    DefaultRuntimeReviewExporter,
-    action_label,
-    action_primary_tile,
-    action_cmp_key,
-    candidate_to_log_dict,
-    same_action,
-    summarize_decision_matches,
-    summarize_reach_followup,
-)
-from inference.scoring import ActionScorer, DefaultActionScorer
-from inference.pt_map import (
-    expected_pt_for_all_seats,
-    expected_pt_for_scores,
-    expected_pt_from_rank_probs,
-    placement_utility_from_outputs,
-    pt_for_rank,
-    validate_pt_map,
-)
+"""Inference package.
 
-__all__ = [
-    "ActionScorer",
-    "DecisionContext",
-    "DecisionContextBuilder",
-    "DecisionResult",
-    "DefaultDecisionContextBuilder",
-    "DefaultRuntimeReviewExporter",
-    "DefaultActionScorer",
-    "expected_pt_for_all_seats",
-    "expected_pt_for_scores",
-    "expected_pt_from_rank_probs",
-    "placement_utility_from_outputs",
-    "InferenceAdapter",
-    "KeqingModelAdapter",
-    "ModelAuxOutputs",
-    "ModelForwardResult",
-    "RuntimeReviewExporter",
-    "ScoredCandidate",
-    "Xmodel1RuntimeOutputs",
-    "action_label",
-    "action_primary_tile",
-    "action_cmp_key",
-    "candidate_to_log_dict",
-    "same_action",
-    "summarize_decision_matches",
-    "summarize_reach_followup",
-    "pt_for_rank",
-    "validate_pt_map",
-]
+Active runtime code should import concrete submodules directly, for example
+``inference.mortal_bot`` or ``inference.bot_registry``. The historical
+Keqing/xmodel runtime stack is no longer imported eagerly from package init.
+"""
+
+__all__: list[str] = []

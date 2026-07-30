@@ -68,7 +68,8 @@ export type ActionType =
 
 export interface BattleState {
   game_id: string;
-  phase: "waiting" | "playing" | "ended";
+  phase: "waiting" | "playing" | "hand_result" | "ended";
+  game_length?: "tonpu" | "hanchan";
   winner: number | null;
   bakaze: string;
   kyoku: number;
@@ -92,6 +93,39 @@ export interface BattleState {
   legal_actions: Action[];
   remaining_wall: number;
   human_player_id: number;
+  round_result?: {
+    type: "hora" | "ryukyoku";
+    actor?: number;
+    target?: number;
+    pai?: string;
+    is_tsumo?: boolean;
+    deltas?: number[];
+    scores?: number[];
+    han?: number;
+    fu?: number;
+    yaku?: string[];
+    yaku_details?: Array<{ key?: string; name: string; han: number }>;
+    cost?: Action["cost"];
+    honba?: number;
+    kyotaku?: number;
+    tenpai_players?: number[];
+  } | null;
+  game_result?: {
+    final_scores: number[];
+    ranks: number[];
+    rating_updates?: Array<{
+      player_id: string;
+      display_name: string;
+      rating: number;
+      rating_delta: number;
+      games: number;
+      average_rank: number;
+      rank: number;
+      score: number;
+    }>;
+  } | null;
+  can_continue?: boolean;
+  revealed_hands?: string[][] | null;
   player_info: PlayerInfo[];
   /** 仅回放使用：当前处于摸牌前态的玩家，用于展示他家第 14 张手牌 */
   replay_draw_actor?: number | null;
@@ -102,6 +136,7 @@ export interface StartBattleRequest {
   bot_count?: number;
   seed?: number;
   bot_model?: BotType;
+  game_length?: "tonpu" | "hanchan";
 }
 
 export interface StartBattleResponse {
@@ -118,4 +153,14 @@ export interface ActionResponse {
   success: boolean;
   state: BattleState;
   bot_action?: Action;
+  rating_updates?: Array<{
+    player_id: string;
+    display_name: string;
+    rating: number;
+    rating_delta: number;
+    games: number;
+    average_rank: number;
+    rank: number;
+    score: number;
+  }>;
 }

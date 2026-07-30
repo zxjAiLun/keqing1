@@ -10,25 +10,25 @@ export interface BotCatalogEntry {
 
 export const BOT_CATALOG: BotCatalogEntry[] = [
   {
-    value: 'xmodel1',
-    label: 'xmodel1',
-    shortLabel: '主线',
-    badge: 'Mainline',
-    description: '当前训练窗口主线，GUI 默认模型。',
-  },
-  {
-    value: 'keqingv4',
-    label: 'keqingv4',
-    shortLabel: '备线',
-    badge: 'Backup',
-    description: '当前备线与 Rust 语义收敛路径。',
-  },
-  {
     value: 'mortal',
-    label: 'mortal',
-    shortLabel: 'Mortal',
-    badge: 'Review',
-    description: 'Mortal 原生 Brain+DQN checkpoint，用于打牌和牌谱 review。',
+    label: 'Mortal candidate',
+    shortLabel: 'candidate',
+    badge: 'V2 candidate',
+    description: 'V2@74000 存在时使用该权重，否则回退到 70k。',
+  },
+  {
+    value: '70k',
+    label: 'Mortal 70k',
+    shortLabel: '70k',
+    badge: '70k 锚点',
+    description: '固定 70k 训练步锚点权重。',
+  },
+  {
+    value: 'ext_mortal',
+    label: 'External Mortal',
+    shortLabel: 'External',
+    badge: '外部参考',
+    description: 'artifacts/external_mortal_20240308_best_min.pth。外部 Mortal 参考权重。',
   },
   {
     value: 'rulebase',
@@ -39,12 +39,18 @@ export const BOT_CATALOG: BotCatalogEntry[] = [
   },
 ];
 
-export const DEFAULT_BOT_TYPE: BotType = 'xmodel1';
+const GUI_MODEL_ORDER: BotType[] = ['ext_mortal', '70k', 'mortal'];
+
+export const GUI_BOT_CATALOG: BotCatalogEntry[] = BOT_CATALOG
+  .filter((entry) => entry.value !== 'rulebase')
+  .sort((left, right) => GUI_MODEL_ORDER.indexOf(left.value) - GUI_MODEL_ORDER.indexOf(right.value));
+
+export const DEFAULT_BOT_TYPE: BotType = 'mortal';
 
 export const BOT_CHECKPOINT_DEFAULTS: Record<BotType, string> = {
-  xmodel1: 'artifacts/models/xmodel1/best.pth',
-  keqingv4: 'artifacts/models/keqingv4/best.pth',
-  mortal: 'artifacts/mortal_serving/mortal.pth',
+  mortal: 'artifacts/experiments/model_pool_2026_07/V2_population_mixed_v4_warmstart_2026_07/checkpoints/mortal_74000.pth',
+  '70k': 'artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth',
+  ext_mortal: 'artifacts/external_mortal_20240308_best_min.pth',
   rulebase: '',
 };
 

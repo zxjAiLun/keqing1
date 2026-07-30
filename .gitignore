@@ -56,6 +56,7 @@ metrics.json
 dataset/
 dataset_debug*/
 *.json
+!configs/keqingrl/*.json
 !reports/keqingrl_learning_signal_ablation_20260425_small_cuda/sweep.json
 !reports/keqingrl_sampling_diversity_20260426_step36a_ep16/sampling_diversity.json
 !reports/keqingrl_rule_score_scale_probe_20260426_step36b_ep16/rule_score_scale_probe.json
@@ -66,6 +67,18 @@ dataset_debug*/
 !reports/keqingrl_sampling_diversity_20260426/sampling_diversity.json
 !reports/keqingrl_temperature_pilot_20260426_source93/temperature_pilot.json
 !reports/keqingrl_tempered_ratio_pilot_20260426_source93/tempered_ratio_pilot.json
+!tests/fixtures/replay_action_semantics_matrix.json
+
+# Reproducible project dependencies
+**/uv.lock
+!/uv.lock
+
+# Replay UI project manifests
+!src/replay_ui/package.json
+!src/replay_ui/package-lock.json
+!src/replay_ui/tsconfig.json
+!src/replay_ui/tsconfig.*.json
+
 *.jsonl
 *.jsonl.gz
 links.txt
@@ -111,7 +124,6 @@ Thumbs.db
 *.txt
 
 keqing1.code-workspace
-uv.lock
 .venv/
 
 tiles/
@@ -122,6 +134,11 @@ archive/
 # Local-only working surfaces
 docs/**
 !docs/project_overview_current.md
+!docs/mortal/
+!docs/mortal/archive_decisions_2026_05.md
+!docs/mortal/mainline_pivot_2026_05_09.md
+!docs/mortal/reward_pt_experiment_report_2026_05.md
+!docs/mortal/grp_audit_report_2026_05.md
 !docs/mortal_action_contract.md
 !docs/riichi_dev_mortal_handoff.md
 !docs/keqingrl/
@@ -135,3 +152,40 @@ AGENTS.md
 # Preprocess artifacts
 processed*/
 processed_*/
+
+# Playwright browser automation
+.playwright-reviewer-profile/
+.edge-reviewer-cdp-profile/
+node_modules/
+scripts/mortal/reviewer_browser_auto.mjs
+start_reviewer_browser_auto_game00000.cmd
+
+# Launcher build artifacts
+build/
+*.spec
+.workbench-launcher.pid
+
+# Curated Mortal experiment reports
+!reports/
+!reports/mortal/
+!reports/mortal/reward_ab_2026_07_epoch2/
+!reports/mortal/reward_ab_2026_07_epoch2/reward_ab_eval_1000h_summary.md
+!reports/mortal/reward_ab_2026_07_epoch2/reward_ab_eval_1000h_summary.json
+
+# Current Mortal reward research report
+!docs/mortal/reward_ab_2026_07.md
+
+# Current Mortal optimizer A/B research report
+!docs/mortal/optimizer_ab_2026_07.md
+
+# Current Mortal replay distribution audit
+!docs/mortal/data_distribution_audit_2026_07.md
+
+# Current Mortal mixed-vs-pure data route report
+!docs/mortal/data_route_ab_2026_07.md
+
+# Current Mortal objective learnability audit
+!docs/mortal/objective_learnability_2026_07.md
+
+# Current Mortal legal-mean objective A/B plan
+!docs/mortal/legal_mean_value_ab_2026_07.md

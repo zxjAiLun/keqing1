@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react';
 
 export const gameReplayRootStyle: CSSProperties = {
-  height: 'calc(100vh - var(--mobile-shell-offset, 0px))',
+  height: '100%',
   background: 'var(--page-bg)',
   overflow: 'hidden',
 };
@@ -109,14 +109,14 @@ export const perspectiveDrawerStyle: CSSProperties = {
 
 export const floatingTopBarWrapStyle: CSSProperties = {
   position: 'absolute',
-  top: 12,
-  left: 168,
-  right: 12,
+  top: 8,
+  left: 8,
+  right: 8,
   zIndex: 34,
   display: 'flex',
-  flexDirection: 'column',
+  flexDirection: 'row',
   alignItems: 'flex-start',
-  gap: 8,
+  gap: 6,
   pointerEvents: 'none',
 };
 
@@ -138,11 +138,12 @@ export const toolbarToggleStyle: CSSProperties = {
 export const floatingTopBarStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
-  gap: 10,
+  gap: 8,
   flexWrap: 'wrap',
-  padding: '7px 10px',
-  borderRadius: 8,
-  width: 'min(980px, calc(100% - 32px))',
+  padding: '5px 8px',
+  borderRadius: 7,
+  width: 'auto',
+  maxWidth: 'calc(100% - 80px)',
   background: 'var(--overlay-toolbar-bg)',
   border: '1px solid var(--overlay-toolbar-border)',
   backdropFilter: 'blur(8px)',
@@ -161,10 +162,13 @@ export const floatingPerspectiveStyle: CSSProperties = {
 };
 
 export const sidePanelContainerStyle: CSSProperties = {
-  width: 198,
-  minWidth: 198,
+  width: 332,
+  minWidth: 332,
   height: '100%',
   borderLeft: '1px solid var(--sidepanel-border)',
   background: 'var(--sidepanel-bg)',
-  backdropFilter: 'blur(6px)',
+  display: 'flex',
+  flexDirection: 'column',
+  minHeight: 0,
+  overflow: 'hidden',
 };

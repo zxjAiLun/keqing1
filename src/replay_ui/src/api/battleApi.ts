@@ -58,3 +58,13 @@ export async function doAction(req: ActionRequest): Promise<ActionResponse> {
   }
   return response.json();
 }
+
+export async function nextKyoku(gameId: string): Promise<ActionResponse> {
+  const response = await fetchWithTimeout(`${API_BASE}/next_kyoku/${gameId}`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to advance kyoku: ${response.statusText}`);
+  }
+  return response.json();
+}

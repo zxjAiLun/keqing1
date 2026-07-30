@@ -31,6 +31,18 @@ class TenhouProtocolError(TenhouBridgeError):
         super().__init__(f"Tenhou protocol error code={code} payload={payload}")
 
 
+class _DownstreamClosed(Exception):
+    """Raised when the local bot client (downstream) disconnected.
+
+    The bridge should stop entirely (not retry) in this case, because the only
+    reason it exists is to relay for that bot client.
+    """
+
+
+def _is_set(stop_event) -> bool:
+    return stop_event is not None and stop_event.is_set()
+
+
 @dataclass(slots=True)
 class TenhouBridgeConfig:
     uri: str = "wss://b-ww.mjv.jp"
@@ -136,6 +148,8 @@ class TenhouBridge:
                     "raw": payload,
                 }
             )
+        except _DownstreamClosed:
+            raise
         except Exception:
             logger.exception("failed to notify mjai client about Tenhou error")
 
@@ -168,14 +182,29 @@ class TenhouBridge:
                 break
             await asyncio.sleep(10)
 
-    async def run(self) -> None:
-        async with websockets.connect(
-            self.config.uri,
-            ssl=True,
-            origin=self.config.origin,
-            extra_headers=self.config.extra_headers(),
-        ) as websocket:
-            await self.send(websocket, json.dumps(self.config.build_helo(name=self.state.name)))
+    async def run(self, *, stop_event=None) -> None:
+        """Relay one Tenhou session only.
+
+        A clean close, a protocol error, or a network drop is terminal.  The
+        caller must explicitly summon a new bot session instead of attempting a
+        protocol-level rejoin.
+        """
+        if _is_set(stop_event):
+            return
+        connect_kwargs = {
+            "origin": self.config.origin,
+            "extra_headers": self.config.extra_headers(),
+        }
+        # Production Tenhou uses wss://.  Keeping ws:// usable for a local
+        # protocol simulator makes the full relay testable without weakening
+        # the production transport.
+        if self.config.uri.lower().startswith("wss://"):
+            connect_kwargs["ssl"] = True
+        async with websockets.connect(self.config.uri, **connect_kwargs) as websocket:
+            await self.send(
+                websocket,
+                json.dumps(self.config.build_helo(name=self.state.name)),
+            )
             consumer_task = asyncio.create_task(self.consumer_handler(websocket))
             producer_task = asyncio.create_task(self.producer_handler(websocket))
             done, pending = await asyncio.wait(
@@ -183,7 +212,20 @@ class TenhouBridge:
             )
             for task in pending:
                 task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
             for task in done:
                 exc = task.exception()
                 if exc is not None:
+                    # Tenhou commonly closes a table with an empty 1005 close
+                    # frame after sending BYE.  This is a normal terminal
+                    # session event, not a gateway crash; the bot client will
+                    # observe EOF and the launcher will leave other bots
+                    # running.
+                    if isinstance(exc, websockets.exceptions.ConnectionClosed):
+                        logger.info(
+                            "tenhou websocket closed for %s: %s",
+                            self.state.name,
+                            exc,
+                        )
+                        continue
                     raise exc

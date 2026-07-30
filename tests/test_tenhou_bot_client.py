@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest import mock
 
 import gateway.tenhou_bot_client as tbc
 
@@ -54,7 +55,7 @@ def test_start_game_creates_runtime_bot_and_defaults_to_none(monkeypatch, tmp_pa
         tbc.BotClientConfig(
             name="bot-b",
             room="2147_0",
-            bot_name="xmodel1",
+            bot_name="mortal",
             project_root=Path('/tmp/project'),
             model_path=fake_ckpt,
         )
@@ -63,7 +64,7 @@ def test_start_game_creates_runtime_bot_and_defaults_to_none(monkeypatch, tmp_pa
     response = client.handle_message({"type": "start_game", "id": 2, "names": []})
 
     assert created["player_id"] == 2
-    assert created["bot_name"] == "xmodel1"
+    assert created["bot_name"] == "mortal"
     assert response == {"type": "none", "actor": 2}
 
 
@@ -163,3 +164,40 @@ def test_public_opponent_post_meld_discard_marks_skip_hand_update(monkeypatch, t
 
     assert bot.events[-1]["type"] == "dahai"
     assert bot.events[-1]["skip_hand_update"] is True
+
+
+def test_run_does_not_reconnect_after_connection_failure(monkeypatch) -> None:
+    client = tbc.GatewayBotClient(
+        tbc.BotClientConfig(name="NoName", room="L2147", bot_name="rulebase")
+    )
+    calls = []
+    monkeypatch.setattr(client, "_preload_once", lambda: calls.append("preload"))
+
+    def fail_once(_stop_event):
+        calls.append("serve")
+        raise OSError("simulated socket drop")
+
+    monkeypatch.setattr(client, "_serve_once", fail_once)
+    client.run()
+
+    assert calls == ["preload", "serve"]
+
+
+def test_gateway_subprocess_receives_selected_port_and_owner_token(monkeypatch, tmp_path) -> None:
+    captured = {}
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return mock.Mock()
+
+    monkeypatch.setattr(tbc.subprocess, "Popen", fake_popen)
+    tbc.start_gateway_subprocess(
+        project_root=tmp_path,
+        port=19001,
+        owner_token="playwithyou-gateway",
+    )
+
+    assert "--port" in captured["command"]
+    assert captured["command"][captured["command"].index("--port") + 1] == "19001"
+    assert captured["command"][-2:] == ["--owner-token", "playwithyou-gateway"]
