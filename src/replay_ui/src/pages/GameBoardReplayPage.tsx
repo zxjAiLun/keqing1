@@ -1,6 +1,6 @@
 // src/replay_ui/src/pages/GameBoardReplayPage.tsx
 import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import { MahjongTable } from '../components/BattleBoard/MahjongTable';
 import { Tile } from '../components/BattleBoard/Tile';
@@ -9,6 +9,7 @@ import { StatsPanel } from './ReplayViewPage';
 import { entryToBattleState, buildLogitData, hasReplayPostAction, hasReplayReachPhase, isCollapsibleResponsePassStep, type ReplayBoardPhase } from '../utils/replayAdapter';
 import { useReplayPlayer } from '../hooks/useReplayPlayer';
 import { replayApi } from '../api/replayApi';
+import { routes } from '../routes';
 import { CN_BAKAZE } from '../utils/constants';
 import { isReplayReviewDiffForPlayer, TILE_ORDER } from '../utils/tileUtils';
 import { normalizeReplayPlayerNames, replayPlayerDisplayName } from '../utils/replayNames';
@@ -39,7 +40,8 @@ export function GameBoardReplayPage() {
   const navigate = useNavigate();
   const routeState = location.state as { replayData?: ReplayData; replayId?: string } | null;
   const params = new URLSearchParams(location.search);
-  const replayIdFromRoute = routeState?.replayId ?? params.get('id');
+  const { replayId: replayIdFromPath } = useParams();
+  const replayIdFromRoute = replayIdFromPath ?? routeState?.replayId ?? params.get('id');
   const playerIdFromQuery = Number(params.get('player_id') ?? '0');
   const requestedPlayerId = Number.isFinite(playerIdFromQuery) ? playerIdFromQuery : 0;
   const teacherReportFromQuery = params.get('teacher_report') || params.get('teacher_report_path');
@@ -379,11 +381,11 @@ export function GameBoardReplayPage() {
   const switchPerspective = (nextPid: number) => {
     if (!replayIdFromRoute) return;
     const nextParams = new URLSearchParams(location.search);
-    nextParams.set('id', replayIdFromRoute);
+    nextParams.delete('id');
     nextParams.set('player_id', String(nextPid));
     nextParams.set('step', String(currentStep));
     nextParams.set('phase', boardPhase);
-    navigate(`/game-replay?${nextParams.toString()}`);
+    navigate(`${routes.reviewWorkspace(replayIdFromRoute)}?${nextParams.toString()}`);
   };
 
   const isForcedRiichiTsumogiri = isForcedRiichiTsumogiriEntry(currentEntry);
@@ -503,7 +505,7 @@ export function GameBoardReplayPage() {
     return (
       <div style={centeredStatusStyle}>
         <p style={errorStatusTextStyle}>{error || '未找到回放数据'}</p>
-        <button onClick={() => navigate('/review')} style={backLinkButtonStyle}>
+        <button onClick={() => navigate(routes.reviewNew)} style={backLinkButtonStyle}>
           返回上传
         </button>
       </div>
@@ -560,7 +562,7 @@ export function GameBoardReplayPage() {
             <div style={sidePanelContainerStyle}>
               <div style={replaySideControlsStyle}>
                 <div style={replaySideHeaderStyle}>
-                  <button onClick={() => navigate('/')} style={replaySideUtilityButtonStyle}>返回</button>
+                  <button onClick={() => navigate(routes.home)} style={replaySideUtilityButtonStyle}>返回</button>
                   <button
                     onClick={() => setShowStats(true)}
                     style={replaySideUtilityButtonStyle}

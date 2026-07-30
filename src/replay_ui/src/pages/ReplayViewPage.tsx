@@ -5,6 +5,7 @@ import { Loader2 } from 'lucide-react';
 import type { ReplayData } from '../types/replay';
 import type { DecisionLogEntry } from '../types/replay';
 import { replayApi } from '../api/replayApi';
+import { legacyRoutes, routes } from '../routes';
 import { actionLabel, isReplayPlayerDecision, isReplayReviewDiffForPlayer, sameReplayAction } from '../utils/tileUtils';
 import { CN_BAKAZE, SEAT_NAMES_CN } from '../utils/constants';
 import { normalizeReplayPlayerNames, replayPlayerDisplayName } from '../utils/replayNames';
@@ -696,7 +697,7 @@ export function ReplayViewPage() {
     return (
       <div style={{ background: 'var(--page-bg)', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
         <p style={{ color: 'var(--error)', fontSize: 14 }}>{error || '未找到回放数据'}</p>
-        <button onClick={() => navigate('/')} style={{ color: 'var(--accent)', fontSize: 14, background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>
+        <button onClick={() => navigate(routes.home)} style={{ color: 'var(--accent)', fontSize: 14, background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>
           返回首页
         </button>
       </div>
@@ -711,7 +712,7 @@ export function ReplayViewPage() {
   const switchPerspective = (nextPid: number) => {
     const replayId = replayIdFromQuery ?? (location.state as { replayId?: string } | null)?.replayId;
     if (!replayId) return;
-    navigate(`/replay?id=${encodeURIComponent(replayId)}&player_id=${nextPid}`);
+    navigate(`${legacyRoutes.decisionList}?id=${encodeURIComponent(replayId)}&player_id=${nextPid}`);
   };
 
   return (
@@ -746,15 +747,15 @@ export function ReplayViewPage() {
           <button
             className="btn"
             onClick={() => replayIdFromQuery
-              ? navigate(`/game-replay?id=${encodeURIComponent(replayIdFromQuery)}&player_id=${pid}`)
-              : navigate('/game-replay', { state: { replayData: data } })}
+              ? navigate(`${routes.reviewWorkspace(replayIdFromQuery)}?player_id=${pid}`)
+              : navigate(legacyRoutes.gameReplay, { state: { replayData: data } })}
             title="切换到牌桌视图"
           >
             🀄牌桌
           </button>
         </span>
 
-        <button className="btn" onClick={() => navigate('/')}>🏠</button>
+        <button className="btn" onClick={() => navigate(routes.home)}>🏠</button>
         <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', marginLeft: 8, display: 'none' }}>←/→ 换局</span>
       </div>
 

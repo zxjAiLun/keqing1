@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { BarChart2, History, Users } from 'lucide-react';
+import { AlertTriangle, Bot, History } from 'lucide-react';
 import { replayApi } from '../api/replayApi';
 import { PageHeader, PageShell, SectionTitle } from '../components/Layout/PageScaffold';
+import { reviewWorkspaceUrl, routes } from '../routes';
 import type { ReviewHistoryItem } from '../types/replay';
-import { buildReviewHistoryPath } from './ReviewHistoryPage';
 
-const entryItems = [
-  { label: '牌谱 Review', path: '/review', icon: BarChart2 },
-  { label: '历史 Review', path: '/review-history', icon: History },
-  { label: '人机对战', path: '/battle', icon: Users },
+const toolEntries = [
+  { label: 'Review Library', path: routes.reviewLibrary, icon: History },
+  { label: '天凤呼出', path: routes.tenhou, icon: Bot },
+  { label: 'Casebook', path: routes.diagnosticsCasebook, icon: AlertTriangle },
 ];
 
 function WorkbenchPanel({
@@ -41,11 +41,11 @@ export function DashboardPage() {
         title="工作台总览"
         actions={
           <button
-            onClick={() => navigate('/review')}
+            onClick={() => navigate(routes.reviewNew)}
             className="btn-primary"
             style={{ height: 34, padding: '0 16px', fontSize: 13 }}
           >
-            进入牌谱 Review
+            新建 Review
           </button>
         }
       />
@@ -58,9 +58,9 @@ export function DashboardPage() {
           alignItems: 'start',
         }}
       >
-        <WorkbenchPanel title="常用入口">
+        <WorkbenchPanel title="工具入口">
           <div style={{ display: 'grid', gap: 6 }}>
-            {entryItems.map((item) => {
+            {toolEntries.map((item) => {
               const Icon = item.icon;
               return (
                 <button
@@ -90,39 +90,16 @@ export function DashboardPage() {
           </div>
         </WorkbenchPanel>
 
-        <div style={{ display: 'grid', gap: 12 }}>
-          <WorkbenchPanel title="运行状态">
-            <div style={{ display: 'grid', gap: 8, fontSize: 12 }}>
-              {[
-                ['服务', 'src/main.py · local'],
-                ['HTTP', '127.0.0.1:8000'],
-                ['GUI', 'replay_ui/dist'],
-                ['Review', '多 Mortal checkpoint 对比'],
-              ].map(([label, value]) => (
-                <div
-                  key={label}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    gap: 12,
-                    borderBottom: '1px solid var(--border)',
-                    paddingBottom: 6,
-                  }}
-                >
-                  <span style={{ color: 'var(--text-muted)' }}>{label}</span>
-                  <span style={{ color: 'var(--text-primary)', fontWeight: 700 }}>{value}</span>
-                </div>
-              ))}
-            </div>
-          </WorkbenchPanel>
-
-          <WorkbenchPanel title="最近 Review">
+        <WorkbenchPanel title="最近 Review">
             <div style={{ display: 'grid', gap: 5 }}>
               {history.map((item) => (
                 <button
                   key={`${item.replay_id}-${item.player_id}`}
                   type="button"
-                  onClick={() => navigate(buildReviewHistoryPath(item))}
+                  onClick={() => navigate(reviewWorkspaceUrl(item.replay_id, {
+                    playerId: item.player_id,
+                    teacherReports: item.teacher_report_paths,
+                  }))}
                   style={{
                     minHeight: 34,
                     border: '1px solid var(--border)',
@@ -146,8 +123,7 @@ export function DashboardPage() {
               ))}
               {history.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>暂无记录</div>}
             </div>
-          </WorkbenchPanel>
-        </div>
+        </WorkbenchPanel>
       </div>
     </PageShell>
   );
