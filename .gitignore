@@ -67,6 +67,17 @@ dataset_debug*/
 !reports/keqingrl_sampling_diversity_20260426/sampling_diversity.json
 !reports/keqingrl_temperature_pilot_20260426_source93/temperature_pilot.json
 !reports/keqingrl_tempered_ratio_pilot_20260426_source93/tempered_ratio_pilot.json
+
+# Reproducible project dependencies
+**/uv.lock
+!/uv.lock
+
+# Replay UI project manifests
+!src/replay_ui/package.json
+!src/replay_ui/package-lock.json
+!src/replay_ui/tsconfig.json
+!src/replay_ui/tsconfig.*.json
+
 *.jsonl
 *.jsonl.gz
 links.txt
@@ -112,7 +123,6 @@ Thumbs.db
 *.txt
 
 keqing1.code-workspace
-uv.lock
 .venv/
 
 tiles/
