@@ -1015,12 +1015,15 @@ async def replay(
         result = _merge_terminal_event_details(result, normalized_events)
         result["bot_type"] = bot_type
         if events:
+            checkpoint_for_storage = checkpoint or (
+                None if bot_type == "rulebase" else str(_default_checkpoint_for_bot_type(bot_type))
+            )
             replay_id = storage.save(
                 events=normalized_events,
                 decisions=result,
                 bot_type=bot_type,
                 player_names=result.get("player_names"),
-                checkpoint=checkpoint or str(_default_checkpoint_for_bot_type(bot_type)),
+                checkpoint=checkpoint_for_storage,
             )
             result = {
                 **result,
