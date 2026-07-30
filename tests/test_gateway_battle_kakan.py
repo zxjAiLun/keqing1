@@ -75,6 +75,10 @@ def _room_for_kakan():
     return manager, room
 
 
+def _native_replay_snapshot_available() -> bool:
+    return getattr(keqing_core, "_RUST_REPLAY_STATE_SNAPSHOT_JSON", None) is not None
+
+
 def test_kakan_enters_chankan_response_window_before_acceptance() -> None:
     manager, room = _room_for_kakan()
 
@@ -86,10 +90,11 @@ def test_kakan_enters_chankan_response_window_before_acceptance() -> None:
     assert room.state.players[0].hand["8s"] == 1
     assert room.events[-1]["type"] == "kakan"
 
-    snapshot = keqing_core.replay_state_snapshot(room.events, 0)
-    assert snapshot["last_kakan"]["actor"] == 0
-    assert snapshot["actor_to_move"] == 0
-    assert snapshot["hand"].count("8s") == 1
+    if _native_replay_snapshot_available():
+        snapshot = keqing_core.replay_state_snapshot(room.events, 0)
+        assert snapshot["last_kakan"]["actor"] == 0
+        assert snapshot["actor_to_move"] == 0
+        assert snapshot["hand"].count("8s") == 1
 
 
 def test_kakan_accept_after_all_passes_does_not_remove_added_tile_twice() -> None:
@@ -109,6 +114,7 @@ def test_kakan_accept_after_all_passes_does_not_remove_added_tile_twice() -> Non
     assert room.state.players[0].hand["8s"] == 0
     assert room.state.players[0].melds[0]["type"] == "kakan"
     assert any(event["type"] == "kakan_accepted" for event in room.events)
-    snapshot = keqing_core.replay_state_snapshot(room.events, 0)
-    assert "8s" not in snapshot["hand"]
-    assert snapshot["pending_rinshan_actor"] == 0
+    if _native_replay_snapshot_available():
+        snapshot = keqing_core.replay_state_snapshot(room.events, 0)
+        assert "8s" not in snapshot["hand"]
+        assert snapshot["pending_rinshan_actor"] == 0

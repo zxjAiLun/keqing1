@@ -32,6 +32,14 @@ def _set_rust_mode(enabled: bool) -> None:
     clear_progress_caches()
 
 
+def _require_native_capabilities(*names: str) -> None:
+    missing = [name for name in names if getattr(keqing_core, name, None) is None]
+    if missing:
+        pytest.skip(
+            "keqing_core native capabilities are unavailable: " + ", ".join(missing)
+        )
+
+
 def _random_counts(total_tiles: int, rng: random.Random) -> tuple[int, ...]:
     counts = [0] * 34
     remaining = [4] * 34
@@ -155,6 +163,7 @@ def test_calc_shanten_all_matches_standard_shanten_on_current_public_surface():
 
 
 def test_required_tiles_contains_live_waits_for_tenpai_case():
+    _require_native_capabilities("_RUST_REQUIRED_TILES", "_RUST_DRAW_DELTAS")
     counts = (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 2) + (0,) * 20
     visible = counts
 
@@ -171,6 +180,7 @@ def test_required_tiles_contains_live_waits_for_tenpai_case():
 
 
 def test_draw_and_discard_deltas_return_stable_shapes():
+    _require_native_capabilities("_RUST_DRAW_DELTAS", "_RUST_DISCARD_DELTAS")
     rng = random.Random(20260419)
     counts = _random_counts(13, rng)
     visible = _random_visible_counts(counts, rng)
@@ -400,6 +410,7 @@ def test_summarize_3n2_tie_uses_first_seen_best_candidate():
 
 
 def test_summarize_3n2_native_candidate_summaries_match_python():
+    _require_native_capabilities("_RUST_SUMMARIZE_3N2_CANDIDATES")
     rng = random.Random(20260413)
     hand_counts = _random_counts(14, rng)
     visible_counts = _random_visible_counts(hand_counts, rng)

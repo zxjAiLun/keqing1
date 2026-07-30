@@ -67,6 +67,7 @@ dataset_debug*/
 !reports/keqingrl_sampling_diversity_20260426/sampling_diversity.json
 !reports/keqingrl_temperature_pilot_20260426_source93/temperature_pilot.json
 !reports/keqingrl_tempered_ratio_pilot_20260426_source93/tempered_ratio_pilot.json
+!tests/fixtures/replay_action_semantics_matrix.json
 
 # Reproducible project dependencies
 **/uv.lock
