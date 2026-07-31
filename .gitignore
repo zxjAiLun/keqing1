@@ -57,6 +57,7 @@ dataset/
 dataset_debug*/
 *.json
 !configs/keqingrl/*.json
+!configs/ladder/seasons/*.json
 !reports/keqingrl_learning_signal_ablation_20260425_small_cuda/sweep.json
 !reports/keqingrl_sampling_diversity_20260426_step36a_ep16/sampling_diversity.json
 !reports/keqingrl_rule_score_scale_probe_20260426_step36b_ep16/rule_score_scale_probe.json
