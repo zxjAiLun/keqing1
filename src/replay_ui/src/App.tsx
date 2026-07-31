@@ -11,8 +11,11 @@ import { BotBattlePage } from './pages/BotBattlePage';
 import { PlayWithYouPage } from './pages/PlayWithYouPage';
 import { SelfplayAnomaliesPage } from './pages/SelfplayAnomaliesPage';
 import { MortalDecisionReviewPage } from './pages/MortalDecisionReviewPage';
+import { LadderPage } from './pages/LadderPage';
+import { LadderAccountPage } from './pages/LadderAccountPage';
+import { LadderModelPage } from './pages/LadderModelPage';
 import { ThemeProvider } from './context/ThemeContext';
-import { legacyRoutes, REVIEW_WORKSPACE_PATTERN, routes } from './routes';
+import { LADDER_ACCOUNT_PATTERN, LADDER_MODEL_PATTERN, legacyRoutes, REVIEW_WORKSPACE_PATTERN, routes } from './routes';
 import './styles/globals.css';
 
 /** 兼容重定向：完整保留 query string（包括重复出现的 teacher_reports）。 */
@@ -54,6 +57,9 @@ export default function App() {
             <Route path={REVIEW_WORKSPACE_PATTERN} element={<GameBoardReplayPage />} />
             <Route path={routes.tenhou} element={<PlayWithYouPage />} />
             <Route path={routes.diagnosticsCasebook} element={<SelfplayAnomaliesPage />} />
+            <Route path={routes.ladder} element={<LadderPage />} />
+            <Route path={LADDER_ACCOUNT_PATTERN} element={<LadderAccountPage />} />
+            <Route path={LADDER_MODEL_PATTERN} element={<LadderModelPage />} />
 
             {/* 旧主入口兼容重定向 */}
             <Route path="/review" element={<PreserveSearchRedirect to={routes.reviewNew} />} />

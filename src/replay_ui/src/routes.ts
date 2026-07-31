@@ -10,12 +10,26 @@ export const routes = {
   reviewNew: '/reviews/new',
   reviewLibrary: '/reviews',
   reviewWorkspace: (replayId: string) => `/reviews/${encodeURIComponent(replayId)}`,
+  ladder: '/ladder',
+  ladderAccount: (accountId: string) => `/ladder/accounts/${encodeURIComponent(accountId)}`,
+  ladderModel: (modelId: string) => `/ladder/models/${encodeURIComponent(modelId)}`,
   tenhou: '/tenhou',
   diagnosticsCasebook: '/diagnostics/casebook',
 } as const;
 
 /** App.tsx 注册 Review Workspace 路由时使用的 pattern。 */
 export const REVIEW_WORKSPACE_PATTERN = '/reviews/:replayId';
+
+/** App.tsx 注册 Ladder 详情页路由时使用的 pattern。 */
+export const LADDER_ACCOUNT_PATTERN = '/ladder/accounts/:accountId';
+export const LADDER_MODEL_PATTERN = '/ladder/models/:modelId';
+
+/** 给 Ladder 相关路径追加 ?season= 查询参数。 */
+export function withLadderSeason(path: string, seasonId: string | null | undefined): string {
+  if (!seasonId) return path;
+  const params = new URLSearchParams({ season: seasonId });
+  return `${path}?${params.toString()}`;
+}
 
 /**
  * 兼容保留的 legacy 页面路径。

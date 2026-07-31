@@ -6,6 +6,7 @@ import {
   Bot,
   History,
   LayoutDashboard,
+  ListTree,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
@@ -36,6 +37,10 @@ const NAV_SECTIONS: Array<{ label: string; items: NavItem[] }> = [
       { path: routes.reviewNew, icon: BarChart2, label: '新建 Review' },
       { path: routes.reviewLibrary, icon: History, label: 'Review Library', exact: true },
     ],
+  },
+  {
+    label: '竞技',
+    items: [{ path: routes.ladder, icon: ListTree, label: '天梯榜' }],
   },
   {
     label: '在线',
