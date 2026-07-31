@@ -85,6 +85,7 @@ export function GameBoardReplayPage() {
   const [activeDrawer, setActiveDrawer] = useState<'left' | 'right' | null>(null);
   const [boardPhase, setBoardPhase] = useState<ReplayBoardPhase>('pre');
   const boardViewportRef = useRef<HTMLDivElement>(null);
+  const workspaceShellRef = useRef<HTMLDivElement>(null);
   const [showOpponentHands, setShowOpponentHands] = useState(false);
   const [activeTeacherModel, setActiveTeacherModel] = useState<string | null>(null);
   const lastAppliedReplaySearchRef = useRef<string | null>(null);
@@ -393,6 +394,20 @@ export function GameBoardReplayPage() {
     return () => el.removeEventListener('wheel', handler);
   }, [moveBoardStep]);
 
+  // 宽布局下左右栏转为静态三栏：清空抽屉 modal state，避免其泄漏后持续屏蔽回放快捷键。
+  // 布局本身仍由 CSS container query 驱动，这里只做 React 状态收口。
+  useEffect(() => {
+    const shell = workspaceShellRef.current;
+    if (!shell) return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width >= 1160) {
+        setActiveDrawer(null);
+      }
+    });
+    observer.observe(shell);
+    return () => observer.disconnect();
+  }, []);
+
   // 优先使用后端返回的真实玩家名，fallback 到 P0/P1/P2/P3
   const playerNames = normalizeReplayPlayerNames(data);
 
@@ -535,7 +550,7 @@ export function GameBoardReplayPage() {
   const rightPanelId = 'review-workspace-right-panel';
 
   return (
-    <div className="review-workspace-shell">
+    <div className="review-workspace-shell" ref={workspaceShellRef}>
       {showStats && data && <ReplayStatsDialog data={data} onClose={() => setShowStats(false)} />}
 
       <div className="review-workspace-grid">

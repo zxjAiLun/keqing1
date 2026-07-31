@@ -25,6 +25,9 @@
   display: flex;
   flex-direction: column;
   position: relative;
+  /* 独立 stacking context：牌桌内部 overlay（结算浮层、focus 提示）不会压到抽屉上 */
+  isolation: isolate;
+  z-index: 0;
 }
 
 .review-workspace-board {
@@ -70,12 +73,17 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  z-index: 40;
+  z-index: 60;
   display: flex;
   flex-direction: column;
   min-height: 0;
   background: var(--card-bg);
-  transition: transform 0.2s ease;
+  /* 关闭抽屉移出键盘焦点顺序，并延迟 visibility 以保留滑出动画 */
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    transform 0.2s ease,
+    visibility 0s linear 0.2s;
 }
 
 .review-workspace-left {
@@ -95,12 +103,15 @@
 .review-workspace-left[data-open="true"],
 .review-workspace-right[data-open="true"] {
   transform: translateX(0);
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
 }
 
 .review-workspace-scrim {
   position: absolute;
   inset: 0;
-  z-index: 35;
+  z-index: 50;
   background: rgba(0, 0, 0, 0.42);
   border: none;
   padding: 0;
@@ -166,6 +177,8 @@
     width: auto;
     transform: none;
     z-index: auto;
+    visibility: visible;
+    pointer-events: auto;
   }
 
   .review-workspace-compact-toolbar,
