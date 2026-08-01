@@ -91,6 +91,16 @@ def main() -> None:
     labels: set[str] = set()
     for label_file in config["dataset"]["player_names_files"]:
         labels.update(line.strip() for line in Path(str(label_file)).read_text(encoding="utf-8").splitlines() if line.strip())
+    mapping = None
+    mapping_path = config["dataset"].get("player_names_by_file")
+    if mapping_path:
+        payload = json.loads(Path(str(mapping_path)).read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"player_names_by_file must be a JSON object: {mapping_path}")
+        mapping = {str(Path(str(key)).resolve()): str(value) for key, value in payload.items()}
+        indexed = {str(Path(str(value)).resolve()) for value in files}
+        if indexed != set(mapping):
+            raise ValueError("player_names_by_file must cover exactly the smoke file index")
     dataset = FileDatasetsIter(
         version=version,
         file_list=files,
@@ -101,6 +111,7 @@ def main() -> None:
         num_epochs=int(config["dataset"]["num_epochs"]),
         enable_augmentation=bool(config["dataset"]["enable_augmentation"]),
         augmented_first=bool(config["dataset"]["augmented_first"]),
+        player_names_by_file=mapping,
     )
     batch = next(
         iter(

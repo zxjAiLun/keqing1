@@ -50,6 +50,16 @@ def load_labels(config: dict[str, Any]) -> list[str]:
     return sorted(values)
 
 
+def load_player_names_by_file(config: dict[str, Any]) -> dict[str, str] | None:
+    path = config["dataset"].get("player_names_by_file")
+    if not path:
+        return None
+    payload = __import__("json").loads(Path(str(path)).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"player_names_by_file must be a JSON object: {path}")
+    return {str(Path(str(key)).resolve()): str(value) for key, value in payload.items()}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
@@ -82,6 +92,7 @@ def main() -> None:
         num_epochs=int(config["dataset"]["num_epochs"]),
         enable_augmentation=bool(config["dataset"]["enable_augmentation"]),
         augmented_first=bool(config["dataset"]["augmented_first"]),
+        player_names_by_file=load_player_names_by_file(config),
     )
     loader = iter(
         DataLoader(
