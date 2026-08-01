@@ -16,9 +16,12 @@ import json
 import os
 import shutil
 import sys
+import time
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -86,7 +89,8 @@ def build_snapshot(
         output_dir=snapshot_dir,
         mortal_root=mortal_root,
         platform_model_label=platform_model_label,
-        rank_points=tuple(float(part) for part in rank_points.split(",") if part.strip()),
+        # 复用仓库严格解析：恰好四个顺位值，错误立即拒绝
+        rank_points=account_report.parse_rank_points(rank_points),
         preserve_log_dir_order=preserve_log_dir_order,
         interleave_log_dirs=interleave_log_dirs,
     )
@@ -119,18 +123,78 @@ def write_manifest(
     return manifest_path
 
 
-def switch_registry(registry_path: Path, season: dict[str, Any], new_report_dir: Path) -> None:
-    """原子切换 registry 的 report_dir：写 .tmp -> 结构校验 -> os.replace。"""
-    updated = dict(season)
-    updated["report_dir"] = str(new_report_dir)
-    tmp_path = registry_path.with_name(registry_path.name + ".tmp")
-    tmp_path.write_text(json.dumps(updated, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+def _lock_path(registry_path: Path) -> Path:
+    return registry_path.with_name(registry_path.name + ".lock")
+
+
+def _tmp_path_for(registry_path: Path) -> Path:
+    """唯一临时文件路径（含 PID + 随机后缀），避免多个发布共享同一 tmp。"""
+    return registry_path.with_name(f"{registry_path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+
+
+def _registry_contract(season: dict[str, Any]) -> str:
+    """除 report_dir 外的注册表契约（模型/账号/状态/checkpoint 等）。"""
+    clone = dict(season)
+    clone.pop("report_dir", None)
+    return json.dumps(clone, sort_keys=True, ensure_ascii=False)
+
+
+@contextmanager
+def _registry_lock(registry_path: Path, *, timeout: float = 30.0) -> Iterator[None]:
+    """per-registry 排他锁：O_CREAT|O_EXCL 原子获取，超时抛 PublishError。"""
+    lock_path = _lock_path(registry_path)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+            os.close(fd)
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise PublishError(f"registry 锁获取超时: {lock_path}（可能有其他发布进行中）")
+            time.sleep(0.2)
     try:
-        ladder.read_registry(tmp_path)
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
-        raise
-    os.replace(tmp_path, registry_path)
+        yield
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+
+def conditional_switch_registry(
+    registry_path: Path,
+    *,
+    expected_season: dict[str, Any],
+    expected_report_dir: str | None,
+    new_report_dir: Path,
+    timeout: float = 30.0,
+) -> None:
+    """加锁下的条件原子切换。
+
+    - 切换前确认当前 report_dir 仍等于发布启动时看到的 previous_report_dir；
+    - 除 report_dir 外的注册表契约（模型/账号/状态/checkpoint）发生变化则拒绝；
+    - 使用唯一 tmp 文件，写盘 -> 结构校验 -> os.replace；
+    - 冲突时抛 PublishError，由调用方清理本次 staging，线上 registry 与快照保持不变。
+    """
+    with _registry_lock(registry_path, timeout=timeout):
+        current = ladder.read_registry(registry_path)
+        current_report = str(current.get("report_dir") or "")
+        if str(expected_report_dir or "") != current_report:
+            raise PublishError(
+                f"registry 已推进（当前 report_dir={current_report!r}，期望 {expected_report_dir!r}），拒绝旧发布覆盖"
+            )
+        if _registry_contract(current) != _registry_contract(expected_season):
+            raise PublishError("registry 契约（模型/账号/状态/checkpoint）在构建期间发生变化，拒绝旧发布覆盖")
+
+        updated = dict(current)
+        updated["report_dir"] = str(new_report_dir)
+        tmp_path = _tmp_path_for(registry_path)
+        tmp_path.write_text(json.dumps(updated, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        try:
+            ladder.read_registry(tmp_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+        os.replace(tmp_path, registry_path)
 
 
 def publish_snapshot(
@@ -195,7 +259,12 @@ def publish_snapshot(
                 "dry_run": True,
                 "registry_switched": False,
             }
-        switch_registry(registry_path, season, snapshot_dir)
+        conditional_switch_registry(
+            registry_path,
+            expected_season=season,
+            expected_report_dir=str(previous_report_dir) if previous_report_dir else None,
+            new_report_dir=snapshot_dir,
+        )
         return {
             "snapshot_dir": str(snapshot_dir),
             "games": report.get("games"),

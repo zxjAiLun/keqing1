@@ -286,8 +286,24 @@ def _load_validated_report(project_root: Path, season: dict[str, Any]) -> tuple[
     return report, rows
 
 
+SNAPSHOT_REQUIRED_FILES = ("account_summary.json", "account_ledger.jsonl", "rating_curve.csv")
+
+
 def validate_snapshot(season: dict[str, Any], snapshot_dir: Path) -> list[dict[str, Any]]:
-    """校验一个已构建好的快照目录是否满足注册表契约（供发布器复用）。"""
+    """校验一个已构建好的快照目录是否满足注册表契约（供发布器复用）。
+
+    除 account_summary.json 外，要求 UI/API 实际消费的 account_ledger.jsonl
+    与 rating_curve.csv 存在且可读（零场快照允许内容为空，但文件必须存在）。
+    """
+    for name in SNAPSHOT_REQUIRED_FILES:
+        path = snapshot_dir / name
+        if not path.is_file():
+            raise SeasonDataError(f"快照缺少必需文件: {name}")
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                handle.read(1)
+        except OSError as exc:
+            raise SeasonDataError(f"快照文件不可读: {name}") from exc
     report = _load_account_summary(snapshot_dir)
     return _validate_report_accounts(season, report)
 
