@@ -29,6 +29,20 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def file_list(path: Path) -> list[str]:
+    payload = torch.load(path.resolve(), weights_only=False, map_location="cpu")
+    values = payload.get("file_list") if isinstance(payload, dict) else payload
+    if not isinstance(values, list):
+        raise ValueError(f"file index has no file_list: {path}")
+    files = [
+        str((Path(str(value)) if Path(str(value)).is_absolute() else REPO_ROOT / str(value)).resolve())
+        for value in values
+    ]
+    if len(files) != len(set(files)) or any(not Path(value).is_file() for value in files):
+        raise ValueError(f"file index contains duplicate or missing files: {path}")
+    return files
+
+
 def counter_add(target: Counter[str], values: dict[str, Any]) -> None:
     for key, value in values.items():
         target[str(key)] += int(value)
