@@ -15,6 +15,13 @@ const SORT_OPTIONS = [
   { value: 'games', label: '按场数' },
 ];
 
+const REFRESH_INTERVAL_MS = 30_000;
+
+function fmtUpdatedAt(epochSecs: number | undefined): string {
+  if (!epochSecs) return '—';
+  return new Date(epochSecs * 1000).toLocaleString();
+}
+
 export function LadderPage() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -62,6 +69,18 @@ export function LadderPage() {
     };
     void load();
     return () => { cancelled = true; };
+  }, [activeSeasonId, sort]);
+
+  // 页面可见时每 30 秒静默刷新（隐藏时停止；请求失败保留现有数据）
+  useEffect(() => {
+    if (!activeSeasonId) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      ladderApi.getLadder(activeSeasonId, sort)
+        .then((payload) => setLadder((current) => (current ? payload : current)))
+        .catch(() => { /* 保留现有数据 */ });
+    }, REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
   }, [activeSeasonId, sort]);
 
   const switchSeason = (seasonId: string) => {
@@ -204,6 +223,12 @@ export function LadderPage() {
               {ladder.season.scoring.pt_profile} · PT {ladder.season.scoring.pt_rank_deltas?.join('/')} · 初始 {ladder.season.scoring.pt_initial} → 目标 {ladder.season.scoring.pt_target} · {ladder.season.scoring.rank_name}
             </div>
           )}
+
+          {/* 快照状态：数据更新时间 / snapshot ID / 已计入场数 */}
+          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
+            快照 {ladder.season.snapshot_id || '—'} · 更新 {fmtUpdatedAt(ladder.season.updated_at)} · 已计入 {ladder.season.games ?? '—'} 场
+            <span style={{ marginLeft: 8 }}>（页面可见时每 30 秒自动刷新）</span>
+          </div>
         </>
       )}
     </PageShell>

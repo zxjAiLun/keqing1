@@ -22,6 +22,10 @@ export interface LadderSeason {
   games?: number;
   data_ready?: boolean;
   report_schema?: string;
+  /** 当前只读快照目录名（如 20260801-203000） */
+  snapshot_id?: string;
+  /** account_summary.json 的 mtime（epoch 秒） */
+  updated_at?: number;
   scoring?: LadderSeasonScoring;
 }
 
