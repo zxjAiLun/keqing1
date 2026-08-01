@@ -77,6 +77,27 @@ def load_registry(path: Path) -> dict[str, Any]:
             raise ValueError(f"record {experiment_id} has invalid list fields")
     if state["K1"] is not None:
         raise ValueError("K1 must remain null until a formal K1 is actually promoted")
+    record_by_id = {record["experiment_id"]: record for record in records}
+    next_id = state["next_experiment"]
+    if next_id not in record_by_id:
+        raise ValueError(f"current_state.next_experiment is not registered: {next_id}")
+    next_record = record_by_id[next_id]
+    if next_record["status"] != state["next_experiment_status"]:
+        raise ValueError(
+            "next experiment status mismatch: "
+            f"current_state={state['next_experiment_status']} record={next_record['status']}"
+        )
+    operational_id = state["operational_control"]
+    if operational_id not in record_by_id:
+        raise ValueError(f"operational control is not registered: {operational_id}")
+    if record_by_id[operational_id]["status"] != "operational":
+        raise ValueError(f"operational control is not operational: {operational_id}")
+    reference_fields = ("predecessor", "next_experiment", "mechanistic_reference", "primary_promotion_control")
+    for record in records:
+        for field in reference_fields:
+            reference = record.get(field)
+            if reference is not None and reference not in record_by_id:
+                raise ValueError(f"record {record['experiment_id']} references unknown {field}: {reference}")
     return registry
 
 
