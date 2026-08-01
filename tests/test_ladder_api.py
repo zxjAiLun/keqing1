@@ -232,3 +232,183 @@ def test_missing_report_dir_raises_data_error(tmp_path: Path):
         ladder.load_ladder(tmp_path, configs_dir, "empty-season")
     seasons = ladder.list_seasons(tmp_path, configs_dir)
     assert seasons[0]["data_ready"] is False
+
+
+# ---------------------------------------------------------------------------
+# 注册表权威性与 report 一致性
+# ---------------------------------------------------------------------------
+
+def _season(status: str = "completed", **overrides) -> dict:
+    base = {
+        "schema": ladder.SEASON_SCHEMA,
+        "season_id": "s1",
+        "report_dir": "artifacts/report",
+        "status": status,
+        "models": [
+            {"model_id": "m1", "checkpoint": "artifacts/m1.pth", "accounts": [
+                {"account_id": "m1@01"}, {"account_id": "m1@02"},
+            ]},
+            {"model_id": "m2", "checkpoint": "artifacts/m2.pth", "accounts": [
+                {"account_id": "m2@01"},
+            ]},
+        ],
+    }
+    base.update(overrides)
+    return base
+
+
+def _write_custom_env(
+    tmp_path: Path,
+    *,
+    season: dict,
+    report_accounts: list[dict] | None,
+    curve_count: int = 0,
+) -> dict:
+    configs_dir = tmp_path / "configs" / "ladder" / "seasons"
+    configs_dir.mkdir(parents=True)
+    (configs_dir / f"{season.get('season_id', 'season')}.json").write_text(json.dumps(season), encoding="utf-8")
+    report_dir = tmp_path / str(season.get("report_dir", "artifacts/report"))
+    report_dir.mkdir(parents=True, exist_ok=True)
+    if report_accounts is not None:
+        report = {"schema": ladder.REPORT_SCHEMA, "games": len(report_accounts), "accounts": report_accounts}
+        (report_dir / "account_summary.json").write_text(json.dumps(report), encoding="utf-8")
+    if curve_count and report_accounts:
+        account_id = report_accounts[0]["account_id"]
+        lines = ["game_index,account_id,model_label,rating,pt,rank_name,games"]
+        for i in range(curve_count):
+            lines.append(f"{i},{account_id},m1,{1500.0 + i},{1400.0 + i * 10},七段,{i + 1}")
+        (report_dir / "rating_curve.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"root": tmp_path, "configs": configs_dir, "report_dir": report_dir}
+
+
+def _three_account_rows() -> list[dict]:
+    return [
+        _account_row("m1@01", "m1", games=2, pt=1500.0, rating=1501.0, ranks=[1, 1, 0, 0], avg_rank=1.5),
+        _account_row("m1@02", "m1", games=2, pt=1400.0, rating=1499.0, ranks=[1, 0, 1, 0], avg_rank=2.0),
+        _account_row("m2@01", "m2", games=2, pt=1300.0, rating=1498.0, ranks=[0, 1, 1, 0], avg_rank=2.5),
+    ]
+
+
+def test_registry_duplicate_model_id(tmp_path: Path):
+    season = _season(models=[
+        {"model_id": "m1", "accounts": [{"account_id": "m1@01"}]},
+        {"model_id": "m1", "accounts": [{"account_id": "m1@02"}]},
+    ])
+    env = _write_custom_env(tmp_path, season=season, report_accounts=None)
+    with pytest.raises(ladder.SeasonRegistryError, match="model_id"):
+        ladder.load_ladder(env["root"], env["configs"], "s1")
+
+
+def test_registry_duplicate_account_id_across_models(tmp_path: Path):
+    season = _season(models=[
+        {"model_id": "m1", "accounts": [{"account_id": "dup@01"}]},
+        {"model_id": "m2", "accounts": [{"account_id": "dup@01"}]},
+    ])
+    env = _write_custom_env(tmp_path, season=season, report_accounts=None)
+    with pytest.raises(ladder.SeasonRegistryError, match="account_id"):
+        ladder.load_ladder(env["root"], env["configs"], "s1")
+
+
+def test_registry_empty_season_id(tmp_path: Path):
+    env = _write_custom_env(tmp_path, season=_season(season_id=""), report_accounts=None)
+    with pytest.raises(ladder.SeasonRegistryError, match="season_id"):
+        ladder.list_seasons(env["root"], env["configs"])
+
+
+def test_registry_global_duplicate_season_id(tmp_path: Path):
+    configs_dir = tmp_path / "configs" / "ladder" / "seasons"
+    configs_dir.mkdir(parents=True)
+    for name in ("a.json", "b.json"):
+        (configs_dir / name).write_text(json.dumps(_season()), encoding="utf-8")
+    with pytest.raises(ladder.SeasonRegistryError, match="全局重复"):
+        ladder.list_seasons(tmp_path, configs_dir)
+
+
+def test_report_unregistered_account_rejected(tmp_path: Path):
+    rows = _three_account_rows() + [_account_row("ghost@01", "m1", games=1, pt=1.0, rating=1500.0, ranks=[0, 0, 0, 1], avg_rank=4.0)]
+    env = _write_custom_env(tmp_path, season=_season(), report_accounts=rows)
+    with pytest.raises(ladder.SeasonDataError, match="未在注册表声明"):
+        ladder.load_ladder(env["root"], env["configs"], "s1")
+
+
+def test_completed_season_missing_registry_account_in_report(tmp_path: Path):
+    env = _write_custom_env(tmp_path, season=_season(), report_accounts=_three_account_rows()[:2])
+    with pytest.raises(ladder.SeasonDataError, match="未出现在 report"):
+        ladder.load_ladder(env["root"], env["configs"], "s1")
+
+
+def test_report_model_label_conflicts_registry(tmp_path: Path):
+    rows = _three_account_rows()
+    rows[0]["model_label"] = "wrong_model"
+    env = _write_custom_env(tmp_path, season=_season(), report_accounts=rows)
+    with pytest.raises(ladder.SeasonDataError, match="model_label"):
+        ladder.load_ladder(env["root"], env["configs"], "s1")
+
+
+def test_report_duplicate_account_id_rejected(tmp_path: Path):
+    rows = _three_account_rows() + [_account_row("m1@01", "m1", games=1, pt=1.0, rating=1500.0, ranks=[0, 0, 0, 1], avg_rank=4.0)]
+    env = _write_custom_env(tmp_path, season=_season(), report_accounts=rows)
+    with pytest.raises(ladder.SeasonDataError, match="重复 account_id"):
+        ladder.load_ladder(env["root"], env["configs"], "s1")
+
+
+def test_corrupted_account_summary_raises_data_error(tmp_path: Path):
+    env = _write_custom_env(tmp_path, season=_season(), report_accounts=None)
+    (env["report_dir"] / "account_summary.json").write_text("{ not valid json", encoding="utf-8")
+    with pytest.raises(ladder.SeasonDataError, match="无法解析"):
+        ladder.load_ladder(env["root"], env["configs"], "s1")
+
+
+def test_running_season_allows_registry_accounts_missing_from_report(tmp_path: Path):
+    env = _write_custom_env(
+        tmp_path,
+        season=_season(status="running"),
+        report_accounts=_three_account_rows()[:1],
+    )
+    payload = ladder.load_ladder(env["root"], env["configs"], "s1")
+    assert [row["account_id"] for row in payload["accounts"]] == ["m1@01"]
+
+
+def test_running_season_rejects_unregistered_account(tmp_path: Path):
+    rows = [_account_row("ghost@01", "m1", games=1, pt=1.0, rating=1500.0, ranks=[0, 0, 0, 1], avg_rank=4.0)]
+    env = _write_custom_env(tmp_path, season=_season(status="running"), report_accounts=rows)
+    with pytest.raises(ladder.SeasonDataError, match="未在注册表声明"):
+        ladder.load_ladder(env["root"], env["configs"], "s1")
+
+
+def test_list_seasons_marks_mismatched_report_not_ready(tmp_path: Path):
+    good = _season(season_id="good-season", report_dir="artifacts/good")
+    bad = _season(season_id="bad-season", report_dir="artifacts/bad")
+    configs_dir = tmp_path / "configs" / "ladder" / "seasons"
+    configs_dir.mkdir(parents=True)
+    for season in (good, bad):
+        (configs_dir / f"{season['season_id']}.json").write_text(json.dumps(season), encoding="utf-8")
+    good_dir = tmp_path / "artifacts" / "good"
+    good_dir.mkdir(parents=True)
+    (good_dir / "account_summary.json").write_text(
+        json.dumps({"schema": ladder.REPORT_SCHEMA, "games": 3, "accounts": _three_account_rows()}),
+        encoding="utf-8",
+    )
+    bad_dir = tmp_path / "artifacts" / "bad"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "account_summary.json").write_text(
+        json.dumps({"schema": ladder.REPORT_SCHEMA, "games": 2, "accounts": _three_account_rows()[:2]}),
+        encoding="utf-8",
+    )
+    seasons = {entry["season_id"]: entry for entry in ladder.list_seasons(tmp_path, configs_dir)}
+    assert seasons["good-season"]["data_ready"] is True
+    assert seasons["bad-season"]["data_ready"] is False
+
+
+@pytest.mark.parametrize("max_points,expected_games", [
+    (0, []),
+    (1, [10]),
+    (2, [1, 10]),
+    (4, [1, 4, 7, 10]),
+])
+def test_curve_point_boundaries(season_env, max_points, expected_games):
+    payload = ladder.load_account(
+        season_env["root"], season_env["configs"], "test-season", "model_a@01",
+        recent_limit=0, curve_max_points=max_points,
+    )
+    assert [point["games"] for point in payload["curve"]] == expected_games

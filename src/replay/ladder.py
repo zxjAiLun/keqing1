@@ -68,14 +68,57 @@ def _read_json_cached(path: Path) -> Any:
 # Season registry
 # ---------------------------------------------------------------------------
 
+def _validate_registry(raw: Any, filename: str) -> dict[str, Any]:
+    """校验赛季注册表结构，使其成为账号身份的权威来源。
+
+    任何无效 model/account 都会抛出 SeasonRegistryError，不做静默跳过。
+    """
+    def _fail(reason: str) -> SeasonRegistryError:
+        return SeasonRegistryError(f"赛季注册表 {filename}: {reason}")
+
+    if not isinstance(raw, dict) or raw.get("schema") != SEASON_SCHEMA:
+        raise _fail("schema 无效")
+    season_id = raw.get("season_id")
+    if not isinstance(season_id, str) or not season_id.strip():
+        raise _fail("season_id 必须是非空字符串")
+    report_dir = raw.get("report_dir")
+    if not isinstance(report_dir, str) or not report_dir.strip():
+        raise _fail(f"season {season_id}: report_dir 必须是非空字符串")
+    models = raw.get("models")
+    if not isinstance(models, list):
+        raise _fail(f"season {season_id}: models 必须是数组")
+    seen_models: set[str] = set()
+    seen_accounts: set[str] = set()
+    for model_index, model in enumerate(models):
+        if not isinstance(model, dict):
+            raise _fail(f"season {season_id}: models[{model_index}] 必须是对象")
+        model_id = model.get("model_id")
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise _fail(f"season {season_id}: models[{model_index}] 的 model_id 必须是非空字符串")
+        if model_id in seen_models:
+            raise _fail(f"season {season_id}: 重复 model_id '{model_id}'")
+        seen_models.add(model_id)
+        accounts = model.get("accounts")
+        if not isinstance(accounts, list):
+            raise _fail(f"season {season_id} / model {model_id}: accounts 必须是数组")
+        for account_index, account in enumerate(accounts):
+            if not isinstance(account, dict):
+                raise _fail(f"season {season_id} / model {model_id}: accounts[{account_index}] 必须是对象")
+            account_id = account.get("account_id")
+            if not isinstance(account_id, str) or not account_id.strip():
+                raise _fail(f"season {season_id} / model {model_id}: accounts[{account_index}] 的 account_id 必须是非空字符串")
+            if account_id in seen_accounts:
+                raise _fail(f"season {season_id}: 重复 account_id '{account_id}'（出现于 model {model_id}）")
+            seen_accounts.add(account_id)
+    return raw
+
+
 def _load_registry_file(path: Path) -> dict[str, Any]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise SeasonRegistryError(f"赛季注册表无法解析: {path.name}") from exc
-    if not isinstance(raw, dict) or raw.get("schema") != SEASON_SCHEMA:
-        raise SeasonRegistryError(f"赛季注册表 schema 无效: {path.name}")
-    return raw
+    return _validate_registry(raw, path.name)
 
 
 def list_season_configs(configs_dir: Path) -> list[dict[str, Any]]:
@@ -83,6 +126,12 @@ def list_season_configs(configs_dir: Path) -> list[dict[str, Any]]:
     if not configs_dir.exists():
         return []
     seasons = [_load_registry_file(path) for path in sorted(configs_dir.glob("*.json"))]
+    seen_ids: set[str] = set()
+    for season in seasons:
+        season_id = str(season["season_id"])
+        if season_id in seen_ids:
+            raise SeasonRegistryError(f"season_id 全局重复: {season_id}")
+        seen_ids.add(season_id)
     seasons.sort(key=lambda item: str(item.get("season_id", "")))
     return seasons
 
@@ -142,22 +191,69 @@ def _load_account_summary(report_dir: Path) -> dict[str, Any]:
     summary_path = report_dir / "account_summary.json"
     if not summary_path.exists():
         raise SeasonDataError("赛季缺少 account_summary.json，请先运行 build_platform_account_report.py")
-    report = _read_json_cached(summary_path)
+    try:
+        report = _read_json_cached(summary_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SeasonDataError(f"account_summary.json 无法解析: {summary_path}") from exc
     if not isinstance(report, dict) or report.get("schema") != REPORT_SCHEMA:
         raise SeasonDataError("account_summary.json schema 无效")
     return report
 
 
-def _summary_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+def _validate_report_accounts(season: dict[str, Any], report: dict[str, Any]) -> list[dict[str, Any]]:
+    """校验 report 账号集合与注册表的一致性（注册表为权威身份表）。
+
+    - report 每个账号必须已在注册表声明；
+    - report 内不得有重复 account_id；
+    - report 的 model_label 非空时必须与注册表 model_id 一致；
+    - status == "completed" 时注册表与 report 的账号集合必须完全一致；
+    - 未完成赛季允许注册账号尚未出现在 report，但 report 不得出现未注册账号。
+    """
+    season_id = season.get("season_id")
     rows = report.get("accounts")
     if not isinstance(rows, list):
-        return []
-    return [row for row in rows if isinstance(row, dict)]
+        raise SeasonDataError(f"season {season_id}: account_summary.json 的 accounts 必须是数组")
+    registry_index = _registry_account_index(season)
+    seen: set[str] = set()
+    validated: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise SeasonDataError(f"season {season_id}: report 账号行必须是对象")
+        account_id = row.get("account_id")
+        if not isinstance(account_id, str) or not account_id.strip():
+            raise SeasonDataError(f"season {season_id}: report 账号行缺少非空 account_id")
+        if account_id in seen:
+            raise SeasonDataError(f"season {season_id}: report 内重复 account_id '{account_id}'")
+        seen.add(account_id)
+        registry = registry_index.get(account_id)
+        if registry is None:
+            raise SeasonDataError(f"season {season_id}: report 账号 '{account_id}' 未在注册表声明")
+        model_label = row.get("model_label")
+        if isinstance(model_label, str) and model_label.strip() and model_label != registry["model_id"]:
+            raise SeasonDataError(
+                f"season {season_id}: 账号 '{account_id}' 的 model_label '{model_label}' "
+                f"与注册表 model_id '{registry['model_id']}' 不一致"
+            )
+        validated.append(row)
+    if str(season.get("status") or "") == "completed":
+        missing = sorted(set(registry_index) - seen)
+        if missing:
+            raise SeasonDataError(
+                f"season {season_id}: completed 赛季注册账号未出现在 report 中: {missing}"
+            )
+    return validated
+
+
+def _load_validated_report(project_root: Path, season: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    report = _load_account_summary(_report_dir(project_root, season))
+    rows = _validate_report_accounts(season, report)
+    return report, rows
 
 
 def _enrich_account_row(row: dict[str, Any], registry_index: dict[str, dict[str, Any]]) -> dict[str, Any]:
     account_id = str(row.get("account_id", ""))
-    registry = registry_index.get(account_id, {})
+    # 注册表为权威身份表；账号存在性已由 _validate_report_accounts 保证
+    registry = registry_index[account_id]
     games = int(row.get("games") or 0)
     rank_1 = int(row.get("rank_1") or 0)
     rank_4 = int(row.get("rank_4") or 0)
@@ -165,8 +261,8 @@ def _enrich_account_row(row: dict[str, Any], registry_index: dict[str, dict[str,
     pt_target = float(row.get("pt_target") or 0.0)
     return {
         "account_id": account_id,
-        "display_name": registry.get("display_name", account_id),
-        "model_id": registry.get("model_id") or str(row.get("model_label", "")),
+        "display_name": registry.get("display_name") or account_id,
+        "model_id": registry["model_id"],
         "checkpoint": registry.get("checkpoint"),
         "games": games,
         "rank_name": row.get("rank_name"),
@@ -265,8 +361,9 @@ def list_seasons(project_root: Path, configs_dir: Path) -> list[dict[str, Any]]:
     for season in list_season_configs(configs_dir):
         entry = _season_public(season)
         try:
-            report = _load_account_summary(_report_dir(project_root, season))
+            report, _rows = _load_validated_report(project_root, season)
         except SeasonDataError:
+            # 报告缺失或与注册表不一致：该赛季标记为未就绪，不影响整个清单
             report = None
         entry["data_ready"] = report is not None
         if report is not None:
@@ -279,9 +376,9 @@ def load_ladder(project_root: Path, configs_dir: Path, season_id: str, sort: str
     if sort not in LADDER_SORTS:
         sort = "pt"
     season = get_season_config(configs_dir, season_id)
-    report = _load_account_summary(_report_dir(project_root, season))
+    report, validated_rows = _load_validated_report(project_root, season)
     registry_index = _registry_account_index(season)
-    rows = [_enrich_account_row(row, registry_index) for row in _summary_rows(report)]
+    rows = [_enrich_account_row(row, registry_index) for row in validated_rows]
     if sort == "pt":
         rows.sort(key=lambda row: row["pt_current"], reverse=True)
     elif sort == "rating":
@@ -317,7 +414,11 @@ def _read_rating_curve(report_dir: Path, account_id: str, max_points: int) -> li
                 })
             except (TypeError, ValueError):
                 continue
-    if max_points > 0 and len(points) > max_points:
+    if max_points <= 0:
+        return []
+    if max_points == 1:
+        return points[-1:] if points else []
+    if len(points) > max_points:
         stride = (len(points) - 1) / (max_points - 1)
         sampled = [points[round(i * stride)] for i in range(max_points - 1)]
         sampled.append(points[-1])
@@ -372,9 +473,9 @@ def load_account(
 ) -> dict[str, Any]:
     season = get_season_config(configs_dir, season_id)
     report_dir = _report_dir(project_root, season)
-    report = _load_account_summary(report_dir)
+    report, validated_rows = _load_validated_report(project_root, season)
     registry_index = _registry_account_index(season)
-    rows = [_enrich_account_row(row, registry_index) for row in _summary_rows(report)]
+    rows = [_enrich_account_row(row, registry_index) for row in validated_rows]
     match = next((row for row in rows if row["account_id"] == account_id), None)
     if match is None:
         raise AccountNotFoundError(f"account 不存在: {account_id}")
@@ -415,9 +516,9 @@ def _load_league_summary(project_root: Path, season: dict[str, Any], model_id: s
 def load_model(project_root: Path, configs_dir: Path, season_id: str, model_id: str) -> dict[str, Any]:
     season = get_season_config(configs_dir, season_id)
     report_dir = _report_dir(project_root, season)
-    report = _load_account_summary(report_dir)
+    report, validated_rows = _load_validated_report(project_root, season)
     registry_index = _registry_account_index(season)
-    rows = [_enrich_account_row(row, registry_index) for row in _summary_rows(report)]
+    rows = [_enrich_account_row(row, registry_index) for row in validated_rows]
     model_rows = [row for row in rows if row["model_id"] == model_id]
     if not model_rows:
         raise ModelNotFoundError(f"model 不存在: {model_id}")
