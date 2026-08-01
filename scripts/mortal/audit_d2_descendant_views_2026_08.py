@@ -287,20 +287,21 @@ def main() -> None:
     q_shard_reports: dict[str, list[dict[str, Any]]] = {}
     for label, index in indexes.items():
         outcome_path = output / f"outcomes_{label}.json"
-        run_child(
-            [
-                sys.executable,
-                str(REPO_ROOT / "scripts/mortal/audit_trainable_view_outcomes_2026_07.py"),
-                "--file-index",
-                str(index),
-                "--model-label",
-                label,
-                "--output",
-                str(outcome_path),
-                "--progress-every",
-                "250",
-            ]
-        )
+        if not outcome_path.is_file():
+            run_child(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts/mortal/audit_trainable_view_outcomes_2026_07.py"),
+                    "--file-index",
+                    str(index),
+                    "--model-label",
+                    label,
+                    "--output",
+                    str(outcome_path),
+                    "--progress-every",
+                    "250",
+                ]
+            )
         if not args.skip_q_audit:
             selected_files = file_list(index)
             if len(selected_files) != 3000:
@@ -313,32 +314,33 @@ def main() -> None:
                 shard_index = index_root / f"file_index_{shard_number:02d}.pth"
                 shard_output = shard_root / f"shard_{shard_number:02d}"
                 write_index(shard_index, shard_files)
-                run_child(
-                    [
-                        sys.executable,
-                        str(REPO_ROOT / "scripts/mortal/audit_replay_distribution.py"),
-                        "--file-index",
-                        str(shard_index),
-                        "--parent",
-                        str(parent),
-                        "--config",
-                        str(config),
-                        "--output-dir",
-                        str(shard_output),
-                        "--model-label",
-                        label,
-                        "--device",
-                        "cuda",
-                        "--require-cuda",
-                        "--q-batch-size",
-                        "4096",
-                        "--file-batch-size",
-                        "50",
-                        "--progress-every",
-                        "250",
-                    ]
-                )
                 shard_report_path = shard_output / "data_distribution_audit.json"
+                if not shard_report_path.is_file():
+                    run_child(
+                        [
+                            sys.executable,
+                            str(REPO_ROOT / "scripts/mortal/audit_replay_distribution.py"),
+                            "--file-index",
+                            str(shard_index),
+                            "--parent",
+                            str(parent),
+                            "--config",
+                            str(config),
+                            "--output-dir",
+                            str(shard_output),
+                            "--model-label",
+                            label,
+                            "--device",
+                            "cuda",
+                            "--require-cuda",
+                            "--q-batch-size",
+                            "4096",
+                            "--file-batch-size",
+                            "50",
+                            "--progress-every",
+                            "250",
+                        ]
+                    )
                 shard_report = load_json(shard_report_path)
                 if shard_report["corpus"]["files_selected"] != 250 or shard_report["corpus"]["malformed_count"] != 0:
                     raise SystemExit(f"{label} shard {shard_number:02d} failed Q audit")
@@ -418,7 +420,11 @@ def main() -> None:
         "decision_distribution": combined_decisions,
     }
 
-    d1_reference = prep / "distribution/summary/d1_distribution_d1.json"
+    d1_reference = (
+        root.parent
+        / "D1_project_owned_population_2026_07"
+        / "training_prep_2026_07/distribution/summary/d1_distribution_d1.json"
+    )
     k0 = load_json(d1_reference) if d1_reference.is_file() else None
     if k0:
         k0_support = k0["support_audit_overall"]
