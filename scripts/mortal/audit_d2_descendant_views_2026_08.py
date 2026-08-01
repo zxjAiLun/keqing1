@@ -16,6 +16,8 @@ import subprocess
 import sys
 from typing import Any
 
+import torch
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = REPO_ROOT / "artifacts/experiments/model_pool_2026_07/D2_project_owned_descendant_view_mix_2026_08"
@@ -119,6 +121,97 @@ def combine_outcomes(reports: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def write_index(path: Path, files: list[Path]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"file_list": [str(value) for value in files]}, path)
+
+
+def aggregate_q_shards(shard_reports: list[dict[str, Any]]) -> dict[str, Any]:
+    """Merge shard audits while keeping memory bounded per child process."""
+
+    corpus = {key: 0 for key in ("files_selected", "hanchans", "trainable_perspectives", "total_decisions", "malformed_count")}
+    final_ranks = Counter()
+    targets = Counter()
+    distributions = {
+        name: Counter()
+        for name in (
+            "phase_counts",
+            "current_rank_counts",
+            "score_gap_counts",
+            "own_riichi_counts",
+            "action_counts",
+            "legal_action_count_buckets",
+            "shanten_buckets",
+        )
+    }
+    support_fields = (
+        "behavior_action_legal_rate",
+        "greedy_agreement_rate",
+        "greedy_disagreement_rate",
+        "mean_behavior_q_rank",
+        "mean_q_regret_greedy_minus_behavior",
+        "mean_greedy_margin",
+        "mean_behavior_q",
+        "mean_greedy_q",
+        "mean_legal_q_abs",
+    )
+    support_sums = Counter()
+    support_rank_counts = Counter()
+    hanchan_rows = []
+    duplicate_totals = Counter()
+    for report in shard_reports:
+        source = report["corpus"]
+        for key in corpus:
+            corpus[key] += int(source[key])
+        counter_add(final_ranks, source["final_rank_counts"])
+        counter_add(targets, source["target_counts"])
+        for name in distributions:
+            counter_add(distributions[name], report["decision_distribution"][name])
+        support = report["support_audit"]["overall"]
+        states = int(support["states"])
+        for field in support_fields:
+            support_sums[field] += states * float(support[field])
+        counter_add(support_rank_counts, support["behavior_q_rank_counts"])
+        hanchan_rows.extend(report["hanchans"])
+        duplicate = report["duplicates"]
+        for key in ("unique_decision_count", "duplicate_decision_count", "unique_state_count", "state_duplicate_count"):
+            duplicate_totals[key] += int(duplicate[key])
+    states = sum(int(report["support_audit"]["overall"]["states"]) for report in shard_reports)
+    support = {
+        "states": states,
+        "behavior_q_rank_counts": dict(sorted(support_rank_counts.items())),
+        **{field: support_sums[field] / states for field in support_fields},
+    }
+    decisions = [int(row["decisions"]) for row in hanchan_rows]
+    q_report = {
+        "schema": "keqing.mortal.replay_distribution_audit.aggregate.v1",
+        "corpus": {
+            **corpus,
+            "final_rank_counts": dict(sorted(final_ranks.items())),
+            "target_counts": dict(sorted(targets.items())),
+        },
+        "hanchan_contribution": {
+            "hanchans": len(decisions),
+            "total_decisions": sum(decisions),
+            "decisions_per_hanchan_min": min(decisions),
+            "decisions_per_hanchan_max": max(decisions),
+            "decisions_per_hanchan_mean": sum(decisions) / len(decisions),
+            "decision_weight_ess": sum(decisions) ** 2 / sum(value * value for value in decisions),
+        },
+        "decision_distribution": {name: dict(sorted(values.items())) for name, values in distributions.items()},
+        "support_audit": {"overall": support},
+        "hanchans": hanchan_rows,
+        "duplicates": {
+            "scope": "shard_local_only",
+            "sum_unique_decisions": duplicate_totals["unique_decision_count"],
+            "sum_duplicate_decisions": duplicate_totals["duplicate_decision_count"],
+            "sum_unique_states": duplicate_totals["unique_state_count"],
+            "sum_state_duplicates": duplicate_totals["state_duplicate_count"],
+        },
+    }
+    return q_report
+
+
 def run_child(command: list[str]) -> None:
     print("[d2-audit] running:", " ".join(command), flush=True)
     subprocess.run(command, cwd=REPO_ROOT, check=True)
@@ -177,6 +270,7 @@ def main() -> None:
     if any(not path.is_file() for path in indexes.values()):
         raise FileNotFoundError("D2 V2/V3 file indexes are missing; run prepare_d2_descendant_view_mix_2026_08.py first")
 
+    q_shard_reports: dict[str, list[dict[str, Any]]] = {}
     for label, index in indexes.items():
         outcome_path = output / f"outcomes_{label}.json"
         run_child(
@@ -194,31 +288,58 @@ def main() -> None:
             ]
         )
         if not args.skip_q_audit:
-            run_child(
-                [
-                    sys.executable,
-                    str(REPO_ROOT / "scripts/mortal/audit_replay_distribution.py"),
-                    "--file-index",
-                    str(index),
-                    "--parent",
-                    str(parent),
-                    "--config",
-                    str(config),
-                    "--output-dir",
-                    str(output / label),
-                    "--model-label",
-                    label,
-                    "--device",
-                    "cuda",
-                    "--require-cuda",
-                    "--q-batch-size",
-                    "4096",
-                    "--file-batch-size",
-                    "50",
-                    "--progress-every",
-                    "250",
-                ]
-            )
+            selected_files = file_list(index)
+            if len(selected_files) != 3000:
+                raise ValueError(f"expected 3000 files for {label}, got {len(selected_files)}")
+            shard_root = output / "q_shards" / label
+            index_root = output / "q_indexes" / label
+            shard_reports: list[dict[str, Any]] = []
+            for shard_number in range(12):
+                shard_files = [Path(value) for value in selected_files[shard_number * 250 : (shard_number + 1) * 250]]
+                shard_index = index_root / f"file_index_{shard_number:02d}.pth"
+                shard_output = shard_root / f"shard_{shard_number:02d}"
+                write_index(shard_index, shard_files)
+                run_child(
+                    [
+                        sys.executable,
+                        str(REPO_ROOT / "scripts/mortal/audit_replay_distribution.py"),
+                        "--file-index",
+                        str(shard_index),
+                        "--parent",
+                        str(parent),
+                        "--config",
+                        str(config),
+                        "--output-dir",
+                        str(shard_output),
+                        "--model-label",
+                        label,
+                        "--device",
+                        "cuda",
+                        "--require-cuda",
+                        "--q-batch-size",
+                        "4096",
+                        "--file-batch-size",
+                        "50",
+                        "--progress-every",
+                        "250",
+                    ]
+                )
+                shard_report_path = shard_output / "data_distribution_audit.json"
+                shard_report = load_json(shard_report_path)
+                if shard_report["corpus"]["files_selected"] != 250 or shard_report["corpus"]["malformed_count"] != 0:
+                    raise SystemExit(f"{label} shard {shard_number:02d} failed Q audit")
+                shard_reports.append(shard_report)
+            aggregate = aggregate_q_shards(shard_reports)
+            aggregate["inputs"] = {
+                "model_label": label,
+                "shards": 12,
+                "files_per_shard": 250,
+                "source_file_index": str(index.resolve()),
+            }
+            aggregate_path = output / label / "data_distribution_audit.json"
+            aggregate_path.parent.mkdir(parents=True, exist_ok=True)
+            aggregate_path.write_text(json.dumps(aggregate, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            q_shard_reports[label] = shard_reports
 
     reports = {}
     for label in indexes:
