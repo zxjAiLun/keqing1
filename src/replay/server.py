@@ -1358,7 +1358,8 @@ async def list_selfplay_anomaly_replays():
 # ========== Model Ladder（模型天梯与账号） ==========
 
 _LADDER_PROJECT_ROOT = BASE_DIR.parent.parent
-_LADDER_SEASONS_DIR = _LADDER_PROJECT_ROOT / "configs" / "ladder" / "seasons"
+# 默认读取仓库 configs/ladder/seasons；正式 runtime 可用 KEQING_LADDER_CONFIG_DIR 指向外部注册表
+_LADDER_SEASONS_DIR = ladder_data.resolve_config_dir(_LADDER_PROJECT_ROOT)
 
 
 @app.get("/api/ladder/seasons", response_class=JSONResponse)

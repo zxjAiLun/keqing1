@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -174,6 +175,36 @@ def _registry_account_index(season: dict[str, Any]) -> dict[str, dict[str, Any]]
 
 
 # ---------------------------------------------------------------------------
+# 外部注册表 / 数据根边界（Live Ladder Data Plane）
+# ---------------------------------------------------------------------------
+
+def resolve_config_dir(project_root: Path) -> Path:
+    """赛季注册表目录。
+
+    默认读取仓库内 ``configs/ladder/seasons``；正式 runtime 通过环境变量
+    ``KEQING_LADDER_CONFIG_DIR`` 指向外部动态注册表目录（如 keqing-data）。
+    """
+    override = os.environ.get("KEQING_LADDER_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override)
+    return project_root / "configs" / "ladder" / "seasons"
+
+
+def resolve_report_dir(project_root: Path, raw_dir: str) -> Path:
+    """解析注册表 report_dir。
+
+    - 绝对路径原样使用（动态赛季通常直接指向 keqing-data 下的快照）；
+    - 相对路径默认相对 project_root；设置 ``KEQING_LADDER_DATA_ROOT`` 时相对该数据根。
+    """
+    path = Path(raw_dir)
+    if path.is_absolute():
+        return path.resolve()
+    data_root = os.environ.get("KEQING_LADDER_DATA_ROOT", "").strip()
+    base = Path(data_root) if data_root else project_root
+    return (base / raw_dir).resolve()
+
+
+# ---------------------------------------------------------------------------
 # Report artifacts
 # ---------------------------------------------------------------------------
 
@@ -181,7 +212,7 @@ def _report_dir(project_root: Path, season: dict[str, Any]) -> Path:
     raw_dir = str(season.get("report_dir") or "")
     if not raw_dir:
         raise SeasonDataError(f"赛季 {season.get('season_id')} 未配置 report_dir")
-    report_dir = (project_root / raw_dir).resolve()
+    report_dir = resolve_report_dir(project_root, raw_dir)
     if not report_dir.exists():
         raise SeasonDataError(f"赛季报告目录不存在: {raw_dir}")
     return report_dir
@@ -248,6 +279,26 @@ def _load_validated_report(project_root: Path, season: dict[str, Any]) -> tuple[
     report = _load_account_summary(_report_dir(project_root, season))
     rows = _validate_report_accounts(season, report)
     return report, rows
+
+
+def validate_snapshot(season: dict[str, Any], snapshot_dir: Path) -> list[dict[str, Any]]:
+    """校验一个已构建好的快照目录是否满足注册表契约（供发布器复用）。"""
+    report = _load_account_summary(snapshot_dir)
+    return _validate_report_accounts(season, report)
+
+
+def _summary_mtime(report_dir: Path) -> float | None:
+    summary_path = report_dir / "account_summary.json"
+    try:
+        return summary_path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _attach_snapshot_meta(season_pub: dict[str, Any], report_dir: Path) -> dict[str, Any]:
+    season_pub["snapshot_id"] = report_dir.name
+    season_pub["updated_at"] = _summary_mtime(report_dir)
+    return season_pub
 
 
 def _enrich_account_row(row: dict[str, Any], registry_index: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -368,6 +419,7 @@ def list_seasons(project_root: Path, configs_dir: Path) -> list[dict[str, Any]]:
         entry["data_ready"] = report is not None
         if report is not None:
             entry["games"] = report.get("games")
+            _attach_snapshot_meta(entry, _report_dir(project_root, season))
         seasons.append(entry)
     return seasons
 
@@ -390,7 +442,7 @@ def load_ladder(project_root: Path, configs_dir: Path, season_id: str, sort: str
     for index, row in enumerate(rows, 1):
         row["rank_position"] = index
     return {
-        "season": _season_public(season, report),
+        "season": _attach_snapshot_meta(_season_public(season, report), _report_dir(project_root, season)),
         "sort": sort,
         "accounts": rows,
         "models": _summarize_models(rows),
@@ -480,7 +532,7 @@ def load_account(
     if match is None:
         raise AccountNotFoundError(f"account 不存在: {account_id}")
     return {
-        "season": _season_public(season, report),
+        "season": _attach_snapshot_meta(_season_public(season, report), report_dir),
         "account": match,
         "rank_distribution": [match["rank_1"], match["rank_2"], match["rank_3"], match["rank_4"]],
         "curve": _read_rating_curve(report_dir, account_id, curve_max_points),
@@ -526,7 +578,7 @@ def load_model(project_root: Path, configs_dir: Path, season_id: str, model_id: 
     summary = next((item for item in _summarize_models(rows) if item["model_id"] == model_id), None)
     registry_model = next((m for m in _registry_models(season) if m.get("model_id") == model_id), {})
     return {
-        "season": _season_public(season, report),
+        "season": _attach_snapshot_meta(_season_public(season, report), report_dir),
         "model": {
             "model_id": model_id,
             "checkpoint": registry_model.get("checkpoint"),

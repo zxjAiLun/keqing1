@@ -412,3 +412,72 @@ def test_curve_point_boundaries(season_env, max_points, expected_games):
         recent_limit=0, curve_max_points=max_points,
     )
     assert [point["games"] for point in payload["curve"]] == expected_games
+
+
+# ---------------------------------------------------------------------------
+# 外部注册表 / 数据根边界（Live Ladder Data Plane）
+# ---------------------------------------------------------------------------
+
+def test_resolve_config_dir_defaults_to_repo(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("KEQING_LADDER_CONFIG_DIR", raising=False)
+    resolved = ladder.resolve_config_dir(tmp_path)
+    assert resolved == tmp_path / "configs" / "ladder" / "seasons"
+
+
+def test_resolve_config_dir_override(monkeypatch, tmp_path: Path):
+    external = tmp_path / "external-registries"
+    external.mkdir()
+    monkeypatch.setenv("KEQING_LADDER_CONFIG_DIR", str(external))
+    assert ladder.resolve_config_dir(tmp_path) == external
+
+
+def test_resolve_report_dir_absolute(monkeypatch, tmp_path: Path):
+    snapshot = tmp_path / "keqing-data" / "snapshots" / "20260801-120000"
+    snapshot.mkdir(parents=True)
+    monkeypatch.setenv("KEQING_LADDER_DATA_ROOT", str(tmp_path / "keqing-data"))
+    resolved = ladder.resolve_report_dir(tmp_path, str(snapshot))
+    assert resolved == snapshot.resolve()
+
+
+def test_resolve_report_dir_relative_uses_data_root(monkeypatch, tmp_path: Path):
+    data_root = tmp_path / "keqing-data"
+    monkeypatch.setenv("KEQING_LADDER_DATA_ROOT", str(data_root))
+    resolved = ladder.resolve_report_dir(tmp_path, "ladder/seasons/dev-live/snapshots/x")
+    assert resolved == (data_root / "ladder/seasons/dev-live/snapshots/x").resolve()
+
+
+def test_resolve_report_dir_relative_defaults_to_project_root(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("KEQING_LADDER_DATA_ROOT", raising=False)
+    resolved = ladder.resolve_report_dir(tmp_path, "artifacts/report")
+    assert resolved == (tmp_path / "artifacts/report").resolve()
+
+
+def test_external_registry_env_config_dir_end_to_end(monkeypatch, tmp_path: Path):
+    """模拟 runtime：外部注册表目录 + 绝对 report_dir（keqing-data 快照）。"""
+    external_registries = tmp_path / "keqing-data" / "registries"
+    external_registries.mkdir(parents=True)
+    snapshot = tmp_path / "keqing-data" / "seasons" / "dev-live" / "snapshots" / "20260801-120000"
+    snapshot.mkdir(parents=True)
+    (snapshot / "account_summary.json").write_text(
+        json.dumps({"schema": ladder.REPORT_SCHEMA, "games": 2, "accounts": _three_account_rows()}),
+        encoding="utf-8",
+    )
+    season = _season(season_id="dev-live", status="running", report_dir=str(snapshot))
+    (external_registries / "dev-live.json").write_text(json.dumps(season), encoding="utf-8")
+    monkeypatch.setenv("KEQING_LADDER_CONFIG_DIR", str(external_registries))
+
+    configs_dir = ladder.resolve_config_dir(tmp_path)
+    payload = ladder.load_ladder(tmp_path, configs_dir, "dev-live")
+    assert len(payload["accounts"]) == 3
+    assert payload["season"]["snapshot_id"] == "20260801-120000"
+    assert isinstance(payload["season"]["updated_at"], float)
+
+
+def test_snapshot_metadata_present_on_all_loaders(season_env):
+    ladder_payload = ladder.load_ladder(season_env["root"], season_env["configs"], "test-season")
+    assert ladder_payload["season"]["snapshot_id"] == "season_report"
+    assert isinstance(ladder_payload["season"]["updated_at"], float)
+    account_payload = ladder.load_account(season_env["root"], season_env["configs"], "test-season", "model_a@01")
+    assert account_payload["season"]["snapshot_id"] == "season_report"
+    model_payload = ladder.load_model(season_env["root"], season_env["configs"], "test-season", "model_a")
+    assert model_payload["season"]["snapshot_id"] == "season_report"
