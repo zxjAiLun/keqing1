@@ -71,16 +71,45 @@ export function LadderPage() {
     return () => { cancelled = true; };
   }, [activeSeasonId, sort]);
 
-  // 页面可见时每 30 秒静默刷新（隐藏时停止；请求失败保留现有数据）
+  // 页面可见时每 30 秒静默刷新：
+  // - cancelled 标记 + in-flight 去重：依赖变化后忽略旧响应，同一时刻最多一个刷新请求；
+  // - 成功响应允许 setLadder/setError(null)/setLoading(false)：从临时失败（409/后端切换）自动恢复；
+  // - visibilitychange：恢复可见时立即刷新一次，不必等下一个 30 秒。
   useEffect(() => {
     if (!activeSeasonId) return;
-    const timer = window.setInterval(() => {
+    let cancelled = false;
+    let inFlight = false;
+
+    const refresh = () => {
+      if (cancelled || inFlight) return;
       if (document.visibilityState !== 'visible') return;
+      inFlight = true;
       ladderApi.getLadder(activeSeasonId, sort)
-        .then((payload) => setLadder((current) => (current ? payload : current)))
-        .catch(() => { /* 保留现有数据 */ });
-    }, REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(timer);
+        .then((payload) => {
+          if (cancelled) return;
+          setLadder(payload);
+          setError(null);
+          setLoading(false);
+        })
+        .catch(() => {
+          // 保留现有数据，等待下一次轮询重试
+        })
+        .finally(() => {
+          inFlight = false;
+        });
+    };
+
+    const timer = window.setInterval(refresh, REFRESH_INTERVAL_MS);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [activeSeasonId, sort]);
 
   const switchSeason = (seasonId: string) => {
