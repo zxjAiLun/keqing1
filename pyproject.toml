@@ -51,6 +51,7 @@ python_files = [
     "test_tenhou_public_state_sync.py",
     "test_final_rank.py",
     "test_ladder_api.py",
+    "test_publish_ladder_snapshot.py",
     "test_legal_actions_*.py",
     "test_normal_progress.py",
     "test_progress_oracle_rust.py",

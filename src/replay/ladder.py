@@ -122,6 +122,11 @@ def _load_registry_file(path: Path) -> dict[str, Any]:
     return _validate_registry(raw, path.name)
 
 
+def read_registry(path: Path) -> dict[str, Any]:
+    """读取并校验单个赛季注册表文件（供发布器等生产端复用）。"""
+    return _load_registry_file(path)
+
+
 def list_season_configs(configs_dir: Path) -> list[dict[str, Any]]:
     """Parse every season registry file, sorted by season_id."""
     if not configs_dir.exists():
