@@ -2,7 +2,7 @@
 
 ## Status
 
-Training is complete for all three preregistered matched seeds. Strength evaluation is pending; this document does not promote a checkpoint.
+Training and the preregistered B250 strength evaluation are complete for all three matched seeds. D2 is rejected as a data route; no D2 checkpoint is promoted. The authoritative Chinese result is [2026-08_D2后代策略视角_结果报告.md](experiments_zh/2026-08_D2后代策略视角_结果报告.md), and the current project state is [研发总览_当前.md](研发总览_当前.md).
 
 ## Data Contract
 

@@ -189,3 +189,9 @@ build/
 
 # Current Mortal legal-mean objective A/B plan
 !docs/mortal/legal_mean_value_ab_2026_07.md
+
+# Chinese Mortal research governance
+!docs/mortal/研发总览_当前.md
+!docs/mortal/experiments_zh/
+!docs/mortal/experiments_zh/*.md
+!docs/mortal/research_registry.json
