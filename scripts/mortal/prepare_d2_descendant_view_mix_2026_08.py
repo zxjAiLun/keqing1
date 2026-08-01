@@ -215,8 +215,7 @@ def main() -> None:
     label_path = dataset_dir / "d2_train_labels.txt"
     label_path.write_text("V2_74000\nV3_74000\n", encoding="utf-8")
 
-    with base_config_path.open("rb") as handle:
-        base = toml.load(handle)
+    base = toml.load(str(base_config_path))
     data_glob = str((d1_root / "data/shard_*/logs/*.json.gz").resolve())
     prep_dir = output / "training_prep_2026_08"
     configs = []
