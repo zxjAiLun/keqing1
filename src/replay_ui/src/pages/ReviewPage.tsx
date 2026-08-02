@@ -4,44 +4,40 @@ import { History } from 'lucide-react';
 import { UploadForm } from '../components/Upload/UploadForm';
 import type { ReplayData } from '../types/replay';
 import { PageHeader, PageShell, SectionTitle } from '../components/Layout/PageScaffold';
+import { legacyRoutes, reviewWorkspaceUrl, routes } from '../routes';
 
 export function ReviewPage() {
   const navigate = useNavigate();
 
-  const buildReplaySearchForData = (data: ReplayData) => {
-    if (!data.replay_id) return '/game-replay';
-    const params = new URLSearchParams({
-      id: data.replay_id,
-      player_id: String(data.player_id ?? 0),
-    });
-    for (const report of data.teacher_report_paths ?? []) {
-      params.append('teacher_reports', report);
-    }
-    return `/game-replay?${params.toString()}`;
-  };
-
   const handleDataLoaded = (data: unknown) => {
     const replayData = data as ReplayData;
     if (replayData.replay_id) {
-      navigate(buildReplaySearchForData(replayData), { replace: true });
+      navigate(
+        reviewWorkspaceUrl(replayData.replay_id, {
+          playerId: replayData.player_id ?? 0,
+          teacherReports: replayData.teacher_report_paths ?? [],
+        }),
+        { replace: true },
+      );
     } else {
-      navigate('/game-replay', { state: { replayData }, replace: true });
+      // 无 replay_id（未持久化）时走 legacy state 通道打开 Workspace
+      navigate(legacyRoutes.gameReplay, { state: { replayData }, replace: true });
     }
   };
 
   return (
     <PageShell width={1180}>
       <PageHeader
-        title="牌谱 Review"
+        title="新建 Review"
         actions={(
           <button
             type="button"
-            onClick={() => navigate('/review-history')}
+            onClick={() => navigate(routes.reviewLibrary)}
             className="btn-secondary"
             style={{ height: 32, display: 'inline-flex', alignItems: 'center', gap: 6 }}
           >
             <History size={14} />
-            历史 Review
+            Review Library
           </button>
         )}
       />

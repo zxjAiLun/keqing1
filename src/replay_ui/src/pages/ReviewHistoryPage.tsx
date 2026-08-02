@@ -3,16 +3,8 @@ import { RefreshCw } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { replayApi } from '../api/replayApi';
 import { PageHeader, PageShell } from '../components/Layout/PageScaffold';
+import { reviewWorkspaceUrl, routes } from '../routes';
 import type { ReviewHistoryItem } from '../types/replay';
-
-export function buildReviewHistoryPath(item: ReviewHistoryItem): string {
-  const params = new URLSearchParams({
-    id: item.replay_id,
-    player_id: String(item.player_id),
-  });
-  item.teacher_report_paths.forEach((path) => params.append('teacher_reports', path));
-  return `/game-replay?${params.toString()}`;
-}
 
 export function ReviewHistoryPage() {
   const navigate = useNavigate();
@@ -37,12 +29,17 @@ export function ReviewHistoryPage() {
   return (
     <PageShell width={1180}>
       <PageHeader
-        title="历史 Review"
+        title="Review Library"
         actions={(
-          <button type="button" onClick={() => void load()} className="btn-secondary" style={actionButtonStyle}>
-            <RefreshCw size={14} />
-            刷新
-          </button>
+          <>
+            <button type="button" onClick={() => navigate(routes.reviewNew)} className="btn-secondary" style={actionButtonStyle}>
+              新建 Review
+            </button>
+            <button type="button" onClick={() => void load()} className="btn-secondary" style={actionButtonStyle}>
+              <RefreshCw size={14} />
+              刷新
+            </button>
+          </>
         )}
       />
 
@@ -63,8 +60,15 @@ export function ReviewHistoryPage() {
             </span>
             <span>{item.kyoku_count}局 / {item.total_steps}步</span>
             <span style={actionGroupStyle}>
-              <button type="button" onClick={() => navigate(buildReviewHistoryPath(item))} style={openButtonStyle}>
-                本地
+              <button
+                type="button"
+                onClick={() => navigate(reviewWorkspaceUrl(item.replay_id, {
+                  playerId: item.player_id,
+                  teacherReports: item.teacher_report_paths,
+                }))}
+                style={openButtonStyle}
+              >
+                打开
               </button>
             </span>
           </div>

@@ -11,7 +11,7 @@ import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -219,12 +219,17 @@ def load_review_history(project_root: Path) -> list[dict]:
 
 
 def review_url(item: dict) -> str:
+    """构造 canonical Review Workspace URL（/reviews/:replayId）。
+
+    replayId 进入 path 并做 URL 编码；teacher_reports 通过 tuple list 逐项
+    追加，重复的参数不会被压平。
+    """
     query = [
-        ("id", item["replay_id"]),
         ("player_id", str(item["player_id"])),
     ]
     query.extend(("teacher_reports", path) for path in item["teacher_report_paths"])
-    return f"{URL}/game-replay?{urlencode(query)}"
+    replay_id = quote(str(item["replay_id"]), safe="")
+    return f"{URL}/reviews/{replay_id}?{urlencode(query)}"
 
 
 # ---------------------------------------------------------------------------

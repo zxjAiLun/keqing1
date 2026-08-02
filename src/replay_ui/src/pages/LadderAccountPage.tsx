@@ -1,0 +1,297 @@
+// src/replay_ui/src/pages/LadderAccountPage.tsx
+// 账号详情：PT/Rating 曲线、顺位分布、行为指标、最近对局。
+import { useEffect, useState, type CSSProperties } from 'react';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { ladderApi } from '../api/ladderApi';
+import { PageHeader, PageShell, SectionTitle } from '../components/Layout/PageScaffold';
+import { TrendChart } from '../components/Ladder/TrendChart';
+import { routes, withLadderSeason } from '../routes';
+import type { LadderAccountDetail, LadderSeason } from '../types/ladder';
+import { fmtPt, fmtRate, fmtRating, fmtSignedInt } from '../utils/ladderFormat';
+
+const RECENT_GAMES_LIMIT = 50;
+
+export function LadderAccountPage() {
+  const { accountId } = useParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [seasons, setSeasons] = useState<LadderSeason[]>([]);
+  const [detail, setDetail] = useState<LadderAccountDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [seasonsLoaded, setSeasonsLoaded] = useState(false);
+
+  const seasonFromQuery = new URLSearchParams(location.search).get('season');
+  const activeSeasonId = seasonFromQuery ?? seasons[0]?.season_id ?? null;
+
+  useEffect(() => {
+    ladderApi.listSeasons()
+      .then((payload) => {
+        setSeasons(payload.seasons);
+        setSeasonsLoaded(true);
+      })
+      .catch((reason) => {
+        setError(reason instanceof Error ? reason.message : String(reason));
+        setSeasonsLoaded(true);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!activeSeasonId || !accountId) return;
+    let cancelled = false;
+    const load = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const payload = await ladderApi.getAccount(activeSeasonId, accountId, RECENT_GAMES_LIMIT);
+        if (!cancelled) {
+          setDetail(payload);
+          setLoading(false);
+        }
+      } catch (reason) {
+        if (!cancelled) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+          setDetail(null);
+          setLoading(false);
+        }
+      }
+    };
+    void load();
+    return () => { cancelled = true; };
+  }, [activeSeasonId, accountId]);
+
+  const account = detail?.account;
+  const backToLadder = () => navigate(withLadderSeason(routes.ladder, activeSeasonId));
+  const openModel = () => {
+    if (account) navigate(withLadderSeason(routes.ladderModel(account.model_id), activeSeasonId));
+  };
+
+  const ptProgress = account && account.pt_target > 0
+    ? Math.max(0, Math.min(100, (account.pt_current / account.pt_target) * 100))
+    : 0;
+
+  return (
+    <PageShell width={1180}>
+      <PageHeader
+        eyebrow="Account Profile"
+        title={account?.display_name ?? '账号详情'}
+        description={detail ? `${detail.season.title || detail.season.season_id} · ${account?.model_id}` : undefined}
+        actions={(
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" onClick={backToLadder} className="btn-secondary" style={actionButtonStyle}>
+              返回天梯
+            </button>
+            {account && (
+              <button type="button" onClick={openModel} className="btn-secondary" style={actionButtonStyle}>
+                模型详情
+              </button>
+            )}
+          </div>
+        )}
+      />
+
+      {error && <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{error}</div>}
+      {((!seasonsLoaded && !error) || (loading && activeSeasonId && accountId)) && (
+        <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>加载中...</div>
+      )}
+
+      {seasonsLoaded && !error && !detail && !(loading && activeSeasonId && accountId) && (
+        <div className="card" style={{ padding: 16, color: 'var(--text-muted)', fontSize: 13 }}>
+          未找到账号数据。请从天梯榜进入，或确认 ?season= 参数与账号 ID。
+        </div>
+      )}
+
+      {!loading && detail && account && (
+        <>
+          {/* 账号概览 */}
+          <section className="card" style={{ padding: 14, marginBottom: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 260 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 18, fontWeight: 800, color: 'var(--text-primary)' }}>{account.display_name}</span>
+                  {account.rank_name && <span style={rankBadgeStyle}>{account.rank_name}</span>}
+                </div>
+                <div style={{ marginTop: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
+                  模型 <button type="button" onClick={openModel} style={linkButtonStyle}>{account.model_id}</button>
+                </div>
+                {account.checkpoint && (
+                  <div style={{ marginTop: 4, fontSize: 10, color: 'var(--text-muted)', fontFamily: 'Menlo, Consolas, monospace', wordBreak: 'break-all' }}>
+                    {account.checkpoint}
+                  </div>
+                )}
+                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
+                  对局数 <b style={{ color: 'var(--text-primary)' }}>{account.games}</b>
+                  {detail.season.scoring && (
+                    <span style={{ color: 'var(--text-muted)' }}> · {detail.season.scoring.pt_profile}</span>
+                  )}
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                <div style={{ minWidth: 200 }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 3 }}>
+                    PT（{fmtPt(account.pt_current)} / {fmtPt(account.pt_target)}）
+                  </div>
+                  <div style={{ height: 8, borderRadius: 4, background: 'var(--page-bg)', border: '1px solid var(--border)', overflow: 'hidden' }}>
+                    <div style={{ width: `${ptProgress}%`, height: '100%', background: account.pt_gap > 0 ? 'var(--accent)' : 'var(--success)' }} />
+                  </div>
+                  <div style={{ marginTop: 3, fontSize: 11, color: account.pt_gap > 0 ? 'var(--text-muted)' : 'var(--success)' }}>
+                    {account.pt_gap > 0 ? `距目标还差 ${fmtPt(account.pt_gap)}` : '已达到目标 PT'}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Rating</div>
+                  <div style={{ fontSize: 24, fontWeight: 800, color: 'var(--text-primary)', fontFamily: 'Menlo, Consolas, monospace' }}>
+                    {fmtRating(account.rating)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* PT / Rating 曲线 */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 12, marginBottom: 12 }}>
+            <section className="card" style={{ padding: 12 }}>
+              <TrendChart title="PT 曲线" points={detail.curve.map((point) => point.pt)} formatValue={fmtPt} />
+            </section>
+            <section className="card" style={{ padding: 12 }}>
+              <TrendChart title="Rating 曲线" points={detail.curve.map((point) => point.rating)} formatValue={fmtRating} color="#8e44ad" />
+            </section>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 12, marginBottom: 12 }}>
+            {/* 顺位分布 */}
+            <section className="card" style={{ padding: 12 }}>
+              <SectionTitle title="顺位分布" />
+              {detail.rank_distribution.map((count, index) => {
+                const total = Math.max(1, account.games);
+                const pct = (count / total) * 100;
+                return (
+                  <div key={index} style={{ display: 'grid', gridTemplateColumns: '44px 1fr 76px', gap: 8, alignItems: 'center', marginBottom: 5 }}>
+                    <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{['一位', '二位', '三位', '四位'][index]}</span>
+                    <div style={{ height: 7, borderRadius: 4, background: 'var(--page-bg)', border: '1px solid var(--border)', overflow: 'hidden' }}>
+                      <div style={{ width: `${pct}%`, height: '100%', background: index === 0 ? 'var(--success)' : index === 3 ? 'var(--error)' : 'var(--accent)' }} />
+                    </div>
+                    <span style={{ fontSize: 11, color: 'var(--text-primary)', textAlign: 'right', fontFamily: 'Menlo, Consolas, monospace' }}>
+                      {count} · {pct.toFixed(1)}%
+                    </span>
+                  </div>
+                );
+              })}
+            </section>
+
+            {/* 行为指标 */}
+            <section className="card" style={{ padding: 12 }}>
+              <SectionTitle title="行为指标" />
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 14px', fontSize: 12 }}>
+                {[
+                  ['和率', fmtRate(account.agari_rate)],
+                  ['放铳率', fmtRate(account.houjuu_rate)],
+                  ['副露率', fmtRate(account.fuuro_rate)],
+                  ['立直率', fmtRate(account.riichi_rate)],
+                  ['副露后和率', fmtRate(account.agari_rate_after_fuuro)],
+                  ['副露后放铳率', fmtRate(account.houjuu_rate_after_fuuro)],
+                  ['立直后和率', fmtRate(account.agari_rate_after_riichi)],
+                  ['立直后放铳率', fmtRate(account.houjuu_rate_after_riichi)],
+                  ['平均和牌打点', account.avg_point_per_agari === null ? '—' : Math.round(account.avg_point_per_agari).toLocaleString()],
+                  ['总分数变化', fmtSignedInt(account.total_delta_score)],
+                ].map(([label, value]) => (
+                  <div key={label} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, borderBottom: '1px dashed var(--border)', paddingBottom: 3 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>{label}</span>
+                    <span style={{ color: 'var(--text-primary)', fontWeight: 700, fontFamily: 'Menlo, Consolas, monospace' }}>{value}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
+
+          {/* 最近对局 */}
+          <section className="card" style={{ padding: 12 }}>
+            <SectionTitle title={`最近对局（${detail.recent_games.length} 场）`} description="按时间倒序，仅展示最近场次，不加载全部牌谱。" />
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', textAlign: 'left' }}>
+                    <th style={thStyle}>场次</th>
+                    <th style={thStyle}>顺位</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>终局分</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>分数Δ</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>PTΔ</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>PT</th>
+                    <th style={{ ...thStyle, textAlign: 'right' }}>Rating</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detail.recent_games.map((game) => (
+                    <tr key={game.game_index} style={{ borderBottom: '1px solid var(--border)' }}>
+                      <td style={{ ...tdStyle, fontFamily: 'Menlo, Consolas, monospace' }}>#{game.game_index}</td>
+                      <td style={{ ...tdStyle, fontWeight: 800, color: game.rank === 1 ? 'var(--success)' : game.rank === 4 ? 'var(--error)' : 'var(--text-primary)' }}>
+                        {game.rank} 位
+                      </td>
+                      <td style={{ ...tdStyle, ...numStyle }}>{game.final_score.toLocaleString()}</td>
+                      <td style={{ ...tdStyle, ...numStyle }}>{fmtSignedInt(game.score_delta)}</td>
+                      <td style={{ ...tdStyle, ...numStyle }}>{fmtSignedInt(game.pt_delta)}</td>
+                      <td style={{ ...tdStyle, ...numStyle }}>{fmtPt(game.pt_after)}</td>
+                      <td style={{ ...tdStyle, ...numStyle }}>{fmtRating(game.rating_after)}</td>
+                    </tr>
+                  ))}
+                  {detail.recent_games.length === 0 && (
+                    <tr><td colSpan={7} style={{ ...tdStyle, color: 'var(--text-muted)', textAlign: 'center', padding: 14 }}>暂无对局记录</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </>
+      )}
+    </PageShell>
+  );
+}
+
+const actionButtonStyle: CSSProperties = {
+  height: 32,
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+  padding: '0 12px',
+};
+
+const rankBadgeStyle: CSSProperties = {
+  border: '1px solid rgba(142,68,173,0.5)',
+  borderRadius: 4,
+  background: 'rgba(142,68,173,0.1)',
+  color: '#8e44ad',
+  fontSize: 11,
+  fontWeight: 800,
+  padding: '2px 6px',
+};
+
+const linkButtonStyle: CSSProperties = {
+  border: 'none',
+  background: 'none',
+  padding: 0,
+  color: 'var(--accent)',
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: 'pointer',
+  textDecoration: 'underline',
+};
+
+const thStyle: CSSProperties = {
+  padding: '6px 8px',
+  fontSize: 11,
+  fontWeight: 700,
+  whiteSpace: 'nowrap',
+};
+
+const tdStyle: CSSProperties = {
+  padding: '6px 8px',
+  color: 'var(--text-primary)',
+  whiteSpace: 'nowrap',
+};
+
+const numStyle: CSSProperties = {
+  textAlign: 'right',
+  fontFamily: 'Menlo, Consolas, monospace',
+};
+

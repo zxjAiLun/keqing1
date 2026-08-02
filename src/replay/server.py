@@ -14,6 +14,7 @@ from urllib.request import urlopen, Request
 from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from replay.normalize import normalize_replay_decisions
+from replay import ladder as ladder_data
 from replay.external_reports import write_external_teacher_reports
 
 
@@ -1352,6 +1353,74 @@ async def list_selfplay_replay_collections():
 async def list_selfplay_anomaly_replays():
     """兼容旧接口，返回相同的聚合对局回放清单。"""
     return JSONResponse(content={"groups": _collect_replay_groups()})
+
+
+# ========== Model Ladder（模型天梯与账号） ==========
+
+_LADDER_PROJECT_ROOT = BASE_DIR.parent.parent
+# 默认读取仓库 configs/ladder/seasons；正式 runtime 可用 KEQING_LADDER_CONFIG_DIR 指向外部注册表
+_LADDER_SEASONS_DIR = ladder_data.resolve_config_dir(_LADDER_PROJECT_ROOT)
+
+
+@app.get("/api/ladder/seasons", response_class=JSONResponse)
+async def list_ladder_seasons():
+    """列出已注册的评测赛季。"""
+    try:
+        seasons = ladder_data.list_seasons(_LADDER_PROJECT_ROOT, _LADDER_SEASONS_DIR)
+    except ladder_data.SeasonRegistryError as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+    return JSONResponse(content={"seasons": seasons})
+
+
+@app.get("/api/ladder/seasons/{season_id}", response_class=JSONResponse)
+async def get_ladder(season_id: str, sort: str = "pt"):
+    """赛季天梯榜：账号排名 + 模型展示性聚合。"""
+    try:
+        payload = ladder_data.load_ladder(_LADDER_PROJECT_ROOT, _LADDER_SEASONS_DIR, season_id, sort=sort)
+    except ladder_data.SeasonNotFoundError as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
+    except ladder_data.SeasonDataError as exc:
+        return JSONResponse(status_code=409, content={"error": str(exc)})
+    except ladder_data.SeasonRegistryError as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+    return JSONResponse(content=payload)
+
+
+@app.get("/api/ladder/seasons/{season_id}/accounts/{account_id}", response_class=JSONResponse)
+async def get_ladder_account(season_id: str, account_id: str, recent_games: int = 50, curve_points: int = 240):
+    """账号详情：聚合指标 + PT/Rating 曲线 + 最近对局（不加载全部牌谱）。"""
+    recent_limit = max(0, min(int(recent_games), 200))
+    curve_max = max(0, min(int(curve_points), 1000))
+    try:
+        payload = ladder_data.load_account(
+            _LADDER_PROJECT_ROOT,
+            _LADDER_SEASONS_DIR,
+            season_id,
+            account_id,
+            recent_limit=recent_limit,
+            curve_max_points=curve_max,
+        )
+    except (ladder_data.SeasonNotFoundError, ladder_data.AccountNotFoundError) as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
+    except ladder_data.SeasonDataError as exc:
+        return JSONResponse(status_code=409, content={"error": str(exc)})
+    except ladder_data.SeasonRegistryError as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+    return JSONResponse(content=payload)
+
+
+@app.get("/api/ladder/seasons/{season_id}/models/{model_id}", response_class=JSONResponse)
+async def get_ladder_model(season_id: str, model_id: str):
+    """模型详情：账号横向对比 + 可选联赛聚合。"""
+    try:
+        payload = ladder_data.load_model(_LADDER_PROJECT_ROOT, _LADDER_SEASONS_DIR, season_id, model_id)
+    except (ladder_data.SeasonNotFoundError, ladder_data.ModelNotFoundError) as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
+    except ladder_data.SeasonDataError as exc:
+        return JSONResponse(status_code=409, content={"error": str(exc)})
+    except ladder_data.SeasonRegistryError as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+    return JSONResponse(content=payload)
 
 
 @app.get("/api/behavior-casebook", response_class=JSONResponse)
