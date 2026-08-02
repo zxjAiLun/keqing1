@@ -1,33 +1,55 @@
 import { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
+  AlertTriangle,
   BarChart2,
   Bot,
   History,
   LayoutDashboard,
+  ListTree,
   Menu,
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
   Table2,
-  Users,
   X,
 } from 'lucide-react';
 import { ThemeToggle } from './ThemeToggle';
 import { TABLECLOTH_OPTIONS } from '../BattleBoard/tableclothOptions';
 import type { TableclothId } from '../BattleBoard/tableclothOptions';
+import { routes } from '../../routes';
 
-const NAV_ITEMS: Array<{
+type NavItem = {
   path: string;
   icon: typeof LayoutDashboard;
   label: string;
   exact?: boolean;
-}> = [
-  { path: '/', icon: LayoutDashboard, label: '总览', exact: true },
-  { path: '/review', icon: BarChart2, label: '牌谱 Review' },
-  { path: '/review-history', icon: History, label: '历史 Review' },
-  { path: '/battle', icon: Users, label: '人机对战' },
-  { path: '/play-with-you', icon: Bot, label: '天凤呼出' },
+};
+
+const NAV_SECTIONS: Array<{ label: string; items: NavItem[] }> = [
+  {
+    label: '工作台',
+    items: [{ path: routes.home, icon: LayoutDashboard, label: '总览', exact: true }],
+  },
+  {
+    label: 'Review',
+    items: [
+      { path: routes.reviewNew, icon: BarChart2, label: '新建 Review' },
+      { path: routes.reviewLibrary, icon: History, label: 'Review Library', exact: true },
+    ],
+  },
+  {
+    label: '竞技',
+    items: [{ path: routes.ladder, icon: ListTree, label: '天梯榜' }],
+  },
+  {
+    label: '在线',
+    items: [{ path: routes.tenhou, icon: Bot, label: '天凤呼出' }],
+  },
+  {
+    label: '诊断',
+    items: [{ path: routes.diagnosticsCasebook, icon: AlertTriangle, label: 'Casebook' }],
+  },
 ];
 
 const SIDEBAR_WIDTH = 176;
@@ -77,7 +99,7 @@ export function Sidebar() {
     window.dispatchEvent(new StorageEvent('storage', { key: 'keqing.tablecloth', newValue: next }));
   };
 
-  const navLink = ({ path, icon: Icon, label, exact }: (typeof NAV_ITEMS)[number]) => (
+  const navLink = ({ path, icon: Icon, label, exact }: NavItem) => (
     <NavLink
       key={path}
       to={path}
@@ -204,8 +226,29 @@ export function Sidebar() {
         )}
       </div>
 
-      <nav style={{ display: 'grid', gap: 4, padding: '10px 8px', flex: 1, overflow: 'auto' }}>
-        {NAV_ITEMS.map(navLink)}
+      <nav style={{ display: 'grid', gap: 4, padding: '10px 8px', flex: 1, overflow: 'auto', alignContent: 'start' }}>
+        {NAV_SECTIONS.map((section, sectionIndex) => (
+          <div key={section.label} style={{ display: 'grid', gap: 4 }}>
+            {sectionIndex > 0 && collapsed && !isMobile && (
+              <div style={{ height: 1, background: 'var(--sidebar-border)', margin: '6px 4px' }} />
+            )}
+            {(!collapsed || isMobile) && (
+              <div
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  letterSpacing: '0.08em',
+                  textTransform: 'uppercase',
+                  color: 'var(--sidebar-text-muted)',
+                  padding: `${sectionIndex === 0 ? '0' : '8px'} 10px 2px`,
+                }}
+              >
+                {section.label}
+              </div>
+            )}
+            {section.items.map(navLink)}
+          </div>
+        ))}
       </nav>
 
       <div style={{ padding: 10, borderTop: '1px solid var(--sidebar-border)' }}>{settings}</div>

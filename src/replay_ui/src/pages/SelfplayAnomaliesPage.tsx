@@ -4,6 +4,7 @@ import { AlertTriangle, Loader2, MonitorPlay, ListTree } from 'lucide-react';
 import { replayApi } from '../api/replayApi';
 import type { SelfplayAnomalyReplayGroup } from '../types/replay';
 import { PageHeader, PageShell, SectionTitle } from '../components/Layout/PageScaffold';
+import { legacyRoutes, routes } from '../routes';
 
 function fmtTime(ts: number): string {
   return new Date(ts * 1000).toLocaleString();
@@ -84,8 +85,8 @@ export function SelfplayAnomaliesPage() {
   return (
     <PageShell width={1160}>
       <PageHeader
-        eyebrow="Replays"
-        title="对局回放"
+        eyebrow="Diagnostics"
+        title="Casebook"
         description="自动聚合 selfplay 导出的 `replays/manifest.json` 与 `anomaly_replays/manifest.json`，统一跳转决策列表或牌桌回放。"
       />
 
@@ -190,7 +191,7 @@ export function SelfplayAnomaliesPage() {
 
                   <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                     <button
-                      onClick={() => item.replay_id && navigate(`/replay?id=${item.replay_id}`)}
+                      onClick={() => item.replay_id && navigate(`${legacyRoutes.decisionList}?id=${item.replay_id}`)}
                       className="btn-primary"
                       disabled={!item.replay_id}
                       style={btnStyle}
@@ -199,7 +200,7 @@ export function SelfplayAnomaliesPage() {
                       决策列表
                     </button>
                     <button
-                      onClick={() => item.replay_id && navigate(`/game-replay?id=${item.replay_id}`)}
+                      onClick={() => item.replay_id && navigate(routes.reviewWorkspace(item.replay_id))}
                       className="btn-primary"
                       disabled={!item.replay_id}
                       style={{ ...btnStyle, background: 'var(--success)' }}

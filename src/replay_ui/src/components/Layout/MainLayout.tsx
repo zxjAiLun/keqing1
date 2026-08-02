@@ -41,7 +41,6 @@ export function MainLayout() {
           }}
         >
           <span style={{ fontWeight: 700, color: 'var(--text-primary)' }}>Keqing1 工作台</span>
-          <span>127.0.0.1:8000 · local</span>
         </div>
         <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
           <Outlet />
