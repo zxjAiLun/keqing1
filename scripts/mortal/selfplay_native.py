@@ -27,6 +27,7 @@ from scripts.mortal.eval_metrics import (
     summarize_rank_counts_with_references,
     write_metrics,
 )
+from scripts.mortal.ladder_publish_hook import add_ladder_publish_args, hook_from_args
 from scripts.mortal.stat_report import write_stat_report
 
 
@@ -59,6 +60,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-amp", action="store_true")
     parser.add_argument("--no-platform-report", action="store_true")
     parser.add_argument("--defer-reports", action="store_true", help="generate logs only; build reports in a final pass")
+    add_ladder_publish_args(parser)
     add_rank_point_args(parser)
     return parser.parse_args()
 
@@ -180,6 +182,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     model_load_time = time.perf_counter() - load_started
     print(f"loaded {args.model_label} in {model_load_time:.1f}s on {args.device}", flush=True)
     env = OneVsThree(disable_progress_bar=True, log_dir=str(log_dir))
+    ladder_hook = hook_from_args(args, log_dirs=(log_dir,), mortal_root=args.mortal_root)
 
     total_games = int(args.games)
     initial_completed = completed
@@ -239,7 +242,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             file=sys.stderr,
             flush=True,
         )
+        ladder_hook.publish(completed)
 
+    ladder_hook.publish(completed, force=True)
     if args.defer_reports:
         print(f"[selfplay] log generation complete: {completed}/{total_games}; reports deferred", flush=True)
         return {"completed_games": completed, "log_dir": str(log_dir)}
@@ -289,6 +294,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     document["artifacts"]["detailed_stats_json"] = str(args.output_dir / "detailed_stats.json")
     document["artifacts"]["detailed_stats_md"] = str(args.output_dir / "detailed_stats.md")
     document["detailed_stats_schema"] = stat_report["schema"]
+    if ladder_hook.enabled:
+        document["ladder_publishing"] = ladder_hook.metadata()
     if not args.no_platform_report:
         platform_dir = args.output_dir / "platform_accounts"
         platform_report = build_platform_account_report(

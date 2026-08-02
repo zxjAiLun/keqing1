@@ -30,6 +30,7 @@ from scripts.mortal.eval_metrics import (
     write_metrics,
 )
 from scripts.mortal.build_platform_account_report import build_report as build_platform_account_report
+from scripts.mortal.ladder_publish_hook import add_ladder_publish_args, hook_from_args
 from scripts.mortal.stat_report import write_stat_report
 
 
@@ -90,6 +91,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--no-platform-report", action="store_true", help="skip platform account pt/rating report")
     parser.add_argument("--platform-model-label", default=None, help="force platform account labels to MODEL@01-04")
     parser.add_argument("--enable-amp", action="store_true")
+    add_ladder_publish_args(parser)
     add_rank_point_args(parser)
     return parser.parse_args()
 
@@ -202,6 +204,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     env = NativeFourPlayer(disable_progress_bar=True, log_dir=str(log_dir))
+    ladder_hook = hook_from_args(args, log_dirs=(log_dir,), mortal_root=args.mortal_root)
     total_games = int(args.games)
     progress_every = int(getattr(args, "progress_every", 0) or 0)
     requested_batch_size = int(getattr(args, "native_batch_games", 0) or 0)
@@ -237,7 +240,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 file=sys.stderr,
                 flush=True,
             )
-
         if str(args.seat_mode) == "random":
             batch_rank_counts = env.py_vs_py_random_seats(
                 engines[0],
@@ -277,6 +279,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 file=sys.stderr,
                 flush=True,
             )
+        ladder_hook.publish(completed)
 
     metrics = {
         label: summarize_rank_counts_with_references(counts, rank_points=rank_points)
@@ -319,9 +322,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         rank_pts=rank_points,
         rank_points_profile=rank_points_profile,
     )
+    ladder_hook.publish(completed, force=True)
     document["artifacts"]["detailed_stats_json"] = str(output_dir / "detailed_stats.json")
     document["artifacts"]["detailed_stats_md"] = str(output_dir / "detailed_stats.md")
     document["detailed_stats_schema"] = stat_report["schema"]
+    if ladder_hook.enabled:
+        document["ladder_publishing"] = ladder_hook.metadata()
     if not bool(getattr(args, "no_platform_report", False)):
         platform_output_dir = output_dir / "platform_accounts"
         platform_report = build_platform_account_report(
