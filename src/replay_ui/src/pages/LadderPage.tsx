@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ladderApi } from '../api/ladderApi';
+import { LadderSnapshotStatus } from '../components/Ladder/LadderSnapshotStatus';
 import { PageHeader, PageShell } from '../components/Layout/PageScaffold';
 import { useVisibleLiveQuery } from '../hooks/useVisibleLiveQuery';
 import { routes, withLadderSeason } from '../routes';
@@ -15,11 +16,6 @@ const SORT_OPTIONS = [
   { value: 'avg_rank', label: '按平均顺位' },
   { value: 'games', label: '按场数' },
 ];
-
-function fmtUpdatedAt(epochSecs: number | undefined): string {
-  if (!epochSecs) return '—';
-  return new Date(epochSecs * 1000).toLocaleString();
-}
 
 export function LadderPage() {
   const location = useLocation();
@@ -202,10 +198,7 @@ export function LadderPage() {
           )}
 
           {/* 快照状态：数据更新时间 / snapshot ID / 已计入场数 */}
-          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
-            快照 {ladder.season.snapshot_id || '—'} · 更新 {fmtUpdatedAt(ladder.season.updated_at)} · 已计入 {ladder.season.games ?? '—'} 场
-            <span style={{ marginLeft: 8 }}>（页面可见时每 30 秒自动刷新）</span>
-          </div>
+          <LadderSnapshotStatus season={ladder.season} refreshing={ladderQuery.refreshing} />
         </>
       )}
     </PageShell>
