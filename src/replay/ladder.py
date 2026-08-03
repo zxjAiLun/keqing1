@@ -37,7 +37,51 @@ class SeasonNotFoundError(LadderError):
 
 
 class SeasonDataError(LadderError):
-    """Season report artifacts are missing or invalid."""
+    """Season report artifacts are missing or invalid.
+
+    ``code`` / ``state`` / ``retryable`` 供机器可读的 readiness 契约：
+    - code: 稳定错误码（season_report_dir_missing / season_report_decode_error / ...）
+    - state: ready / not_published / invalid / registry_mismatch
+    - retryable: 后续发布/轮询是否可能自愈
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "season_data_invalid",
+        state: str = "invalid",
+        retryable: bool = True,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.state = state
+        self.retryable = retryable
+
+
+# 稳定 readiness 状态与错误码（与前端 LadderReadinessState 对齐）
+READINESS_STATES = ("ready", "not_published", "invalid", "registry_mismatch")
+
+SEASON_READINESS_MESSAGES: dict[str, str] = {
+    "ready": "赛季数据已就绪",
+    "season_report_dir_missing": "赛季数据尚未发布",
+    "season_required_file_missing": "赛季报告缺少必需文件",
+    "season_report_decode_error": "赛季报告无法解析",
+    "season_report_schema_invalid": "赛季报告格式无效",
+    "season_snapshot_unreadable": "赛季快照不可读",
+    "season_report_registry_mismatch": "赛季身份契约不一致",
+}
+
+
+def season_data_problem(exc: SeasonDataError) -> dict[str, Any]:
+    """把 SeasonDataError 序列化为结构化 readiness/错误原因。"""
+    return {
+        "state": exc.state,
+        "code": exc.code,
+        "message": SEASON_READINESS_MESSAGES.get(exc.code, "赛季数据异常"),
+        "detail": str(exc),
+        "retryable": exc.retryable,
+    }
 
 
 class AccountNotFoundError(LadderError):
@@ -85,6 +129,10 @@ def _validate_registry(raw: Any, filename: str) -> dict[str, Any]:
     report_dir = raw.get("report_dir")
     if not isinstance(report_dir, str) or not report_dir.strip():
         raise _fail(f"season {season_id}: report_dir 必须是非空字符串")
+    # 可选 default 标记：必须是布尔值（字符串 "true" 视为无效注册表）
+    if "default" in raw:
+        if not isinstance(raw.get("default"), bool):
+            raise _fail(f"season {season_id}: default 必须是布尔值")
     models = raw.get("models")
     if not isinstance(models, list):
         raise _fail(f"season {season_id}: models 必须是数组")
@@ -147,6 +195,42 @@ def get_season_config(configs_dir: Path, season_id: str) -> dict[str, Any]:
         if season.get("season_id") == season_id:
             return season
     raise SeasonNotFoundError(f"season 不存在: {season_id}")
+
+
+def _explicit_defaults(seasons: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [season for season in seasons if season.get("default") is True]
+
+
+def validate_default_season_contract(seasons: list[dict[str, Any]]) -> None:
+    """校验全局最多一个显式 default。
+
+    2 个及以上显式 default 视为整个配置无效（SeasonRegistryError）。
+    """
+    defaults = _explicit_defaults(seasons)
+    if len(defaults) > 1:
+        ids = ", ".join(str(season.get("season_id")) for season in defaults)
+        raise SeasonRegistryError(f"season default 重复（最多一个）: {ids}")
+
+
+def resolve_default_season(seasons: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+    """解析默认赛季，返回 ``(default_season_id, default_source)``。
+
+    - 0 个显式 default：
+        只有一个赛季 → 自动作为默认，source="single_season"
+        多个赛季 → 没有默认，不得猜测（source=None）
+    - 1 个显式 default：该赛季为默认（即使数据未就绪），source="registry"
+    - 2 个及以上显式 default：调用前应已通过 validate_default_season_contract 拒绝。
+
+    默认赛季是运维选择，不按字典序 / 最新 updated_at / data-ready / status 推断。
+    """
+    defaults = _explicit_defaults(seasons)
+    if len(defaults) == 1:
+        return str(defaults[0].get("season_id")), "registry"
+    if len(defaults) > 1:
+        raise SeasonRegistryError("season default 重复（最多一个）")
+    if len(seasons) == 1:
+        return str(seasons[0].get("season_id")), "single_season"
+    return None, None
 
 
 def _registry_models(season: dict[str, Any]) -> list[dict[str, Any]]:
@@ -216,23 +300,43 @@ def resolve_report_dir(project_root: Path, raw_dir: str) -> Path:
 def _report_dir(project_root: Path, season: dict[str, Any]) -> Path:
     raw_dir = str(season.get("report_dir") or "")
     if not raw_dir:
-        raise SeasonDataError(f"赛季 {season.get('season_id')} 未配置 report_dir")
+        raise SeasonDataError(
+            f"赛季 {season.get('season_id')} 未配置 report_dir",
+            code="season_report_dir_missing",
+            state="not_published",
+        )
     report_dir = resolve_report_dir(project_root, raw_dir)
     if not report_dir.exists():
-        raise SeasonDataError(f"赛季报告目录不存在: {raw_dir}")
+        raise SeasonDataError(
+            f"赛季报告目录不存在: {raw_dir}",
+            code="season_report_dir_missing",
+            state="not_published",
+        )
     return report_dir
 
 
 def _load_account_summary(report_dir: Path) -> dict[str, Any]:
     summary_path = report_dir / "account_summary.json"
     if not summary_path.exists():
-        raise SeasonDataError("赛季缺少 account_summary.json，请先运行 build_platform_account_report.py")
+        raise SeasonDataError(
+            "赛季缺少 account_summary.json，请先运行 build_platform_account_report.py",
+            code="season_required_file_missing",
+            state="not_published",
+        )
     try:
         report = _read_json_cached(summary_path)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise SeasonDataError(f"account_summary.json 无法解析: {summary_path}") from exc
+        raise SeasonDataError(
+            f"account_summary.json 无法解析: {summary_path}",
+            code="season_report_decode_error",
+            state="invalid",
+        ) from exc
     if not isinstance(report, dict) or report.get("schema") != REPORT_SCHEMA:
-        raise SeasonDataError("account_summary.json schema 无效")
+        raise SeasonDataError(
+            "account_summary.json schema 无效",
+            code="season_report_schema_invalid",
+            state="invalid",
+        )
     return report
 
 
@@ -248,34 +352,58 @@ def _validate_report_accounts(season: dict[str, Any], report: dict[str, Any]) ->
     season_id = season.get("season_id")
     rows = report.get("accounts")
     if not isinstance(rows, list):
-        raise SeasonDataError(f"season {season_id}: account_summary.json 的 accounts 必须是数组")
+        raise SeasonDataError(
+            f"season {season_id}: account_summary.json 的 accounts 必须是数组",
+            code="season_report_decode_error",
+            state="invalid",
+        )
     registry_index = _registry_account_index(season)
     seen: set[str] = set()
     validated: list[dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
-            raise SeasonDataError(f"season {season_id}: report 账号行必须是对象")
+            raise SeasonDataError(
+                f"season {season_id}: report 账号行必须是对象",
+                code="season_report_decode_error",
+                state="invalid",
+            )
         account_id = row.get("account_id")
         if not isinstance(account_id, str) or not account_id.strip():
-            raise SeasonDataError(f"season {season_id}: report 账号行缺少非空 account_id")
+            raise SeasonDataError(
+                f"season {season_id}: report 账号行缺少非空 account_id",
+                code="season_report_decode_error",
+                state="invalid",
+            )
         if account_id in seen:
-            raise SeasonDataError(f"season {season_id}: report 内重复 account_id '{account_id}'")
+            raise SeasonDataError(
+                f"season {season_id}: report 内重复 account_id '{account_id}'",
+                code="season_report_registry_mismatch",
+                state="registry_mismatch",
+            )
         seen.add(account_id)
         registry = registry_index.get(account_id)
         if registry is None:
-            raise SeasonDataError(f"season {season_id}: report 账号 '{account_id}' 未在注册表声明")
+            raise SeasonDataError(
+                f"season {season_id}: report 账号 '{account_id}' 未在注册表声明",
+                code="season_report_registry_mismatch",
+                state="registry_mismatch",
+            )
         model_label = row.get("model_label")
         if isinstance(model_label, str) and model_label.strip() and model_label != registry["model_id"]:
             raise SeasonDataError(
                 f"season {season_id}: 账号 '{account_id}' 的 model_label '{model_label}' "
-                f"与注册表 model_id '{registry['model_id']}' 不一致"
+                f"与注册表 model_id '{registry['model_id']}' 不一致",
+                code="season_report_registry_mismatch",
+                state="registry_mismatch",
             )
         validated.append(row)
     if str(season.get("status") or "") == "completed":
         missing = sorted(set(registry_index) - seen)
         if missing:
             raise SeasonDataError(
-                f"season {season_id}: completed 赛季注册账号未出现在 report 中: {missing}"
+                f"season {season_id}: completed 赛季注册账号未出现在 report 中: {missing}",
+                code="season_report_registry_mismatch",
+                state="registry_mismatch",
             )
     return validated
 
@@ -298,12 +426,20 @@ def validate_snapshot(season: dict[str, Any], snapshot_dir: Path) -> list[dict[s
     for name in SNAPSHOT_REQUIRED_FILES:
         path = snapshot_dir / name
         if not path.is_file():
-            raise SeasonDataError(f"快照缺少必需文件: {name}")
+            raise SeasonDataError(
+                f"快照缺少必需文件: {name}",
+                code="season_required_file_missing",
+                state="not_published",
+            )
         try:
             with path.open("r", encoding="utf-8") as handle:
                 handle.read(1)
         except (OSError, UnicodeError) as exc:
-            raise SeasonDataError(f"快照文件不可读: {name}") from exc
+            raise SeasonDataError(
+                f"快照文件不可读: {name}",
+                code="season_snapshot_unreadable",
+                state="invalid",
+            ) from exc
     report = _load_account_summary(snapshot_dir)
     return _validate_report_accounts(season, report)
 
@@ -400,7 +536,12 @@ def _summarize_models(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # Public loaders
 # ---------------------------------------------------------------------------
 
-def _season_public(season: dict[str, Any], report: dict[str, Any] | None = None) -> dict[str, Any]:
+def _season_public(
+    season: dict[str, Any],
+    report: dict[str, Any] | None = None,
+    *,
+    is_default: bool = False,
+) -> dict[str, Any]:
     registry_models = _registry_models(season)
     payload: dict[str, Any] = {
         "season_id": season.get("season_id"),
@@ -410,6 +551,7 @@ def _season_public(season: dict[str, Any], report: dict[str, Any] | None = None)
         "notes": season.get("notes"),
         "models": [model.get("model_id") for model in registry_models],
         "accounts": sum(len(model.get("accounts") or []) for model in registry_models),
+        "is_default": is_default,
     }
     if report is not None:
         payload["games"] = report.get("games")
@@ -429,20 +571,53 @@ def _season_public(season: dict[str, Any], report: dict[str, Any] | None = None)
 
 
 def list_seasons(project_root: Path, configs_dir: Path) -> list[dict[str, Any]]:
+    """列出已注册赛季（每项含 is_default 派生标记）。
+
+    保持返回 list 以兼容既有调用方；带默认信息的完整目录见
+    :func:`list_seasons_catalog`。
+    """
+    catalog = list_seasons_catalog(project_root, configs_dir)
+    return catalog["seasons"]
+
+
+def list_seasons_catalog(project_root: Path, configs_dir: Path) -> dict[str, Any]:
+    """赛季目录：默认赛季 + 每赛季 is_default/readiness 派生信息。
+
+    ``default_source``：registry / single_season / null（无默认时）。
+    """
+    seasons_configs = list_season_configs(configs_dir)
+    validate_default_season_contract(seasons_configs)
+    default_id, default_source = resolve_default_season(seasons_configs)
+
     seasons: list[dict[str, Any]] = []
-    for season in list_season_configs(configs_dir):
-        entry = _season_public(season)
+    for season in seasons_configs:
+        is_default = season.get("season_id") == default_id
+        entry = _season_public(season, is_default=is_default)
         try:
             report, _rows = _load_validated_report(project_root, season)
-        except SeasonDataError:
+        except SeasonDataError as exc:
             # 报告缺失或与注册表不一致：该赛季标记为未就绪，不影响整个清单
             report = None
-        entry["data_ready"] = report is not None
-        if report is not None:
+            entry["data_ready"] = False
+            entry["readiness"] = season_data_problem(exc)
+        else:
+            entry["data_ready"] = True
+            entry["readiness"] = {
+                "state": "ready",
+                "code": "ready",
+                "message": "赛季数据已就绪",
+                "retryable": False,
+            }
             entry["games"] = report.get("games")
             _attach_snapshot_meta(entry, _report_dir(project_root, season))
         seasons.append(entry)
-    return seasons
+
+    return {
+        "schema": "keqing.ladder.seasons.v1",
+        "default_season_id": default_id,
+        "default_source": default_source,
+        "seasons": seasons,
+    }
 
 
 def load_ladder(project_root: Path, configs_dir: Path, season_id: str, sort: str = "pt") -> dict[str, Any]:

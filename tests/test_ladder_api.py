@@ -481,3 +481,96 @@ def test_snapshot_metadata_present_on_all_loaders(season_env):
     assert account_payload["season"]["snapshot_id"] == "season_report"
     model_payload = ladder.load_model(season_env["root"], season_env["configs"], "test-season", "model_a")
     assert model_payload["season"]["snapshot_id"] == "season_report"
+
+
+# ---------------------------------------------------------------------------
+# 默认赛季契约（Round 7）
+# ---------------------------------------------------------------------------
+
+def _write_two_seasons(tmp_path: Path, *, a: dict, b: dict, report_accounts=None) -> dict:
+    configs_dir = tmp_path / "configs" / "ladder" / "seasons"
+    configs_dir.mkdir(parents=True)
+    for season in (a, b):
+        (configs_dir / f"{season['season_id']}.json").write_text(json.dumps(season), encoding="utf-8")
+    report_dir = tmp_path / "artifacts" / "report"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    if report_accounts is not None:
+        report = {"schema": ladder.REPORT_SCHEMA, "games": len(report_accounts), "accounts": report_accounts}
+        (report_dir / "account_summary.json").write_text(json.dumps(report), encoding="utf-8")
+    return {"root": tmp_path, "configs": configs_dir}
+
+
+def test_single_season_without_default_auto_selected(tmp_path: Path):
+    configs_dir = tmp_path / "configs" / "ladder" / "seasons"
+    configs_dir.mkdir(parents=True)
+    (configs_dir / "only.json").write_text(json.dumps(_season(season_id="only")), encoding="utf-8")
+    catalog = ladder.list_seasons_catalog(tmp_path, configs_dir)
+    assert catalog["default_season_id"] == "only"
+    assert catalog["default_source"] == "single_season"
+
+
+def test_multiple_seasons_without_default_returns_null(tmp_path: Path):
+    env = _write_two_seasons(tmp_path, a=_season(season_id="aaa"), b=_season(season_id="zzz"))
+    catalog = ladder.list_seasons_catalog(tmp_path, env["configs"])
+    assert catalog["default_season_id"] is None
+    assert catalog["default_source"] is None
+
+
+def test_single_explicit_default(tmp_path: Path):
+    env = _write_two_seasons(
+        tmp_path,
+        a=_season(season_id="aaa", default=True),
+        b=_season(season_id="zzz"),
+    )
+    catalog = ladder.list_seasons_catalog(tmp_path, env["configs"])
+    assert catalog["default_season_id"] == "aaa"
+    assert catalog["default_source"] == "registry"
+    by_id = {entry["season_id"]: entry for entry in catalog["seasons"]}
+    assert by_id["aaa"]["is_default"] is True
+    assert by_id["zzz"]["is_default"] is False
+
+
+def test_default_ignores_lexicographic_order(tmp_path: Path):
+    env = _write_two_seasons(
+        tmp_path,
+        a=_season(season_id="aaa-history"),
+        b=_season(season_id="zzz-live", default=True),
+    )
+    catalog = ladder.list_seasons_catalog(tmp_path, env["configs"])
+    # default 是运维选择，不按字典序
+    assert catalog["default_season_id"] == "zzz-live"
+    assert catalog["default_source"] == "registry"
+
+
+def test_default_may_be_not_ready(tmp_path: Path):
+    # default 指向不存在目录（未就绪），仍保持为默认
+    env = _write_two_seasons(
+        tmp_path,
+        a=_season(season_id="aaa", report_dir="artifacts/missing"),
+        b=_season(season_id="zzz"),
+    )
+    (tmp_path / "configs" / "ladder" / "seasons" / "aaa.json").write_text(
+        json.dumps(_season(season_id="aaa", default=True, report_dir="artifacts/missing")), encoding="utf-8")
+    catalog = ladder.list_seasons_catalog(tmp_path, env["configs"])
+    assert catalog["default_season_id"] == "aaa"
+    by_id = {entry["season_id"]: entry for entry in catalog["seasons"]}
+    assert by_id["aaa"]["data_ready"] is False
+    assert by_id["aaa"]["readiness"]["state"] == "not_published"
+
+
+def test_two_explicit_defaults_rejected(tmp_path: Path):
+    configs_dir = tmp_path / "configs" / "ladder" / "seasons"
+    configs_dir.mkdir(parents=True)
+    (configs_dir / "aaa.json").write_text(json.dumps(_season(season_id="aaa", default=True)), encoding="utf-8")
+    (configs_dir / "zzz.json").write_text(json.dumps(_season(season_id="zzz", default=True)), encoding="utf-8")
+    with pytest.raises(ladder.SeasonRegistryError, match="default 重复"):
+        ladder.list_seasons_catalog(tmp_path, configs_dir)
+
+
+def test_non_boolean_default_rejected(tmp_path: Path):
+    configs_dir = tmp_path / "configs" / "ladder" / "seasons"
+    configs_dir.mkdir(parents=True)
+    (configs_dir / "aaa.json").write_text(
+        json.dumps(_season(season_id="aaa", default="true")), encoding="utf-8")
+    with pytest.raises(ladder.SeasonRegistryError, match="default 必须是布尔值"):
+        ladder.list_seasons_catalog(tmp_path, configs_dir)
