@@ -16,6 +16,7 @@ atomic materialize -> atomic registry switch.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -133,6 +134,19 @@ def write_manifest(
     report: dict[str, Any],
     registry_path: Path,
     previous_report_dir: str | None,
+    keep_account_logs: bool = False,
+    source_fingerprint: str = "",
+    registry_contract: str = "",
+    source_log_dirs: list[Path] | None = None,
+    source_file_count: int = 0,
+    source_total_bytes: int = 0,
+    build_duration_seconds: float = 0.0,
+    materialize_duration_seconds: float = 0.0,
+    snapshot_total_bytes: int = 0,
+    rank_points: str = "90,45,0,-135",
+    platform_model_label: str | None = None,
+    preserve_log_dir_order: bool = False,
+    interleave_log_dirs: bool = False,
 ) -> Path:
     manifest = {
         "schema": MANIFEST_SCHEMA,
@@ -141,6 +155,20 @@ def write_manifest(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "games": report.get("games"),
         "accounts": len(report.get("accounts") or []),
+        "compact": True,
+        "kept_account_logs": bool(keep_account_logs),
+        "rank_points": rank_points,
+        "platform_model_label": platform_model_label,
+        "preserve_log_dir_order": bool(preserve_log_dir_order),
+        "interleave_log_dirs": bool(interleave_log_dirs),
+        "source_fingerprint": source_fingerprint,
+        "registry_contract": registry_contract,
+        "source_log_dirs": [str(path) for path in (source_log_dirs or [])],
+        "source_file_count": source_file_count,
+        "source_total_bytes": source_total_bytes,
+        "build_duration_seconds": build_duration_seconds,
+        "materialize_duration_seconds": materialize_duration_seconds,
+        "snapshot_total_bytes": snapshot_total_bytes,
         "source_registry": str(registry_path),
         "previous_report_dir": previous_report_dir,
     }
@@ -267,6 +295,76 @@ def _read_manifest(snapshot_dir: Path) -> dict[str, Any] | None:
     return manifest
 
 
+def _log_file_stats(log_dirs: list[Path]) -> list[tuple[str, int, int]]:
+    """收集排序后的源日志指纹元组：(绝对路径, size, mtime_ns)。"""
+    stats: list[tuple[str, int, int]] = []
+    for log_dir in log_dirs:
+        for path in sorted(log_dir.glob("*.json.gz")):
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            stats.append((str(path.resolve()), st.st_size, st.st_mtime_ns))
+    stats.sort(key=lambda item: item[0])
+    return stats
+
+
+def compute_source_fingerprint(
+    log_dirs: list[Path],
+    *,
+    preserve_log_dir_order: bool = False,
+    interleave_log_dirs: bool = False,
+) -> str:
+    """源日志输入指纹：覆盖排序后的路径、大小、mtime_ns。
+
+    相同的日志文件集合（含 ordering/interleave 参数）产生相同指纹；
+    用于避免人工重复执行、resume 无新增日志、调度器重复触发时的重复重建。
+    """
+    stats = _log_file_stats(log_dirs)
+    hasher = hashlib.sha256()
+    hasher.update(("preserve=%s;interleave=%s;" % (preserve_log_dir_order, interleave_log_dirs)).encode("ascii"))
+    for path, size, mtime_ns in stats:
+        hasher.update(f"{path}\0{size}\0{mtime_ns}\n".encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def _should_skip_unchanged(
+    season: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    source_fingerprint: str,
+    rank_points: str,
+    platform_model_label: str | None,
+    preserve_log_dir_order: bool,
+    interleave_log_dirs: bool,
+) -> bool:
+    """当前 snapshot manifest 与本次发布条件一致时返回 True（跳过重建）。
+
+    需要 season contract、source_fingerprint、rank_points、
+    platform_model_label、log ordering/interleave 参数全部一致。
+    """
+    if manifest.get("season_id") != season.get("season_id"):
+        return False
+    if _registry_contract(season) != _registry_contract_from_manifest(manifest):
+        return False
+    if manifest.get("source_fingerprint") != source_fingerprint:
+        return False
+    if manifest.get("rank_points") != rank_points:
+        return False
+    if manifest.get("platform_model_label") != (platform_model_label or None):
+        return False
+    if bool(manifest.get("preserve_log_dir_order")) != preserve_log_dir_order:
+        return False
+    if bool(manifest.get("interleave_log_dirs")) != interleave_log_dirs:
+        return False
+    return True
+
+
+def _registry_contract_from_manifest(manifest: dict[str, Any]) -> str:
+    raw = manifest.get("registry_contract")
+    return raw if isinstance(raw, str) else ""
+
+
 def enforce_retention(
     snapshot_root: Path,
     *,
@@ -365,6 +463,42 @@ def publish_snapshot(
 
     data_root = os.environ.get("KEQING_LADDER_DATA_ROOT", "").strip()
     root = snapshot_root or default_snapshot_root(Path(data_root) if data_root else None, season_id)
+
+    previous_report_dir = season.get("report_dir")
+    previous_snapshot: Path | None = None
+    if previous_report_dir:
+        previous_snapshot = Path(str(previous_report_dir))
+        if not previous_snapshot.is_absolute():
+            data_root_env = Path(data_root) if data_root else None
+            base = data_root_env or _REPO_ROOT
+            previous_snapshot = (base / str(previous_report_dir)).resolve()
+
+    source_fingerprint = compute_source_fingerprint(
+        log_dirs,
+        preserve_log_dir_order=preserve_log_dir_order,
+        interleave_log_dirs=interleave_log_dirs,
+    )
+    if previous_snapshot is not None and previous_snapshot.is_dir():
+        prev_manifest = _read_manifest(previous_snapshot)
+        if prev_manifest is not None and _should_skip_unchanged(
+            season,
+            prev_manifest,
+            source_fingerprint=source_fingerprint,
+            rank_points=rank_points,
+            platform_model_label=platform_model_label,
+            preserve_log_dir_order=preserve_log_dir_order,
+            interleave_log_dirs=interleave_log_dirs,
+        ):
+            return {
+                "snapshot_dir": str(previous_snapshot),
+                "games": prev_manifest.get("games"),
+                "dry_run": dry_run,
+                "registry_switched": False,
+                "skipped_unchanged": True,
+                "retention_deleted": [],
+                "retention_errors": [],
+            }
+
     # 秒级时间戳命名；同一秒内多次发布时追加序号，避免目录冲突
     base_name = datetime.now().strftime("%Y%m%d-%H%M%S")
     snapshot_dir = root / base_name
@@ -378,8 +512,8 @@ def publish_snapshot(
     snapshot_stage = staging_root / "snapshot"
     staging_root.mkdir(parents=True)
 
-    previous_report_dir = season.get("report_dir")
     try:
+        build_started = time.monotonic()
         report = build_snapshot(
             log_dirs=log_dirs,
             snapshot_dir=build_dir,
@@ -390,12 +524,23 @@ def publish_snapshot(
             interleave_log_dirs=interleave_log_dirs,
             build_report=build_report,
         )
+        build_duration = time.monotonic() - build_started
+
+        materialize_started = time.monotonic()
         _materialize_compact_snapshot(
             build_dir=build_dir,
             snapshot_stage=snapshot_stage,
             keep_account_logs=keep_account_logs,
         )
         ladder.validate_snapshot(season, snapshot_stage)
+        materialize_duration = time.monotonic() - materialize_started
+
+        source_stats = _log_file_stats(log_dirs)
+        snapshot_total_bytes = sum(
+            (snapshot_stage / name).stat().st_size
+            for name in SNAPSHOT_REQUIRED_FILES + SNAPSHOT_RECOMMENDED_FILES
+            if (snapshot_stage / name).is_file()
+        )
         write_manifest(
             snapshot_stage,
             season_id=season_id,
@@ -403,6 +548,19 @@ def publish_snapshot(
             report=report,
             registry_path=registry_path,
             previous_report_dir=str(previous_report_dir) if previous_report_dir else None,
+            keep_account_logs=keep_account_logs,
+            source_fingerprint=source_fingerprint,
+            registry_contract=_registry_contract(season),
+            source_log_dirs=log_dirs,
+            source_file_count=len(source_stats),
+            source_total_bytes=sum(int(size) for _path, size, _mtime in source_stats),
+            build_duration_seconds=round(build_duration, 4),
+            materialize_duration_seconds=round(materialize_duration, 4),
+            snapshot_total_bytes=snapshot_total_bytes,
+            rank_points=rank_points,
+            platform_model_label=platform_model_label,
+            preserve_log_dir_order=preserve_log_dir_order,
+            interleave_log_dirs=interleave_log_dirs,
         )
         # 只有完整构建与校验通过后，才把 snapshot staging 原子改名为最终快照
         os.replace(snapshot_stage, snapshot_dir)
@@ -412,6 +570,7 @@ def publish_snapshot(
                 "games": report.get("games"),
                 "dry_run": True,
                 "registry_switched": False,
+                "skipped_unchanged": False,
                 "retention_deleted": [],
                 "retention_errors": [],
             }
@@ -434,6 +593,7 @@ def publish_snapshot(
             "games": report.get("games"),
             "dry_run": False,
             "registry_switched": True,
+            "skipped_unchanged": False,
             **retention,
         }
     except Exception:

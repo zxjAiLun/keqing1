@@ -153,21 +153,27 @@ def test_publish_removes_staging_on_invalid_snapshot(tmp_path: Path):
 
 def test_publish_keeps_previous_snapshot_available(tmp_path: Path):
     registry_path = _write_registry(tmp_path, _running_season())
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "a.json.gz").write_text("", encoding="utf-8")
     first = publisher.publish_snapshot(
         registry_path=registry_path,
-        log_dirs=[tmp_path / "logs"],
+        log_dirs=[log_dir],
         snapshot_root=tmp_path / "snapshots",
         build_report=_fake_build([_row()], games=1),
     )
+    # 新增日志使指纹变化，触发真实二次发布
+    (log_dir / "b.json.gz").write_text("", encoding="utf-8")
     second = publisher.publish_snapshot(
         registry_path=registry_path,
-        log_dirs=[tmp_path / "logs"],
+        log_dirs=[log_dir],
         snapshot_root=tmp_path / "snapshots",
-        build_report=_fake_build([_row()], games=1),
+        build_report=_fake_build([_row()], games=2),
     )
     assert Path(first["snapshot_dir"]).exists()
     assert Path(second["snapshot_dir"]).exists()
     assert first["snapshot_dir"] != second["snapshot_dir"]
+    assert second["registry_switched"] is True
     assert ladder.read_registry(registry_path)["report_dir"] == str(Path(second["snapshot_dir"]))
 
 
