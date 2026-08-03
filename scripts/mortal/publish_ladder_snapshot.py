@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Publish an atomic Ladder snapshot for a dynamic (dev) season.
 
-staging build -> validation -> manifest -> atomic registry switch.
+hidden staging build -> compact snapshot -> validation -> manifest ->
+atomic materialize -> atomic registry switch.
 
 - 每次发布生成一个全新的不可变快照目录，绝不原地覆写在线目录；
-- 校验通过后通过 ``.tmp + os.replace`` 原子切换 registry 的 ``report_dir``；
-- 校验失败时删除本次 staging 目录，旧快照与旧 registry 保持可用；
+- 完整报告先在隐藏 staging/build 构建，再从 build 提取线上所需产物，
+  在 staging/snapshot 形成紧凑快照（默认不含 account_logs 派生副本）；
+- 校验通过后 ``os.replace`` 将 snapshot staging 原子改名为最终快照；
+- registry 通过 ``.tmp + os.replace`` 原子切换 ``report_dir``；
+- registry 切换失败时删除本次已 materialize 的孤儿快照；
 - API 保持纯只读，本脚本由训练线在固定间隔触发。
 """
 
@@ -34,6 +38,21 @@ from replay import ladder  # noqa: E402
 
 MANIFEST_SCHEMA = "keqing.ladder.snapshot.v1"
 
+# 线上 runtime/UI 实际消费、快照必须保留的产物
+SNAPSHOT_REQUIRED_FILES = (
+    "account_summary.json",
+    "account_ledger.jsonl",
+    "rating_curve.csv",
+)
+# 建议保留的派生报告（便于人工查看，runtime 不依赖）
+SNAPSHOT_RECOMMENDED_FILES = (
+    "account_summary.csv",
+    "account_summary.md",
+    "per_game_results.csv",
+    "detailed_stats.json",
+    "detailed_stats.md",
+)
+
 
 class PublishError(Exception):
     """发布流程错误（completed 赛季、目录冲突等）。"""
@@ -54,6 +73,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preserve-log-dir-order", action="store_true")
     parser.add_argument("--interleave-log-dirs", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="只构建并校验，不切换 registry")
+    parser.add_argument("--keep-account-logs", action="store_true",
+                        help="调试用：在快照中保留 account_logs/ 派生副本（默认丢弃）")
     return parser.parse_args()
 
 
@@ -197,6 +218,41 @@ def conditional_switch_registry(
         os.replace(tmp_path, registry_path)
 
 
+def _materialize_compact_snapshot(
+    build_dir: Path,
+    snapshot_stage: Path,
+    *,
+    keep_account_logs: bool,
+) -> Path:
+    """从完整 build 目录提取线上所需产物到紧凑 snapshot staging。
+
+    - 必需产物（runtime/API 消费）必须存在；
+    - 建议产物存在则复制，便于人工查看；
+    - account_logs/ 是 build 阶段为计算详细统计而生成的派生副本，
+      原始 mjai 日志归训练线所有，默认不写入快照。
+    """
+    snapshot_stage.mkdir(parents=True)
+    for name in SNAPSHOT_REQUIRED_FILES:
+        src = build_dir / name
+        if not src.is_file():
+            raise ladder.SeasonDataError(f"快照缺少必需文件: {name}")
+        shutil.copy2(src, snapshot_stage / name)
+    for name in SNAPSHOT_RECOMMENDED_FILES:
+        src = build_dir / name
+        if src.is_file():
+            shutil.copy2(src, snapshot_stage / name)
+    if keep_account_logs:
+        logs_src = build_dir / "account_logs"
+        if logs_src.is_dir():
+            shutil.copytree(logs_src, snapshot_stage / "account_logs")
+    return snapshot_stage
+
+
+def _staging_root_for(snapshot_root: Path, snapshot_name: str) -> Path:
+    """隐藏 staging 根目录：完整 build + 紧凑 snapshot staging 都放其下。"""
+    return snapshot_root / f".{snapshot_name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.staging"
+
+
 def publish_snapshot(
     *,
     registry_path: Path,
@@ -208,12 +264,14 @@ def publish_snapshot(
     preserve_log_dir_order: bool = False,
     interleave_log_dirs: bool = False,
     dry_run: bool = False,
+    keep_account_logs: bool = False,
     build_report: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """构建 -> 校验 -> manifest -> 原子切换 registry（staging 流程）。
+    """隐藏 staging 构建 -> 紧凑快照 -> 校验 -> manifest -> 原子发布（staging 流程）。
 
     返回 dict：{snapshot_dir, games, dry_run, registry_switched}。
-    校验失败时删除本次 staging 目录并抛出原异常，旧快照与旧 registry 不受影响。
+    校验失败时删除本次 staging 目录并抛出原异常，旧快照与旧 registry 不受影响；
+    registry 切换失败时删除本次已 materialize 的孤儿快照，旧 registry 保持可用。
     """
     season = load_registry(registry_path)
     season_id = str(season["season_id"])
@@ -229,13 +287,17 @@ def publish_snapshot(
     while snapshot_dir.exists():
         attempt += 1
         snapshot_dir = root / f"{base_name}-{attempt}"
-    snapshot_dir.mkdir(parents=True)
+
+    staging_root = _staging_root_for(root, snapshot_dir.name)
+    build_dir = staging_root / "build"
+    snapshot_stage = staging_root / "snapshot"
+    staging_root.mkdir(parents=True)
 
     previous_report_dir = season.get("report_dir")
     try:
         report = build_snapshot(
             log_dirs=log_dirs,
-            snapshot_dir=snapshot_dir,
+            snapshot_dir=build_dir,
             mortal_root=mortal_root,
             platform_model_label=platform_model_label,
             rank_points=rank_points,
@@ -243,15 +305,22 @@ def publish_snapshot(
             interleave_log_dirs=interleave_log_dirs,
             build_report=build_report,
         )
-        ladder.validate_snapshot(season, snapshot_dir)
+        _materialize_compact_snapshot(
+            build_dir=build_dir,
+            snapshot_stage=snapshot_stage,
+            keep_account_logs=keep_account_logs,
+        )
+        ladder.validate_snapshot(season, snapshot_stage)
         write_manifest(
-            snapshot_dir,
+            snapshot_stage,
             season_id=season_id,
             snapshot_id=snapshot_dir.name,
             report=report,
             registry_path=registry_path,
             previous_report_dir=str(previous_report_dir) if previous_report_dir else None,
         )
+        # 只有完整构建与校验通过后，才把 snapshot staging 原子改名为最终快照
+        os.replace(snapshot_stage, snapshot_dir)
         if dry_run:
             return {
                 "snapshot_dir": str(snapshot_dir),
@@ -272,8 +341,12 @@ def publish_snapshot(
             "registry_switched": True,
         }
     except Exception:
+        # registry 切换失败时，清理本次已 materialize 的孤儿快照
         shutil.rmtree(snapshot_dir, ignore_errors=True)
         raise
+    finally:
+        # 无论成败都清理完整 build staging（含 account_logs 派生副本）
+        shutil.rmtree(staging_root, ignore_errors=True)
 
 
 def main() -> None:
@@ -288,6 +361,7 @@ def main() -> None:
         preserve_log_dir_order=args.preserve_log_dir_order,
         interleave_log_dirs=args.interleave_log_dirs,
         dry_run=args.dry_run,
+        keep_account_logs=args.keep_account_logs,
     )
     print(json.dumps(result, ensure_ascii=False), flush=True)
 
