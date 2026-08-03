@@ -1,6 +1,25 @@
 // src/replay_ui/src/types/ladder.ts
 // Model Ladder & Account Profiles 类型契约（与 /api/ladder/* 响应对齐）。
 
+export type LadderReadinessState = 'ready' | 'not_published' | 'invalid' | 'registry_mismatch';
+
+export interface LadderSeasonReadiness {
+  state: LadderReadinessState;
+  code: string;
+  message: string;
+  detail?: string;
+  retryable: boolean;
+}
+
+export type LadderDefaultSource = 'registry' | 'single_season' | null;
+
+export interface LadderSeasonsResponse {
+  schema: string;
+  default_season_id: string | null;
+  default_source: LadderDefaultSource;
+  seasons: LadderSeason[];
+}
+
 export interface LadderSeasonScoring {
   pt_profile?: string;
   pt_rank_deltas?: number[];
@@ -27,6 +46,10 @@ export interface LadderSeason {
   /** account_summary.json 的 mtime（epoch 秒） */
   updated_at?: number;
   scoring?: LadderSeasonScoring;
+  /** 是否默认赛季（目录派生的规范化标记） */
+  is_default?: boolean;
+  /** 未就绪原因（结构化 readiness 契约；就绪时 state="ready"） */
+  readiness?: LadderSeasonReadiness;
 }
 
 export interface LadderAccountRow {

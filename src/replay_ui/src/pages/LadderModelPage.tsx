@@ -1,13 +1,15 @@
 // src/replay_ui/src/pages/LadderModelPage.tsx
 // 模型详情：账号横向对比 + 可选联赛聚合。
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useMemo, type CSSProperties } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { ladderApi } from '../api/ladderApi';
+import { LadderSeasonNotice } from '../components/Ladder/LadderSeasonNotice';
 import { LadderSnapshotStatus } from '../components/Ladder/LadderSnapshotStatus';
 import { PageHeader, PageShell, SectionTitle } from '../components/Layout/PageScaffold';
+import { useLadderSeasonCatalog } from '../hooks/useLadderSeasonCatalog';
 import { useVisibleLiveQuery } from '../hooks/useVisibleLiveQuery';
 import { routes, withLadderSeason } from '../routes';
-import type { LadderAccountRow, LadderModelDetail, LadderSeason } from '../types/ladder';
+import type { LadderAccountRow, LadderModelDetail } from '../types/ladder';
 import { fmtPt, fmtRank, fmtRate, fmtRating } from '../utils/ladderFormat';
 
 function leagueNum(entry: Record<string, unknown>, key: string): number | null {
@@ -22,26 +24,10 @@ function leagueRankCounts(entry: Record<string, unknown>): number[] | null {
 
 export function LadderModelPage() {
   const { modelId } = useParams();
-  const location = useLocation();
   const navigate = useNavigate();
-  const [seasons, setSeasons] = useState<LadderSeason[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [seasonsLoaded, setSeasonsLoaded] = useState(false);
 
-  const seasonFromQuery = new URLSearchParams(location.search).get('season');
-  const activeSeasonId = seasonFromQuery ?? seasons[0]?.season_id ?? null;
-
-  useEffect(() => {
-    ladderApi.listSeasons()
-      .then((payload) => {
-        setSeasons(payload.seasons);
-        setSeasonsLoaded(true);
-      })
-      .catch((reason) => {
-        setError(reason instanceof Error ? reason.message : String(reason));
-        setSeasonsLoaded(true);
-      });
-  }, []);
+  const catalog = useLadderSeasonCatalog();
+  const { seasons, activeSeasonId, loading: catalogLoading } = catalog;
 
   // 完整 LadderModelDetail 为单一原子状态：snapshot 更新时 model 汇总/账号列表/
   // league_summary/season 一起替换，避免跨 snapshot 混合。
@@ -79,17 +65,20 @@ export function LadderModelPage() {
       />
 
       {/* 赛季列表错误与模型查询错误统一展示；轮询失败不进入 query.error */}
-      {(error ?? detailQuery.error) && (
-        <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{error ?? detailQuery.error}</div>
+      {(catalog.error ?? detailQuery.error) && (
+        <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{catalog.error ?? detailQuery.error}</div>
       )}
-      {(!error && !seasonsLoaded && !detailQuery.error) || (loading && activeSeasonId && modelId) ? (
+      {(!catalog.error && !catalogLoading && !detailQuery.error) || (loading && activeSeasonId && modelId) ? (
         <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>加载中...</div>
       ) : null}
 
-      {seasonsLoaded && !error && !detailQuery.error && !detail && !(loading && activeSeasonId && modelId) && (
-        <div className="card" style={{ padding: 16, color: 'var(--text-muted)', fontSize: 13 }}>
-          未找到模型数据。请从天梯榜的模型卡片进入，或确认 ?season= 参数与模型 ID。
-        </div>
+      {/* 无默认 / 未就绪：结构化状态展示（实体 payload 成功时主体优先，不遮挡） */}
+      {!catalogLoading && !detail && !(loading && activeSeasonId && modelId) && (
+        <LadderSeasonNotice
+          seasons={seasons}
+          activeSeason={seasons.find((s) => s.season_id === activeSeasonId)}
+          defaultSeasonId={catalog.defaultSeasonId}
+        />
       )}
 
       {!loading && detail && model && (
