@@ -48,6 +48,8 @@ export function LadderModelPage() {
   const model = detail?.model;
   const activeSeason = seasons.find((s) => s.season_id === activeSeasonId);
   const seasonProblem = activeSeason?.readiness?.state !== 'ready' ? activeSeason?.readiness : null;
+  // 未就绪抑制裸 409（结构化 Notice 展示原因）；catalog 500 / 实体 404 仍显示 alert
+  const visibleError = catalog.error ?? (seasonProblem ? null : detailQuery.error);
   const backToLadder = () => navigate(withLadderSeason(routes.ladder, activeSeasonId));
   const openAccount = (row: LadderAccountRow) => {
     navigate(withLadderSeason(routes.ladderAccount(row.account_id), activeSeasonId));
@@ -68,15 +70,15 @@ export function LadderModelPage() {
 
       {/* 赛季列表错误与模型查询错误统一展示；轮询失败不进入 query.error */}
       {/* 赛季目录错误与模型查询错误统一展示；未就绪抑制裸 409（结构化 Notice 展示） */}
-      {(catalog.error ?? (seasonProblem ? null : detailQuery.error)) && (
-        <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{catalog.error ?? (seasonProblem ? null : detailQuery.error)}</div>
+      {visibleError && (
+        <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{visibleError}</div>
       )}
-      {(!catalog.error && catalogLoading && !detailQuery.error) || (loading && activeSeasonId && modelId) ? (
+      {(!visibleError && catalogLoading && !detailQuery.error) || (loading && activeSeasonId && modelId) ? (
         <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>加载中...</div>
       ) : null}
 
       {/* 无默认 / 未就绪：结构化状态展示（实体 payload 成功时主体优先，不遮挡） */}
-      {!catalogLoading && !detail && !(loading && activeSeasonId && modelId) && (
+      {!catalogLoading && !visibleError && !detail && !(loading && activeSeasonId && modelId) && (
         <LadderSeasonNotice
           seasons={seasons}
           activeSeason={seasons.find((s) => s.season_id === activeSeasonId)}

@@ -91,12 +91,16 @@ for (const page of PAGES) {
     /catalogLoading/.test(src),
     `${page} loading 条件应使用 catalogLoading（正向）`,
   );
-  // loading 三元里不得出现 !catalogLoading（即加载完成误判为"还在加载"）
-  const loadingLine = src.split('\n').find((line) => line.includes('加载中...'));
-  check(
-    !(loadingLine && /!\s*catalogLoading/.test(loadingLine)),
-    `${page} loading 三元不应使用 !catalogLoading`,
-  );
+  // loading 三元（JSX 条件可能在"加载中..."上一行）里不得出现 !catalogLoading
+  const lines = src.split('\n');
+  const loadingIdx = lines.findIndex((line) => line.includes('加载中...'));
+  if (loadingIdx >= 0) {
+    const context = lines.slice(Math.max(0, loadingIdx - 4), loadingIdx + 1).join('\n');
+    check(
+      !/!\s*catalogLoading/.test(context),
+      `${page} loading 三元不应使用 !catalogLoading`,
+    );
+  }
 }
 
 // 11. 三页未就绪时抑制裸 409：seasonProblem 存在时不直接渲染 query.error
