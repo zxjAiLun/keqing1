@@ -22,7 +22,6 @@ from typing import Any, Sequence
 from .base import (
     PlayerRankState,
     RankMeta,
-    RankSystem,
     RankUpdate,
     TableContext,
 )

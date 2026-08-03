@@ -21,7 +21,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from scripts.mortal.stat_report import build_stat_report
 from scripts.mortal.stat_report import format_markdown_report
-from replay.rank_systems import PlayerRankState, create_rank_system
+from replay.rank_systems import PlayerRankState, create_rank_system  # noqa: E402
 
 TENHOU_RANK_RESULTS = (30.0, 10.0, -10.0, -30.0)
 HOUOU_7DAN_HANCHAN_PT = (90.0, 45.0, 0.0, -135.0)
