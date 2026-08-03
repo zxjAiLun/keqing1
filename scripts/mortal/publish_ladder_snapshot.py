@@ -58,7 +58,8 @@ SNAPSHOT_RECOMMENDED_FILES = (
 DEFAULT_RETAIN_SNAPSHOTS = 24
 
 # report 派生逻辑契约版本：未来算法更新时递增，避免相同源日志复用旧产物
-SNAPSHOT_BUILD_CONTRACT_VERSION = "v1"
+# v2：版本化计分引擎（tenhou_4p_ranked / legacy fixed profile）取代固定七段常量
+SNAPSHOT_BUILD_CONTRACT_VERSION = "v2"
 
 
 class PublishError(Exception):
@@ -108,6 +109,7 @@ def build_snapshot(
     rank_points: str,
     preserve_log_dir_order: bool,
     interleave_log_dirs: bool,
+    scoring_config: dict[str, Any] | None = None,
     build_report: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """在全新快照目录构建完整 report（staging）。"""
@@ -123,6 +125,7 @@ def build_snapshot(
         rank_points=account_report.parse_rank_points(rank_points),
         preserve_log_dir_order=preserve_log_dir_order,
         interleave_log_dirs=interleave_log_dirs,
+        scoring_config=scoring_config,
     )
     if not isinstance(report, dict):
         raise PublishError("构建脚本未返回 report 字典")
@@ -150,7 +153,9 @@ def write_manifest(
     platform_model_label: str | None = None,
     preserve_log_dir_order: bool = False,
     interleave_log_dirs: bool = False,
+    scoring_config: dict[str, Any] | None = None,
 ) -> Path:
+    scoring_hash = scoring_config_hash(scoring_config)
     manifest = {
         "schema": MANIFEST_SCHEMA,
         "season_id": season_id,
@@ -162,6 +167,10 @@ def write_manifest(
         "kept_account_logs": bool(keep_account_logs),
         "build_contract_version": SNAPSHOT_BUILD_CONTRACT_VERSION,
         "rank_points": rank_points,
+        "scoring_system": str((scoring_config or {}).get("system") or ""),
+        "scoring_version": str((scoring_config or {}).get("version") or ""),
+        "scoring_config_hash": scoring_hash,
+        "room_policy": str((scoring_config or {}).get("room_policy") or ""),
         "platform_model_label": platform_model_label,
         "preserve_log_dir_order": bool(preserve_log_dir_order),
         "interleave_log_dirs": bool(interleave_log_dirs),
@@ -203,6 +212,14 @@ def _registry_contract(season: dict[str, Any]) -> str:
     clone = dict(season)
     clone.pop("report_dir", None)
     return json.dumps(clone, sort_keys=True, ensure_ascii=False)
+
+
+def scoring_config_hash(scoring_config: dict[str, Any] | None) -> str:
+    """赛季 scoring 配置的规范化指纹（manifest 中锁定计分契约）。"""
+    payload = scoring_config or {}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
 
 
 @contextmanager
@@ -383,11 +400,12 @@ def _should_skip_unchanged(
     keep_account_logs: bool,
     preserve_log_dir_order: bool,
     interleave_log_dirs: bool,
+    scoring_config: dict[str, Any] | None,
 ) -> bool:
     """当前 snapshot manifest 与本次发布条件一致时返回 True（跳过重建）。
 
     需要 season contract、build contract version、source_fingerprint、
-    rank_points、platform_model_label、keep_account_logs、
+    rank_points、scoring_config_hash、platform_model_label、keep_account_logs、
     log ordering/interleave 参数全部一致。
     """
     if manifest.get("season_id") != season.get("season_id"):
@@ -399,6 +417,8 @@ def _should_skip_unchanged(
     if manifest.get("source_fingerprint") != source_fingerprint:
         return False
     if manifest.get("rank_points") != rank_points:
+        return False
+    if manifest.get("scoring_config_hash") != scoring_config_hash(scoring_config):
         return False
     if manifest.get("platform_model_label") != (platform_model_label or None):
         return False
@@ -523,6 +543,9 @@ def publish_snapshot(
     if retain_snapshots < 0:
         raise PublishError(f"retain_snapshots 不能为负: {retain_snapshots}")
 
+    # 版本化计分 profile 从赛季注册表的 scoring 块读取（legacy 赛季缺省走 fixed）。
+    scoring_config = season.get("scoring") if isinstance(season.get("scoring"), dict) else None
+
     data_root = os.environ.get("KEQING_LADDER_DATA_ROOT", "").strip()
     root = snapshot_root or default_snapshot_root(Path(data_root) if data_root else None, season_id)
 
@@ -552,6 +575,7 @@ def publish_snapshot(
             keep_account_logs=keep_account_logs,
             preserve_log_dir_order=preserve_log_dir_order,
             interleave_log_dirs=interleave_log_dirs,
+            scoring_config=scoring_config,
         ):
             try:
                 ladder.validate_snapshot(season, previous_snapshot)
@@ -594,6 +618,7 @@ def publish_snapshot(
             rank_points=rank_points,
             preserve_log_dir_order=preserve_log_dir_order,
             interleave_log_dirs=interleave_log_dirs,
+            scoring_config=scoring_config,
             build_report=build_report,
         )
         build_duration = time.monotonic() - build_started
@@ -632,6 +657,7 @@ def publish_snapshot(
             platform_model_label=platform_model_label,
             preserve_log_dir_order=preserve_log_dir_order,
             interleave_log_dirs=interleave_log_dirs,
+            scoring_config=scoring_config,
         )
         # manifest 已在目录中，递归统计整个快照（含 manifest/account_logs）。
         # 第一次写入占位(0)改变 manifest 自身大小，第二轮统计即稳定。
