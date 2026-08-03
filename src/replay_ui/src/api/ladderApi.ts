@@ -11,6 +11,7 @@ const API_BASE = '/api';
 
 async function api<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
+    cache: 'no-store',
     signal,
     headers: {
       Accept: 'application/json',
