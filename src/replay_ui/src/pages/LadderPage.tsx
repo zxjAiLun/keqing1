@@ -1,9 +1,11 @@
 // src/replay_ui/src/pages/LadderPage.tsx
 // 天梯榜：赛季账号排名 + 模型展示性聚合。
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ladderApi } from '../api/ladderApi';
+import { LadderSnapshotStatus } from '../components/Ladder/LadderSnapshotStatus';
 import { PageHeader, PageShell } from '../components/Layout/PageScaffold';
+import { useVisibleLiveQuery } from '../hooks/useVisibleLiveQuery';
 import { routes, withLadderSeason } from '../routes';
 import type { LadderAccountRow, LadderModelSummary, LadderResponse, LadderSeason } from '../types/ladder';
 import { fmtPt, fmtRank, fmtRate, fmtRating } from '../utils/ladderFormat';
@@ -15,22 +17,13 @@ const SORT_OPTIONS = [
   { value: 'games', label: '按场数' },
 ];
 
-const REFRESH_INTERVAL_MS = 30_000;
-
-function fmtUpdatedAt(epochSecs: number | undefined): string {
-  if (!epochSecs) return '—';
-  return new Date(epochSecs * 1000).toLocaleString();
-}
-
 export function LadderPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const [seasons, setSeasons] = useState<LadderSeason[]>([]);
-  const [ladder, setLadder] = useState<LadderResponse | null>(null);
-  const [sort, setSort] = useState('pt');
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [seasonsLoaded, setSeasonsLoaded] = useState(false);
+  const [sort, setSort] = useState('pt');
 
   const seasonFromQuery = new URLSearchParams(location.search).get('season');
   const activeSeasonId = seasonFromQuery ?? seasons[0]?.season_id ?? null;
@@ -47,70 +40,21 @@ export function LadderPage() {
       });
   }, []);
 
-  useEffect(() => {
-    if (!activeSeasonId) return;
-    let cancelled = false;
-    const load = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const payload = await ladderApi.getLadder(activeSeasonId, sort);
-        if (!cancelled) {
-          setLadder(payload);
-          setLoading(false);
-        }
-      } catch (reason) {
-        if (!cancelled) {
-          setError(reason instanceof Error ? reason.message : String(reason));
-          setLadder(null);
-          setLoading(false);
-        }
-      }
-    };
-    void load();
-    return () => { cancelled = true; };
-  }, [activeSeasonId, sort]);
-
-  // 页面可见时每 30 秒静默刷新：
-  // - cancelled 标记 + in-flight 去重：依赖变化后忽略旧响应，同一时刻最多一个刷新请求；
-  // - 成功响应允许 setLadder/setError(null)/setLoading(false)：从临时失败（409/后端切换）自动恢复；
-  // - visibilitychange：恢复可见时立即刷新一次，不必等下一个 30 秒。
-  useEffect(() => {
-    if (!activeSeasonId) return;
-    let cancelled = false;
-    let inFlight = false;
-
-    const refresh = () => {
-      if (cancelled || inFlight) return;
-      if (document.visibilityState !== 'visible') return;
-      inFlight = true;
-      ladderApi.getLadder(activeSeasonId, sort)
-        .then((payload) => {
-          if (cancelled) return;
-          setLadder(payload);
-          setError(null);
-          setLoading(false);
-        })
-        .catch(() => {
-          // 保留现有数据，等待下一次轮询重试
-        })
-        .finally(() => {
-          inFlight = false;
-        });
-    };
-
-    const timer = window.setInterval(refresh, REFRESH_INTERVAL_MS);
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') refresh();
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, [activeSeasonId, sort]);
+  // 共享可见性实时查询：页面可见时每 30 秒静默刷新，hidden 跳过，
+  // 恢复可见立即刷新，轮询失败保留旧数据，queryKey 变化清空旧实体重新加载。
+  const ladderQuery = useVisibleLiveQuery<LadderResponse>({
+    enabled: Boolean(activeSeasonId),
+    queryKey: `ladder:${activeSeasonId ?? ''}:${sort}`,
+    load: useMemo(
+      () => (signal: AbortSignal) => {
+        if (!activeSeasonId) return Promise.reject(new Error('no active season'));
+        return ladderApi.getLadder(activeSeasonId, sort, signal);
+      },
+      [activeSeasonId, sort],
+    ),
+  });
+  const ladder = ladderQuery.data;
+  const loading = ladderQuery.loading;
 
   const switchSeason = (seasonId: string) => {
     navigate(`${routes.ladder}?season=${encodeURIComponent(seasonId)}`);
@@ -123,6 +67,9 @@ export function LadderPage() {
   const openModel = (model: LadderModelSummary) => {
     navigate(withLadderSeason(routes.ladderModel(model.model_id), activeSeasonId));
   };
+
+  // 赛季列表错误与榜单查询错误统一展示（查询轮询失败不进入 query.error）
+  const visibleError = error ?? ladderQuery.error;
 
   return (
     <PageShell width={1240}>
@@ -161,12 +108,12 @@ export function LadderPage() {
         )}
       />
 
-      {error && <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{error}</div>}
-      {((!seasonsLoaded && !error) || (loading && activeSeasonId)) && (
+      {visibleError && <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{visibleError}</div>}
+      {(!visibleError && !seasonsLoaded) || (loading && activeSeasonId) ? (
         <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>加载中...</div>
-      )}
+      ) : null}
 
-      {seasonsLoaded && !activeSeasonId && !error && (
+      {seasonsLoaded && !activeSeasonId && !visibleError && (
         <div className="card" style={{ padding: 16, color: 'var(--text-muted)', fontSize: 13 }}>
           暂无已注册赛季。往 <code>configs/ladder/seasons/</code> 添加赛季注册表并生成 platform account 报告后，这里会出现天梯数据。
         </div>
@@ -254,10 +201,7 @@ export function LadderPage() {
           )}
 
           {/* 快照状态：数据更新时间 / snapshot ID / 已计入场数 */}
-          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
-            快照 {ladder.season.snapshot_id || '—'} · 更新 {fmtUpdatedAt(ladder.season.updated_at)} · 已计入 {ladder.season.games ?? '—'} 场
-            <span style={{ marginLeft: 8 }}>（页面可见时每 30 秒自动刷新）</span>
-          </div>
+          <LadderSnapshotStatus season={ladder.season} refreshing={ladderQuery.refreshing} />
         </>
       )}
     </PageShell>
