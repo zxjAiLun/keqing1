@@ -414,7 +414,7 @@ def enforce_retention(
         candidates.append((str(manifest.get("created_at") or entry.name), entry))
 
     # 按 created_at 排序（desc），保留最近 retain 个
-    candidates.sort(key=lambda item: item[0], reverse=True)
+    candidates.sort(key=lambda item: (item[0], item[1].name), reverse=True)
     keep = candidates[:retain]
     keep_paths = {path.resolve() for _created, path in keep}
     for _created, entry in candidates[retain:]:
