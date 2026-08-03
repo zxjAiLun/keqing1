@@ -106,7 +106,7 @@ export function LadderPage() {
         <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>加载中...</div>
       ) : null}
 
-      {/* 无默认且多赛季：要求用户选择，不自动请求 seasons[0] */}
+      {/* 无默认且多赛季：要求用户选择，不自动请求数组首项 */}
       {catalogLoaded && !activeSeasonId && !visibleError && (
         <LadderSeasonNotice
           seasons={seasons}
