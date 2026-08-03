@@ -28,6 +28,14 @@ export interface LadderSeasonScoring {
   rating_initial?: number;
   rating_formula?: string;
   rank_name?: string;
+  /** 版本化计分引擎描述（Round 8） */
+  system?: string;
+  version?: string;
+  game_length?: string;
+  room_policy?: string;
+  membership?: string;
+  initial_rank?: string;
+  initial_rating?: number;
 }
 
 export interface LadderSeason {
@@ -58,10 +66,22 @@ export interface LadderAccountRow {
   model_id: string;
   checkpoint?: string | null;
   games: number;
+  /** v2 报告的段位状态；v1 legacy 报告为 null（固定七段） */
+  rank_id?: string | null;
   rank_name?: string | null;
+  rank_ordinal: number;
+  pt_initial?: number | null;
   pt_current: number;
-  pt_target: number;
-  pt_gap: number;
+  /** 升段目标 PT；天凤位为 null */
+  pt_target: number | null;
+  pt_gap: number | null;
+  pt_progress?: number | null;
+  promotions?: number;
+  demotions?: number;
+  highest_rank_id?: string | null;
+  tenhou_reached?: boolean;
+  total_pt_delta?: number | null;
+  avg_pt_delta?: number | null;
   rating: number;
   rank_1: number;
   rank_2: number;
@@ -88,10 +108,16 @@ export interface LadderModelSummary {
   model_id: string;
   accounts: number;
   games: number;
+  /** 跨段位不再平均 PT；同一段位（含 v1 legacy）时有效 */
   avg_pt: number | null;
   avg_rating: number | null;
   avg_rank: number | null;
   avg_rank_pt: number | null;
+  rank_distribution?: Record<string, number>;
+  highest_rank_id?: string | null;
+  highest_rank_name?: string | null;
+  median_rank_ordinal?: number | null;
+  median_rank_name?: string | null;
 }
 
 export interface LadderResponse {
@@ -105,6 +131,9 @@ export interface LadderCurvePoint {
   games: number;
   rating: number;
   pt: number;
+  rank_id?: string;
+  rank_name?: string;
+  pt_target?: number | null;
 }
 
 export interface LadderRecentGame {
@@ -112,8 +141,15 @@ export interface LadderRecentGame {
   rank: number;
   final_score: number;
   score_delta: number;
+  table_room?: string;
+  game_length?: string;
+  rank_before?: string | null;
+  pt_before?: number | null;
   pt_delta: number;
+  transition?: string | null;
+  rank_after?: string | null;
   pt_after: number;
+  rating_before?: number | null;
   rating_after: number;
   source_log?: string | null;
 }

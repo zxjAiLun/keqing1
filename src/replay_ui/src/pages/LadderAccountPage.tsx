@@ -10,7 +10,7 @@ import { TrendChart } from '../components/Ladder/TrendChart';
 import { useLadderSeasonCatalog } from '../hooks/useLadderSeasonCatalog';
 import { useVisibleLiveQuery } from '../hooks/useVisibleLiveQuery';
 import { routes, withLadderSeason } from '../routes';
-import type { LadderAccountDetail } from '../types/ladder';
+import type { LadderAccountDetail, LadderSeasonScoring } from '../types/ladder';
 import { fmtPt, fmtRate, fmtRating, fmtSignedInt } from '../utils/ladderFormat';
 
 const RECENT_GAMES_LIMIT = 50;
@@ -48,8 +48,9 @@ export function LadderAccountPage() {
     if (account) navigate(withLadderSeason(routes.ladderModel(account.model_id), activeSeasonId));
   };
 
-  const ptProgress = account && account.pt_target > 0
-    ? Math.max(0, Math.min(100, (account.pt_current / account.pt_target) * 100))
+  const ptTarget = account?.pt_target ?? null;
+  const ptProgress = ptTarget !== null && ptTarget > 0 && account
+    ? Math.max(0, Math.min(100, (account.pt_current / ptTarget) * 100))
     : 0;
 
   return (
@@ -98,6 +99,12 @@ export function LadderAccountPage() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 18, fontWeight: 800, color: 'var(--text-primary)' }}>{account.display_name}</span>
                   {account.rank_name && <span style={rankBadgeStyle}>{account.rank_name}</span>}
+                  {account.tenhou_reached && <span style={rankBadgeStyle}>天凤位</span>}
+                  {account.promotions ? <span style={progressionBadgeStyle('promotion')}>升段 ×{account.promotions}</span> : null}
+                  {account.demotions ? <span style={progressionBadgeStyle('demotion')}>降段 ×{account.demotions}</span> : null}
+                  {account.highest_rank_id && account.highest_rank_id !== account.rank_id && (
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>历史最高 {account.highest_rank_id}</span>
+                  )}
                 </div>
                 <div style={{ marginTop: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
                   模型 <button type="button" onClick={openModel} style={linkButtonStyle}>{account.model_id}</button>
@@ -110,7 +117,7 @@ export function LadderAccountPage() {
                 <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
                   对局数 <b style={{ color: 'var(--text-primary)' }}>{account.games}</b>
                   {detail.season.scoring && (
-                    <span style={{ color: 'var(--text-muted)' }}> · {detail.season.scoring.pt_profile}</span>
+                    <span style={{ color: 'var(--text-muted)' }}> · {scoringProfileLabel(detail.season.scoring)}</span>
                   )}
                 </div>
               </div>
@@ -118,13 +125,21 @@ export function LadderAccountPage() {
               <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'flex-start' }}>
                 <div style={{ minWidth: 200 }}>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 3 }}>
-                    PT（{fmtPt(account.pt_current)} / {fmtPt(account.pt_target)}）
+                    {ptTarget !== null
+                      ? `PT（${fmtPt(account.pt_current)} / ${fmtPt(ptTarget)}）`
+                      : `PT（${fmtPt(account.pt_current)} / 天凤位）`}
                   </div>
-                  <div style={{ height: 8, borderRadius: 4, background: 'var(--page-bg)', border: '1px solid var(--border)', overflow: 'hidden' }}>
-                    <div style={{ width: `${ptProgress}%`, height: '100%', background: account.pt_gap > 0 ? 'var(--accent)' : 'var(--success)' }} />
-                  </div>
-                  <div style={{ marginTop: 3, fontSize: 11, color: account.pt_gap > 0 ? 'var(--text-muted)' : 'var(--success)' }}>
-                    {account.pt_gap > 0 ? `距目标还差 ${fmtPt(account.pt_gap)}` : '已达到目标 PT'}
+                  {ptTarget !== null ? (
+                    <div style={{ height: 8, borderRadius: 4, background: 'var(--page-bg)', border: '1px solid var(--border)', overflow: 'hidden' }}>
+                      <div style={{ width: `${ptProgress}%`, height: '100%', background: (account?.pt_current ?? 0) < ptTarget ? 'var(--accent)' : 'var(--success)' }} />
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: 'var(--success)' }}>已达成天凤位</div>
+                  )}
+                  <div style={{ marginTop: 3, fontSize: 11, color: 'var(--text-muted)' }}>
+                    {ptTarget !== null
+                      ? account.pt_current >= ptTarget ? '已达到升段 PT' : `距升段还差 ${fmtPt(ptTarget - account.pt_current)}`
+                      : '天凤位（不再计分）'}
                   </div>
                 </div>
                 <div>
@@ -183,6 +198,8 @@ export function LadderAccountPage() {
                   ['立直后放铳率', fmtRate(account.houjuu_rate_after_riichi)],
                   ['平均和牌打点', account.avg_point_per_agari === null ? '—' : Math.round(account.avg_point_per_agari).toLocaleString()],
                   ['总分数变化', fmtSignedInt(account.total_delta_score)],
+                  ['累计PTΔ', account.total_pt_delta === null || account.total_pt_delta === undefined ? '—' : fmtSignedInt(account.total_pt_delta)],
+                  ['平均每场PTΔ', account.avg_pt_delta === null || account.avg_pt_delta === undefined ? '—' : (account.avg_pt_delta >= 0 ? '+' : '') + account.avg_pt_delta.toFixed(1)],
                 ].map(([label, value]) => (
                   <div key={label} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, borderBottom: '1px dashed var(--border)', paddingBottom: 3 }}>
                     <span style={{ color: 'var(--text-muted)' }}>{label}</span>
@@ -202,6 +219,8 @@ export function LadderAccountPage() {
                   <tr style={{ color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', textAlign: 'left' }}>
                     <th style={thStyle}>场次</th>
                     <th style={thStyle}>顺位</th>
+                    <th style={thStyle}>段位变化</th>
+                    <th style={thStyle}>卓</th>
                     <th style={{ ...thStyle, textAlign: 'right' }}>终局分</th>
                     <th style={{ ...thStyle, textAlign: 'right' }}>分数Δ</th>
                     <th style={{ ...thStyle, textAlign: 'right' }}>PTΔ</th>
@@ -216,6 +235,23 @@ export function LadderAccountPage() {
                       <td style={{ ...tdStyle, fontWeight: 800, color: game.rank === 1 ? 'var(--success)' : game.rank === 4 ? 'var(--error)' : 'var(--text-primary)' }}>
                         {game.rank} 位
                       </td>
+                      <td style={{ ...tdStyle }}>
+                        {game.rank_before && game.rank_after ? (
+                          <span>
+                            {game.rank_before}
+                            <span style={{ color: 'var(--text-muted)' }}> → </span>
+                            {game.rank_after}
+                            {game.transition === 'promotion' && <span style={{ color: 'var(--success)' }}> ⬆</span>}
+                            {game.transition === 'demotion' && <span style={{ color: 'var(--error)' }}> ⬇</span>}
+                            {game.transition === 'tenhou' && <span style={{ color: 'var(--accent)' }}> 👑</span>}
+                          </span>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)' }}>—</span>
+                        )}
+                      </td>
+                      <td style={{ ...tdStyle, color: 'var(--text-muted)' }}>
+                        {game.table_room ? `${roomLabel(game.table_room)}${game.game_length === 'tonpuu' ? ' 東風' : ' 東南'}` : '—'}
+                      </td>
                       <td style={{ ...tdStyle, ...numStyle }}>{game.final_score.toLocaleString()}</td>
                       <td style={{ ...tdStyle, ...numStyle }}>{fmtSignedInt(game.score_delta)}</td>
                       <td style={{ ...tdStyle, ...numStyle }}>{fmtSignedInt(game.pt_delta)}</td>
@@ -224,7 +260,7 @@ export function LadderAccountPage() {
                     </tr>
                   ))}
                   {detail.recent_games.length === 0 && (
-                    <tr><td colSpan={7} style={{ ...tdStyle, color: 'var(--text-muted)', textAlign: 'center', padding: 14 }}>暂无对局记录</td></tr>
+                    <tr><td colSpan={9} style={{ ...tdStyle, color: 'var(--text-muted)', textAlign: 'center', padding: 14 }}>暂无对局记录</td></tr>
                   )}
                 </tbody>
               </table>
@@ -256,6 +292,33 @@ const rankBadgeStyle: CSSProperties = {
   fontWeight: 800,
   padding: '2px 6px',
 };
+
+const progressionBadgeStyle = (kind: 'promotion' | 'demotion'): CSSProperties => ({
+  border: `1px solid ${kind === 'promotion' ? 'rgba(39,174,96,0.5)' : 'rgba(231,76,60,0.5)'}`,
+  borderRadius: 4,
+  background: kind === 'promotion' ? 'rgba(39,174,96,0.08)' : 'rgba(231,76,60,0.08)',
+  color: kind === 'promotion' ? '#27ae60' : '#e74c3c',
+  fontSize: 11,
+  fontWeight: 700,
+  padding: '2px 6px',
+});
+
+function roomLabel(room: string): string {
+  const names: Record<string, string> = {
+    ippan: '一般',
+    joukyuu: '上級',
+    tokujou: '特上',
+    houou: '鳳凰',
+  };
+  return names[room] ?? room;
+}
+
+function scoringProfileLabel(scoring: LadderSeasonScoring): string {
+  if (scoring.system) {
+    return [scoring.system, scoring.version, scoring.room_policy].filter(Boolean).join(' · ');
+  }
+  return scoring.pt_profile || 'legacy';
+}
 
 const linkButtonStyle: CSSProperties = {
   border: 'none',
