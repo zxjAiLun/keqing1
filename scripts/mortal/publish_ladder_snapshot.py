@@ -57,6 +57,9 @@ SNAPSHOT_RECOMMENDED_FILES = (
 # 默认保留的最近有效快照数；0 表示禁用自动清理
 DEFAULT_RETAIN_SNAPSHOTS = 24
 
+# report 派生逻辑契约版本：未来算法更新时递增，避免相同源日志复用旧产物
+SNAPSHOT_BUILD_CONTRACT_VERSION = "v1"
+
 
 class PublishError(Exception):
     """发布流程错误（completed 赛季、目录冲突等）。"""
@@ -157,6 +160,7 @@ def write_manifest(
         "accounts": len(report.get("accounts") or []),
         "compact": True,
         "kept_account_logs": bool(keep_account_logs),
+        "build_contract_version": SNAPSHOT_BUILD_CONTRACT_VERSION,
         "rank_points": rank_points,
         "platform_model_label": platform_model_label,
         "preserve_log_dir_order": bool(preserve_log_dir_order),
@@ -175,6 +179,14 @@ def write_manifest(
     manifest_path = snapshot_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return manifest_path
+
+
+def _patch_manifest_bytes(snapshot_dir: Path, *, snapshot_total_bytes: int) -> None:
+    """重写 manifest 的 snapshot_total_bytes（manifest 就位后递归统计）。"""
+    manifest_path = snapshot_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["snapshot_total_bytes"] = snapshot_total_bytes
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _lock_path(registry_path: Path) -> Path:
@@ -251,6 +263,20 @@ def conditional_switch_registry(
         os.replace(tmp_path, registry_path)
 
 
+def _dir_total_bytes(directory: Path) -> int:
+    """递归统计目录内全部文件的总字节数（含 manifest、account_logs 等）。"""
+    if not directory.is_dir():
+        return 0
+    total = 0
+    for path in directory.rglob("*"):
+        if path.is_file():
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
 def _materialize_compact_snapshot(
     build_dir: Path,
     snapshot_stage: Path,
@@ -295,17 +321,32 @@ def _read_manifest(snapshot_dir: Path) -> dict[str, Any] | None:
     return manifest
 
 
-def _log_file_stats(log_dirs: list[Path]) -> list[tuple[str, int, int]]:
-    """收集排序后的源日志指纹元组：(绝对路径, size, mtime_ns)。"""
+def _ordered_log_stats(
+    log_dirs: list[Path],
+    *,
+    preserve_log_dir_order: bool = False,
+    interleave_log_dirs: bool = False,
+) -> list[tuple[str, int, int]]:
+    """按 report builder 的真实处理顺序收集源日志指纹元组。
+
+    复用 ``build_platform_account_report.iter_log_files`` 得到与评分/PT ledger
+    完全一致的顺序，避免 ``[A,B]`` 与 ``[B,A]`` 在 preserve/interleave 模式下
+    被误判为相同输入。
+    """
+    from scripts.mortal import build_platform_account_report as account_report
+
+    ordered_files = account_report.iter_log_files(
+        log_dirs,
+        preserve_log_dir_order=preserve_log_dir_order,
+        interleave_log_dirs=interleave_log_dirs,
+    )
     stats: list[tuple[str, int, int]] = []
-    for log_dir in log_dirs:
-        for path in sorted(log_dir.glob("*.json.gz")):
-            try:
-                st = path.stat()
-            except OSError:
-                continue
-            stats.append((str(path.resolve()), st.st_size, st.st_mtime_ns))
-    stats.sort(key=lambda item: item[0])
+    for path in ordered_files:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        stats.append((str(path.resolve()), st.st_size, st.st_mtime_ns))
     return stats
 
 
@@ -315,12 +356,16 @@ def compute_source_fingerprint(
     preserve_log_dir_order: bool = False,
     interleave_log_dirs: bool = False,
 ) -> str:
-    """源日志输入指纹：覆盖排序后的路径、大小、mtime_ns。
+    """源日志输入指纹：覆盖 builder 实际处理顺序的路径、大小、mtime_ns。
 
     相同的日志文件集合（含 ordering/interleave 参数）产生相同指纹；
     用于避免人工重复执行、resume 无新增日志、调度器重复触发时的重复重建。
     """
-    stats = _log_file_stats(log_dirs)
+    stats = _ordered_log_stats(
+        log_dirs,
+        preserve_log_dir_order=preserve_log_dir_order,
+        interleave_log_dirs=interleave_log_dirs,
+    )
     hasher = hashlib.sha256()
     hasher.update(("preserve=%s;interleave=%s;" % (preserve_log_dir_order, interleave_log_dirs)).encode("ascii"))
     for path, size, mtime_ns in stats:
@@ -335,23 +380,29 @@ def _should_skip_unchanged(
     source_fingerprint: str,
     rank_points: str,
     platform_model_label: str | None,
+    keep_account_logs: bool,
     preserve_log_dir_order: bool,
     interleave_log_dirs: bool,
 ) -> bool:
     """当前 snapshot manifest 与本次发布条件一致时返回 True（跳过重建）。
 
-    需要 season contract、source_fingerprint、rank_points、
-    platform_model_label、log ordering/interleave 参数全部一致。
+    需要 season contract、build contract version、source_fingerprint、
+    rank_points、platform_model_label、keep_account_logs、
+    log ordering/interleave 参数全部一致。
     """
     if manifest.get("season_id") != season.get("season_id"):
         return False
     if _registry_contract(season) != _registry_contract_from_manifest(manifest):
+        return False
+    if manifest.get("build_contract_version") != SNAPSHOT_BUILD_CONTRACT_VERSION:
         return False
     if manifest.get("source_fingerprint") != source_fingerprint:
         return False
     if manifest.get("rank_points") != rank_points:
         return False
     if manifest.get("platform_model_label") != (platform_model_label or None):
+        return False
+    if bool(manifest.get("kept_account_logs")) != keep_account_logs:
         return False
     if bool(manifest.get("preserve_log_dir_order")) != preserve_log_dir_order:
         return False
@@ -430,6 +481,15 @@ def enforce_retention(
     return result
 
 
+def _snapshot_name_for(now: datetime, random_hex: str) -> str:
+    """最终快照目录名：UTC 时间戳（含微秒）+ 随机后缀，天然唯一。
+
+    ``<YYYYmmdd-HHMMSS>-<microseconds>-<uuid8>``，避免两个 publisher
+    同秒争用同一最终目录。
+    """
+    return f"{now.strftime('%Y%m%d-%H%M%S')}-{now.microsecond:06d}-{random_hex}"
+
+
 def _staging_root_for(snapshot_root: Path, snapshot_name: str) -> Path:
     """隐藏 staging 根目录：完整 build + 紧凑 snapshot staging 都放其下。"""
     return snapshot_root / f".{snapshot_name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.staging"
@@ -460,6 +520,8 @@ def publish_snapshot(
     season_id = str(season["season_id"])
     if str(season.get("status") or "") == "completed":
         raise PublishError(f"season {season_id}: completed 赛季不可发布快照")
+    if retain_snapshots < 0:
+        raise PublishError(f"retain_snapshots 不能为负: {retain_snapshots}")
 
     data_root = os.environ.get("KEQING_LADDER_DATA_ROOT", "").strip()
     root = snapshot_root or default_snapshot_root(Path(data_root) if data_root else None, season_id)
@@ -478,7 +540,8 @@ def publish_snapshot(
         preserve_log_dir_order=preserve_log_dir_order,
         interleave_log_dirs=interleave_log_dirs,
     )
-    if previous_snapshot is not None and previous_snapshot.is_dir():
+    # dry-run 始终真正构建与校验；skip 前必须确认当前快照三件套仍完整可读。
+    if not dry_run and previous_snapshot is not None and previous_snapshot.is_dir():
         prev_manifest = _read_manifest(previous_snapshot)
         if prev_manifest is not None and _should_skip_unchanged(
             season,
@@ -486,31 +549,40 @@ def publish_snapshot(
             source_fingerprint=source_fingerprint,
             rank_points=rank_points,
             platform_model_label=platform_model_label,
+            keep_account_logs=keep_account_logs,
             preserve_log_dir_order=preserve_log_dir_order,
             interleave_log_dirs=interleave_log_dirs,
         ):
-            return {
-                "snapshot_dir": str(previous_snapshot),
-                "games": prev_manifest.get("games"),
-                "dry_run": dry_run,
-                "registry_switched": False,
-                "skipped_unchanged": True,
-                "retention_deleted": [],
-                "retention_errors": [],
-            }
+            try:
+                ladder.validate_snapshot(season, previous_snapshot)
+            except ladder.SeasonDataError:
+                # 当前快照损坏：忽略 skip，重新完整构建以自愈
+                pass
+            else:
+                return {
+                    "snapshot_dir": str(previous_snapshot),
+                    "games": prev_manifest.get("games"),
+                    "dry_run": dry_run,
+                    "registry_switched": False,
+                    "skipped_unchanged": True,
+                    "retention_deleted": [],
+                    "retention_errors": [],
+                }
 
-    # 秒级时间戳命名；同一秒内多次发布时追加序号，避免目录冲突
-    base_name = datetime.now().strftime("%Y%m%d-%H%M%S")
-    snapshot_dir = root / base_name
-    attempt = 1
-    while snapshot_dir.exists():
-        attempt += 1
-        snapshot_dir = root / f"{base_name}-{attempt}"
+    # 最终快照 ID 天然唯一：UTC 时间戳（含微秒）+ 随机后缀，
+    # 避免两个 publisher 同秒争用同一最终目录。
+    snapshot_name = _snapshot_name_for(datetime.now(timezone.utc), uuid.uuid4().hex[:8])
+    snapshot_dir = root / snapshot_name
 
     staging_root = _staging_root_for(root, snapshot_dir.name)
     build_dir = staging_root / "build"
     snapshot_stage = staging_root / "snapshot"
     staging_root.mkdir(parents=True)
+
+    # 发布所有权：只有本次调用确实成功 os.replace 才拥有该最终目录；
+    # registry 一旦切换，任何后续异常都不得删除当前线上快照。
+    materialized_by_this_publish = False
+    registry_switched = False
 
     try:
         build_started = time.monotonic()
@@ -535,11 +607,10 @@ def publish_snapshot(
         ladder.validate_snapshot(season, snapshot_stage)
         materialize_duration = time.monotonic() - materialize_started
 
-        source_stats = _log_file_stats(log_dirs)
-        snapshot_total_bytes = sum(
-            (snapshot_stage / name).stat().st_size
-            for name in SNAPSHOT_REQUIRED_FILES + SNAPSHOT_RECOMMENDED_FILES
-            if (snapshot_stage / name).is_file()
+        source_stats = _ordered_log_stats(
+            log_dirs,
+            preserve_log_dir_order=preserve_log_dir_order,
+            interleave_log_dirs=interleave_log_dirs,
         )
         write_manifest(
             snapshot_stage,
@@ -547,7 +618,7 @@ def publish_snapshot(
             snapshot_id=snapshot_dir.name,
             report=report,
             registry_path=registry_path,
-            previous_report_dir=str(previous_report_dir) if previous_report_dir else None,
+            previous_report_dir=str(previous_snapshot) if previous_snapshot else None,
             keep_account_logs=keep_account_logs,
             source_fingerprint=source_fingerprint,
             registry_contract=_registry_contract(season),
@@ -556,14 +627,19 @@ def publish_snapshot(
             source_total_bytes=sum(int(size) for _path, size, _mtime in source_stats),
             build_duration_seconds=round(build_duration, 4),
             materialize_duration_seconds=round(materialize_duration, 4),
-            snapshot_total_bytes=snapshot_total_bytes,
+            snapshot_total_bytes=0,  # 占位；manifest 就位后重算
             rank_points=rank_points,
             platform_model_label=platform_model_label,
             preserve_log_dir_order=preserve_log_dir_order,
             interleave_log_dirs=interleave_log_dirs,
         )
+        # manifest 已在目录中，递归统计整个快照（含 manifest/account_logs）。
+        # 第一次写入占位(0)改变 manifest 自身大小，第二轮统计即稳定。
+        for _round in range(2):
+            _patch_manifest_bytes(snapshot_stage, snapshot_total_bytes=_dir_total_bytes(snapshot_stage))
         # 只有完整构建与校验通过后，才把 snapshot staging 原子改名为最终快照
         os.replace(snapshot_stage, snapshot_dir)
+        materialized_by_this_publish = True
         if dry_run:
             return {
                 "snapshot_dir": str(snapshot_dir),
@@ -580,14 +656,22 @@ def publish_snapshot(
             expected_report_dir=str(previous_report_dir) if previous_report_dir else None,
             new_report_dir=snapshot_dir,
         )
-        retention = enforce_retention(
-            root,
-            season_id=season_id,
-            retain=retain_snapshots,
-            current_snapshot_dir=snapshot_dir,
-            previous_report_dir=str(previous_report_dir) if previous_report_dir else None,
-            protected_snapshots=set(),
-        )
+        registry_switched = True
+        try:
+            retention = enforce_retention(
+                root,
+                season_id=season_id,
+                retain=retain_snapshots,
+                current_snapshot_dir=snapshot_dir,
+                previous_report_dir=str(previous_snapshot) if previous_snapshot else None,
+                protected_snapshots=set(),
+            )
+        except Exception as exc:
+            # retention 降级为结果项，绝不把已成功的发布标记为失败
+            retention = {
+                "retention_deleted": [],
+                "retention_errors": [f"retention scan failed: {exc}"],
+            }
         return {
             "snapshot_dir": str(snapshot_dir),
             "games": report.get("games"),
@@ -597,8 +681,10 @@ def publish_snapshot(
             **retention,
         }
     except Exception:
-        # registry 切换失败时，清理本次已 materialize 的孤儿快照
-        shutil.rmtree(snapshot_dir, ignore_errors=True)
+        # 仅当本次调用确实 materialize 且 registry 尚未切换时才可删除该目录；
+        # 切换成功后或目录不属于本调用时，绝不删除（避免误删线上/他人快照）。
+        if materialized_by_this_publish and not registry_switched:
+            shutil.rmtree(snapshot_dir, ignore_errors=True)
         raise
     finally:
         # 无论成败都清理完整 build staging（含 account_logs 派生副本）

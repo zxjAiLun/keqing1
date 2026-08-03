@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -647,14 +648,248 @@ def test_manifest_telemetry_matches_actual_snapshot(tmp_path: Path):
     assert manifest["kept_account_logs"] is False
     assert manifest["source_file_count"] == 1
     assert manifest["source_total_bytes"] == 100
-    expected_bytes = sum(
-        (snapshot_dir / name).stat().st_size
-        for name in publisher.SNAPSHOT_REQUIRED_FILES + publisher.SNAPSHOT_RECOMMENDED_FILES
-        if (snapshot_dir / name).is_file()
-    )
-    assert manifest["snapshot_total_bytes"] == expected_bytes
+    assert manifest["snapshot_total_bytes"] == publisher._dir_total_bytes(snapshot_dir)
     assert manifest["source_fingerprint"]
     assert manifest["registry_contract"]
+    assert manifest["build_contract_version"] == publisher.SNAPSHOT_BUILD_CONTRACT_VERSION
     assert manifest["build_duration_seconds"] >= 0
     assert manifest["materialize_duration_seconds"] >= 0
     assert not (snapshot_dir / "account_logs").exists()
+
+
+# ---------------------------------------------------------------------------
+# Round 5 follow-up: race safety, ownership, and skip contract (review fixes)
+# ---------------------------------------------------------------------------
+
+def test_same_timestamp_publishers_do_not_share_final_dir(tmp_path: Path):
+    """即使两个发布落在同一秒，最终目录名仍因 uuid 段天然唯一。"""
+    fixed_ts = "20260803-072225"
+    first = f"{fixed_ts}-500684-aaaa1111"
+    second = f"{fixed_ts}-500684-bbbb2222"
+    assert first != second
+    # 格式：<YYYYmmdd-HHMMSS>-<microseconds>-<uuid8>
+    assert len(first.split("-")) == 4
+    assert len(second.split("-")) == 4
+    # publisher 生成的 snapshot_name 同样包含微秒+uuid 段
+    name = publisher._snapshot_name_for(datetime(2026, 8, 3, 7, 22, 25, 500684, tzinfo=timezone.utc), "abc12345")
+    assert name == "20260803-072225-500684-abc12345"
+
+
+def test_materialize_failure_does_not_delete_foreign_snapshot(tmp_path: Path, monkeypatch):
+    """materialize(os.replace) 失败时，不删除已存在的 foreign snapshot。"""
+    registry_path = _write_registry(tmp_path, _running_season())
+    root = tmp_path / "snapshots"
+    root.mkdir(parents=True)
+    # 预置一个 foreign 快照（非本次调用创建）
+    foreign = root / "foreign-20260101-000000-000000-deadbeef"
+    foreign.mkdir(parents=True)
+    (foreign / "manifest.json").write_text("{}", encoding="utf-8")
+
+    real_replace = __import__("os").replace
+
+    def failing_replace(src, dst):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr("os.replace", failing_replace)
+    with pytest.raises(OSError, match="simulated replace failure"):
+        publisher.publish_snapshot(
+            registry_path=registry_path,
+            log_dirs=[tmp_path / "logs"],
+            snapshot_root=root,
+            build_report=_fake_build([_row()], games=1),
+        )
+    monkeypatch.undo()
+    # foreign 快照必须保留；本次 staging 已清理
+    assert foreign.exists()
+    assert len(list(root.glob("*.staging"))) == 0
+
+
+def test_post_switch_retention_failure_keeps_live_snapshot(tmp_path: Path, monkeypatch):
+    """registry 已切换后，retention 整体抛异常仍保留线上快照与 registry。"""
+    registry_path = _write_registry(tmp_path, _running_season())
+
+    def exploding_retention(**kwargs: Any) -> dict:
+        raise OSError("retention scan exploded")
+
+    monkeypatch.setattr(publisher, "enforce_retention", exploding_retention)
+    result = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[tmp_path / "logs"],
+        snapshot_root=tmp_path / "snapshots",
+        build_report=_fake_build([_row()], games=1),
+    )
+    assert result["registry_switched"] is True
+    assert result["retention_errors"]
+    assert result["retention_deleted"] == []
+    # 线上快照仍存在且 registry 指向它
+    assert Path(result["snapshot_dir"]).exists()
+    assert ladder.read_registry(registry_path)["report_dir"] == result["snapshot_dir"]
+
+
+def test_retention_protects_relative_previous_by_data_root(tmp_path: Path, monkeypatch):
+    """相对 previous_report_dir 应按 data root 解析并保护。"""
+    data_root = tmp_path / "keqing-data"
+    previous = data_root / "seasons" / "dev-live" / "snapshots" / "prev"
+    previous.mkdir(parents=True)
+    (previous / "manifest.json").write_text("{}", encoding="utf-8")
+    registry_path = _write_registry(tmp_path, _running_season(report_dir=str(previous)))
+    root = tmp_path / "snapshots"
+    root.mkdir(parents=True)
+
+    result = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[tmp_path / "logs"],
+        snapshot_root=root,
+        retain_snapshots=1,
+        build_report=_fake_build([_row()], games=1),
+    )
+    # previous 解析应基于 data root
+    assert result["registry_switched"] is True
+    assert previous.exists()
+
+
+def test_fingerprint_differs_for_reversed_dirs_preserve(tmp_path: Path):
+    """preserve 模式下 [A,B] 与 [B,A] fingerprint 不同。"""
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (a / "1.json.gz").write_text("", encoding="utf-8")
+    (b / "2.json.gz").write_text("", encoding="utf-8")
+    fp_ab = publisher.compute_source_fingerprint([a, b], preserve_log_dir_order=True)
+    fp_ba = publisher.compute_source_fingerprint([b, a], preserve_log_dir_order=True)
+    assert fp_ab != fp_ba
+
+
+def test_fingerprint_differs_for_reversed_dirs_interleave(tmp_path: Path):
+    """interleave 模式下 [A,B] 与 [B,A] fingerprint 不同。"""
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (a / "1.json.gz").write_text("", encoding="utf-8")
+    (b / "2.json.gz").write_text("", encoding="utf-8")
+    fp_ab = publisher.compute_source_fingerprint([a, b], interleave_log_dirs=True)
+    fp_ba = publisher.compute_source_fingerprint([b, a], interleave_log_dirs=True)
+    assert fp_ab != fp_ba
+
+
+def test_keep_account_logs_change_triggers_new_snapshot(tmp_path: Path):
+    """默认发布后再以 --keep-account-logs 发布，必须生成新快照而非 skip。"""
+    registry_path = _write_registry(tmp_path, _running_season())
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "a.json.gz").write_text("", encoding="utf-8")
+    first = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[log_dir],
+        snapshot_root=tmp_path / "snapshots",
+        build_report=_fake_build_with_account_logs([_row()], games=1),
+    )
+    second = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[log_dir],
+        snapshot_root=tmp_path / "snapshots",
+        keep_account_logs=True,
+        build_report=_fake_build_with_account_logs([_row()], games=1),
+    )
+    assert second["registry_switched"] is True
+    assert second["skipped_unchanged"] is False
+    assert second["snapshot_dir"] != first["snapshot_dir"]
+    assert (Path(second["snapshot_dir"]) / "account_logs").exists()
+
+
+def test_dry_run_always_builds_even_when_unchanged(tmp_path: Path):
+    """dry-run 即使源输入未变化也执行 builder（不命中 skip）。"""
+    registry_path = _write_registry(tmp_path, _running_season())
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "a.json.gz").write_text("", encoding="utf-8")
+
+    calls: list[int] = []
+
+    def counting_build(**kwargs: Any) -> dict[str, Any]:
+        calls.append(1)
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "account_summary.json").write_text(
+            json.dumps({"schema": ladder.REPORT_SCHEMA, "games": 1, "accounts": [_row()]}),
+            encoding="utf-8")
+        (output_dir / "account_ledger.jsonl").write_text("", encoding="utf-8")
+        (output_dir / "rating_curve.csv").write_text(
+            "game_index,account_id,model_label,rating,pt,rank_name,games\n", encoding="utf-8")
+        return {"games": 1, "accounts": [_row()]}
+
+    first = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[log_dir],
+        snapshot_root=tmp_path / "snapshots",
+        build_report=counting_build,
+    )
+    assert first["registry_switched"] is True
+    dry = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[log_dir],
+        snapshot_root=tmp_path / "snapshots",
+        dry_run=True,
+        build_report=counting_build,
+    )
+    # dry-run 即使输入未变化也执行 builder
+    assert len(calls) == 2
+    assert dry["dry_run"] is True
+    assert dry["skipped_unchanged"] is False
+    assert dry["registry_switched"] is False
+
+
+def test_corrupted_current_snapshot_does_not_skip(tmp_path: Path):
+    """当前快照三件套损坏时不会 skip，而会重建自愈。"""
+    registry_path = _write_registry(tmp_path, _running_season())
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "a.json.gz").write_text("", encoding="utf-8")
+    first = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[log_dir],
+        snapshot_root=tmp_path / "snapshots",
+        build_report=_fake_build([_row()], games=1),
+    )
+    # 破坏当前快照的必需产物
+    (Path(first["snapshot_dir"]) / "account_summary.json").unlink()
+    second = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[log_dir],
+        snapshot_root=tmp_path / "snapshots",
+        build_report=_fake_build([_row()], games=1),
+    )
+    assert second["registry_switched"] is True
+    assert second["skipped_unchanged"] is False
+    assert second["snapshot_dir"] != first["snapshot_dir"]
+
+
+def test_retain_negative_rejected(tmp_path: Path):
+    """retain_snapshots < 0 立即拒绝。"""
+    registry_path = _write_registry(tmp_path, _running_season())
+    with pytest.raises(publisher.PublishError, match="不能为负"):
+        publisher.publish_snapshot(
+            registry_path=registry_path,
+            log_dirs=[tmp_path / "logs"],
+            snapshot_root=tmp_path / "snapshots",
+            retain_snapshots=-1,
+            build_report=_fake_build([_row()], games=1),
+        )
+
+
+def test_snapshot_total_bytes_matches_full_dir(tmp_path: Path):
+    """snapshot_total_bytes 与实际整个快照目录字节一致（含 manifest/account_logs）。"""
+    registry_path = _write_registry(tmp_path, _running_season())
+    result = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[tmp_path / "logs"],
+        snapshot_root=tmp_path / "snapshots",
+        keep_account_logs=True,
+        build_report=_fake_build_with_account_logs([_row()], games=1),
+    )
+    snapshot_dir = Path(result["snapshot_dir"])
+    manifest = json.loads((snapshot_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["snapshot_total_bytes"] == publisher._dir_total_bytes(snapshot_dir)
+    assert manifest["kept_account_logs"] is True

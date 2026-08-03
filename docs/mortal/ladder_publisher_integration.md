@@ -1,6 +1,6 @@
 ﻿# Ladder Publisher Integration
 
-> 更新：2026-08-03（Round 5：compact snapshot / retention / telemetry）
+> 更新：2026-08-03（Round 5：compact snapshot / retention / telemetry；review 收口：race-safe ownership / 幂等 contract）
 > 关联：`scripts/mortal/publish_ladder_snapshot.py`、`src/replay/ladder.py`
 
 ## 职责边界
@@ -42,8 +42,19 @@
 失败语义：
 
 - 构建/校验失败：只清理隐藏 staging，不生成最终快照，旧 registry 保持可用；
-- registry 切换失败：删除本次已 materialize 的孤儿快照，registry 回滚不变；
+- registry 切换失败：仅当本次调用确实 materialize 该目录且 registry 尚未切换时，
+  才删除该孤儿快照；**绝不删除其他调用创建的快照**；
+- registry 已切换后：任何后续异常（含 retention 扫描故障）都降级为
+  `retention_errors` 返回，**绝不删除当前线上快照**；
 - retention 清理失败：记录 `retention_errors` 返回，不把已成功的发布标记为失败。
+
+## 并发所有权
+
+- 最终快照 ID 天然唯一：`<YYYYmmdd-HHMMSS>-<microseconds>-<uuid8>`，
+  两个 publisher 同秒启动也不会争用同一最终目录；
+- `materialized_by_this_publish` / `registry_switched` 两个状态明确发布所有权：
+  - registry 尚未切换：失败时允许删除本次自己 materialize 的快照；
+  - registry 已切换：任何后续异常都不得删除当前快照。
 
 ## 幂等与指纹
 
@@ -51,13 +62,24 @@
 `{"skipped_unchanged": true, "registry_switched": false}`，不重建：
 
 - season contract（注册表模型/账号/状态，除 report_dir）
-- `source_fingerprint`（排序后的源日志路径 + 大小 + mtime_ns + ordering/interleave 参数）
+- `build_contract_version`（report 派生逻辑契约版本，算法更新时递增）
+- `source_fingerprint`（**builder 真实处理顺序**下的源日志路径 + 大小 + mtime_ns）
 - `rank_points`
 - `platform_model_label`
+- `keep_account_logs`
 - `preserve_log_dir_order` / `interleave_log_dirs`
 
-避免人工重复执行、resume 后无新增日志、外部调度器重复触发时的重复重建。
-任何源日志增加、大小或 mtime 变化都会产生新快照。
+注意：
+
+- `source_fingerprint` 复用 `iter_log_files` 的实际顺序，`[A,B]` 与 `[B,A]`
+  在 preserve/interleave 模式下产生不同指纹，不会被误判为 unchanged；
+- **dry-run 始终真正构建并校验**，不命中 skip；
+- 命中 skip 前会重新 `validate_snapshot` 当前快照；三件套损坏时忽略 skip
+  并完整重建自愈；
+- 任何源日志增加、大小或 mtime 变化都会产生新快照。
+
+`snapshot_total_bytes` 为递归统计的整个快照目录字节数（含 manifest.json、
+`account_logs/` 等全部文件），与 manifest 一致。
 
 ## 快照历史保留
 

@@ -16,6 +16,6 @@ _ENV_KEYS = ("KEQING_LADDER_DATA_ROOT", "KEQING_LADDER_CONFIG_DIR")
 
 
 @pytest.fixture(autouse=True)
-def _clear_ladder_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_external_ladder_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in _ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
