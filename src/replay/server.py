@@ -1364,12 +1364,12 @@ _LADDER_SEASONS_DIR = ladder_data.resolve_config_dir(_LADDER_PROJECT_ROOT)
 
 @app.get("/api/ladder/seasons", response_class=JSONResponse)
 async def list_ladder_seasons():
-    """列出已注册的评测赛季。"""
+    """列出已注册的评测赛季（含默认赛季与每赛季 readiness）。"""
     try:
-        seasons = ladder_data.list_seasons(_LADDER_PROJECT_ROOT, _LADDER_SEASONS_DIR)
+        catalog = ladder_data.list_seasons_catalog(_LADDER_PROJECT_ROOT, _LADDER_SEASONS_DIR)
     except ladder_data.SeasonRegistryError as exc:
         return JSONResponse(status_code=500, content={"error": str(exc)})
-    return JSONResponse(content={"seasons": seasons})
+    return JSONResponse(content=catalog)
 
 
 @app.get("/api/ladder/seasons/{season_id}", response_class=JSONResponse)
@@ -1380,7 +1380,7 @@ async def get_ladder(season_id: str, sort: str = "pt"):
     except ladder_data.SeasonNotFoundError as exc:
         return JSONResponse(status_code=404, content={"error": str(exc)})
     except ladder_data.SeasonDataError as exc:
-        return JSONResponse(status_code=409, content={"error": str(exc)})
+        return JSONResponse(status_code=409, content={"error": str(exc), "reason": ladder_data.season_data_problem(exc)})
     except ladder_data.SeasonRegistryError as exc:
         return JSONResponse(status_code=500, content={"error": str(exc)})
     return JSONResponse(content=payload)
@@ -1403,7 +1403,7 @@ async def get_ladder_account(season_id: str, account_id: str, recent_games: int 
     except (ladder_data.SeasonNotFoundError, ladder_data.AccountNotFoundError) as exc:
         return JSONResponse(status_code=404, content={"error": str(exc)})
     except ladder_data.SeasonDataError as exc:
-        return JSONResponse(status_code=409, content={"error": str(exc)})
+        return JSONResponse(status_code=409, content={"error": str(exc), "reason": ladder_data.season_data_problem(exc)})
     except ladder_data.SeasonRegistryError as exc:
         return JSONResponse(status_code=500, content={"error": str(exc)})
     return JSONResponse(content=payload)
@@ -1417,7 +1417,7 @@ async def get_ladder_model(season_id: str, model_id: str):
     except (ladder_data.SeasonNotFoundError, ladder_data.ModelNotFoundError) as exc:
         return JSONResponse(status_code=404, content={"error": str(exc)})
     except ladder_data.SeasonDataError as exc:
-        return JSONResponse(status_code=409, content={"error": str(exc)})
+        return JSONResponse(status_code=409, content={"error": str(exc), "reason": ladder_data.season_data_problem(exc)})
     except ladder_data.SeasonRegistryError as exc:
         return JSONResponse(status_code=500, content={"error": str(exc)})
     return JSONResponse(content=payload)
