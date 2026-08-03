@@ -98,6 +98,12 @@ def load_registry(path: Path) -> dict[str, Any]:
             reference = record.get(field)
             if reference is not None and reference not in record_by_id:
                 raise ValueError(f"record {record['experiment_id']} references unknown {field}: {reference}")
+        promotion_control = record.get("primary_promotion_control")
+        if promotion_control is not None and record_by_id[promotion_control]["status"] != "operational":
+            raise ValueError(
+                f"record {record['experiment_id']} primary_promotion_control is not operational: "
+                f"{promotion_control}"
+            )
     return registry
 
 

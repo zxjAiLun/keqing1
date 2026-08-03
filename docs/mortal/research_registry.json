@@ -12,7 +12,7 @@
     "operational_objective": "behavior_action_mc",
     "operational_reward": "final_rank_mc",
     "legacy_continuation_optimizer": "preserved_adam_70k_legacy_continuation",
-    "current_stage": "D1/D2 data-lineage experiments closed; next data-generation hypothesis pending pre-registration",
+    "current_stage": "D3 feasibility audit completed; generation contract pending pre-registration",
     "next_experiment": "D3_uncertainty_guided_exploration",
     "next_experiment_status": "proposal_only_not_started",
     "prohibitions": [
@@ -102,8 +102,8 @@
       "name_zh": "D1 project-owned 纯 K0 视角数据路线",
       "category": "data",
       "parent_model": "K0_70k",
-      "control": "M0：ext_mortal trainable view",
-      "variant": "D1：K0_70k trainable view",
+      "control": "M0 mixed replay corpus",
+      "variant": "D1 K0-view project-owned population replay",
       "changed_variable": "完整 replay lineage：M0 mixed replay → 新生成的 D1 K0-view population replay",
       "fixed_variables": ["两边均为 6000 个 trainable perspectives", "一局一个 trainable perspective", "final_rank_mc", "behavior_action_mc", "preserved Adam", "70k→72k", "B250 random-seat evaluation"],
       "training_seeds": [20260806, 20260807, 20260808],
@@ -159,7 +159,7 @@
       "training_seeds": [],
       "evaluation_protocol": null,
       "status": "proposal_only_not_started",
-      "primary_result": "尚未运行；当前只登记研究问题：受控探索是否能提供比纯 K0-view 更有用、且不失控的 action support。",
+      "primary_result": "只读 feasibility audit 已完成：M0 938158 / D1 970692 decisions，均 0 malformed；top-2 可选率 94.643% / 94.351%，mean margin 2.312 / 2.340，cross-semantic top-2 24.715% / 24.787%。D3 仍未生成牌谱或训练。",
       "promoted_data_route": null,
       "promoted_checkpoint": null,
       "recipe_promotion": false,
@@ -168,9 +168,9 @@
       "predecessor": "D2_project_owned_descendant_view_mix",
       "next_experiment": null,
       "commits": [],
-      "artifact_paths": [],
-      "report_paths": ["docs/mortal/研发总览_当前.md"],
-      "proposal_constraints": ["先完成中文预注册、数据生成合同、seed/protocol、反自欺规则和 feasibility audit，再决定是否实现。"]
+      "artifact_paths": ["artifacts/experiments/model_pool_2026_07/D3_uncertainty_guided_exploration_2026_08/feasibility_audit/d3_exploration_feasibility.json", "artifacts/experiments/model_pool_2026_07/D3_uncertainty_guided_exploration_2026_08/feasibility_audit/d3_exploration_feasibility.md"],
+      "report_paths": ["docs/mortal/研发总览_当前.md", "docs/mortal/experiments_zh/2026-08_D3不确定性探索_预注册设计.md"],
+      "proposal_constraints": ["只读 feasibility audit 已完成；仍需完成中文预注册、数据生成合同、seed/protocol、反自欺规则，再决定是否实现。", "audit 中的 margin threshold 仅为描述性分桶，不是已批准的触发参数。"]
     },
     {
       "experiment_id": "grp_delta_pt_reward",
