@@ -110,6 +110,16 @@ check(
   'useVisibleLiveQuery 返回 data 前应核对 state key',
 );
 
+// 11. 轮询 timer 必须使用 intervalMs，且 effect 依赖包含 intervalMs（动态周期重建）
+check(
+  /setInterval\([\s\S]*?intervalMs\)/.test(hook),
+  'useVisibleLiveQuery setInterval 应使用 intervalMs',
+);
+check(
+  /}, \[enabled, intervalMs, run\]\);/.test(hook),
+  'useVisibleLiveQuery 轮询 effect 依赖应包含 intervalMs',
+);
+
 if (failures > 0) {
   console.error(`ladder live semantics FAILED (${failures} issues)`);
   process.exit(1);

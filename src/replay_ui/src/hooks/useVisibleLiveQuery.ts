@@ -62,7 +62,6 @@ export function useVisibleLiveQuery<T>(options: VisibleLiveQueryOptions<T>): Vis
   }));
 
   const loadRef = useRef(load);
-  const intervalMsRef = useRef(intervalMs);
   const enabledRef = useRef(enabled);
   const queryKeyRef = useRef(queryKey);
   const activeRef = useRef<ActiveRequest | null>(null);
@@ -70,10 +69,6 @@ export function useVisibleLiveQuery<T>(options: VisibleLiveQueryOptions<T>): Vis
   useEffect(() => {
     loadRef.current = load;
   }, [load]);
-
-  useEffect(() => {
-    intervalMsRef.current = intervalMs;
-  }, [intervalMs]);
 
   useEffect(() => {
     enabledRef.current = enabled;
@@ -158,11 +153,12 @@ export function useVisibleLiveQuery<T>(options: VisibleLiveQueryOptions<T>): Vis
   }, [enabled]);
 
   // 可见性轮询：visible 每 intervalMs；hidden 跳过；恢复 visible 立即刷新。
+  // intervalMs 变化时重建 timer（旧 timer 清除，按新周期继续）。
   useEffect(() => {
     if (!enabled) return;
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void run('poll');
-    }, intervalMsRef.current);
+    }, intervalMs);
     const onVisibility = () => {
       if (document.visibilityState === 'visible') void run('poll');
     };
@@ -171,7 +167,7 @@ export function useVisibleLiveQuery<T>(options: VisibleLiveQueryOptions<T>): Vis
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [enabled, run]);
+  }, [enabled, intervalMs, run]);
 
   // 卸载（含 StrictMode 重放 cleanup）：解除所有权并 abort。
   useEffect(() => {
