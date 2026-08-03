@@ -35,6 +35,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed-start", type=int, default=1_799_000)
     parser.add_argument("--seed-key", type=int, default=8192)
     parser.add_argument("--games", type=int, default=25)
+    parser.add_argument("--expected-project-commit", required=True)
+    parser.add_argument("--expected-mortal-source-commit", required=True)
+    parser.add_argument("--expected-native-patch-sha256", required=True)
+    parser.add_argument("--expected-native-binary-sha256", required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -128,6 +132,8 @@ def _audit_events(events: list[dict[str, Any]], expected_seed_keys: set[tuple[in
                 errors.append(f"margin threshold violation: {identity}")
             if bool(event["own_riichi"]):
                 errors.append(f"own-riichi event: {identity}")
+            if event.get("context_kind") != "primary_action" or event.get("exploration_allowed") is not True:
+                errors.append(f"event is not a primary action context: {identity}")
 
             expected_canonical, expected_digest, expected_u = canonical_hash_u(
                 generation_seed, seed_key, seat, kyoku_index, decision_index
@@ -227,6 +233,31 @@ def _audit_run(root: Path, args: argparse.Namespace) -> dict[str, Any]:
         "protocol_games": protocol.get("games") == args.games,
         "protocol_native_batch_games": protocol.get("native_batch_games") == 25,
         "protocol_amp_false": protocol.get("amp") is False,
+        "protocol_device_cuda": protocol.get("device") == "cuda",
+        "protocol_cuda_available": protocol.get("cuda_available") is True,
+        "protocol_project_clean": protocol.get("project_git_dirty") is False
+        and protocol.get("git_dirty") is False,
+        "protocol_project_commit": protocol.get("project_git_commit") == args.expected_project_commit
+        and protocol.get("git_commit") == args.expected_project_commit,
+        "protocol_mortal_clean": protocol.get("mortal_source_dirty") is False,
+        "protocol_mortal_commit": protocol.get("mortal_source_commit")
+        == args.expected_mortal_source_commit,
+        "protocol_native_patch": protocol.get("d3_native_patch_sha256")
+        == args.expected_native_patch_sha256,
+        "protocol_native_binary": protocol.get("loaded_libriichi_sha256")
+        == args.expected_native_binary_sha256,
+        "protocol_native_profile": protocol.get("native_build_profile") == "release",
+        "protocol_native_path_present": bool(protocol.get("loaded_libriichi_path")),
+        "protocol_model_manifest": set(protocol.get("models", {}))
+        == {"K0_70k", "V2_74000", "V3_74000", "ext_mortal"}
+        and all(
+            isinstance(value, dict) and bool(value.get("sha256"))
+            for value in protocol.get("models", {}).values()
+        ),
+        "protocol_auxiliary_exploration_zero": protocol.get("exploration_counters", {}).get(
+            "auxiliary_exploration_count", 0
+        )
+        == 0,
         "log_count": len(logs) == args.games,
         "unique_seed_count": len(log_rows) == args.games,
         "expected_seed_set": set(log_rows)
@@ -268,6 +299,22 @@ def _compare_runs(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]
     ).hexdigest()
     if left_events != right_events:
         errors.append("sorted exploration event records differ")
+    left_protocol = left["protocol"]
+    right_protocol = right["protocol"]
+    for field in (
+        "project_git_commit",
+        "mortal_source_commit",
+        "d3_native_patch_sha256",
+        "loaded_libriichi_sha256",
+        "native_build_profile",
+        "device",
+        "cuda_version",
+        "torch_version",
+    ):
+        if left_protocol.get(field) != right_protocol.get(field):
+            errors.append(f"protocol field differs: {field}")
+    if left_protocol.get("models") != right_protocol.get("models"):
+        errors.append("model manifest differs")
     return {
         "canonical_log_hashes_equal": not any("canonical log hash" in error for error in errors),
         "event_records_equal": left_events == right_events,

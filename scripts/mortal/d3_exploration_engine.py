@@ -38,11 +38,19 @@ def canonical_hash_u(
     return canonical, digest, integer / float(1 << 64)
 
 
-def _context_tuple(value: Iterable[Any]) -> tuple[int, int, int, int, int, bool]:
+def _context_tuple(value: Iterable[Any]) -> tuple[int, int, int, int, int, bool, bool]:
     fields = tuple(value)
-    if len(fields) != 6:
-        raise ValueError(f"D3 decision context must have 6 fields, got {len(fields)}")
-    generation_seed, seed_key, seat, kyoku_index, decision_index, own_riichi = fields
+    if len(fields) != 7:
+        raise ValueError(f"D3 decision context must have 7 fields, got {len(fields)}")
+    (
+        generation_seed,
+        seed_key,
+        seat,
+        kyoku_index,
+        decision_index,
+        own_riichi,
+        exploration_allowed,
+    ) = fields
     return (
         int(generation_seed),
         int(seed_key),
@@ -50,6 +58,7 @@ def _context_tuple(value: Iterable[Any]) -> tuple[int, int, int, int, int, bool]
         int(kyoku_index),
         int(decision_index),
         bool(own_riichi),
+        bool(exploration_allowed),
     )
 
 
@@ -102,7 +111,18 @@ class D3ExplorationEngine:
         explored_flags = [False] * len(obs)
         for index, context_value in enumerate(decision_contexts):
             context = _context_tuple(context_value)
-            generation_seed, seed_key, seat, kyoku_index, decision_index, own_riichi = context
+            (
+                generation_seed,
+                seed_key,
+                seat,
+                kyoku_index,
+                decision_index,
+                own_riichi,
+                exploration_allowed,
+            ) = context
+            if not exploration_allowed:
+                self.counters["auxiliary_count"] += 1
+                continue
             q_row = [float(value) for value in q_values[index]]
             mask_row = [bool(value) for value in returned_masks[index]]
             legal = [
@@ -165,6 +185,8 @@ class D3ExplorationEngine:
                     "kyoku_index": kyoku_index,
                     "decision_index": decision_index,
                     "own_riichi": own_riichi,
+                    "context_kind": "primary_action",
+                    "exploration_allowed": exploration_allowed,
                     "top1_action": top1_action,
                     "top2_action": top2_action,
                     "top1_q": q_row[top1_action],
@@ -211,6 +233,7 @@ class D3ExplorationEngine:
                 ),
             )
             counters = dict(self.counters)
+            counters.setdefault("auxiliary_exploration_count", 0)
             counters["explored_count"] = sum(bool(event["explored"]) for event in events)
             counters["event_count"] = len(events)
             counters["kyoku_count"] = len({

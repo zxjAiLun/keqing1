@@ -8,12 +8,14 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import platform
 import subprocess
 import sys
 import time
 from typing import Any
 
 import torch
+from libriichi import _riichi
 
 # Import the installed native package before adding the repository's Mortal
 # Python directory, which contains a legacy extension that can shadow it.
@@ -52,6 +54,17 @@ def _git_value(*args: str) -> str:
     return completed.stdout.strip()
 
 
+def _git_value_at(root: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", action="append", help="LABEL=CHECKPOINT; repeat exactly four times")
@@ -71,7 +84,9 @@ def _write_json(path: Path, value: Any) -> None:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    if args.require_cuda and not torch.cuda.is_available():
+    if args.device != "cuda":
+        raise ValueError("D3 smoke is fixed to device=cuda")
+    if not torch.cuda.is_available():
         raise SystemExit("CUDA required but torch.cuda.is_available() is False")
     if args.games != 25 or args.seed_start != 1_799_000:
         raise ValueError("D3 smoke is fixed at 25 games and seed_start=1799000")
@@ -85,6 +100,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(f"smoke output must be empty: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     log_dir = output_dir / "logs"
+    native_root = args.mortal_root.resolve()
+    patch_path = REPO_ROOT / "scripts/mortal/patches/libriichi_d3_decision_context.patch"
+    if not patch_path.is_file():
+        raise FileNotFoundError(f"D3 native patch not found: {patch_path}")
+    extension_path = Path(_riichi.__file__).resolve()
 
     models = _parse_model_specs(args.model)
     required_labels = {"K0_70k", "V2_74000", "V3_74000", "ext_mortal"}
@@ -115,6 +135,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     ]
     labels = ["K0_70k", "V2_74000", "V3_74000", "ext_mortal"]
 
+    project_git_commit = _git_value("rev-parse", "HEAD")
+    project_git_dirty = bool(_git_value("status", "--porcelain"))
+    mortal_source_commit = _git_value_at(native_root, "rev-parse", "HEAD")
+    mortal_source_dirty = bool(_git_value_at(native_root, "status", "--porcelain"))
     protocol = {
         "schema": "keqing.mortal.d3_generation_smoke_protocol.v1",
         "contract_id": CONTRACT_ID,
@@ -133,8 +157,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             for label, path in models.items()
         },
         "engine_order": labels,
-        "git_commit": _git_value("rev-parse", "HEAD"),
-        "git_dirty": bool(_git_value("status", "--porcelain")),
+        "git_commit": project_git_commit,
+        "git_dirty": project_git_dirty,
+        "project_git_commit": project_git_commit,
+        "project_git_dirty": project_git_dirty,
+        "mortal_source_commit": mortal_source_commit,
+        "mortal_source_dirty": mortal_source_dirty,
+        "d3_native_patch_sha256": _sha256_file(patch_path),
+        "loaded_libriichi_path": str(extension_path),
+        "loaded_libriichi_sha256": _sha256_file(extension_path),
+        "native_build_profile": "release",
+        "python_executable": sys.executable,
+        "python_version": platform.python_version(),
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
         "contract_semantics": {
             "probability": 0.25,
             "margin_threshold": 0.5,
@@ -180,6 +216,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "exploration_summary": str(audit_paths["summary"]),
         "smoke_summary": str(output_dir / "smoke_summary.json"),
     }
+    protocol["exploration_counters"] = summary["counters"]
     _write_json(output_dir / "protocol.json", protocol)
     print(json.dumps(summary["counters"], ensure_ascii=False, indent=2), flush=True)
     return summary
