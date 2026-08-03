@@ -53,6 +53,9 @@ SNAPSHOT_RECOMMENDED_FILES = (
     "detailed_stats.md",
 )
 
+# 默认保留的最近有效快照数；0 表示禁用自动清理
+DEFAULT_RETAIN_SNAPSHOTS = 24
+
 
 class PublishError(Exception):
     """发布流程错误（completed 赛季、目录冲突等）。"""
@@ -75,6 +78,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="只构建并校验，不切换 registry")
     parser.add_argument("--keep-account-logs", action="store_true",
                         help="调试用：在快照中保留 account_logs/ 派生副本（默认丢弃）")
+    parser.add_argument("--retain-snapshots", type=int, default=DEFAULT_RETAIN_SNAPSHOTS,
+                        help=f"成功发布后保留的最近有效快照数（默认 {DEFAULT_RETAIN_SNAPSHOTS}；0 表示禁用自动清理）")
     return parser.parse_args()
 
 
@@ -248,6 +253,85 @@ def _materialize_compact_snapshot(
     return snapshot_stage
 
 
+def _read_manifest(snapshot_dir: Path) -> dict[str, Any] | None:
+    """读取快照目录的 manifest；无 manifest 或 schema 不合法时返回 None。"""
+    manifest_path = snapshot_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict) or manifest.get("schema") != MANIFEST_SCHEMA:
+        return None
+    return manifest
+
+
+def enforce_retention(
+    snapshot_root: Path,
+    *,
+    season_id: str,
+    retain: int,
+    current_snapshot_dir: Path,
+    previous_report_dir: str | None,
+    protected_snapshots: set[Path],
+) -> dict[str, list[str]]:
+    """清理 snapshots 根目录下超出保留上限的旧快照。
+
+    只在 registry 成功切换之后调用；任何清理失败都记录 warning 并返回
+    ``retention_errors``，绝不把已成功发布的切换标记为失败。
+
+    永不删除：
+    - 当前 registry 指向的快照；
+    - manifest 中记录的 previous snapshot（保留回滚点）；
+    - 本次发布保护集（如 dry-run 快照）；
+    - 没有合法 ``keqing.ladder.snapshot.v1`` manifest 的目录；
+    - season_id 不一致的目录；
+    - 隐藏 staging 目录；
+    - snapshots 根目录中的其他人工文件。
+
+    返回 ``{retention_deleted: [...], retention_errors: [...]}``。
+    """
+    result: dict[str, list[str]] = {"retention_deleted": [], "retention_errors": []}
+    if retain <= 0 or not snapshot_root.exists():
+        return result
+
+    protected: set[Path] = set(protected_snapshots)
+    protected.add(current_snapshot_dir.resolve())
+    if previous_report_dir:
+        protected.add(Path(previous_report_dir).resolve())
+
+    # 收集本 season 的合法快照（带 manifest、season_id 一致、非隐藏）
+    candidates: list[tuple[str, Path]] = []
+    for entry in snapshot_root.iterdir():
+        if not entry.is_dir():
+            continue
+        if entry.name.startswith("."):
+            continue
+        manifest = _read_manifest(entry)
+        if manifest is None:
+            continue
+        if manifest.get("season_id") != season_id:
+            continue
+        candidates.append((str(manifest.get("created_at") or entry.name), entry))
+
+    # 按 created_at 排序（desc），保留最近 retain 个
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    keep = candidates[:retain]
+    keep_paths = {path.resolve() for _created, path in keep}
+    for _created, entry in candidates[retain:]:
+        resolved = entry.resolve()
+        if resolved in protected or resolved in keep_paths:
+            continue
+        try:
+            shutil.rmtree(entry)
+        except OSError as exc:
+            result["retention_errors"].append(f"{entry}: {exc}")
+        else:
+            result["retention_deleted"].append(str(entry))
+    return result
+
+
 def _staging_root_for(snapshot_root: Path, snapshot_name: str) -> Path:
     """隐藏 staging 根目录：完整 build + 紧凑 snapshot staging 都放其下。"""
     return snapshot_root / f".{snapshot_name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.staging"
@@ -265,6 +349,7 @@ def publish_snapshot(
     interleave_log_dirs: bool = False,
     dry_run: bool = False,
     keep_account_logs: bool = False,
+    retain_snapshots: int = DEFAULT_RETAIN_SNAPSHOTS,
     build_report: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """隐藏 staging 构建 -> 紧凑快照 -> 校验 -> manifest -> 原子发布（staging 流程）。
@@ -327,6 +412,8 @@ def publish_snapshot(
                 "games": report.get("games"),
                 "dry_run": True,
                 "registry_switched": False,
+                "retention_deleted": [],
+                "retention_errors": [],
             }
         conditional_switch_registry(
             registry_path,
@@ -334,11 +421,20 @@ def publish_snapshot(
             expected_report_dir=str(previous_report_dir) if previous_report_dir else None,
             new_report_dir=snapshot_dir,
         )
+        retention = enforce_retention(
+            root,
+            season_id=season_id,
+            retain=retain_snapshots,
+            current_snapshot_dir=snapshot_dir,
+            previous_report_dir=str(previous_report_dir) if previous_report_dir else None,
+            protected_snapshots=set(),
+        )
         return {
             "snapshot_dir": str(snapshot_dir),
             "games": report.get("games"),
             "dry_run": False,
             "registry_switched": True,
+            **retention,
         }
     except Exception:
         # registry 切换失败时，清理本次已 materialize 的孤儿快照
@@ -362,6 +458,7 @@ def main() -> None:
         interleave_log_dirs=args.interleave_log_dirs,
         dry_run=args.dry_run,
         keep_account_logs=args.keep_account_logs,
+        retain_snapshots=args.retain_snapshots,
     )
     print(json.dumps(result, ensure_ascii=False), flush=True)
 
