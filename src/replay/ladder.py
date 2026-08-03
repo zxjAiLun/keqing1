@@ -591,6 +591,7 @@ def _summarize_models(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # v1 legacy（全部无 rank_id，同一固定段位）与 v2 单一段位均可平均 PT。
         same_rank = len(distinct_ranks) <= 1
 
+        highest = max(items, key=lambda item: int(item.get("rank_ordinal") or 0))
         summaries.append({
             "model_id": model_id,
             "accounts": len(items),
@@ -600,15 +601,15 @@ def _summarize_models(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "avg_rank": _weighted("avg_rank"),
             "avg_rank_pt": _weighted("avg_rank_pt"),
             "rank_distribution": {name: rank_names.count(name) for name in sorted(set(rank_names))},
-            "highest_rank_id": max(items, key=lambda item: int(item.get("rank_ordinal") or 0)).get("rank_id"),
-            "highest_rank_name": max(items, key=lambda item: int(item.get("rank_ordinal") or 0)).get("rank_name"),
+            "highest_rank_id": highest.get("rank_id"),
+            "highest_rank_name": highest.get("rank_name"),
+            "highest_rank_ordinal": int(highest.get("rank_ordinal") or 0),
             "median_rank_ordinal": _median(rank_ordinals),
             "median_rank_name": _rank_name_for_ordinal(rank_ordinals, rank_names),
         })
     summaries.sort(
         key=lambda item: (
-            item["highest_rank_id"] is None,
-            -(int(item.get("highest_rank_id") or 0) if item.get("highest_rank_id") else 0),
+            -(int(item.get("highest_rank_ordinal") or 0)),
             item["avg_rating"] is None,
             -(item["avg_rating"] or 0.0),
         )
@@ -712,6 +713,7 @@ def list_seasons_catalog(project_root: Path, configs_dir: Path) -> dict[str, Any
             entry["data_ready"] = False
             entry["readiness"] = season_data_problem(exc)
         else:
+            entry = _season_public(season, report, is_default=is_default)
             entry["data_ready"] = True
             entry["readiness"] = {
                 "state": "ready",
