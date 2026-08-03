@@ -866,6 +866,39 @@ def test_corrupted_current_snapshot_does_not_skip(tmp_path: Path):
     assert second["snapshot_dir"] != first["snapshot_dir"]
 
 
+def test_corrupted_utf8_snapshot_rebuilds_instead_of_skipping(tmp_path: Path):
+    """当前快照含非法 UTF-8 时不会 skip，而会完整重建自愈。"""
+    registry_path = _write_registry(tmp_path, _running_season())
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "a.json.gz").write_text("", encoding="utf-8")
+    first = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[log_dir],
+        snapshot_root=tmp_path / "snapshots",
+        build_report=_fake_build([_row()], games=1),
+    )
+    # 写入非法 UTF-8 字节到必需产物
+    summary_path = Path(first["snapshot_dir"]) / "account_summary.json"
+    summary_path.write_bytes(b"\xff\xfe\x00\x80invalid\xff")
+    second = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[log_dir],
+        snapshot_root=tmp_path / "snapshots",
+        build_report=_fake_build([_row()], games=1),
+    )
+    assert second["registry_switched"] is True
+    assert second["skipped_unchanged"] is False
+    assert second["snapshot_dir"] != first["snapshot_dir"]
+    # 重建后的 B 三件套有效（account_summary.json 可正常解析）
+    rebuilt = Path(second["snapshot_dir"])
+    summary = json.loads((rebuilt / "account_summary.json").read_text(encoding="utf-8"))
+    assert summary["schema"] == ladder.REPORT_SCHEMA
+    assert (rebuilt / "account_ledger.jsonl").is_file()
+    assert (rebuilt / "rating_curve.csv").is_file()
+    assert ladder.read_registry(registry_path)["report_dir"] == second["snapshot_dir"]
+
+
 def test_retain_negative_rejected(tmp_path: Path):
     """retain_snapshots < 0 立即拒绝。"""
     registry_path = _write_registry(tmp_path, _running_season())
