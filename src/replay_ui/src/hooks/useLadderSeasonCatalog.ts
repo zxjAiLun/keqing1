@@ -8,7 +8,7 @@
 //     有 default_season_id -> replace 导航到规范 URL（不增加浏览器历史）；
 //     没有默认 -> activeSeasonId=null，要求用户选择。
 // 目录本身通过 useVisibleLiveQuery 每 30 秒刷新，未就绪原因 / 外部默认项变更可被发现。
-import { useCallback, useEffect, useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ladderApi } from '../api/ladderApi';
 import type { LadderSeason, LadderSeasonsResponse } from '../types/ladder';
@@ -25,7 +25,6 @@ export interface LadderSeasonCatalogResult {
   loading: boolean;
   error: string | null;
   refreshing: boolean;
-  refresh: () => void;
 }
 
 function mergeSearchWithSeason(search: string, seasonId: string): string {
@@ -71,9 +70,6 @@ export function useLadderSeasonCatalog(): LadderSeasonCatalogResult {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅当 catalog 确定默认后执行一次
   }, [catalogQuery.loading, urlSeasonId, defaultSeasonId]);
 
-  const refresh = useCallback(() => {
-    void ladderApi.listSeasons();
-  }, []);
 
   return {
     seasons,
@@ -84,6 +80,5 @@ export function useLadderSeasonCatalog(): LadderSeasonCatalogResult {
     loading: catalogQuery.loading,
     error: catalogQuery.error,
     refreshing: catalogQuery.refreshing,
-    refresh,
   };
 }

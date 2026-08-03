@@ -56,7 +56,10 @@ export function LadderPage() {
   };
 
   // 赛季目录错误与榜单查询错误统一展示（查询轮询失败不进入 query.error）
-  const visibleError = catalog.error ?? ladderQuery.error;
+  const activeSeason = seasons.find((s) => s.season_id === activeSeasonId);
+  const seasonProblem = activeSeason?.readiness?.state !== 'ready' ? activeSeason?.readiness : null;
+  // 未就绪时抑制裸 409 alert（结构化 Notice 已展示原因）；真正 404/500 仍显示
+  const visibleError = catalog.error ?? (seasonProblem ? null : ladderQuery.error);
   const catalogLoaded = !catalog.loading;
 
   return (
@@ -102,7 +105,7 @@ export function LadderPage() {
       />
 
       {visibleError && <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{visibleError}</div>}
-      {(!visibleError && !catalogLoading) || (loading && activeSeasonId) ? (
+      {(!visibleError && catalogLoading) || (loading && activeSeasonId) ? (
         <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>加载中...</div>
       ) : null}
 

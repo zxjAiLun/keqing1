@@ -84,6 +84,37 @@ const notice = read(NOTICE);
 check(/readiness\.message/.test(notice), 'LadderSeasonNotice 应展示 readiness.message');
 check(/readiness\.detail/.test(notice), 'LadderSeasonNotice 应展示 readiness.detail（运维文本）');
 
+// 10. 三页 loading 条件必须使用 catalogLoading（不是 !catalogLoading）
+for (const page of PAGES) {
+  const src = read(page);
+  check(
+    /catalogLoading/.test(src),
+    `${page} loading 条件应使用 catalogLoading（正向）`,
+  );
+  // loading 三元里不得出现 !catalogLoading（即加载完成误判为"还在加载"）
+  const loadingLine = src.split('\n').find((line) => line.includes('加载中...'));
+  check(
+    !(loadingLine && /!\s*catalogLoading/.test(loadingLine)),
+    `${page} loading 三元不应使用 !catalogLoading`,
+  );
+}
+
+// 11. 三页未就绪时抑制裸 409：seasonProblem 存在时不直接渲染 query.error
+for (const page of PAGES) {
+  const src = read(page);
+  check(
+    /seasonProblem \? null :/.test(src),
+    `${page} 未就绪时应抑制 query.error（seasonProblem 三元）`,
+  );
+}
+
+// 12. test_ladder_server.py 必须在 pytest python_files 白名单
+const pyproject = readFileSync(resolve(import.meta.dirname, '../../../pyproject.toml'), 'utf8');
+check(
+  /test_ladder_server\.py/.test(pyproject),
+  'pyproject.toml python_files 应包含 test_ladder_server.py',
+);
+
 if (failures > 0) {
   console.error(`ladder season semantics FAILED (${failures} issues)`);
   process.exit(1);
