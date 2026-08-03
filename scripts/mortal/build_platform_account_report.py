@@ -11,6 +11,7 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -20,6 +21,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from scripts.mortal.stat_report import build_stat_report
 from scripts.mortal.stat_report import format_markdown_report
+from replay.rank_systems import PlayerRankState, create_rank_system
 
 TENHOU_RANK_RESULTS = (30.0, 10.0, -10.0, -30.0)
 HOUOU_7DAN_HANCHAN_PT = (90.0, 45.0, 0.0, -135.0)
@@ -27,6 +29,23 @@ INITIAL_RATING = 1500.0
 INITIAL_PT = 1400.0
 PT_TARGET = 2800.0
 RANK_NAME = "七段"
+
+# 报告 schema：v2 引入版本化计分引擎（rank_id/transition/total_pt_delta 等字段）。
+REPORT_SCHEMA = "keqing.mortal.platform_account_report.v2"
+
+# 默认（无 scoring config）时保持历史 legacy fixed profile 行为。
+_DEFAULT_SCORING_CONFIG = {
+    "system": "tenhou_houou_7dan_fixed",
+    "version": "2026-07-01",
+    "game_length": "hanchan",
+    "room": "houou",
+    "initial_rank": "7dan",
+    "initial_pt": INITIAL_PT,
+    "initial_rating": INITIAL_RATING,
+    "rank_points": list(HOUOU_7DAN_HANCHAN_PT),
+    "target_pt": PT_TARGET,
+}
+
 KNOWN_OUTPUT_FILES = (
     "account_summary.json",
     "account_summary.csv",
@@ -43,14 +62,28 @@ KNOWN_OUTPUT_FILES = (
 class AccountState:
     account_id: str
     model_label: str
-    rating: float = INITIAL_RATING
-    pt: float = INITIAL_PT
+    rank_id: str
+    pt: int
+    rating: Decimal
     games: int = 0
     rank_counts: list[int] | None = None
+    promotions: int = 0
+    demotions: int = 0
+    highest_rank_id: str | None = None
+    tenhou_reached: bool = False
+    total_pt_delta: int = 0
 
     def __post_init__(self) -> None:
         if self.rank_counts is None:
             self.rank_counts = [0, 0, 0, 0]
+
+    def player_state(self) -> PlayerRankState:
+        return PlayerRankState(
+            rank_id=self.rank_id,
+            pt=self.pt,
+            rating=self.rating,
+            games=self.games,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,6 +93,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mortal-root", type=Path, default=Path("third_party/Mortal"))
     parser.add_argument("--platform-model-label", default=None, help="Force all seats to MODEL@01-04.")
     parser.add_argument("--rank-points", default="90,45,0,-135")
+    parser.add_argument(
+        "--scoring-config",
+        type=Path,
+        default=None,
+        help="season scoring JSON（版本化计分 profile）；缺省时使用 legacy fixed profile",
+    )
     parser.add_argument("--preserve-log-dir-order", action="store_true", help="process repeated --log-dir inputs in supplied order")
     parser.add_argument(
         "--interleave-log-dirs",
@@ -210,10 +249,6 @@ def ranks_from_scores(scores: Sequence[int]) -> list[int]:
     return ranks
 
 
-def rating_correction(games_before: int) -> float:
-    return 1.0 - float(games_before) * 0.002 if games_before < 400 else 0.2
-
-
 def write_account_log(events: Sequence[Mapping[str, Any]], account_ids: Sequence[str], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(output_path, "wt", encoding="utf-8") as handle:
@@ -246,8 +281,15 @@ def build_report(
     rank_points: tuple[float, float, float, float],
     preserve_log_dir_order: bool = False,
     interleave_log_dirs: bool = False,
+    scoring_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     account_log_dir = prepare_output_dir(output_dir)
+
+    # 版本化计分引擎：scoring_config 显式选择 profile；缺省沿用 legacy fixed
+    effective_scoring = scoring_config if scoring_config is not None else dict(_DEFAULT_SCORING_CONFIG)
+    rank_system = create_rank_system(effective_scoring)
+    system_id = rank_system.system_id
+    is_legacy_fixed = system_id == "tenhou_houou_7dan_fixed"
 
     files = iter_log_files(
         log_dirs,
@@ -269,52 +311,66 @@ def build_report(
         write_account_log(events, account_ids, account_log_dir / f"{source_id}.json.gz")
 
         initial_scores, scores = initial_and_final_scores_from_events(events)
-        ranks = ranks_from_scores(scores)
+        placements = ranks_from_scores(scores)
         table_account_states: list[AccountState] = []
         for seat, entry in enumerate(seat_accounts):
             account_id = entry["account_id"]
             if account_id not in accounts:
-                accounts[account_id] = AccountState(account_id=account_id, model_label=entry["model_label"])
+                initial = rank_system.initial_state()
+                accounts[account_id] = AccountState(
+                    account_id=account_id,
+                    model_label=entry["model_label"],
+                    rank_id=initial.rank_id,
+                    pt=initial.pt,
+                    rating=initial.rating,
+                )
             table_account_states.append(accounts[account_id])
 
-        pre_ratings = [state.rating for state in table_account_states]
-        table_avg_rating = sum(pre_ratings) / 4.0
+        # 四位共用同一份赛前状态快照：不允许逐个更新污染桌均 Rating / 段位。
+        pre_states = [state.player_state() for state in table_account_states]
+        table = rank_system.resolve_table(pre_states)
+        table_avg_rating = sum(state.rating for state in pre_states) / 4
+
         updates: list[dict[str, Any]] = []
         for seat, state in enumerate(table_account_states):
-            rank = ranks[seat]
-            games_before = int(state.games)
-            rating_before = float(state.rating)
-            pt_before = float(state.pt)
-            correction = rating_correction(games_before)
-            rating_delta = correction * (TENHOU_RANK_RESULTS[rank - 1] + (table_avg_rating - rating_before) / 40.0)
-            pt_delta = float(rank_points[rank - 1])
+            placement = int(placements[seat])
+            update = rank_system.apply_result(pre_states[seat], placement=placement, table=table)
             updates.append(
                 {
                     "seat": seat,
                     "state": state,
-                    "rank": rank,
+                    "placement": placement,
                     "final_score": int(scores[seat]),
                     "score_delta": int(scores[seat] - initial_scores[seat]),
-                    "rating_before": rating_before,
-                    "rating_delta": rating_delta,
-                    "rating_after": rating_before + rating_delta,
-                    "pt_before": pt_before,
-                    "pt_delta": pt_delta,
-                    "pt_after": pt_before + pt_delta,
-                    "games_before": games_before,
-                    "rating_correction": correction,
+                    "update": update,
                 }
             )
 
-        for update in updates:
-            state = update["state"]
-            state.rating = float(update["rating_after"])
-            state.pt = float(update["pt_after"])
+        for entry in updates:
+            state = entry["state"]
+            update = entry["update"]
+            placement = int(entry["placement"])
+            state.rank_id = update.rank_after
+            state.pt = update.pt_after
+            state.rating = update.rating_after
             state.games += 1
             assert state.rank_counts is not None
-            state.rank_counts[int(update["rank"]) - 1] += 1
+            state.rank_counts[placement - 1] += 1
+            if update.transition in {"promotion", "tenhou"}:
+                state.promotions += 1
+            if update.transition == "demotion":
+                state.demotions += 1
+            if state.highest_rank_id is None or (
+                rank_system.rank_meta(update.rank_after).ordinal
+                > rank_system.rank_meta(state.highest_rank_id).ordinal
+            ):
+                state.highest_rank_id = update.rank_after
+            if update.rank_after == "tenhou":
+                state.tenhou_reached = True
+            state.total_pt_delta += int(update.pt_delta)
 
-            seat = int(update["seat"])
+            after_meta = rank_system.rank_meta(update.rank_after)
+            seat = int(entry["seat"])
             row = {
                 "game_index": game_index,
                 "source_log": str(path),
@@ -322,21 +378,25 @@ def build_report(
                 "raw_player_name": seat_accounts[seat]["raw_player_name"],
                 "account_id": state.account_id,
                 "model_label": state.model_label,
-                "rank": int(update["rank"]),
-                "final_score": int(update["final_score"]),
-                "score_delta": int(update["score_delta"]),
-                "table_avg_rating_before": table_avg_rating,
-                "rating_before": float(update["rating_before"]),
-                "rating_delta": float(update["rating_delta"]),
-                "rating_after": float(update["rating_after"]),
-                "rating_correction": float(update["rating_correction"]),
-                "pt_before": float(update["pt_before"]),
-                "pt_delta": float(update["pt_delta"]),
-                "pt_after": float(update["pt_after"]),
-                "pt_target": PT_TARGET,
-                "rank_name": RANK_NAME,
-                "games_before": int(update["games_before"]),
-                "games_after": int(update["games_before"]) + 1,
+                "rank": placement,
+                "final_score": int(entry["final_score"]),
+                "score_delta": int(entry["score_delta"]),
+                "table_room": table.room,
+                "game_length": table.game_length,
+                "table_avg_rating_before": float(table_avg_rating),
+                "rank_before": update.rank_before,
+                "pt_before": int(update.pt_before),
+                "pt_delta": int(update.pt_delta),
+                "transition": update.transition,
+                "rank_after": update.rank_after,
+                "pt_after": int(update.pt_after),
+                "rank_name": after_meta.rank_name,
+                "pt_target": after_meta.target_pt,
+                "rating_before": float(update.rating_before),
+                "rating_delta": float(update.rating_delta_raw),
+                "rating_after": float(update.rating_after),
+                "games_before": int(state.games) - 1,
+                "games_after": int(state.games),
             }
             per_game_rows.append(row)
             ledger_rows.append(row)
@@ -345,20 +405,30 @@ def build_report(
                     "game_index": game_index,
                     "account_id": state.account_id,
                     "model_label": state.model_label,
-                    "rating": float(update["rating_after"]),
-                    "pt": float(update["pt_after"]),
-                    "rank_name": RANK_NAME,
-                    "games": int(update["games_before"]) + 1,
+                    "rating": float(update.rating_after),
+                    "pt": int(update.pt_after),
+                    "rank_id": update.rank_after,
+                    "rank_name": after_meta.rank_name,
+                    "pt_target": after_meta.target_pt,
+                    "games": int(state.games),
                 }
             )
 
     account_ids = sorted(accounts)
+    if is_legacy_fixed:
+        stat_rank_pts = [float(value) for value in rank_points]
+        stat_profile = "houou_7dan_hanchan"
+    else:
+        # 动态段位/卓别下 stat_report 的"平均顺位列 PT"失去意义；仍生成详细统计，
+        # 但以 zero table 标注，权威指标改为引擎真实 total_pt_delta / avg_pt_delta。
+        stat_rank_pts = [0.0, 0.0, 0.0, 0.0]
+        stat_profile = system_id
     stat_report = build_stat_report(
         log_dir=account_log_dir,
         players={account_id: account_id for account_id in account_ids},
         mortal_root=mortal_root,
-        rank_pts=rank_points,
-        rank_points_profile="houou_7dan_hanchan",
+        rank_pts=stat_rank_pts,
+        rank_points_profile=stat_profile,
     )
 
     summary_rows: list[dict[str, Any]] = []
@@ -368,21 +438,40 @@ def build_report(
         raw = stat_player.get("raw", {})
         derived = stat_player.get("derived", {})
         ranks = state.rank_counts or [0, 0, 0, 0]
+        meta = rank_system.rank_meta(state.rank_id)
+        pt_target = meta.target_pt
+        pt_progress = (
+            float(state.pt) / float(pt_target)
+            if pt_target is not None and float(pt_target) > 0
+            else None
+        )
         summary_rows.append(
             {
                 "account_id": account_id,
                 "model_label": state.model_label,
                 "games": int(state.games),
-                "rank_name": RANK_NAME,
-                "pt_current": float(state.pt),
-                "pt_target": PT_TARGET,
+                "rank_id": meta.rank_id,
+                "rank_name": meta.rank_name,
+                "rank_ordinal": meta.ordinal,
+                "pt_initial": meta.initial_pt,
+                "pt_current": int(state.pt),
+                "pt_target": pt_target,
+                "pt_progress": pt_progress,
                 "rating": float(state.rating),
                 "rank_1": ranks[0],
                 "rank_2": ranks[1],
                 "rank_3": ranks[2],
                 "rank_4": ranks[3],
                 "avg_rank": derived.get("avg_rank"),
-                "avg_rank_pt": derived.get("avg_rank_pt"),
+                "avg_rank_pt": derived.get("avg_rank_pt") if is_legacy_fixed else None,
+                "promotions": state.promotions,
+                "demotions": state.demotions,
+                "highest_rank_id": state.highest_rank_id,
+                "tenhou_reached": state.tenhou_reached,
+                "total_pt_delta": state.total_pt_delta,
+                "avg_pt_delta": (
+                    state.total_pt_delta / float(state.games) if state.games else None
+                ),
                 "agari_rate": derived.get("agari_rate"),
                 "houjuu_rate": derived.get("houjuu_rate"),
                 "fuuro_rate": derived.get("fuuro_rate"),
@@ -396,30 +485,43 @@ def build_report(
             }
         )
 
+    scoring_payload = {
+        "system": system_id,
+        "version": rank_system.version,
+        "game_length": rank_system.game_length,
+        "room_policy": getattr(rank_system, "room_policy", "fixed"),
+        "membership": getattr(rank_system, "membership", None),
+        "initial_rank": getattr(rank_system, "initial_rank", None),
+        "initial_rating": float(getattr(rank_system, "initial_rating", 1500.0)),
+        "rating_formula": "delta = game_count_correction * (placement_point + (max(table_avg_rating, 1500) - player_rating) / 40), rounded up to 2dp",
+        "rating_game_count_correction": "1 - games * 0.002 if games < 400 else 0.2",
+        "rating_scaling": 1.0,
+        "pt_profile": system_id,
+        "pt_rank_deltas": [float(value) for value in rank_points],
+        "pt_initial": None,
+        "pt_target": None,
+        "rank_name": None,
+        "sources": [
+            "https://tenhou.net/man/index.html",
+        ],
+    }
+    if is_legacy_fixed:
+        scoring_payload.update(
+            {
+                "pt_initial": INITIAL_PT,
+                "pt_target": PT_TARGET,
+                "rank_name": RANK_NAME,
+            }
+        )
+
     report = {
-        "schema": "keqing.mortal.platform_account_report.v1",
+        "schema": REPORT_SCHEMA,
         "log_dirs": [str(path) for path in log_dirs],
         "output_dir": str(output_dir),
         "platform_model_label": platform_model_label,
         "preserve_log_dir_order": bool(preserve_log_dir_order),
         "interleave_log_dirs": bool(interleave_log_dirs),
-        "scoring": {
-            "rating_initial": INITIAL_RATING,
-            "rating_rank_results": list(TENHOU_RANK_RESULTS),
-            "rating_formula": "delta = game_count_correction * (rank_result + (table_avg_rating - player_rating) / 40)",
-            "rating_game_count_correction": "1 - games * 0.002 if games < 400 else 0.2",
-            "rating_scaling": 1.0,
-            "pt_profile": "houou_7dan_hanchan",
-            "pt_rank_deltas": list(rank_points),
-            "pt_initial": INITIAL_PT,
-            "pt_target": PT_TARGET,
-            "rank_name": RANK_NAME,
-            "sources": [
-                "https://doramahjong.org/osusume/02/0012.html",
-                "https://detail.chiebukuro.yahoo.co.jp/qa/question_detail/q14229956494",
-                "https://tenhou.net/man/",
-            ],
-        },
+        "scoring": scoring_payload,
         "games": len(files),
         "accounts": summary_rows,
         "stat_report": stat_report,
@@ -525,6 +627,9 @@ def write_outputs(
 
 def main() -> None:
     args = parse_args()
+    scoring_config: dict[str, Any] | None = None
+    if args.scoring_config is not None:
+        scoring_config = json.loads(args.scoring_config.read_text(encoding="utf-8"))
     report = build_report(
         log_dirs=args.log_dir,
         output_dir=args.output_dir,
@@ -533,6 +638,7 @@ def main() -> None:
         rank_points=parse_rank_points(str(args.rank_points)),
         preserve_log_dir_order=bool(args.preserve_log_dir_order),
         interleave_log_dirs=bool(args.interleave_log_dirs),
+        scoring_config=scoring_config,
     )
     print(json.dumps({"games": report["games"], "accounts": len(report["accounts"])}, ensure_ascii=False), flush=True)
 
