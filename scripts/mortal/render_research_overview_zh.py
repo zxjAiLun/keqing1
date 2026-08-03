@@ -43,6 +43,7 @@ ALLOWED_STATUSES = {
     "promoted_recipe_only",
     "analysis_only",
     "proposal_only_not_started",
+    "preregistered_not_started",
 }
 
 
@@ -115,6 +116,7 @@ def status_text(status: str) -> str:
         "promoted_recipe_only": "仅 recipe 晋级",
         "analysis_only": "仅分析",
         "proposal_only_not_started": "仅提案，未启动",
+        "preregistered_not_started": "已预注册，未启动",
     }[status]
 
 

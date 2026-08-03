@@ -163,7 +163,10 @@ class MarginAccumulator:
         self.states = 0
         self.two_action_states = 0
         self.single_action_states = 0
+        self.zero_finite_legal_action_states = 0
         self.nonfinite_q_states = 0
+        self.nonfinite_legal_q_values = 0
+        self.behavior_action_illegal_count = 0
         self.margins = RunningStats()
         self.histogram: Counter[str] = Counter()
         self.threshold_counts: Counter[str] = Counter()
@@ -176,34 +179,51 @@ class MarginAccumulator:
 
     def update(self, record: DecisionRecord, q: np.ndarray) -> None:
         self.states += 1
-        valid = record.mask.astype(bool) & np.isfinite(q)
-        if not valid[record.action]:
+        mask = record.mask.astype(bool)
+        if q.shape != mask.shape:
+            raise ValueError(f"Q/mask shape mismatch: q={q.shape} mask={mask.shape}")
+        finite_legal = mask & np.isfinite(q)
+        finite_count = int(finite_legal.sum())
+        nonfinite_count = int((mask & ~np.isfinite(q)).sum())
+        self.nonfinite_legal_q_values += nonfinite_count
+        self.nonfinite_q_states += int(nonfinite_count > 0)
+        if finite_count == 0:
+            self.zero_finite_legal_action_states += 1
+        elif finite_count == 1:
+            self.single_action_states += 1
+        else:
+            self.two_action_states += 1
+
+        behavior_is_legal = 0 <= record.action < len(finite_legal) and bool(finite_legal[record.action])
+        if behavior_is_legal:
+            self.behavior_legal += 1
+        else:
+            self.behavior_action_illegal_count += 1
+        if finite_count == 0:
             return
-        self.behavior_legal += 1
-        legal_actions = np.flatnonzero(valid)
+
+        legal_actions = np.flatnonzero(finite_legal)
         legal_q = q[legal_actions]
         order = np.argsort(-legal_q, kind="stable")
         top1_action = int(legal_actions[order[0]])
         top1_q = float(legal_q[order[0]])
-        behavior_q = float(q[record.action])
-        self.greedy_agreement += int(top1_action == record.action)
-        self.behavior_regret.update(top1_q - behavior_q)
-        if legal_actions.size < 2:
-            self.single_action_states += 1
-            return
-        self.two_action_states += 1
-        top2_action = int(legal_actions[order[1]])
-        margin = top1_q - float(legal_q[order[1]])
-        self.margins.update(margin)
-        self.histogram[margin_bin(margin)] += 1
-        for threshold in DIAGNOSTIC_THRESHOLDS:
-            if margin <= threshold:
-                self.threshold_counts[str(threshold)] += 1
         top1_semantic = action_semantic(top1_action)
-        top2_semantic = action_semantic(top2_action)
         self.top1_semantics[top1_semantic] += 1
-        self.top2_semantics[top2_semantic] += 1
-        self.transition_counts[f"{top1_semantic}->{top2_semantic}"] += 1
+        if finite_count >= 2:
+            top2_action = int(legal_actions[order[1]])
+            margin = top1_q - float(legal_q[order[1]])
+            self.margins.update(margin)
+            self.histogram[margin_bin(margin)] += 1
+            for threshold in DIAGNOSTIC_THRESHOLDS:
+                if margin <= threshold:
+                    self.threshold_counts[str(threshold)] += 1
+            top2_semantic = action_semantic(top2_action)
+            self.top2_semantics[top2_semantic] += 1
+            self.transition_counts[f"{top1_semantic}->{top2_semantic}"] += 1
+        if behavior_is_legal:
+            behavior_q = float(q[record.action])
+            self.greedy_agreement += int(top1_action == record.action)
+            self.behavior_regret.update(top1_q - behavior_q)
 
     def to_json(self) -> dict[str, Any]:
         two = self.two_action_states
@@ -228,6 +248,10 @@ class MarginAccumulator:
             "greedy_agreement_rate": self.greedy_agreement / self.behavior_legal if self.behavior_legal else 0.0,
             "single_legal_action_states": self.single_action_states,
             "two_or_more_legal_action_states": two,
+            "zero_finite_legal_action_states": self.zero_finite_legal_action_states,
+            "nonfinite_q_states": self.nonfinite_q_states,
+            "nonfinite_legal_q_values": self.nonfinite_legal_q_values,
+            "behavior_action_illegal_count": self.behavior_action_illegal_count,
             "two_or_more_legal_action_rate": two / states if states else 0.0,
             "top1_top2_margin": self.margins.summary(),
             "second_action_parent_q_regret": self.margins.summary(),
@@ -241,6 +265,20 @@ class MarginAccumulator:
             "discard_to_discard_top2_rate": self.transition_counts["discard->discard"] / two if two else 0.0,
             "behavior_q_regret_greedy_minus_behavior": self.behavior_regret.summary(),
         }
+
+
+def hard_finite_checks(summary: dict[str, Any]) -> dict[str, bool]:
+    states = int(summary["states"])
+    return {
+        "behavior_action_legal_count_equals_states": int(summary["behavior_action_legal_count"]) == states,
+        "finite_legal_action_partition_covers_states": (
+            int(summary["single_legal_action_states"])
+            + int(summary["two_or_more_legal_action_states"])
+            == states
+        ),
+        "zero_finite_legal_action_states_is_zero": int(summary["zero_finite_legal_action_states"]) == 0,
+        "nonfinite_legal_q_values_is_zero": int(summary["nonfinite_legal_q_values"]) == 0,
+    }
 
 
 def counter_json(counter: Counter[Any]) -> dict[str, int]:
@@ -283,6 +321,7 @@ def source_report(
     malformed: list[dict[str, str]],
 ) -> dict[str, Any]:
     values = np.asarray(decision_counts, dtype=np.float64)
+    overall = margin_overall.to_json()
     return {
         "name": name,
         "inputs": {
@@ -317,7 +356,8 @@ def source_report(
         },
         "top2_feasibility": {
             "dimensions": ["phase", "behavior_action_kind", "behavior_action_semantic", "own_riichi", "legal_actions"],
-            "overall": margin_overall.to_json(),
+            "overall": overall,
+            "hard_finite_checks": hard_finite_checks(overall),
             "by_stratum": {key: value.to_json() for key, value in sorted(margin_strata.items())},
         },
         "scope_notes": [
@@ -447,7 +487,11 @@ def audit_source(
         decisions=total_decisions,
         malformed=malformed,
     )
-    report["audit_passed"] = not malformed and len(decision_counts) == len(files)
+    report["audit_passed"] = (
+        not malformed
+        and len(decision_counts) == len(files)
+        and all(report["top2_feasibility"]["hard_finite_checks"].values())
+    )
     return report
 
 
@@ -493,6 +537,8 @@ def write_markdown(report: dict[str, Any], path: Path) -> None:
             f"{overall['top1_top2_margin']['mean']:.6g} | {overall['cross_semantic_top2_rate']:.4%} | "
             f"{source['corpus']['malformed_count']} |"
         )
+        checks = source["top2_feasibility"]["hard_finite_checks"]
+        lines.append(f"| {source['name']} hard checks | {'PASS' if all(checks.values()) else 'FAIL'} |  |  |  |  |  |  |")
     lines.extend(["", "## Diagnostic margin coverage", "", "The denominator is all decisions; the conditional column is among states with at least two finite legal Q values.", ""])
     for source in report["sources"]:
         overall = source["top2_feasibility"]["overall"]
