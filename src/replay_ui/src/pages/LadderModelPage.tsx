@@ -1,9 +1,11 @@
 // src/replay_ui/src/pages/LadderModelPage.tsx
 // 模型详情：账号横向对比 + 可选联赛聚合。
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ladderApi } from '../api/ladderApi';
+import { LadderSnapshotStatus } from '../components/Ladder/LadderSnapshotStatus';
 import { PageHeader, PageShell, SectionTitle } from '../components/Layout/PageScaffold';
+import { useVisibleLiveQuery } from '../hooks/useVisibleLiveQuery';
 import { routes, withLadderSeason } from '../routes';
 import type { LadderAccountRow, LadderModelDetail, LadderSeason } from '../types/ladder';
 import { fmtPt, fmtRank, fmtRate, fmtRating } from '../utils/ladderFormat';
@@ -23,8 +25,6 @@ export function LadderModelPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const [seasons, setSeasons] = useState<LadderSeason[]>([]);
-  const [detail, setDetail] = useState<LadderModelDetail | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [seasonsLoaded, setSeasonsLoaded] = useState(false);
 
@@ -43,29 +43,21 @@ export function LadderModelPage() {
       });
   }, []);
 
-  useEffect(() => {
-    if (!activeSeasonId || !modelId) return;
-    let cancelled = false;
-    const load = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const payload = await ladderApi.getModel(activeSeasonId, modelId);
-        if (!cancelled) {
-          setDetail(payload);
-          setLoading(false);
-        }
-      } catch (reason) {
-        if (!cancelled) {
-          setError(reason instanceof Error ? reason.message : String(reason));
-          setDetail(null);
-          setLoading(false);
-        }
-      }
-    };
-    void load();
-    return () => { cancelled = true; };
-  }, [activeSeasonId, modelId]);
+  // 完整 LadderModelDetail 为单一原子状态：snapshot 更新时 model 汇总/账号列表/
+  // league_summary/season 一起替换，避免跨 snapshot 混合。
+  const detailQuery = useVisibleLiveQuery<LadderModelDetail>({
+    enabled: Boolean(activeSeasonId && modelId),
+    queryKey: `model:${activeSeasonId ?? ''}:${modelId ?? ''}`,
+    load: useMemo(
+      () => (signal: AbortSignal) => {
+        if (!activeSeasonId || !modelId) return Promise.reject(new Error('missing season or model'));
+        return ladderApi.getModel(activeSeasonId, modelId, signal);
+      },
+      [activeSeasonId, modelId],
+    ),
+  });
+  const detail = detailQuery.data;
+  const loading = detailQuery.loading;
 
   const model = detail?.model;
   const backToLadder = () => navigate(withLadderSeason(routes.ladder, activeSeasonId));
@@ -86,12 +78,15 @@ export function LadderModelPage() {
         )}
       />
 
-      {error && <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{error}</div>}
-      {((!seasonsLoaded && !error) || (loading && activeSeasonId && modelId)) && (
-        <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>加载中...</div>
+      {/* 赛季列表错误与模型查询错误统一展示；轮询失败不进入 query.error */}
+      {(error ?? detailQuery.error) && (
+        <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{error ?? detailQuery.error}</div>
       )}
+      {(!error && !seasonsLoaded && !detailQuery.error) || (loading && activeSeasonId && modelId) ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>加载中...</div>
+      ) : null}
 
-      {seasonsLoaded && !error && !detail && !(loading && activeSeasonId && modelId) && (
+      {seasonsLoaded && !error && !detailQuery.error && !detail && !(loading && activeSeasonId && modelId) && (
         <div className="card" style={{ padding: 16, color: 'var(--text-muted)', fontSize: 13 }}>
           未找到模型数据。请从天梯榜的模型卡片进入，或确认 ?season= 参数与模型 ID。
         </div>
@@ -215,6 +210,9 @@ export function LadderModelPage() {
               </div>
             </section>
           )}
+
+          {/* 快照状态：数据更新时间 / snapshot ID / 已计入场数 */}
+          <LadderSnapshotStatus season={detail.season} refreshing={detailQuery.refreshing} />
         </>
       )}
     </PageShell>

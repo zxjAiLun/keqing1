@@ -1,10 +1,12 @@
 // src/replay_ui/src/pages/LadderAccountPage.tsx
 // 账号详情：PT/Rating 曲线、顺位分布、行为指标、最近对局。
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ladderApi } from '../api/ladderApi';
+import { LadderSnapshotStatus } from '../components/Ladder/LadderSnapshotStatus';
 import { PageHeader, PageShell, SectionTitle } from '../components/Layout/PageScaffold';
 import { TrendChart } from '../components/Ladder/TrendChart';
+import { useVisibleLiveQuery } from '../hooks/useVisibleLiveQuery';
 import { routes, withLadderSeason } from '../routes';
 import type { LadderAccountDetail, LadderSeason } from '../types/ladder';
 import { fmtPt, fmtRate, fmtRating, fmtSignedInt } from '../utils/ladderFormat';
@@ -16,8 +18,6 @@ export function LadderAccountPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const [seasons, setSeasons] = useState<LadderSeason[]>([]);
-  const [detail, setDetail] = useState<LadderAccountDetail | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [seasonsLoaded, setSeasonsLoaded] = useState(false);
 
@@ -36,29 +36,21 @@ export function LadderAccountPage() {
       });
   }, []);
 
-  useEffect(() => {
-    if (!activeSeasonId || !accountId) return;
-    let cancelled = false;
-    const load = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const payload = await ladderApi.getAccount(activeSeasonId, accountId, RECENT_GAMES_LIMIT);
-        if (!cancelled) {
-          setDetail(payload);
-          setLoading(false);
-        }
-      } catch (reason) {
-        if (!cancelled) {
-          setError(reason instanceof Error ? reason.message : String(reason));
-          setDetail(null);
-          setLoading(false);
-        }
-      }
-    };
-    void load();
-    return () => { cancelled = true; };
-  }, [activeSeasonId, accountId]);
+  // 完整 LadderAccountDetail 为单一原子状态：snapshot 更新时 account/curve/
+  // rank_distribution/recent_games/season 一起替换，避免跨 snapshot 混合。
+  const detailQuery = useVisibleLiveQuery<LadderAccountDetail>({
+    enabled: Boolean(activeSeasonId && accountId),
+    queryKey: `account:${activeSeasonId ?? ''}:${accountId ?? ''}:${RECENT_GAMES_LIMIT}`,
+    load: useMemo(
+      () => (signal: AbortSignal) => {
+        if (!activeSeasonId || !accountId) return Promise.reject(new Error('missing season or account'));
+        return ladderApi.getAccount(activeSeasonId, accountId, RECENT_GAMES_LIMIT, signal);
+      },
+      [activeSeasonId, accountId],
+    ),
+  });
+  const detail = detailQuery.data;
+  const loading = detailQuery.loading;
 
   const account = detail?.account;
   const backToLadder = () => navigate(withLadderSeason(routes.ladder, activeSeasonId));
@@ -90,12 +82,15 @@ export function LadderAccountPage() {
         )}
       />
 
-      {error && <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{error}</div>}
-      {((!seasonsLoaded && !error) || (loading && activeSeasonId && accountId)) && (
-        <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>加载中...</div>
+      {/* 赛季列表错误与账号查询错误统一展示；轮询失败不进入 query.error */}
+      {(error ?? detailQuery.error) && (
+        <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{error ?? detailQuery.error}</div>
       )}
+      {(!error && !seasonsLoaded && !detailQuery.error) || (loading && activeSeasonId && accountId) ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>加载中...</div>
+      ) : null}
 
-      {seasonsLoaded && !error && !detail && !(loading && activeSeasonId && accountId) && (
+      {seasonsLoaded && !error && !detailQuery.error && !detail && !(loading && activeSeasonId && accountId) && (
         <div className="card" style={{ padding: 16, color: 'var(--text-muted)', fontSize: 13 }}>
           未找到账号数据。请从天梯榜进入，或确认 ?season= 参数与账号 ID。
         </div>
@@ -242,6 +237,9 @@ export function LadderAccountPage() {
               </table>
             </div>
           </section>
+
+          {/* 快照状态：数据更新时间 / snapshot ID / 已计入场数 */}
+          <LadderSnapshotStatus season={detail.season} refreshing={detailQuery.refreshing} />
         </>
       )}
     </PageShell>
