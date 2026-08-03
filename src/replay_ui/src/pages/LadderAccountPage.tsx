@@ -82,12 +82,15 @@ export function LadderAccountPage() {
         )}
       />
 
-      {error && <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{error}</div>}
-      {(error === null && !seasonsLoaded && !detailQuery.error) || (loading && activeSeasonId && accountId) ? (
+      {/* 赛季列表错误与账号查询错误统一展示；轮询失败不进入 query.error */}
+      {(error ?? detailQuery.error) && (
+        <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{error ?? detailQuery.error}</div>
+      )}
+      {(!error && !seasonsLoaded && !detailQuery.error) || (loading && activeSeasonId && accountId) ? (
         <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>加载中...</div>
       ) : null}
 
-      {seasonsLoaded && !error && !detail && !(loading && activeSeasonId && accountId) && (
+      {seasonsLoaded && !error && !detailQuery.error && !detail && !(loading && activeSeasonId && accountId) && (
         <div className="card" style={{ padding: 16, color: 'var(--text-muted)', fontSize: 13 }}>
           未找到账号数据。请从天梯榜进入，或确认 ?season= 参数与账号 ID。
         </div>

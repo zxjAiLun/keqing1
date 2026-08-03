@@ -78,6 +78,38 @@ check(
   'useVisibleLiveQuery 默认轮询间隔应为 30_000ms',
 );
 
+// 7. 三页均渲染查询首次错误（query.error 出现在 JSX 中），
+//    避免 409/500 首次失败被误报为"未找到账号/模型"或空白。
+for (const page of PAGES) {
+  const src = read(page);
+  check(
+    /\.error\s*[)}]/.test(src) || /\?\? .*\.error/.test(src),
+    `${page} 应展示查询 query.error（首次失败）`,
+  );
+  check(
+    /\.error/.test(src),
+    `${page} 应在渲染中引用 query.error`,
+  );
+}
+
+// 8. Hook 的 visibility 限制只能针对 poll（initial 始终执行）
+check(
+  /mode === 'poll' && document\.visibilityState !== 'visible'/.test(hook),
+  'useVisibleLiveQuery visibility guard 应仅针对 poll',
+);
+
+// 9. Hook 的 finally 必须带 active-request identity（owner-only 释放）
+check(
+  /activeRef\.current === request/.test(hook),
+  'useVisibleLiveQuery finally 必须有 active-request identity 判断',
+);
+
+// 10. Hook 返回 data 前必须核对 state key（render 同步屏蔽旧实体）
+check(
+  /state\.key === queryKey/.test(hook),
+  'useVisibleLiveQuery 返回 data 前应核对 state key',
+);
+
 if (failures > 0) {
   console.error(`ladder live semantics FAILED (${failures} issues)`);
   process.exit(1);

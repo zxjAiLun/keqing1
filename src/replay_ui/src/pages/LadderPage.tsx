@@ -68,6 +68,9 @@ export function LadderPage() {
     navigate(withLadderSeason(routes.ladderModel(model.model_id), activeSeasonId));
   };
 
+  // 赛季列表错误与榜单查询错误统一展示（查询轮询失败不进入 query.error）
+  const visibleError = error ?? ladderQuery.error;
+
   return (
     <PageShell width={1240}>
       <PageHeader
@@ -105,12 +108,12 @@ export function LadderPage() {
         )}
       />
 
-      {error && <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{error}</div>}
-      {(error === null && !seasonsLoaded && !ladderQuery.error) || (loading && activeSeasonId) ? (
+      {visibleError && <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{visibleError}</div>}
+      {(!visibleError && !seasonsLoaded) || (loading && activeSeasonId) ? (
         <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>加载中...</div>
       ) : null}
 
-      {seasonsLoaded && !activeSeasonId && !error && !ladderQuery.error && (
+      {seasonsLoaded && !activeSeasonId && !visibleError && (
         <div className="card" style={{ padding: 16, color: 'var(--text-muted)', fontSize: 13 }}>
           暂无已注册赛季。往 <code>configs/ladder/seasons/</code> 添加赛季注册表并生成 platform account 报告后，这里会出现天梯数据。
         </div>
