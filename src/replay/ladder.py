@@ -229,7 +229,7 @@ def _load_account_summary(report_dir: Path) -> dict[str, Any]:
         raise SeasonDataError("赛季缺少 account_summary.json，请先运行 build_platform_account_report.py")
     try:
         report = _read_json_cached(summary_path)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SeasonDataError(f"account_summary.json 无法解析: {summary_path}") from exc
     if not isinstance(report, dict) or report.get("schema") != REPORT_SCHEMA:
         raise SeasonDataError("account_summary.json schema 无效")
@@ -302,7 +302,7 @@ def validate_snapshot(season: dict[str, Any], snapshot_dir: Path) -> list[dict[s
         try:
             with path.open("r", encoding="utf-8") as handle:
                 handle.read(1)
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise SeasonDataError(f"快照文件不可读: {name}") from exc
     report = _load_account_summary(snapshot_dir)
     return _validate_report_accounts(season, report)
