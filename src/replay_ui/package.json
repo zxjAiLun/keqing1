@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "check:replay-semantics": "node --experimental-transform-types scripts/checkReplayActionSemantics.ts",
+    "check:ladder-live-semantics": "node --experimental-transform-types scripts/checkLadderLiveSemantics.ts",
     "lint": "eslint .",
     "preview": "vite preview"
   },
