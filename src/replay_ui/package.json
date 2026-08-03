@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "check:replay-semantics": "node --experimental-transform-types scripts/checkReplayActionSemantics.ts",
     "check:ladder-live-semantics": "node --experimental-transform-types scripts/checkLadderLiveSemantics.ts",
+    "check:ladder-season-semantics": "node --experimental-transform-types scripts/checkLadderSeasonSemantics.ts",
     "lint": "eslint .",
     "preview": "vite preview"
   },
