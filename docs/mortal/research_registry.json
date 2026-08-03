@@ -167,7 +167,7 @@
       "closure_reason": null,
       "predecessor": "D2_project_owned_descendant_view_mix",
       "next_experiment": null,
-      "commits": ["0aafffd"],
+      "commits": ["0aafffd", "1d8d5b6"],
       "artifact_paths": ["artifacts/experiments/model_pool_2026_07/D3_uncertainty_guided_exploration_2026_08/feasibility_audit/d3_exploration_feasibility.json", "artifacts/experiments/model_pool_2026_07/D3_uncertainty_guided_exploration_2026_08/feasibility_audit/d3_exploration_feasibility.md", "artifacts/experiments/model_pool_2026_07/D3_uncertainty_guided_exploration_2026_08/generation_smoke/d3_smoke_audit.json", "artifacts/experiments/model_pool_2026_07/D3_uncertainty_guided_exploration_2026_08/generation_smoke/d3_smoke_audit.md"],
       "report_paths": ["docs/mortal/研发总览_当前.md", "docs/mortal/experiments_zh/2026-08_D3不确定性探索_预注册设计.md", "docs/mortal/experiments_zh/2026-08_D3生成器Smoke_结果报告.md"],
       "proposal_constraints": ["25h smoke 必须验证 hash 可复现、探索动作合法且 100% 为 discard→discard、预算不超限。", "250h B250 production gate 必须 250 canonical unique hanchans、0 malformed、0 own-riichi exploration、0 threshold/budget violation。", "gate 失败时关闭 D3 generation v1，不现场调整概率或阈值。", "未通过 smoke/production gate 前不得生成完整 6000h 或训练。"]
