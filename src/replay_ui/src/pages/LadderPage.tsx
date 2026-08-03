@@ -1,13 +1,15 @@
 // src/replay_ui/src/pages/LadderPage.tsx
 // 天梯榜：赛季账号排名 + 模型展示性聚合。
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useMemo, useState, type CSSProperties } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { ladderApi } from '../api/ladderApi';
 import { LadderSnapshotStatus } from '../components/Ladder/LadderSnapshotStatus';
+import { LadderSeasonNotice } from '../components/Ladder/LadderSeasonNotice';
 import { PageHeader, PageShell } from '../components/Layout/PageScaffold';
+import { useLadderSeasonCatalog } from '../hooks/useLadderSeasonCatalog';
 import { useVisibleLiveQuery } from '../hooks/useVisibleLiveQuery';
 import { routes, withLadderSeason } from '../routes';
-import type { LadderAccountRow, LadderModelSummary, LadderResponse, LadderSeason } from '../types/ladder';
+import type { LadderAccountRow, LadderModelSummary, LadderResponse } from '../types/ladder';
 import { fmtPt, fmtRank, fmtRate, fmtRating } from '../utils/ladderFormat';
 
 const SORT_OPTIONS = [
@@ -18,27 +20,11 @@ const SORT_OPTIONS = [
 ];
 
 export function LadderPage() {
-  const location = useLocation();
   const navigate = useNavigate();
-  const [seasons, setSeasons] = useState<LadderSeason[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [seasonsLoaded, setSeasonsLoaded] = useState(false);
   const [sort, setSort] = useState('pt');
 
-  const seasonFromQuery = new URLSearchParams(location.search).get('season');
-  const activeSeasonId = seasonFromQuery ?? seasons[0]?.season_id ?? null;
-
-  useEffect(() => {
-    ladderApi.listSeasons()
-      .then((payload) => {
-        setSeasons(payload.seasons);
-        setSeasonsLoaded(true);
-      })
-      .catch((reason) => {
-        setError(reason instanceof Error ? reason.message : String(reason));
-        setSeasonsLoaded(true);
-      });
-  }, []);
+  const catalog = useLadderSeasonCatalog();
+  const { seasons, activeSeasonId, loading: catalogLoading } = catalog;
 
   // 共享可见性实时查询：页面可见时每 30 秒静默刷新，hidden 跳过，
   // 恢复可见立即刷新，轮询失败保留旧数据，queryKey 变化清空旧实体重新加载。
@@ -57,6 +43,7 @@ export function LadderPage() {
   const loading = ladderQuery.loading;
 
   const switchSeason = (seasonId: string) => {
+    if (!seasonId) return;
     navigate(`${routes.ladder}?season=${encodeURIComponent(seasonId)}`);
   };
 
@@ -68,8 +55,12 @@ export function LadderPage() {
     navigate(withLadderSeason(routes.ladderModel(model.model_id), activeSeasonId));
   };
 
-  // 赛季列表错误与榜单查询错误统一展示（查询轮询失败不进入 query.error）
-  const visibleError = error ?? ladderQuery.error;
+  // 赛季目录错误与榜单查询错误统一展示（查询轮询失败不进入 query.error）
+  const activeSeason = seasons.find((s) => s.season_id === activeSeasonId);
+  const seasonProblem = activeSeason?.readiness?.state !== 'ready' ? activeSeason?.readiness : null;
+  // 未就绪时抑制裸 409 alert（结构化 Notice 已展示原因）；真正 404/500 仍显示
+  const visibleError = catalog.error ?? (seasonProblem ? null : ladderQuery.error);
+  const catalogLoaded = !catalog.loading;
 
   return (
     <PageShell width={1240}>
@@ -79,15 +70,20 @@ export function LadderPage() {
         description={ladder?.season.notes || ladder?.season.title || '赛季账号 PT / Rating 排名。'}
         actions={(
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            {seasons.length > 1 && (
+            {seasons.length > 0 && (
               <select
                 value={activeSeasonId ?? ''}
                 onChange={(event) => switchSeason(event.target.value)}
                 style={selectStyle}
               >
+                {!catalog.defaultSeasonId && seasons.length > 1 && (
+                  <option value="">选择赛季…</option>
+                )}
                 {seasons.map((season) => (
                   <option key={season.season_id} value={season.season_id}>
                     {season.title || season.season_id}
+                    {season.is_default ? '（默认）' : ''}
+                    {season.data_ready === false ? ' · 未就绪' : ''}
                   </option>
                 ))}
               </select>
@@ -109,14 +105,26 @@ export function LadderPage() {
       />
 
       {visibleError && <div role="alert" style={{ color: 'var(--error)', fontSize: 13, marginBottom: 10 }}>{visibleError}</div>}
-      {(!visibleError && !seasonsLoaded) || (loading && activeSeasonId) ? (
+      {(!visibleError && catalogLoading) || (loading && activeSeasonId) ? (
         <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 20, textAlign: 'center' }}>加载中...</div>
       ) : null}
 
-      {seasonsLoaded && !activeSeasonId && !visibleError && (
-        <div className="card" style={{ padding: 16, color: 'var(--text-muted)', fontSize: 13 }}>
-          暂无已注册赛季。往 <code>configs/ladder/seasons/</code> 添加赛季注册表并生成 platform account 报告后，这里会出现天梯数据。
-        </div>
+      {/* 无默认且多赛季：要求用户选择，不自动请求数组首项 */}
+      {catalogLoaded && !activeSeasonId && !visibleError && (
+        <LadderSeasonNotice
+          seasons={seasons}
+          activeSeason={undefined}
+          defaultSeasonId={catalog.defaultSeasonId}
+        />
+      )}
+
+      {/* 默认赛季未就绪 / 数据损坏：结构化原因展示（主体可继续轮询恢复） */}
+      {!loading && !ladder && activeSeasonId && (
+        <LadderSeasonNotice
+          seasons={seasons}
+          activeSeason={seasons.find((s) => s.season_id === activeSeasonId)}
+          defaultSeasonId={catalog.defaultSeasonId}
+        />
       )}
 
       {!loading && ladder && (

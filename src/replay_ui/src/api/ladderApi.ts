@@ -4,7 +4,7 @@ import type {
   LadderAccountDetail,
   LadderModelDetail,
   LadderResponse,
-  LadderSeason,
+  LadderSeasonsResponse,
 } from '../types/ladder';
 
 const API_BASE = '/api';
@@ -25,8 +25,8 @@ async function api<T>(path: string, signal?: AbortSignal): Promise<T> {
 }
 
 export const ladderApi = {
-  /** 已注册的评测赛季 */
-  listSeasons: (signal?: AbortSignal): Promise<{ seasons: LadderSeason[] }> =>
+  /** 已注册的评测赛季（含默认赛季与每赛季 readiness） */
+  listSeasons: (signal?: AbortSignal): Promise<LadderSeasonsResponse> =>
     api('/ladder/seasons', signal),
 
   /** 赛季天梯榜：账号排名 + 模型展示性聚合 */
