@@ -42,6 +42,8 @@ def _make_ready(project_root: Path, season: dict) -> None:
         {"account_id": "m1@02", "model_label": "m1"},
     ]}
     (report_dir / "account_summary.json").write_text(json.dumps(report), encoding="utf-8")
+    (report_dir / "account_ledger.jsonl").write_text("", encoding="utf-8")
+    (report_dir / "rating_curve.csv").write_text("game_index,account_id,model_label,rating,pt,rank_name,games\n", encoding="utf-8")
 
 
 def _run(coro):
@@ -131,3 +133,22 @@ def test_season_list_readiness_not_ready(tmp_path, monkeypatch):
     assert by_id["broken-season"]["data_ready"] is False
     assert by_id["broken-season"]["readiness"]["state"] == "not_published"
     assert by_id["broken-season"]["readiness"]["code"] == "season_report_dir_missing"
+
+
+def test_duplicate_default_fails_all_server_endpoints(tmp_path, monkeypatch):
+    configs_dir = _write_env(
+        tmp_path,
+        [_season("aaa", default=True), _season("zzz", default=True)],
+    )
+    monkeypatch.setattr(server, "_LADDER_PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(server, "_LADDER_SEASONS_DIR", configs_dir)
+    # catalog
+    response = _run(server.list_ladder_seasons())
+    assert response.status_code == 500
+    # 实体端点不得绕过默认唯一性
+    response = _run(server.get_ladder("aaa"))
+    assert response.status_code == 500
+    response = _run(server.get_ladder_account("aaa", "m1@01"))
+    assert response.status_code == 500
+    response = _run(server.get_ladder_model("aaa", "m1"))
+    assert response.status_code == 500

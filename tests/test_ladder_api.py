@@ -272,6 +272,11 @@ def _write_custom_env(
     if report_accounts is not None:
         report = {"schema": ladder.REPORT_SCHEMA, "games": len(report_accounts), "accounts": report_accounts}
         (report_dir / "account_summary.json").write_text(json.dumps(report), encoding="utf-8")
+        # 快照必需三件套：ledger / curve 存在即可读（零场允许为空）
+        if not (report_dir / "account_ledger.jsonl").exists():
+            (report_dir / "account_ledger.jsonl").write_text("", encoding="utf-8")
+        if not (report_dir / "rating_curve.csv").exists():
+            (report_dir / "rating_curve.csv").write_text("game_index,account_id,model_label,rating,pt,rank_name,games\n", encoding="utf-8")
     if curve_count and report_accounts:
         account_id = report_accounts[0]["account_id"]
         lines = ["game_index,account_id,model_label,rating,pt,rank_name,games"]
@@ -353,7 +358,8 @@ def test_report_duplicate_account_id_rejected(tmp_path: Path):
 
 
 def test_corrupted_account_summary_raises_data_error(tmp_path: Path):
-    env = _write_custom_env(tmp_path, season=_season(), report_accounts=None)
+    env = _write_custom_env(tmp_path, season=_season(), report_accounts=_three_account_rows())
+    # 三件套完整后破坏 summary，验证 decode 错误优先于缺文件
     (env["report_dir"] / "account_summary.json").write_text("{ not valid json", encoding="utf-8")
     with pytest.raises(ladder.SeasonDataError, match="无法解析"):
         ladder.load_ladder(env["root"], env["configs"], "s1")
@@ -389,12 +395,16 @@ def test_list_seasons_marks_mismatched_report_not_ready(tmp_path: Path):
         json.dumps({"schema": ladder.REPORT_SCHEMA, "games": 3, "accounts": _three_account_rows()}),
         encoding="utf-8",
     )
+    (good_dir / "account_ledger.jsonl").write_text("", encoding="utf-8")
+    (good_dir / "rating_curve.csv").write_text("game_index,account_id,model_label,rating,pt,rank_name,games\n", encoding="utf-8")
     bad_dir = tmp_path / "artifacts" / "bad"
     bad_dir.mkdir(parents=True)
     (bad_dir / "account_summary.json").write_text(
         json.dumps({"schema": ladder.REPORT_SCHEMA, "games": 2, "accounts": _three_account_rows()[:2]}),
         encoding="utf-8",
     )
+    (bad_dir / "account_ledger.jsonl").write_text("", encoding="utf-8")
+    (bad_dir / "rating_curve.csv").write_text("game_index,account_id,model_label,rating,pt,rank_name,games\n", encoding="utf-8")
     seasons = {entry["season_id"]: entry for entry in ladder.list_seasons(tmp_path, configs_dir)}
     assert seasons["good-season"]["data_ready"] is True
     assert seasons["bad-season"]["data_ready"] is False
@@ -462,6 +472,8 @@ def test_external_registry_env_config_dir_end_to_end(monkeypatch, tmp_path: Path
         json.dumps({"schema": ladder.REPORT_SCHEMA, "games": 2, "accounts": _three_account_rows()}),
         encoding="utf-8",
     )
+    (snapshot / "account_ledger.jsonl").write_text("", encoding="utf-8")
+    (snapshot / "rating_curve.csv").write_text("game_index,account_id,model_label,rating,pt,rank_name,games\n", encoding="utf-8")
     season = _season(season_id="dev-live", status="running", report_dir=str(snapshot))
     (external_registries / "dev-live.json").write_text(json.dumps(season), encoding="utf-8")
     monkeypatch.setenv("KEQING_LADDER_CONFIG_DIR", str(external_registries))
@@ -574,3 +586,49 @@ def test_non_boolean_default_rejected(tmp_path: Path):
         json.dumps(_season(season_id="aaa", default="true")), encoding="utf-8")
     with pytest.raises(ladder.SeasonRegistryError, match="default 必须是布尔值"):
         ladder.list_seasons_catalog(tmp_path, configs_dir)
+
+
+def test_duplicate_default_fails_all_entity_loaders(tmp_path: Path):
+    """重复 default 必须让 catalog 与实体端点全部失败（统一入口校验）。"""
+    configs_dir = tmp_path / "configs" / "ladder" / "seasons"
+    configs_dir.mkdir(parents=True)
+    (configs_dir / "aaa.json").write_text(json.dumps(_season(season_id="aaa", default=True)), encoding="utf-8")
+    (configs_dir / "zzz.json").write_text(json.dumps(_season(season_id="zzz", default=True)), encoding="utf-8")
+    with pytest.raises(ladder.SeasonRegistryError, match="default 重复"):
+        ladder.list_seasons_catalog(tmp_path, configs_dir)
+    with pytest.raises(ladder.SeasonRegistryError, match="default 重复"):
+        ladder.load_ladder(tmp_path, configs_dir, "aaa")
+    with pytest.raises(ladder.SeasonRegistryError, match="default 重复"):
+        ladder.load_account(tmp_path, configs_dir, "aaa", "m1@01")
+    with pytest.raises(ladder.SeasonRegistryError, match="default 重复"):
+        ladder.load_model(tmp_path, configs_dir, "aaa", "m1")
+
+
+def test_missing_ledger_marks_not_ready(tmp_path: Path):
+    env = _write_custom_env(tmp_path, season=_season(season_id="s1"), report_accounts=_three_account_rows())
+    # 删除 ledger → catalog 应标记 not_ready / season_required_file_missing
+    (env["report_dir"] / "account_ledger.jsonl").unlink()
+    catalog = ladder.list_seasons_catalog(tmp_path, env["configs"])
+    entry = catalog["seasons"][0]
+    assert entry["data_ready"] is False
+    assert entry["readiness"]["code"] == "season_required_file_missing"
+    with pytest.raises(ladder.SeasonDataError, match="必需文件"):
+        ladder.load_ladder(tmp_path, env["configs"], "s1")
+
+
+def test_missing_curve_marks_not_ready(tmp_path: Path):
+    env = _write_custom_env(tmp_path, season=_season(season_id="s1"), report_accounts=_three_account_rows())
+    (env["report_dir"] / "rating_curve.csv").unlink()
+    catalog = ladder.list_seasons_catalog(tmp_path, env["configs"])
+    entry = catalog["seasons"][0]
+    assert entry["data_ready"] is False
+    assert entry["readiness"]["code"] == "season_required_file_missing"
+
+
+def test_corrupted_ledger_marks_unreadable(tmp_path: Path):
+    env = _write_custom_env(tmp_path, season=_season(season_id="s1"), report_accounts=_three_account_rows())
+    (env["report_dir"] / "account_ledger.jsonl").write_bytes(b"\xff\xfe\x00invalid")
+    catalog = ladder.list_seasons_catalog(tmp_path, env["configs"])
+    entry = catalog["seasons"][0]
+    assert entry["data_ready"] is False
+    assert entry["readiness"]["code"] == "season_snapshot_unreadable"

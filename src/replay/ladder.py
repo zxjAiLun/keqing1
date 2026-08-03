@@ -176,7 +176,11 @@ def read_registry(path: Path) -> dict[str, Any]:
 
 
 def list_season_configs(configs_dir: Path) -> list[dict[str, Any]]:
-    """Parse every season registry file, sorted by season_id."""
+    """Parse every season registry file, sorted by season_id.
+
+    这是注册表的统一入口：同时校验 season_id 全局唯一与 default 全局唯一，
+    因此 catalog 与实体端点（load_ladder / load_account / load_model）共享同一契约。
+    """
     if not configs_dir.exists():
         return []
     seasons = [_load_registry_file(path) for path in sorted(configs_dir.glob("*.json"))]
@@ -187,6 +191,7 @@ def list_season_configs(configs_dir: Path) -> list[dict[str, Any]]:
             raise SeasonRegistryError(f"season_id 全局重复: {season_id}")
         seen_ids.add(season_id)
     seasons.sort(key=lambda item: str(item.get("season_id", "")))
+    validate_default_season_contract(seasons)
     return seasons
 
 
@@ -409,7 +414,9 @@ def _validate_report_accounts(season: dict[str, Any], report: dict[str, Any]) ->
 
 
 def _load_validated_report(project_root: Path, season: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    report = _load_account_summary(_report_dir(project_root, season))
+    report_dir = _report_dir(project_root, season)
+    _validate_snapshot_files(report_dir)
+    report = _load_account_summary(report_dir)
     rows = _validate_report_accounts(season, report)
     return report, rows
 
@@ -417,11 +424,10 @@ def _load_validated_report(project_root: Path, season: dict[str, Any]) -> tuple[
 SNAPSHOT_REQUIRED_FILES = ("account_summary.json", "account_ledger.jsonl", "rating_curve.csv")
 
 
-def validate_snapshot(season: dict[str, Any], snapshot_dir: Path) -> list[dict[str, Any]]:
-    """校验一个已构建好的快照目录是否满足注册表契约（供发布器复用）。
+def _validate_snapshot_files(snapshot_dir: Path) -> None:
+    """校验快照必需三件套存在且可读（零场快照允许内容为空，但文件必须存在）。
 
-    除 account_summary.json 外，要求 UI/API 实际消费的 account_ledger.jsonl
-    与 rating_curve.csv 存在且可读（零场快照允许内容为空，但文件必须存在）。
+    catalog 与实体端点、publisher 共用同一份"就绪"定义。
     """
     for name in SNAPSHOT_REQUIRED_FILES:
         path = snapshot_dir / name
@@ -440,6 +446,11 @@ def validate_snapshot(season: dict[str, Any], snapshot_dir: Path) -> list[dict[s
                 code="season_snapshot_unreadable",
                 state="invalid",
             ) from exc
+
+
+def validate_snapshot(season: dict[str, Any], snapshot_dir: Path) -> list[dict[str, Any]]:
+    """校验一个已构建好的快照目录是否满足注册表契约（供发布器复用）。"""
+    _validate_snapshot_files(snapshot_dir)
     report = _load_account_summary(snapshot_dir)
     return _validate_report_accounts(season, report)
 
