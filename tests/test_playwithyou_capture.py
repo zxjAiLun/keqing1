@@ -22,7 +22,9 @@ from gateway.api import playwithyou as pwy  # noqa: E402
 from gateway.playwithyou_capture import (  # noqa: E402
     CaptureBinding,
     PlayWithYouCaptureCollector,
+    canonicalize_scores,
     capture_dir_for_session,
+    extract_tenhou_log_seat,
     extract_tenhou_match_id,
 )
 
@@ -37,17 +39,26 @@ def _binding(session_id: str = "abc123") -> CaptureBinding:
     )
 
 
-def _start_game(seat: int, log: str = "https://tenhou.net/3/?log=20260804gm-abc-xyz&tw=2") -> dict:
-    return {
+def _start_game(tw: int, *, match_id: str = "20260804gm-abc-xyz", tenhou_log_seat=None) -> dict:
+    """真实桥语义：id 恒为 0（本地 MJAI 视角），全局座位来自 tw / tenhou_log_seat。"""
+    message = {
         "type": "start_game",
-        "id": seat,
+        "id": 0,
         "names": ["NoName-1", "Nick", "NoName-2", "NoName-3"],
-        "log": log,
+        "log": f"https://tenhou.net/3/?log={match_id}&tw={tw}",
     }
+    if tenhou_log_seat is not None:
+        message["tenhou_log_seat"] = tenhou_log_seat
+    return message
 
 
-def _end_game(scores: list[int]) -> dict:
-    return {"type": "end_game", "scores": scores}
+def _local_scores(global_scores: list[int], tw: int) -> list[int]:
+    """把全局分数转成 tw 座位 observer 看到的本地旋转视角。"""
+    return [global_scores[(tw + i) % 4] for i in range(4)]
+
+
+def _end_game(global_scores: list[int], tw: int) -> dict:
+    return {"type": "end_game", "scores": _local_scores(global_scores, tw)}
 
 
 def _collector(tmp_path: Path) -> PlayWithYouCaptureCollector:
@@ -79,25 +90,47 @@ def test_extract_tenhou_match_id_from_url() -> None:
     assert extract_tenhou_match_id("https://example.com/nolog") is None
 
 
+def test_extract_tenhou_log_seat_from_url() -> None:
+    assert extract_tenhou_log_seat("https://tenhou.net/3/?log=abc&tw=2") == 2
+    assert extract_tenhou_log_seat("https://tenhou.net/3/?log=abc") is None
+    assert extract_tenhou_log_seat(None) is None
+
+
+def test_canonicalize_scores_roundtrip() -> None:
+    global_scores = [42100, 28300, 18100, 11500]
+    for tw in (0, 1, 2, 3):
+        local = _local_scores(global_scores, tw)
+        assert canonicalize_scores(local, tw) == tuple(global_scores)
+
+
 def test_collector_derives_human_seat(tmp_path: Path) -> None:
-    """C4：三个 observer 分别在不同 seat，剩余 seat 推导为人类。"""
+    """C4+C26：observer 的全局 seat 来自 tw（id 全为 0），剩余 seat 推导为人类。"""
     collector = _collector(tmp_path)
-    collector.observe("70k@01", _start_game(2))
-    collector.observe("70k@02", _start_game(0))
-    collector.observe("70k@03", _start_game(3))
+    collector.observe("70k@01", _start_game(tw=2))
+    collector.observe("70k@02", _start_game(tw=0))
+    collector.observe("70k@03", _start_game(tw=3))
+    assert collector._seat_of == {"70k@01": 2, "70k@02": 0, "70k@03": 3}  # noqa: SLF001
     assert collector._human_seat() == 1  # noqa: SLF001
     assert collector._account_for_seat(1) == "nick@01"  # noqa: SLF001
 
 
-def test_collector_rotated_perspectives_still_canonical(tmp_path: Path) -> None:
-    """C5+C6：observer 旋转视角最终规范结果一致；三份相同 end_game 只生成一个 pending。"""
+def test_tenhou_log_seat_explicit_overrides_tw(tmp_path: Path) -> None:
+    """显式 tenhou_log_seat 优先于 URL tw。"""
     collector = _collector(tmp_path)
-    collector.observe("70k@02", _start_game(0))
-    collector.observe("70k@01", _start_game(2))
-    collector.observe("70k@03", _start_game(3))
-    collector.observe("70k@01", _end_game([42100, 28300, 18100, 11500]))
-    collector.observe("70k@02", _end_game([42100, 28300, 18100, 11500]))
-    collector.observe("70k@03", _end_game([42100, 28300, 18100, 11500]))
+    collector.observe("70k@01", _start_game(tw=0, tenhou_log_seat=3))
+    assert collector._seat_of == {"70k@01": 3}  # noqa: SLF001
+
+
+def test_collector_rotated_perspectives_still_canonical(tmp_path: Path) -> None:
+    """C5+C6+C27：observer 旋转视角规范化后一致；三份相同 end_game 只生成一个 pending。"""
+    global_scores = [42100, 28300, 18100, 11500]
+    collector = _collector(tmp_path)
+    collector.observe("70k@02", _start_game(tw=0))
+    collector.observe("70k@01", _start_game(tw=2))
+    collector.observe("70k@03", _start_game(tw=3))
+    collector.observe("70k@01", _end_game(global_scores, tw=2))
+    collector.observe("70k@02", _end_game(global_scores, tw=0))
+    collector.observe("70k@03", _end_game(global_scores, tw=3))
     collector.finalize()
 
     pending = _read_pending(collector.capture_dir)
@@ -108,15 +141,18 @@ def test_collector_rotated_perspectives_still_canonical(tmp_path: Path) -> None:
     assert by_seat[1] == "nick@01"
     assert by_seat[2] == "70k@01"
     assert by_seat[3] == "70k@03"
+    final_by_seat = {p["seat"]: p["final_score"] for p in players}
+    assert final_by_seat == {0: 42100, 1: 28300, 2: 18100, 3: 11500}
 
 
 def test_collector_one_observer_enough_when_other_disconnects(tmp_path: Path) -> None:
     """C7：一个 observer 掉线，另一个完整 end_game 仍可形成 pending。"""
+    global_scores = [42100, 28300, 18100, 11500]
     collector = _collector(tmp_path)
-    collector.observe("70k@01", _start_game(2))
-    collector.observe("70k@02", _start_game(0))
-    collector.observe("70k@03", _start_game(3))
-    collector.observe("70k@01", _end_game([42100, 28300, 18100, 11500]))
+    collector.observe("70k@01", _start_game(tw=2))
+    collector.observe("70k@02", _start_game(tw=0))
+    collector.observe("70k@03", _start_game(tw=3))
+    collector.observe("70k@01", _end_game(global_scores, tw=2))
     collector.finalize()
     pending = _read_pending(collector.capture_dir)
     assert len(pending) == 1
@@ -124,13 +160,13 @@ def test_collector_one_observer_enough_when_other_disconnects(tmp_path: Path) ->
 
 
 def test_collector_score_conflict_rejected(tmp_path: Path) -> None:
-    """C8：分数冲突进入 conflict，不得确认。"""
+    """C8：规范化后分数冲突进入 conflict，不得确认。"""
     collector = _collector(tmp_path)
-    collector.observe("70k@01", _start_game(2))
-    collector.observe("70k@02", _start_game(0))
-    collector.observe("70k@03", _start_game(3))
-    collector.observe("70k@01", _end_game([42100, 28300, 18100, 11500]))
-    collector.observe("70k@02", _end_game([40000, 30000, 20000, 10000]))
+    collector.observe("70k@01", _start_game(tw=2))
+    collector.observe("70k@02", _start_game(tw=0))
+    collector.observe("70k@03", _start_game(tw=3))
+    collector.observe("70k@01", _end_game([42100, 28300, 18100, 11500], tw=2))
+    collector.observe("70k@02", _end_game([40000, 30000, 20000, 10000], tw=0))
     collector.finalize()
     assert _read_state(collector.capture_dir)["state"] == "conflict"
     assert _read_pending(collector.capture_dir) == []
@@ -139,9 +175,9 @@ def test_collector_score_conflict_rejected(tmp_path: Path) -> None:
 def test_collector_interrupted_game_no_pending(tmp_path: Path) -> None:
     """C9：没有 end_game 的中断局不计分。"""
     collector = _collector(tmp_path)
-    collector.observe("70k@01", _start_game(2))
-    collector.observe("70k@02", _start_game(0))
-    collector.observe("70k@03", _start_game(3))
+    collector.observe("70k@01", _start_game(tw=2))
+    collector.observe("70k@02", _start_game(tw=0))
+    collector.observe("70k@03", _start_game(tw=3))
     collector.finalize()
     assert _read_state(collector.capture_dir)["state"] == "incomplete"
     assert _read_pending(collector.capture_dir) == []
@@ -465,30 +501,31 @@ def test_ignore_then_confirm_rejected(tmp_path: Path, season_env) -> None:
 def test_observer_log_id_mismatch_conflict(tmp_path: Path) -> None:
     """C19：三个 observer 中一个 log ID 不同 -> conflict，不生成 pending。"""
     collector = _collector(tmp_path)
-    collector.observe("70k@01", _start_game(0, log="https://tenhou.net/3/?log=AAAA&tw=0"))
-    collector.observe("70k@02", _start_game(2, log="https://tenhou.net/3/?log=AAAA&tw=0"))
-    collector.observe("70k@03", _start_game(3, log="https://tenhou.net/3/?log=BBBB&tw=0"))
+    collector.observe("70k@01", _start_game(tw=0, match_id="AAAA"))
+    collector.observe("70k@02", _start_game(tw=2, match_id="AAAA"))
+    collector.observe("70k@03", _start_game(tw=3, match_id="BBBB"))
     collector.finalize()
     assert _read_state(collector.capture_dir)["state"] == "conflict"
     assert _read_pending(collector.capture_dir) == []
 
 
 def test_observer_seat_rebind_conflict(tmp_path: Path) -> None:
-    """C20：observer 第二次上报不同 seat -> conflict。"""
+    """C20：observer 第二次上报不同全局 seat -> conflict。"""
     collector = _collector(tmp_path)
-    collector.observe("70k@01", _start_game(0))
-    collector.observe("70k@01", _start_game(2))
+    collector.observe("70k@01", _start_game(tw=0))
+    collector.observe("70k@01", _start_game(tw=2))
     collector.finalize()
     assert _read_state(collector.capture_dir)["state"] == "conflict"
 
 
 def test_end_game_progressive_pending_without_finalize(tmp_path: Path) -> None:
     """C21：end_game 后不调用 finalize（进程异常退出），pending 仍可恢复。"""
+    global_scores = [42100, 28300, 18100, 11500]
     collector = _collector(tmp_path)
-    collector.observe("70k@01", _start_game(2))
-    collector.observe("70k@02", _start_game(0))
-    collector.observe("70k@03", _start_game(3))
-    collector.observe("70k@01", _end_game([42100, 28300, 18100, 11500]))
+    collector.observe("70k@01", _start_game(tw=2))
+    collector.observe("70k@02", _start_game(tw=0))
+    collector.observe("70k@03", _start_game(tw=3))
+    collector.observe("70k@01", _end_game(global_scores, tw=2))
     # 不调用 finalize：provisional pending 已渐进落盘
     pending = _read_pending(collector.capture_dir)
     assert len(pending) == 1
@@ -499,29 +536,19 @@ def test_end_game_progressive_pending_without_finalize(tmp_path: Path) -> None:
 
 
 def test_incomplete_and_conflict_visible_after_restart(tmp_path: Path) -> None:
-    """C22：incomplete/conflict 后端重启后仍可见（errors/ 目录）。"""
+    """C22+C29：incomplete/conflict 后端重启后仍可见（errors/ 目录，无需 finalize）。"""
     import os
 
     os.environ["KEQING_LADDER_DATA_ROOT"] = str(tmp_path / "data")
-    from gateway.playwithyou_capture import capture_dir_for_session
 
-    # incomplete
+    # incomplete（无 end_game）
     collector = _collector(tmp_path)
-    collector.observe("70k@01", _start_game(2))
+    collector.observe("70k@01", _start_game(tw=2, match_id="INCOMPLETE"))
     collector.finalize()
-    # conflict
+    # conflict 且不调用 finalize（C29）：_set_conflict 已立即写 errors/
     collector2 = _collector(tmp_path)
-    collector2.binding = CaptureBinding(
-        session_id="abc124",
-        season_id="official-ladder-v1",
-        human_account_id="nick@01",
-        bot_account_ids=("70k@01", "70k@02", "70k@03"),
-        mode="confirm",
-    )
-    collector2.capture_dir = capture_dir_for_session(tmp_path / "data", "abc124")
-    collector2.observe("70k@01", _start_game(0))
-    collector2.observe("70k@01", _start_game(2))
-    collector2.finalize()
+    collector2.observe("70k@01", _start_game(tw=0))
+    collector2.observe("70k@01", _start_game(tw=2))
 
     states = {entry["state"] for entry in pwy._discover_captures()}
     assert "incomplete" in states
@@ -552,3 +579,207 @@ def test_relative_sources_root_resolution_matches_publisher(
     monkeypatch.setenv("KEQING_LADDER_DATA_ROOT", str(tmp_path / "dataroot"))
     resolved2 = ladder_ingest.resolve_ingest_sources_root(Path(season_env["root"]), season)
     assert resolved2 == (tmp_path / "dataroot" / "relative" / "sources").resolve()
+
+
+# --- R9-3 review fixes round 2: C28, C30-C32 ------------------------------
+
+def test_concurrent_conflicting_scores_must_conflict(tmp_path: Path) -> None:
+    """C28：两个线程通过 Barrier 同时提交不同分数，最终必定 conflict、无 pending。"""
+    import threading
+
+    global_scores = [42100, 28300, 18100, 11500]
+    collector = _collector(tmp_path)
+    collector.observe("70k@01", _start_game(tw=2))
+    collector.observe("70k@02", _start_game(tw=0))
+    collector.observe("70k@03", _start_game(tw=3))
+
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def report(account: str, scores: list[int], tw: int) -> None:
+        try:
+            barrier.wait(timeout=5)
+            collector.observe(account, _end_game(scores, tw))
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    a = threading.Thread(target=report, args=("70k@01", global_scores, 2))
+    b = threading.Thread(target=report, args=("70k@02", [40000, 30000, 20000, 10000], 0))
+    a.start()
+    b.start()
+    a.join(timeout=10)
+    b.join(timeout=10)
+    assert not errors
+    assert _read_state(collector.capture_dir)["state"] == "conflict"
+    assert _read_pending(collector.capture_dir) == []
+
+
+def test_conflict_visible_without_finalize(tmp_path: Path) -> None:
+    """C29：冲突后强制退出、不调用 finalize，重启仍可见（errors/ 已即时写出）。"""
+    import os
+
+    os.environ["KEQING_LADDER_DATA_ROOT"] = str(tmp_path / "data")
+    collector = _collector(tmp_path)
+    collector.observe("70k@01", _start_game(tw=0))
+    collector.observe("70k@01", _start_game(tw=2))
+    # 不调用 finalize
+    states = {entry["state"] for entry in pwy._discover_captures()}
+    assert "conflict" in states
+
+
+def test_accepted_publish_failed_cannot_be_ignored(tmp_path: Path, season_env, monkeypatch) -> None:
+    """C30：accepted_publish_failed 不允许 ignore（source 已写入，只能 retry）。"""
+    import scripts.mortal.publish_ladder_snapshot as publisher_mod
+    from gateway.api import playwithyou as pwy_api
+    from gateway.playwithyou_capture import CAPTURE_SCHEMA
+
+    capture_dir = capture_dir_for_session(Path(season_env["root"]) / "data", "abc123")
+    pending_dir = capture_dir / "pending"
+    pending_dir.mkdir(parents=True)
+    payload = {
+        "schema": CAPTURE_SCHEMA,
+        "capture_id": "abc123:tenhou:fail2",
+        "session_id": "abc123",
+        "state": "pending_confirmation",
+        "season_id": "official-ladder-v1",
+        "match": {
+            "match_id": "tenhou:fail2",
+            "occurred_at": "2026-08-04T07:00:00Z",
+            "game_length": "hanchan",
+            "players": [
+                {"account_id": "nick@01", "seat": 0, "final_score": 42100},
+                {"account_id": "70k@01", "seat": 1, "final_score": 28300},
+                {"account_id": "70k@02", "seat": 2, "final_score": 18100},
+                {"account_id": "70k@03", "seat": 3, "final_score": 11500},
+            ],
+        },
+        "tenhou_log_url": "x",
+        "observer_accounts": [],
+        "score_observers": ["70k@01"],
+    }
+    (pending_dir / "fail2.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    def _boom(**kwargs):
+        raise RuntimeError("boom")
+
+    with monkeypatch.context() as context:
+        context.setattr(publisher_mod, "publish_snapshot", _boom)
+        with pytest.raises(Exception, match="boom"):
+            pwy_api._confirm_capture("abc123:tenhou:fail2")
+    with pytest.raises(Exception, match="不能忽略"):
+        pwy_api.ignore_ladder_capture("abc123:tenhou:fail2")
+    # source 仍在（已 accepted）
+    sources_root = Path(season_env["season"]["ingest"]["sources_root"])
+    assert len(list((sources_root / "playwithyou").glob("*.jsonl"))) == 1
+
+
+def test_concurrent_confirms_do_not_overwrite(tmp_path: Path, season_env) -> None:
+    """C31：并发不同内容 confirm 不得互相覆盖（source 写锁）。"""
+    import threading
+
+    from gateway.api import playwithyou as pwy_api
+    from gateway.playwithyou_capture import CAPTURE_SCHEMA
+
+    capture_dir = capture_dir_for_session(Path(season_env["root"]) / "data", "abc123")
+    pending_dir = capture_dir / "pending"
+    pending_dir.mkdir(parents=True)
+    sources_root = Path(season_env["season"]["ingest"]["sources_root"])
+
+    def _payload(capture_suffix: str, nick_score: int) -> dict:
+        return {
+            "schema": CAPTURE_SCHEMA,
+            "capture_id": f"abc123:tenhou:cc-{capture_suffix}",
+            "session_id": "abc123",
+            "state": "pending_confirmation",
+            "season_id": "official-ladder-v1",
+            "match": {
+                "match_id": "tenhou:cc",
+                "occurred_at": "2026-08-04T07:00:00Z",
+                "game_length": "hanchan",
+                "players": [
+                    {"account_id": "nick@01", "seat": 0, "final_score": nick_score},
+                    {"account_id": "70k@01", "seat": 1, "final_score": 28300},
+                    {"account_id": "70k@02", "seat": 2, "final_score": 18100},
+                    {"account_id": "70k@03", "seat": 3, "final_score": 11500},
+                ],
+            },
+            "tenhou_log_url": "x",
+            "observer_accounts": [],
+            "score_observers": ["70k@01"],
+        }
+
+    (pending_dir / "cc_a.json").write_text(json.dumps(_payload("a", 42100), ensure_ascii=False), encoding="utf-8")
+    (pending_dir / "cc_b.json").write_text(json.dumps(_payload("b", 99999), ensure_ascii=False), encoding="utf-8")
+
+    barrier = threading.Barrier(2)
+    outcomes: list[BaseException] = []
+
+    def confirm(capture_id: str) -> None:
+        try:
+            barrier.wait(timeout=5)
+            pwy_api._confirm_capture(capture_id)
+        except BaseException as exc:  # noqa: BLE001
+            outcomes.append(exc)
+
+    ta = threading.Thread(target=confirm, args=("abc123:tenhou:cc-a",))
+    tb = threading.Thread(target=confirm, args=("abc123:tenhou:cc-b",))
+    ta.start()
+    tb.start()
+    ta.join(timeout=15)
+    tb.join(timeout=15)
+    # 至少一个成功、另一个要么幂等要么 conflict；但 source 文件必须是单一确定内容
+    source_files = list((sources_root / "playwithyou").glob("*.jsonl"))
+    assert len(source_files) == 1
+    row = json.loads(source_files[0].read_text(encoding="utf-8").splitlines()[0])
+    nick = next(p for p in row["players"] if p["account_id"] == "nick@01")
+    assert nick["final_score"] in (42100, 99999)  # 最终内容确定，未被混写
+
+
+def test_retry_clears_publish_error(tmp_path: Path, season_env, monkeypatch) -> None:
+    """C32：retry 成功后 publish_error 被清除。"""
+    import scripts.mortal.publish_ladder_snapshot as publisher_mod
+    from gateway.api import playwithyou as pwy_api
+    from gateway.playwithyou_capture import CAPTURE_SCHEMA
+
+    capture_dir = capture_dir_for_session(Path(season_env["root"]) / "data", "abc123")
+    pending_dir = capture_dir / "pending"
+    pending_dir.mkdir(parents=True)
+    payload = {
+        "schema": CAPTURE_SCHEMA,
+        "capture_id": "abc123:tenhou:retry",
+        "session_id": "abc123",
+        "state": "pending_confirmation",
+        "season_id": "official-ladder-v1",
+        "match": {
+            "match_id": "tenhou:retry",
+            "occurred_at": "2026-08-04T07:00:00Z",
+            "game_length": "hanchan",
+            "players": [
+                {"account_id": "nick@01", "seat": 0, "final_score": 42100},
+                {"account_id": "70k@01", "seat": 1, "final_score": 28300},
+                {"account_id": "70k@02", "seat": 2, "final_score": 18100},
+                {"account_id": "70k@03", "seat": 3, "final_score": 11500},
+            ],
+        },
+        "tenhou_log_url": "x",
+        "observer_accounts": [],
+        "score_observers": ["70k@01"],
+    }
+    (pending_dir / "retry.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    def _boom(**kwargs):
+        raise RuntimeError("boom")
+
+    with monkeypatch.context() as context:
+        context.setattr(publisher_mod, "publish_snapshot", _boom)
+        with pytest.raises(Exception, match="boom"):
+            pwy_api._confirm_capture("abc123:tenhou:retry")
+    state_file = capture_dir / "pending" / "retry.json"
+    assert json.loads(state_file.read_text(encoding="utf-8"))["state"] == "accepted_publish_failed"
+    assert json.loads(state_file.read_text(encoding="utf-8"))["publish_error"]
+
+    # retry 成功：publish_error 必须被清除
+    pwy_api._confirm_capture("abc123:tenhou:retry")
+    published = json.loads(state_file.read_text(encoding="utf-8"))
+    assert published["state"] == "published"
+    assert "publish_error" not in published
