@@ -48,10 +48,94 @@ def _higher_priority_response_intercepted(
     return _same_response_source(pending_action, current_action)
 
 
-def normalize_replay_decisions(decisions: dict, meta: dict | None = None) -> dict:
+def _repair_kakan_snapshots(decisions: dict, events: list[dict] | None) -> None:
+    """Repair cached snapshots written by a native runtime without kakan_accepted."""
+    if not events:
+        return
+
+    accepted: list[tuple[tuple[str, int, int], int, str]] = []
+    current_kyoku: tuple[str, int, int] | None = None
+    for event in events:
+        if event.get("type") == "start_kyoku":
+            current_kyoku = (
+                str(event.get("bakaze", "")),
+                int(event.get("kyoku", 0)),
+                int(event.get("honba", 0)),
+            )
+        elif event.get("type") == "kakan_accepted" and current_kyoku is not None:
+            accepted.append((current_kyoku, int(event.get("actor", -1)), str(event.get("pai", ""))))
+
+    consumed_accepts: set[int] = set()
+    active: tuple[tuple[str, int, int], str, int] | None = None
+    for entry in decisions.get("log", []):
+        key_data = entry.get("kyoku_key") or {}
+        entry_key = (
+            str(key_data.get("bakaze", entry.get("bakaze", ""))),
+            int(key_data.get("kyoku", entry.get("kyoku", 0))),
+            int(key_data.get("honba", entry.get("honba", 0))),
+        )
+        if active is not None and active[0] != entry_key:
+            active = None
+
+        if active is not None:
+            _, added_tile, actor = active
+            hand = list(entry.get("hand") or [])
+            for index, tile in enumerate(hand):
+                if normalize_tile(str(tile)) == normalize_tile(added_tile):
+                    hand.pop(index)
+                    break
+            entry["hand"] = hand
+
+            melds = entry.get("melds")
+            if isinstance(melds, list) and 0 <= actor < len(melds):
+                for meld in melds[actor] or []:
+                    if (
+                        isinstance(meld, dict)
+                        and meld.get("type") == "pon"
+                        and normalize_tile(str(meld.get("pai", ""))) == normalize_tile(added_tile)
+                    ):
+                        meld["type"] = "kakan"
+                        consumed = list(meld.get("consumed") or [])
+                        if len(consumed) < 4:
+                            consumed.append(added_tile)
+                        meld["consumed"] = consumed
+
+            entry["candidates"] = [
+                candidate
+                for candidate in (entry.get("candidates") or [])
+                if not (
+                    candidate.get("action", {}).get("type") in {"dahai", "kakan"}
+                    and candidate.get("action", {}).get("pai") is not None
+                    and normalize_tile(str(candidate["action"]["pai"])) == normalize_tile(added_tile)
+                    and not any(normalize_tile(str(tile)) == normalize_tile(added_tile) for tile in hand)
+                )
+            ]
+
+        gt_action = entry.get("gt_action") or {}
+        if gt_action.get("type") != "kakan":
+            continue
+        for index, (accepted_key, accepted_actor, accepted_tile) in enumerate(accepted):
+            if index in consumed_accepts:
+                continue
+            if (
+                accepted_key == entry_key
+                and accepted_actor == int(gt_action.get("actor", -1))
+                and normalize_tile(accepted_tile) == normalize_tile(str(gt_action.get("pai", "")))
+            ):
+                consumed_accepts.add(index)
+                active = (entry_key, accepted_tile, accepted_actor)
+                break
+
+
+def normalize_replay_decisions(
+    decisions: dict,
+    meta: dict | None = None,
+    events: list[dict] | None = None,
+) -> dict:
     if not isinstance(decisions, dict):
         return decisions
 
+    _repair_kakan_snapshots(decisions, events)
     log = decisions.get("log", [])
     player_id = decisions.get("player_id")
     pending_idx: int | None = None
@@ -79,19 +163,11 @@ def normalize_replay_decisions(decisions: dict, meta: dict | None = None) -> dic
         elif chosen.get("type") in _RESPONSE_ACTION_TYPES and has_none_candidate:
             if _higher_priority_response_intercepted(chosen, current_action, player_id):
                 # The player had a real response opportunity, but the same
-                # discard was consumed by a higher-priority pon/kan/ron from
-                # another seat before this response could execute.  Keep the
-                # actual action as pass for board reconstruction, but exclude
-                # this decision from mistake and match accounting.
+                # discard was consumed by a higher-priority call first.
                 pending["comparison_exempt"] = "response_preempted"
                 pending["comparison_exempt_by"] = dict(current_action)
                 pending["gt_action"] = {"type": "none", "actor": player_id}
-                pending_idx = None
-                continue
-            # 仅在后续条目明确确认了相同副露/和牌时，才把响应动作补成 chosen。
-            # 否则保守地视为错过该响应窗口（实际为 none），避免把“可碰但没碰”
-            # 误标成“实际碰了”，导致后续手牌/副露状态和动作标签互相矛盾。
-            if same_action(current_action, chosen):
+            elif same_action(current_action, chosen):
                 pending["gt_action"] = {
                     **current_action,
                     "actor": current_action.get("actor", chosen.get("actor", player_id)),
@@ -99,6 +175,27 @@ def normalize_replay_decisions(decisions: dict, meta: dict | None = None) -> dic
             else:
                 pending["gt_action"] = {"type": "none", "actor": player_id}
             pending_idx = None
+
+    # Cached decisions may already contain an explicit none gt_action from an
+    # older normalizer. Re-check those response windows for historical replays.
+    for idx, pending in enumerate(log):
+        if pending.get("is_obs") or pending.get("comparison_exempt"):
+            continue
+        chosen = pending.get("chosen") or {}
+        if chosen.get("type") not in {"chi", "pon"}:
+            continue
+        if not any(
+            (candidate.get("action") or {}).get("type") == "none"
+            for candidate in pending.get("candidates", [])
+        ):
+            continue
+        if idx + 1 >= len(log):
+            continue
+        current_action = log[idx + 1].get("gt_action") or log[idx + 1].get("chosen") or {}
+        if _higher_priority_response_intercepted(chosen, current_action, player_id):
+            pending["comparison_exempt"] = "response_preempted"
+            pending["comparison_exempt_by"] = dict(current_action)
+            pending["gt_action"] = {"type": "none", "actor": player_id}
 
     own_log = [e for e in log if not e.get("is_obs")]
     comparable_log = [entry for entry in own_log if not entry.get("comparison_exempt")]

@@ -1400,7 +1400,7 @@ async def get_replay(
         decisions = render_replay_json(bot)
         decisions["bot_type"] = bot_type
     if isinstance(decisions, dict):
-        decisions = normalize_replay_decisions(decisions, meta=meta)
+        decisions = normalize_replay_decisions(decisions, meta=meta, events=events)
         decisions = _merge_terminal_event_details(decisions, events)
         raw_teacher_reports = list(teacher_reports or [])
         if teacher_report:

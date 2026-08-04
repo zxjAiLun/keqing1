@@ -62,3 +62,24 @@ def test_default_context_builder_daiminkan_is_not_followup_decision_window(monke
         )
         is None
     )
+
+
+def test_default_context_builder_rejects_stale_native_hand_snapshot(monkeypatch):
+    builder = default_context.DefaultDecisionContextBuilder(
+        model_version="mortal",
+        riichi_state=None,
+        inject_shanten_waits=lambda *args, **kwargs: None,
+        enumerate_legal_actions_fn=lambda snap, seat: [],
+    )
+    python_snapshot = {"hand": ["2m"], "melds": [[], [], [], []]}
+    stale_snapshot = {"hand": ["2m", "3m"], "melds": [[], [], [], []]}
+    state = SimpleNamespace(snapshot=lambda actor: python_snapshot)
+
+    monkeypatch.setattr(default_context.keqing_core, "is_enabled", lambda: True)
+    monkeypatch.setattr(
+        default_context.keqing_core,
+        "replay_state_snapshot",
+        lambda events, actor: stale_snapshot,
+    )
+
+    assert builder._snapshot_for_actor(state, 0, events=[{"type": "kakan_accepted"}]) == python_snapshot

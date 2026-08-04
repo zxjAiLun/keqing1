@@ -131,7 +131,13 @@ def _candidate_native_paths() -> list[_Path]:
         pass
     for root in search_roots:
         package_root = _Path(root) / "keqing_core"
-        if not package_root.exists():
+        try:
+            package_exists = package_root.exists()
+        except OSError:
+            # A locked or inaccessible user-site package must not prevent the
+            # project-local native runtime from being discovered.
+            package_exists = False
+        if not package_exists:
             continue
         candidates.extend(
             sorted(path for path in package_root.glob("_native*") if _is_native_extension(path))
