@@ -109,12 +109,56 @@ class NativeLogAdapter:
 
     Raw player names are mapped to official account_ids via ``name_to_account``;
     names not present in the mapping are rejected loudly.
+
+    ``occurred_at`` comes from a stable sidecar index, never from file mtime
+    (copying / restoring / migrating a data disk changes mtime and would reorder
+    the full replay).  The sidecar is ``source_dir/index.jsonl``, one record per
+    line: ``{"match_id": "...", "occurred_at": "...", "path": "..."}``.  A log
+    file absent from the index is rejected as a formal ingest source.
     """
 
     source_type = "native"
+    INDEX_FILENAME = "index.jsonl"
 
-    def __init__(self, name_to_account: Mapping[str, str]):
+    def __init__(
+        self,
+        name_to_account: Mapping[str, str],
+        occurred_at_index: Mapping[str, str] | None = None,
+    ):
         self.name_to_account = dict(name_to_account)
+        self._occurred_at_index = dict(occurred_at_index) if occurred_at_index is not None else None
+
+    def _load_index(self, source_dir: Path) -> dict[str, datetime]:
+        if self._occurred_at_index is not None:
+            return {
+                match_id: _parse_iso(value)
+                for match_id, value in self._occurred_at_index.items()
+            }
+        index_path = source_dir / self.INDEX_FILENAME
+        if not index_path.is_file():
+            raise LadderIngestError(
+                f"native source {source_dir}: 缺少稳定时间索引 {self.INDEX_FILENAME}，"
+                "拒绝作为正式 ingest source（不采用文件 mtime）"
+            )
+        result: dict[str, datetime] = {}
+        with index_path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise LadderIngestError(
+                        f"{index_path.name}:{line_number} JSON 无法解析: {exc}"
+                    ) from exc
+                match_id = raw.get("match_id")
+                occurred = raw.get("occurred_at")
+                if not isinstance(match_id, str) or not isinstance(occurred, str):
+                    raise LadderIngestError(
+                        f"{index_path.name}:{line_number} 需要 match_id + occurred_at"
+                    )
+                result[match_id] = _parse_iso(occurred)
+        return result
 
     def iter_matches(self, source_dir: Path) -> Iterator[LadderMatch]:
         from scripts.mortal.build_platform_account_report import (
@@ -123,7 +167,15 @@ class NativeLogAdapter:
             read_events,
         )
 
+        index = self._load_index(source_dir)
         for path in iter_log_files([source_dir]):
+            match_id = path.name.removesuffix(".json.gz")
+            try:
+                occurred_at = index[match_id]
+            except KeyError as exc:
+                raise LadderIngestError(
+                    f"native log {path.name}: 未在稳定时间索引中（match_id={match_id!r}），拒绝"
+                ) from exc
             events = read_events(path)
             raw_names = [str(name) for name in events[0]["names"]]
             try:
@@ -132,11 +184,6 @@ class NativeLogAdapter:
                 raise LadderIngestError(
                     f"native log {path.name}: 玩家名 {exc.args[0]!r} 未在 name_to_account 映射中"
                 ) from exc
-            try:
-                stat = path.stat()
-                occurred_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-            except OSError:
-                occurred_at = datetime.fromtimestamp(0, tz=timezone.utc)
             _initial, scores = initial_and_final_scores_from_events(events)
             players = tuple(
                 LadderMatchPlayer(
@@ -147,7 +194,7 @@ class NativeLogAdapter:
                 for seat in range(4)
             )
             yield LadderMatch(
-                match_id=path.name.removesuffix(".json.gz"),
+                match_id=match_id,
                 occurred_at=occurred_at,
                 game_length="hanchan",
                 players=players,
@@ -227,9 +274,20 @@ class ManualTenhouAdapter(_JsonlMatchAdapter):
 # Deterministic merge
 # ---------------------------------------------------------------------------
 
-def _placements(players: Sequence[LadderMatchPlayer]) -> list[int]:
-    """顺位：按 final_score 降序，同分按 seat 升序（与 report builder 一致）。"""
-    ordered = sorted(range(4), key=lambda seat: (-players[seat].final_score, seat))
+def canonical_players(match: LadderMatch) -> tuple[LadderMatchPlayer, ...]:
+    """按 seat 排序的规范玩家序列（players 数组顺序不代表 seat 顺序）。
+
+    所有计分、去重、replay 一律只消费 canonical 序列。
+    """
+    return tuple(sorted(match.players, key=lambda player: player.seat))
+
+
+def _placements(canonical: Sequence[LadderMatchPlayer]) -> list[int]:
+    """顺位：按 final_score 降序，同分按 seat 升序（与 report builder 一致）。
+
+    ``canonical`` 已按 seat 排序，index == seat。
+    """
+    ordered = sorted(range(4), key=lambda seat: (-canonical[seat].final_score, seat))
     placements = [0, 0, 0, 0]
     for placement, seat in enumerate(ordered, 1):
         placements[seat] = placement
@@ -243,8 +301,9 @@ def merge_ladder_matches(
 ) -> list[LadderMatch]:
     """读取所有 source -> 校验 -> 按 match_id 去重 -> 稳定排序。
 
-    - 同 match_id 同内容：no-op（同一局被多 source 重复录入时跳过）；
-    - 同 match_id 不同内容：冲突，整体拒绝发布（LadderIngestError）。
+    - 同 match_id、相同玩家/座位/分数/规则：no-op（保留最早 occurred_at，
+      其他来源视为重复证据；occurred_at 差异不构成冲突）；
+    - 同 match_id 但玩家/分数不同：冲突，整体拒绝发布（LadderIngestError）。
     """
     collected: list[LadderMatch] = []
     for adapter, source_dir in source_entries:
@@ -260,7 +319,8 @@ def merge_ladder_matches(
         if previous is None:
             by_id[match.match_id] = match
         elif _content_key(previous) == _content_key(match):
-            continue  # 重复录入同一局：no-op（source_ref/来源不同不算冲突）
+            if match.occurred_at < previous.occurred_at:
+                by_id[match.match_id] = match  # 保留最早记录时间
         else:
             raise LadderIngestError(
                 f"match_id 冲突: {match.match_id}（两个来源记录了不同内容，拒绝发布）"
@@ -269,8 +329,8 @@ def merge_ladder_matches(
 
 
 def _content_key(match: LadderMatch):
-    """去重比较的实质性内容（不含 source_ref / source_type）。"""
-    return (match.match_id, match.occurred_at, match.game_length, match.players)
+    """去重比较的实质内容：不含 occurred_at / source_type / source_ref。"""
+    return (match.match_id, match.game_length, canonical_players(match))
 
 
 # ---------------------------------------------------------------------------
@@ -325,15 +385,18 @@ def replay_ladder_matches(
         for player in match.players:
             ensure(player.account_id)
 
+        # 规范玩家序列（按 seat 排序，index == seat）；players 数组顺序不代表座位。
+        canonical = canonical_players(match)
+
         # 赛前快照（不可变）
         pre_states = [
-            _player_state(rank_system, states[player.account_id]) for player in match.players
+            _player_state(rank_system, states[player.account_id]) for player in canonical
         ]
         ctx = rank_system.match_context(pre_states)
 
-        placements = _placements(match.players)
+        placements = _placements(canonical)
         updates: list[dict[str, Any]] = []
-        for seat, player in enumerate(match.players):
+        for seat, player in enumerate(canonical):
             update = rank_system.apply_result(
                 pre_states[seat], placement=placements[seat], match=ctx
             )

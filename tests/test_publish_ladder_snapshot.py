@@ -1074,4 +1074,8 @@ def test_publish_ingest_season_builds_snapshot(tmp_path: Path):
     manifest = json.loads((snapshot_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["scoring_system"] == "tenhou_rank_progression"
     assert manifest["rank_points"] is None
+    # ingest manifest 统计来自 sources_root（而非 CLI log_dirs）
+    assert manifest["source_file_count"] == 1
+    assert manifest["source_total_bytes"] > 0
+    assert manifest["source_log_dirs"] == [str(sources.parent.resolve())]
     assert ladder.read_registry(registry_path)["report_dir"] == result["snapshot_dir"]

@@ -70,8 +70,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", type=Path, required=True,
                         help="动态赛季注册表 JSON 路径（如 keqing-data/ladder/registries/dev-live.json）")
-    parser.add_argument("--log-dir", action="append", type=Path, required=True,
-                        help="输入 mjai 日志目录，可重复")
+    parser.add_argument("--log-dir", action="append", type=Path, default=[],
+                        help="输入 mjai 日志目录，可重复；ingest 赛季不需要（使用 season.ingest.sources_root）")
     parser.add_argument("--snapshot-root", type=Path, default=None,
                         help="快照根目录；默认 <KEQING_LADDER_DATA_ROOT>/seasons/<season_id>/snapshots")
     parser.add_argument("--mortal-root", type=Path, default=Path("third_party/Mortal"))
@@ -655,6 +655,9 @@ def publish_snapshot(
         interleave_log_dirs=interleave_log_dirs,
         ingest_root=ingest_root,
     )
+    # 非 ingest 赛季必须有 mjai 日志输入；ingest 赛季不需要 --log-dir。
+    if ingest_root is None and not log_dirs:
+        raise PublishError("非 ingest 赛季至少需要一个 --log-dir")
     # dry-run 始终真正构建与校验；skip 前必须确认当前快照三件套仍完整可读。
     if not dry_run and previous_snapshot is not None and previous_snapshot.is_dir():
         prev_manifest = _read_manifest(previous_snapshot)
@@ -726,11 +729,14 @@ def publish_snapshot(
         ladder.validate_snapshot(season, snapshot_stage)
         materialize_duration = time.monotonic() - materialize_started
 
-        source_stats = _ordered_log_stats(
-            log_dirs,
-            preserve_log_dir_order=preserve_log_dir_order,
-            interleave_log_dirs=interleave_log_dirs,
-        )
+        if ingest_root is not None:
+            source_stats = _ordered_source_stats(ingest_root)
+        else:
+            source_stats = _ordered_log_stats(
+                log_dirs,
+                preserve_log_dir_order=preserve_log_dir_order,
+                interleave_log_dirs=interleave_log_dirs,
+            )
         write_manifest(
             snapshot_stage,
             season_id=season_id,

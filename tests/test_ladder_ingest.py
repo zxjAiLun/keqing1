@@ -129,10 +129,17 @@ def _write_mjai_log(log_dir: Path, name: str, scores: list[int], names: list[str
             handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
+def _write_native_index(log_dir: Path, entries: list[dict]) -> None:
+    with (log_dir / "index.jsonl").open("w", encoding="utf-8") as handle:
+        for entry in entries:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
 def test_native_log_adapter_maps_names_to_accounts(tmp_path: Path) -> None:
     log_dir = tmp_path / "native"
     log_dir.mkdir(parents=True)
     _write_mjai_log(log_dir, "g000", [40000, 25000, 20000, 15000], ["Nick", "70k1", "70k2", "70k3"])
+    _write_native_index(log_dir, [{"match_id": "g000", "occurred_at": "2026-08-04T07:00:00Z"}])
     adapter = NativeLogAdapter(
         {"Nick": "nick@01", "70k1": "70k@01", "70k2": "70k@02", "70k3": "70k@03"}
     )
@@ -143,12 +150,34 @@ def test_native_log_adapter_maps_names_to_accounts(tmp_path: Path) -> None:
     assert match.source_type == "native"
     assert [p.account_id for p in match.players] == ["nick@01", "70k@01", "70k@02", "70k@03"]
     assert [p.final_score for p in match.players] == [40000, 25000, 20000, 15000]
+    assert match.occurred_at == datetime.fromisoformat("2026-08-04T07:00:00+00:00")
+
+
+def test_native_log_adapter_requires_stable_time_index(tmp_path: Path) -> None:
+    """正式 ingest 不得使用文件 mtime：缺少稳定时间索引直接拒绝。"""
+    log_dir = tmp_path / "native"
+    log_dir.mkdir(parents=True)
+    _write_mjai_log(log_dir, "g000", [40000, 25000, 20000, 15000], ["Nick", "70k1", "70k2", "70k3"])
+    adapter = NativeLogAdapter({"Nick": "nick@01", "70k1": "70k@01", "70k2": "70k@02", "70k3": "70k@03"})
+    with pytest.raises(LadderIngestError, match="稳定时间索引"):
+        list(adapter.iter_matches(log_dir))
+
+
+def test_native_log_adapter_rejects_log_missing_from_index(tmp_path: Path) -> None:
+    log_dir = tmp_path / "native"
+    log_dir.mkdir(parents=True)
+    _write_mjai_log(log_dir, "g000", [40000, 25000, 20000, 15000], ["Nick", "70k1", "70k2", "70k3"])
+    _write_native_index(log_dir, [{"match_id": "other", "occurred_at": "2026-08-04T07:00:00Z"}])
+    adapter = NativeLogAdapter({"Nick": "nick@01", "70k1": "70k@01", "70k2": "70k@02", "70k3": "70k@03"})
+    with pytest.raises(LadderIngestError, match="未在稳定时间索引中"):
+        list(adapter.iter_matches(log_dir))
 
 
 def test_native_log_adapter_rejects_unknown_name(tmp_path: Path) -> None:
     log_dir = tmp_path / "native"
     log_dir.mkdir(parents=True)
     _write_mjai_log(log_dir, "g001", [40000, 25000, 20000, 15000], ["Nick", "ghost", "70k2", "70k3"])
+    _write_native_index(log_dir, [{"match_id": "g001", "occurred_at": "2026-08-04T07:00:00Z"}])
     adapter = NativeLogAdapter({"Nick": "nick@01", "70k2": "70k@02", "70k3": "70k@03"})
     with pytest.raises(LadderIngestError, match="未在 name_to_account"):
         list(adapter.iter_matches(log_dir))
@@ -260,9 +289,64 @@ def test_merge_sorts_by_occurred_at_then_match_id(tmp_path: Path) -> None:
     assert [m.match_id for m in merged] == ["m-1", "m-0"]
 
 
+def test_merge_dedups_shuffled_players_order(tmp_path: Path) -> None:
+    """同一局 players 数组顺序不同（0/1/2/3 vs 2/0/3/1）-> 去重为同一内容。"""
+    players_ordered = [
+        {"account_id": "nick@01", "seat": 0, "final_score": 42100},
+        {"account_id": "70k@01", "seat": 1, "final_score": 28300},
+        {"account_id": "70k@02", "seat": 2, "final_score": 18100},
+        {"account_id": "70k@03", "seat": 3, "final_score": 11500},
+    ]
+    players_shuffled = [players_ordered[2], players_ordered[0], players_ordered[3], players_ordered[1]]
+    base = {"match_id": "m-seat", "occurred_at": "2026-08-04T07:00:00Z", "game_length": "hanchan"}
+    pwy_dir = tmp_path / "pwy"
+    _write_jsonl(pwy_dir, [{**base, "players": players_ordered}, {**base, "players": players_shuffled}])
+    merged = merge_ladder_matches([(PlayWithYouResultAdapter(), pwy_dir)], allowed_accounts=ACCOUNTS)
+    assert len(merged) == 1
+
+
+def test_merge_dedups_across_small_occurred_at_difference(tmp_path: Path) -> None:
+    """自动与手动来源同 match_id、时间略有差异 -> 仍去重，保留最早时间。"""
+    record = {
+        "match_id": "m-time",
+        "game_length": "hanchan",
+        "players": [
+            {"account_id": "nick@01", "seat": 0, "final_score": 42100},
+            {"account_id": "70k@01", "seat": 1, "final_score": 28300},
+            {"account_id": "70k@02", "seat": 2, "final_score": 18100},
+            {"account_id": "70k@03", "seat": 3, "final_score": 11500},
+        ],
+    }
+    pwy_dir = tmp_path / "pwy"
+    _write_jsonl(pwy_dir, [{**record, "occurred_at": "2026-08-04T07:00:00Z"}])
+    manual_dir = tmp_path / "manual"
+    _write_jsonl(manual_dir, [{**record, "occurred_at": "2026-08-04T07:03:12Z"}])
+    merged = merge_ladder_matches(
+        [(PlayWithYouResultAdapter(), pwy_dir), (ManualTenhouAdapter(), manual_dir)],
+        allowed_accounts=ACCOUNTS,
+    )
+    assert len(merged) == 1
+    assert merged[0].occurred_at == datetime.fromisoformat("2026-08-04T07:00:00+00:00")
+
+
+def test_replay_identical_regardless_of_players_order(tmp_path: Path) -> None:
+    """C15：任意 players JSON 顺序都按 seat 正确 replay，结果完全一致。"""
+    ordered = _match("m1", scores=(42100, 28300, 18100, 11500))
+    shuffled = LadderMatch(
+        match_id="m1",
+        occurred_at=ordered.occurred_at,
+        game_length="hanchan",
+        players=tuple(sorted(ordered.players, key=lambda player: -player.seat)),
+        source_type="playwithyou",
+    )
+    first = _replay_report(tmp_path, [ordered], subdir="a")
+    second = _replay_report(tmp_path, [shuffled], subdir="b")
+    assert first["accounts"] == second["accounts"]
+
+
 # --- Replay -----------------------------------------------------------------
 
-def _replay_report(tmp_path: Path, matches: list[LadderMatch]) -> dict:
+def _replay_report(tmp_path: Path, matches: list[LadderMatch], subdir: str = "out") -> dict:
     from replay.ladder_ingest import replay_ladder_matches, write_ingest_outputs
 
     result = replay_ladder_matches(
@@ -273,7 +357,7 @@ def _replay_report(tmp_path: Path, matches: list[LadderMatch]) -> dict:
             "game_length": "hanchan",
         },
     )
-    write_ingest_outputs(tmp_path / "out", result)
+    write_ingest_outputs(tmp_path / subdir, result)
     return result["report"]
 
 
