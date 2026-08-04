@@ -56,6 +56,7 @@ python_files = [
     "test_report_builder_rank.py",
     "test_ladder_progression.py",
     "test_ladder_ingest.py",
+    "test_playwithyou_capture.py",
     "test_publish_ladder_snapshot.py",
     "test_legal_actions_*.py",
     "test_normal_progress.py",
