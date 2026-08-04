@@ -60,6 +60,10 @@ dataset_debug*/
 !configs/ladder/seasons/*.json
 !reports/keqingrl_learning_signal_ablation_20260425_small_cuda/sweep.json
 !reports/keqingrl_sampling_diversity_20260426_step36a_ep16/sampling_diversity.json
+# Review 状态一致性回归 fixture（真实 API 数据快照，必须入库）
+!fixtures/
+!fixtures/review_state/
+!fixtures/review_state/**/*.json
 !reports/keqingrl_rule_score_scale_probe_20260426_step36b_ep16/rule_score_scale_probe.json
 !reports/keqingrl_actor_only_online_probe_20260426_step36c/sweep.json
 !reports/keqingrl_fixed_online_bridge_20260426_step36d/fixed_online_bridge.json
