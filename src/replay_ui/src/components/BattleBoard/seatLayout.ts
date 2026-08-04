@@ -117,10 +117,10 @@ export function validateMeldTiles(meld: MeldEntry): boolean {
       ok = meld.consumed.length === 3 && Boolean(meld.pai);
       break;
     case "ankan":
-      ok = meld.consumed.length >= 4;
+      ok = meld.consumed.length === 4;
       break;
     case "kakan":
-      ok = meld.consumed.length >= 4;
+      ok = meld.consumed.length === 4;
       break;
     default:
       ok = false;
@@ -130,8 +130,10 @@ export function validateMeldTiles(meld: MeldEntry): boolean {
 }
 
 export function buildMeldDisplayTiles(actor: number, meld: MeldEntry): MeldDisplayTile[] {
-  validateMeldTiles(meld);
-  if (meld.type === "kakan" && meld.consumed.length >= 4) {
+  // 校验失败即拒绝渲染：不产生空白牌框或 undefined 牌
+  if (!validateMeldTiles(meld)) return [];
+  if (meld.type === "kakan") {
+    // kakan consumed = [手牌1, 手牌2, 被鸣, 加杠]：前 3 张为原 pon，第 4 张叠在被鸣牌上
     const baseHandTiles = meld.consumed.slice(0, 2);
     const calledTile = meld.consumed[2] ?? meld.pai;
     const addedTile = meld.consumed[3];
@@ -150,4 +152,20 @@ export function buildMeldDisplayTiles(actor: number, meld: MeldEntry): MeldDispl
   }
 
   return buildCalledMeldTiles(actor, meld.target, [...meld.consumed], meld.pai);
+}
+
+/** 自家手牌区实际渲染宽度（含摸牌）。与 MahjongTable 的 flex 布局保持一致。 */
+export function computeSelfHandWidth(
+  handCount: number,
+  hasTsumoPai: boolean,
+  tileWidth: number,
+  tileGap: number,
+  drawGap: number,
+): number {
+  const tileCount = handCount + (hasTsumoPai ? 1 : 0);
+  // flex 子元素数 = tileCount，普通 gap 数 = tileCount - 1；摸牌另加 drawGap margin
+  const normalGapCount =
+    Math.max(0, handCount - 1)
+    + (hasTsumoPai && handCount > 0 ? 1 : 0);
+  return tileCount * tileWidth + normalGapCount * tileGap + (hasTsumoPai ? drawGap : 0);
 }

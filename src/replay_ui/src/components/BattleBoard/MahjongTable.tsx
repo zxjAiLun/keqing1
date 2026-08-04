@@ -25,7 +25,7 @@ import type { BattleState, Action, DiscardEntry, MeldEntry } from "../../types/b
 import type { LogitTileData } from "../../utils/replayAdapter";
 import { BAKAZE_CN, JIKAZE_CN } from "../../utils/constants";
 import { sortHand } from "../../utils/tileUtils";
-import { buildMeldDisplayTiles, getSeatModel, type LayoutAxis, type SeatPosition } from "./seatLayout";
+import { buildMeldDisplayTiles, computeSelfHandWidth, getSeatModel, type LayoutAxis, type SeatPosition } from "./seatLayout";
 import { TABLECLOTH_OPTIONS } from "./tableclothOptions";
 import type { TableclothId } from "./tableclothOptions";
 
@@ -639,10 +639,14 @@ function PlayerZone({
 
     // 手牌宽度按实际数量计算：门清 13/14 张、1/2/3 副露时自然收缩到 10/11、7/8、4/5 张，
     // 四副露只剩 1/2 张——不再固定预留 14 张宽度（避免大吊车时手牌与副露之间出现巨大空白）。
-    const actualHandWidth =
-      sortedHand.length * TILE_SIZES.large.w
-      + Math.max(0, sortedHand.length - 1) * SELF_HAND_GAP
-      + (tsumoPai ? SELF_HAND_DRAW_GAP + TILE_SIZES.large.w : 0);
+    // 有摸牌时 flex 内含 n+1 个子元素（n 个普通 gap + drawGap margin），宽度必须与实际 flex 一致。
+    const actualHandWidth = computeSelfHandWidth(
+      sortedHand.length,
+      Boolean(tsumoPai),
+      TILE_SIZES.large.w,
+      SELF_HAND_GAP,
+      SELF_HAND_DRAW_GAP,
+    );
 
     return (
       <div style={{ display: "flex", flexDirection: "row", alignItems: "flex-end", justifyContent: "center", gap: 12, width: "100%", maxWidth: "100%" }}>

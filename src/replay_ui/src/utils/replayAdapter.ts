@@ -184,11 +184,23 @@ function normalizedTileList(tiles: string[]): string {
   return [...tiles].sort().join('|');
 }
 
+/** kakan 的 consumed 对比：真实 gt_action 只有 3 张（不含加杠那张），修复后的 meld 为 4 张。 */
+function kakanConsumedMatches(a: string[], b: string[]): boolean {
+  if (normalizedTileList(a) === normalizedTileList(b)) return true;
+  const [shortList, longList] = a.length <= b.length ? [a, b] : [b, a];
+  return longList.length === shortList.length + 1
+    && shortList.every((tile) => longList.includes(tile));
+}
+
 function sameMeldShape(a: MeldEntry, b: MeldEntry): boolean {
-  return a.type === b.type
-    && a.pai === b.pai
-    && a.target === b.target
-    && normalizedTileList(a.consumed) === normalizedTileList(b.consumed);
+  if (a.type !== b.type || a.pai !== b.pai) return false;
+  if (a.type === 'kakan') {
+    // kakan 的 target 在真实 gt_action 中可能缺失（只是原 pon 的来源座位），
+    // 且 consumed 可能比 meld 少一张加杠牌——统一放宽为 pai + consumed 子集匹配。
+    return kakanConsumedMatches(a.consumed, b.consumed);
+  }
+  if (a.target !== b.target) return false;
+  return normalizedTileList(a.consumed) === normalizedTileList(b.consumed);
 }
 
 function meldShapeForAction(action: Action): MeldEntry {
@@ -231,23 +243,29 @@ function rewindMeldAction(
   const remaining = actorMelds.filter((_, i) => i !== targetIndex);
 
   let hand = [...state.hand];
-  if (action.type === 'kakan' && removed && removed.consumed.length >= 4) {
-    // kakan 前态是原 pon：consumed = [手牌1, 手牌2, 被鸣, 加杠]，加杠牌放回手中
-    remaining.push({
+  let tsumoPai = state.tsumo_pai;
+
+  if (action.type === 'kakan' && removed) {
+    // kakan 前态是原 pon：consumed[0..1] 为 pon 手牌、consumed[2] 为被鸣牌，
+    // consumed[3] 为加杠的那张（动作前为摸到的 tsumo_pai）。
+    const restoredPon: MeldEntry = {
       type: 'pon',
       pai: removed.consumed[2] ?? removed.pai,
       consumed: removed.consumed.slice(0, 2),
       target: removed.target,
-    });
+    };
+    // 在原索引插回，保持副露时间顺序不漂移
+    remaining.splice(targetIndex, 0, restoredPon);
     if (action.actor === viewPlayerId) {
-      for (const tile of removed.consumed.slice(3)) hand = addTileOnce(hand, tile);
+      const addedTile = removed.consumed[3] ?? removed.pai;
+      if (addedTile) tsumoPai = addedTile;
     }
   } else if (action.actor === viewPlayerId) {
     for (const tile of action.consumed ?? []) hand = addTileOnce(hand, tile);
   }
 
   const lastDiscard =
-    action.type === 'ankan'
+    action.type === 'ankan' || action.type === 'kakan'
       ? null
       : action.pai
         ? { actor: action.target ?? action.actor, pai: action.pai, pai_raw: action.pai }
@@ -259,7 +277,109 @@ function rewindMeldAction(
     melds: { ...melds, [action.actor]: remaining },
     last_discard: lastDiscard,
     actor_to_move: action.actor,
-    tsumo_pai: null,
+    tsumo_pai: tsumoPai,
+  };
+}
+
+/**
+ * 把副露动作正向应用到动作后状态（post phase 专用）。
+ * kakan 走 applyKakanAction：替换原 pon，而不是追加一组。
+ */
+function applyMeldAction(
+  state: BattleState,
+  action: Action,
+  viewPlayerId: number,
+): BattleState {
+  if (action.type === 'kakan') {
+    return applyKakanAction(state, action, viewPlayerId);
+  }
+  const melds = cloneMelds(state.melds);
+  const actorMelds = [...(melds[action.actor] ?? [])];
+  let hand = [...state.hand];
+  let tsumoPai = state.tsumo_pai;
+  if (action.actor === viewPlayerId) {
+    const consumed = [...(action.consumed ?? [])];
+    // 摸牌进副露（ankan 等自摸动作）：先吃掉 tsumo_pai，再吃暗手
+    if (tsumoPai && consumed.includes(tsumoPai)) {
+      consumed.splice(consumed.indexOf(tsumoPai), 1);
+      tsumoPai = null;
+    }
+    for (const tile of consumed) hand = removeTileOnce(hand, tile);
+  }
+  actorMelds.push({
+    type: action.type as MeldEntry['type'],
+    pai: action.pai ?? '',
+    consumed: [...(action.consumed ?? [])],
+    target: action.target ?? action.actor,
+  });
+  return {
+    ...state,
+    hand,
+    melds: { ...melds, [action.actor]: actorMelds },
+    tsumo_pai: tsumoPai,
+    last_discard: null,
+    actor_to_move: action.actor,
+  };
+}
+
+/**
+ * kakan 正向应用：找到同牌、同 target 的原 pon 并原地替换为 kakan。
+ * 加杠牌（= action.pai）从自家暗手/摸牌中移除；找不到唯一原 pon 时报错并保持原状态。
+ */
+function applyKakanAction(
+  state: BattleState,
+  action: Action,
+  viewPlayerId: number,
+): BattleState {
+  const melds = cloneMelds(state.melds);
+  const actorMelds = [...(melds[action.actor] ?? [])];
+
+  let ponIndex = -1;
+  for (let i = actorMelds.length - 1; i >= 0; i--) {
+    const meld = actorMelds[i];
+    if (
+      meld.type === 'pon'
+      && meld.pai === action.pai
+      && (action.target == null || meld.target === action.target)
+    ) {
+      if (ponIndex >= 0) { ponIndex = -1; break; }
+      ponIndex = i;
+    }
+  }
+  if (ponIndex < 0) {
+    if (typeof console !== 'undefined') {
+      console.error('kakan forward: no unique original pon found', action, actorMelds);
+    }
+    return state;
+  }
+  const pon = actorMelds[ponIndex];
+  const addedTile = action.pai ?? '';
+  const kakan: MeldEntry = {
+    type: 'kakan',
+    pai: action.pai ?? '',
+    // 真实编码 consumed 只有 3 张；加杠牌恒等于 pai，补足成 4 张便于展示与校验
+    consumed: [...(action.consumed ?? []), ...(addedTile ? [addedTile] : [])],
+    target: action.target ?? pon.target,
+  };
+  actorMelds[ponIndex] = kakan;
+
+  let hand = [...state.hand];
+  let tsumoPai = state.tsumo_pai;
+  if (action.actor === viewPlayerId && addedTile) {
+    if (tsumoPai === addedTile) {
+      tsumoPai = null;
+    } else {
+      hand = removeTileOnce(hand, addedTile);
+    }
+  }
+
+  return {
+    ...state,
+    hand,
+    melds: { ...melds, [action.actor]: actorMelds },
+    tsumo_pai: tsumoPai,
+    last_discard: null,
+    actor_to_move: action.actor,
   };
 }
 
@@ -332,6 +452,7 @@ export function entryToBattleState(
     ? mergedEntry.melds as MeldEntry[][]
     : toArray(mergedEntry.melds) as MeldEntry[][];
   const action = mergedEntry.gt_action ?? mergedEntry.chosen;
+  const isMeldAction = (MELD_ACTION_TYPES as readonly string[]).includes(action?.type ?? '');
   const isPreDiscardPhase = phase === 'pre' && action?.type === 'dahai';
   const suppressSnapshotDrawActor = action?.type === 'none';
   const pendingDiscardActorFromSnapshot =
@@ -383,30 +504,29 @@ export function entryToBattleState(
   };
 
   if (mergedEntry.is_obs) {
-    const obsBoardPhase =
+    // snapshotPhase：entry 数据本身处于什么时点；targetPhase：用户请求的 pre/post。
+    // 打牌动作按目标 phase 推导快照时点（obs 弃牌 entry 的 board_phase 不可靠），
+    // 其余动作读 entry.board_phase。
+    const snapshotPhase =
       action?.type === 'dahai'
         ? (phase === 'post' ? 'after_action' : 'before_action')
         : (mergedEntry.board_phase ?? 'after_action');
-    if (obsBoardPhase === 'after_action') {
-      return {
+
+    if (action?.type === 'dahai') {
+      if (snapshotPhase === 'after_action') {
+        return { ...baseState, replay_draw_actor: null };
+      }
+      const nextState: BattleState = {
         ...baseState,
+        hand: [...baseState.hand],
+        discards: cloneDiscards(baseState.discards),
+        melds: cloneMelds(baseState.melds),
+        reached: [...baseState.reached],
+        pending_reach: [...baseState.pending_reach],
+        last_discard: baseState.last_discard ? { ...baseState.last_discard } : null,
+        actor_to_move: baseState.actor_to_move,
         replay_draw_actor: null,
       };
-    }
-
-    const nextState: BattleState = {
-      ...baseState,
-      hand: [...baseState.hand],
-      discards: cloneDiscards(baseState.discards),
-      melds: cloneMelds(baseState.melds),
-      reached: [...baseState.reached],
-      pending_reach: [...baseState.pending_reach],
-      last_discard: baseState.last_discard ? { ...baseState.last_discard } : null,
-      actor_to_move: baseState.actor_to_move,
-      replay_draw_actor: null,
-    };
-
-    if (action.type === 'dahai') {
       const { discards: prevDiscards, removed } = popLastDiscardIfMatches(
         baseState.discards,
         action.actor,
@@ -423,14 +543,32 @@ export function entryToBattleState(
       return nextState;
     }
 
-    if (['chi', 'pon', 'daiminkan', 'ankan', 'kakan'].includes(action.type)) {
-      if (!needsMeldRewind(baseState, action)) {
-        // snapshot 已是动作前：无需回退
+    if (isMeldAction) {
+      // 完整矩阵：
+      //   before & pre  → 原样
+      //   after  & post → 原样
+      //   before & post → 正向应用
+      //   after  & pre  → 逆向回退
+      if (snapshotPhase === 'before_action' && phase === 'post') {
+        if (needsMeldRewind(baseState, action)) {
+          // 快照已是动作后：不再前向应用
+          return { ...baseState, replay_draw_actor: null };
+        }
+        return applyMeldAction(baseState, action, viewPlayerId);
+      }
+      if (snapshotPhase === 'after_action' && phase === 'pre') {
+        if (needsMeldRewind(baseState, action)) {
+          return rewindMeldAction(baseState, action, viewPlayerId);
+        }
         return baseState;
       }
-      return rewindMeldAction(baseState, action, viewPlayerId);
+      return { ...baseState, replay_draw_actor: null };
     }
 
+    // 非副露、非打牌动作（reach/none/hora 等）：after_action 时取消摸牌指示
+    if (snapshotPhase === 'after_action') {
+      return { ...baseState, replay_draw_actor: null };
+    }
     return baseState;
   }
 
@@ -492,32 +630,12 @@ export function entryToBattleState(
     return nextState;
   }
 
-  if (['chi', 'pon', 'daiminkan', 'ankan', 'kakan'].includes(action.type)) {
+  if (isMeldAction) {
     if (needsMeldRewind(baseState, action)) {
       // snapshot 已经是动作后状态（meld 已在、consumed 已移除）：不再前向应用
       return baseState;
     }
-    const meldType = action.type as MeldEntry['type'];
-    if (action.actor === viewPlayerId) {
-      let hand = [...nextState.hand];
-      for (const tile of action.consumed ?? []) {
-        hand = removeTileOnce(hand, tile);
-      }
-      nextState.hand = hand;
-      nextState.tsumo_pai = null;
-    }
-    nextState.melds[action.actor] = [
-      ...(nextState.melds[action.actor] ?? []),
-      {
-        type: meldType,
-        pai: action.pai ?? '',
-        consumed: [...(action.consumed ?? [])],
-        target: action.target ?? action.actor,
-      },
-    ];
-    nextState.last_discard = null;
-    nextState.actor_to_move = action.actor;
-    return nextState;
+    return applyMeldAction(nextState, action, viewPlayerId);
   }
 
   return baseState;
