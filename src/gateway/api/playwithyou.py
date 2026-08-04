@@ -257,6 +257,12 @@ def _validate_ladder_capture(capture: LadderCaptureRequest, specs: List[str]) ->
         for account in model.get("accounts", []) or []:
             if isinstance(account, dict):
                 model_by_account[str(account.get("account_id") or "")] = model_id
+    # human 账号必须属于 model_id=human（C23：Nick 的成绩不得记到 70k@04）
+    if model_by_account.get(human_id) != "human":
+        raise ValueError(
+            f"人类账号 {human_id} 必须属于 model_id=human（当前属于 "
+            f"{model_by_account.get(human_id) or '未知'}），拒绝正式捕获"
+        )
     for spec, account_id in zip(specs, bot_ids, strict=True):
         model_id = _spec_to_model_id(spec, PROJECT_ROOT)
         if model_id is None:
@@ -706,7 +712,16 @@ def _capture_root() -> Path:
 
 
 def _discover_captures() -> List[dict]:
-    """扫描持久化捕获目录，重发现 pending/ignored/state（不依赖 SESSIONS 内存）。"""
+    """扫描持久化捕获目录，重发现 pending/ignored/errors（不依赖 SESSIONS 内存）。
+
+    每个子目录只接受对应状态集合：
+    - pending/  只允许 pending_confirmation / published / accepted_publish_failed
+    - ignored/  只返回 ignored
+    - errors/   只允许 incomplete / conflict
+    状态与所在子目录不一致的条目视为不一致状态，不对外暴露。
+    """
+    from gateway.playwithyou_capture import STATE_BY_SUBDIR
+
     captures: List[dict] = []
     root = _capture_root()
     if not root.is_dir():
@@ -714,7 +729,7 @@ def _discover_captures() -> List[dict]:
     for session_dir in sorted(root.iterdir()):
         if not session_dir.is_dir():
             continue
-        for subdir in ("pending", "ignored", "errors"):
+        for subdir, allowed in STATE_BY_SUBDIR.items():
             folder = session_dir / subdir
             if not folder.is_dir():
                 continue
@@ -723,16 +738,21 @@ def _discover_captures() -> List[dict]:
                     payload = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     continue
+                state = payload.get("state")
+                if state not in allowed:
+                    continue  # 状态与目录不一致，不暴露
                 captures.append(
                     {
                         "capture_id": payload.get("capture_id") or path.stem,
                         "session_id": payload.get("session_id") or session_dir.name,
-                        "state": payload.get("state") or subdir,
+                        "state": state,
                         "season_id": payload.get("season_id"),
                         "match": payload.get("match"),
                         "tenhou_log_url": payload.get("tenhou_log_url"),
                         "observer_accounts": payload.get("observer_accounts") or [],
                         "score_observers": payload.get("score_observers") or [],
+                        "conflict_reason": payload.get("conflict_reason"),
+                        "publish_error": payload.get("publish_error"),
                         "_path": str(path),
                     }
                 )
@@ -746,6 +766,10 @@ def _capture_file(capture_id: str) -> Path:
     raise HTTPException(status_code=404, detail=f"capture 不存在: {capture_id}")
 
 
+class SourceConflictError(Exception):
+    """同 match_id 已存在不同内容的 source 文件，拒绝覆盖。"""
+
+
 def _safe_source_filename(match_id: str) -> str:
     import hashlib
 
@@ -753,17 +777,24 @@ def _safe_source_filename(match_id: str) -> str:
     return f"tenhou-{digest}.jsonl"
 
 
-def _write_source_atomic(path: Path, line: str) -> str:
-    """一局一个 JSONL 文件，原子写入；返回现有内容（用于幂等判定）。"""
+def write_source_idempotent(path: Path, line: str) -> str:
+    """一局一个 JSONL 文件的幂等写入。
+
+    - 文件不存在：原子创建，返回 ``"created"``；
+    - 已存在且内容相同：no-op，返回 ``"existing"``；
+    - 已存在且内容不同：抛 SourceConflictError，绝不改写旧 source（C17）。
+    """
     import os as _os
 
-    existing = None
     if path.is_file():
         existing = path.read_text(encoding="utf-8")
+        if existing.rstrip("\n") == line.rstrip("\n"):
+            return "existing"
+        raise SourceConflictError(f"同 match_id 已存在不同内容: {path.name}")
     tmp = path.with_name(f".{path.name}.{_os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(line, encoding="utf-8")
     _os.replace(tmp, path)
-    return existing
+    return "created"
 
 
 def _confirm_capture(capture_id: str) -> dict:
@@ -797,13 +828,12 @@ def _confirm_capture(capture_id: str) -> dict:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if str(season.get("status") or "") != "running":
         raise HTTPException(status_code=409, detail=f"赛季 {season_id} 不是 running")
-    ingest = season.get("ingest") if isinstance(season.get("ingest"), dict) else {}
-    raw_root = ingest.get("sources_root")
-    if not raw_root:
-        raise HTTPException(status_code=409, detail=f"赛季 {season_id} 缺少 ingest.sources_root")
-    sources_root = Path(str(raw_root))
-    if not sources_root.is_absolute():
-        sources_root = (_ladder_data_root() / raw_root).resolve()
+    from replay import ladder_ingest
+
+    try:
+        sources_root = ladder_ingest.resolve_ingest_sources_root(PROJECT_ROOT, season)
+    except ladder_ingest.LadderIngestError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     pwy_source = sources_root / "playwithyou"
     pwy_source.mkdir(parents=True, exist_ok=True)
@@ -818,12 +848,10 @@ def _confirm_capture(capture_id: str) -> dict:
         separators=(",", ":"),
     ) + "\n"
     target = pwy_source / _safe_source_filename(str(match.get("match_id") or capture_id))
-    existing = _write_source_atomic(target, line)
-    if existing is not None and existing.rstrip("\n") != line.rstrip("\n"):
-        raise HTTPException(
-            status_code=409,
-            detail="同 match_id 已存在不同内容的 source 文件，拒绝覆盖（conflict）",
-        )
+    try:
+        write_source_idempotent(target, line)
+    except SourceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     # 同步发布（本轮不引入后台队列）。
     registry_path = _ladder_config_dir() / f"{season_id}.json"
@@ -884,7 +912,19 @@ def confirm_ladder_capture(capture_id: str) -> dict:
 
 @router.post("/captures/{capture_id}/ignore")
 def ignore_ladder_capture(capture_id: str) -> dict:
+    """把捕获标记为 ignored（先原子改写 payload.state，再移动到 ignored/）。
+
+    之后不可再 confirm（state 校验拒绝），也不会进入 sources（C18）。
+    """
     path = _capture_file(capture_id)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"capture 无法解析: {exc}") from exc
+    if payload.get("state") == "published":
+        raise HTTPException(status_code=409, detail="已发布的捕获不能忽略")
+    payload["state"] = "ignored"
+    _set_capture_state(path, "ignored")
     ignored_dir = path.parent.parent / "ignored"
     ignored_dir.mkdir(parents=True, exist_ok=True)
     import os as _os

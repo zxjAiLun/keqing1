@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,24 @@ from typing import Any, Iterator, Mapping, Protocol, Sequence
 from replay.rank_systems import create_rank_system
 
 GAME_LENGTHS = ("hanchan", "tonpuu")
+
+
+def resolve_ingest_sources_root(project_root: Path, season: Mapping[str, Any]) -> Path:
+    """解析赛季 ingest.sources_root（API 与 publisher 共用同一套路径语义）。
+
+    - 绝对路径原样使用；
+    - 相对路径：设置 ``KEQING_LADDER_DATA_ROOT`` 时相对数据根，否则相对仓库根。
+    """
+    ingest = season.get("ingest") if isinstance(season.get("ingest"), dict) else {}
+    raw = ingest.get("sources_root")
+    if not raw:
+        raise LadderIngestError("season 缺少 ingest.sources_root")
+    path = Path(str(raw))
+    if path.is_absolute():
+        return path.resolve()
+    data_root = os.environ.get("KEQING_LADDER_DATA_ROOT", "").strip()
+    base = Path(data_root) if data_root else project_root
+    return (base / path).resolve()
 
 
 class LadderIngestError(ValueError):

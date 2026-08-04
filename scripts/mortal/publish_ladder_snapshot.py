@@ -627,16 +627,14 @@ def publish_snapshot(
 
     data_root = os.environ.get("KEQING_LADDER_DATA_ROOT", "").strip()
 
-    # ingest 赛季：sources_root 作为权威输入根（相对路径基于 data_root/仓库根）。
+    # ingest 赛季：sources_root 解析与 API 共用同一实现（相对路径基于
+    # KEQING_LADDER_DATA_ROOT，未设置时基于仓库根）。
     ingest_root: Path | None = None
     ingest_cfg = season.get("ingest") if isinstance(season.get("ingest"), dict) else None
     if ingest_cfg:
-        raw_root = ingest_cfg.get("sources_root")
-        if isinstance(raw_root, str) and raw_root.strip():
-            ingest_root = Path(raw_root)
-            if not ingest_root.is_absolute():
-                base = Path(data_root) if data_root else _REPO_ROOT
-                ingest_root = (base / ingest_root).resolve()
+        from replay import ladder_ingest
+
+        ingest_root = ladder_ingest.resolve_ingest_sources_root(_REPO_ROOT, season)
 
     root = snapshot_root or default_snapshot_root(Path(data_root) if data_root else None, season_id)
 
