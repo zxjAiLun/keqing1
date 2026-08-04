@@ -52,6 +52,8 @@ export function LadderAccountPage() {
   const ptProgress = ptTarget !== null && ptTarget > 0 && account
     ? Math.max(0, Math.min(100, (account.pt_current / ptTarget) * 100))
     : 0;
+  // 仅当本账号的对局记录含个人计分档位时，才展示"计分档位"列
+  const hasTierData = detail?.recent_games.some((game) => Boolean(game.pt_tier)) ?? false;
 
   return (
     <PageShell width={1180}>
@@ -222,7 +224,7 @@ export function LadderAccountPage() {
                     <th style={thStyle}>场次</th>
                     <th style={thStyle}>顺位</th>
                     <th style={thStyle}>段位变化</th>
-                    <th style={thStyle}>计分档位</th>
+                    {hasTierData && <th style={thStyle}>计分档位</th>}
                     <th style={{ ...thStyle, textAlign: 'right' }}>终局分</th>
                     <th style={{ ...thStyle, textAlign: 'right' }}>分数Δ</th>
                     <th style={{ ...thStyle, textAlign: 'right' }}>PTΔ</th>
@@ -251,9 +253,11 @@ export function LadderAccountPage() {
                           <span style={{ color: 'var(--text-muted)' }}>—</span>
                         )}
                       </td>
-                      <td style={{ ...tdStyle, color: 'var(--text-muted)' }}>
-                        {game.pt_tier ? tierDisplay(game.pt_tier, game.positive_pt) : '—'}
-                      </td>
+                      {hasTierData && (
+                        <td style={{ ...tdStyle, color: 'var(--text-muted)' }}>
+                          {game.pt_tier ? tierDisplay(game.pt_tier, game.positive_pt) : '—'}
+                        </td>
+                      )}
                       <td style={{ ...tdStyle, ...numStyle }}>{game.final_score.toLocaleString()}</td>
                       <td style={{ ...tdStyle, ...numStyle }}>{fmtSignedInt(game.score_delta)}</td>
                       <td style={{ ...tdStyle, ...numStyle }}>{fmtSignedInt(game.pt_delta)}</td>
@@ -262,7 +266,7 @@ export function LadderAccountPage() {
                     </tr>
                   ))}
                   {detail.recent_games.length === 0 && (
-                    <tr><td colSpan={9} style={{ ...tdStyle, color: 'var(--text-muted)', textAlign: 'center', padding: 14 }}>暂无对局记录</td></tr>
+                    <tr><td colSpan={hasTierData ? 9 : 8} style={{ ...tdStyle, color: 'var(--text-muted)', textAlign: 'center', padding: 14 }}>暂无对局记录</td></tr>
                   )}
                 </tbody>
               </table>
