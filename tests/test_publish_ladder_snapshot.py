@@ -1012,3 +1012,66 @@ def test_legacy_manifest_reflects_custom_cli_rank_points(tmp_path: Path):
     assert manifest["scoring_system"] == "tenhou_houou_7dan_fixed"
     assert manifest["rank_points"] == "100,50,0,-150"
     assert manifest["scoring"]["pt_rank_deltas"] == [100.0, 50.0, 0.0, -150.0]
+
+
+# ---------------------------------------------------------------------------
+# R9: ingest season publish (multi-source -> deterministic replay -> snapshot)
+# ---------------------------------------------------------------------------
+
+def test_publish_ingest_season_builds_snapshot(tmp_path: Path):
+    """ingest 赛季：sources_root 下 playwithyou JSONL -> 合并重放 -> 单 snapshot。"""
+    scoring = {"system": "tenhou_rank_progression", "version": "v1", "game_length": "hanchan"}
+    season = {
+        "schema": ladder.SEASON_SCHEMA,
+        "season_id": "official-ladder-v1",
+        "status": "running",
+        "report_dir": "artifacts/old-snapshot",
+        "default": False,
+        "scoring": scoring,
+        "ingest": {"sources_root": str(tmp_path / "sources")},
+        "models": [
+            {"model_id": "human", "accounts": [{"account_id": "nick@01", "display_name": "Nick"}]},
+            {"model_id": "70k", "accounts": [
+                {"account_id": "70k@01", "display_name": "70k-1"},
+                {"account_id": "70k@02", "display_name": "70k-2"},
+                {"account_id": "70k@03", "display_name": "70k-3"},
+            ]},
+        ],
+    }
+    sources = tmp_path / "sources" / "playwithyou"
+    sources.mkdir(parents=True)
+    (sources / "capture.jsonl").write_text(
+        json.dumps({
+            "match_id": "pwy:1",
+            "occurred_at": "2026-08-04T07:00:00Z",
+            "game_length": "hanchan",
+            "players": [
+                {"account_id": "nick@01", "seat": 0, "final_score": 42100},
+                {"account_id": "70k@01", "seat": 1, "final_score": 28300},
+                {"account_id": "70k@02", "seat": 2, "final_score": 18100},
+                {"account_id": "70k@03", "seat": 3, "final_score": 11500},
+            ],
+        }, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    registry_path = _write_registry(tmp_path, season)
+    result = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[tmp_path / "logs"],
+        snapshot_root=tmp_path / "snapshots",
+        build_report=_fake_build([_row()], games=1),
+    )
+    assert result["registry_switched"] is True
+    snapshot_dir = Path(result["snapshot_dir"])
+    summary = json.loads((snapshot_dir / "account_summary.json").read_text(encoding="utf-8"))
+    assert summary["games"] == 1
+    assert summary["scoring"]["system"] == "tenhou_rank_progression"
+    assert summary["scoring"]["tier_policy"] == "individual_highest"
+    ledger = (snapshot_dir / "account_ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(ledger) == 4
+    assert "table_room" not in ledger[0]
+    assert '"pt_tier"' in ledger[0]
+    manifest = json.loads((snapshot_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["scoring_system"] == "tenhou_rank_progression"
+    assert manifest["rank_points"] is None
+    assert ladder.read_registry(registry_path)["report_dir"] == result["snapshot_dir"]

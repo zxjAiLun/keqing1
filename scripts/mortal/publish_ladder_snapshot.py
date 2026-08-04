@@ -110,23 +110,38 @@ def build_snapshot(
     preserve_log_dir_order: bool,
     interleave_log_dirs: bool,
     scoring_config: dict[str, Any] | None = None,
+    season: dict[str, Any] | None = None,
+    ingest_root: Path | None = None,
     build_report: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """在全新快照目录构建完整 report（staging）。"""
-    from scripts.mortal import build_platform_account_report as account_report
+    """在全新快照目录构建完整 report（staging）。
 
-    builder = build_report or account_report.build_report
-    report = builder(
-        log_dirs=log_dirs,
-        output_dir=snapshot_dir,
-        mortal_root=mortal_root,
-        platform_model_label=platform_model_label,
-        # 复用仓库严格解析：恰好四个顺位值，错误立即拒绝
-        rank_points=account_report.parse_rank_points(rank_points),
-        preserve_log_dir_order=preserve_log_dir_order,
-        interleave_log_dirs=interleave_log_dirs,
-        scoring_config=scoring_config,
-    )
+    - ingest 赛季（season 带 ingest 配置）：走多来源 LadderMatch 合并 + 全量重放；
+    - 否则：走原有 mjai 日志 report builder。
+    """
+    if ingest_root is not None and season is not None:
+        from replay import ladder_ingest
+
+        report = ladder_ingest.build_ingest_report(
+            season=season,
+            sources_root=ingest_root,
+            output_dir=snapshot_dir,
+        )
+    else:
+        from scripts.mortal import build_platform_account_report as account_report
+
+        builder = build_report or account_report.build_report
+        report = builder(
+            log_dirs=log_dirs,
+            output_dir=snapshot_dir,
+            mortal_root=mortal_root,
+            platform_model_label=platform_model_label,
+            # 复用仓库严格解析：恰好四个顺位值，错误立即拒绝
+            rank_points=account_report.parse_rank_points(rank_points),
+            preserve_log_dir_order=preserve_log_dir_order,
+            interleave_log_dirs=interleave_log_dirs,
+            scoring_config=scoring_config,
+        )
     if not isinstance(report, dict):
         raise PublishError("构建脚本未返回 report 字典")
     return report
@@ -390,17 +405,43 @@ def _ordered_log_stats(
     return stats
 
 
+def _ordered_source_stats(ingest_root: Path) -> list[tuple[str, int, int]]:
+    """ingest 赛季：递归收集 sources_root 下全部 source 文件（路径/大小/mtime）。"""
+    stats: list[tuple[str, int, int]] = []
+    if not ingest_root.is_dir():
+        return stats
+    for path in sorted(ingest_root.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        stats.append((str(path.resolve()), st.st_size, st.st_mtime_ns))
+    return stats
+
+
 def compute_source_fingerprint(
     log_dirs: list[Path],
     *,
     preserve_log_dir_order: bool = False,
     interleave_log_dirs: bool = False,
+    ingest_root: Path | None = None,
 ) -> str:
     """源日志输入指纹：覆盖 builder 实际处理顺序的路径、大小、mtime_ns。
 
     相同的日志文件集合（含 ordering/interleave 参数）产生相同指纹；
     用于避免人工重复执行、resume 无新增日志、调度器重复触发时的重复重建。
+
+    ingest 赛季使用 sources_root 全量文件；否则使用 mjai 日志目录。
     """
+    if ingest_root is not None:
+        stats = _ordered_source_stats(ingest_root)
+        hasher = hashlib.sha256()
+        hasher.update(b"ingest=1;")
+        for path, size, mtime_ns in stats:
+            hasher.update(f"{path}\0{size}\0{mtime_ns}\n".encode("utf-8"))
+        return hasher.hexdigest()
     stats = _ordered_log_stats(
         log_dirs,
         preserve_log_dir_order=preserve_log_dir_order,
@@ -585,6 +626,18 @@ def publish_snapshot(
     expected_rank_points = manifest_rank_points(resolved_block)
 
     data_root = os.environ.get("KEQING_LADDER_DATA_ROOT", "").strip()
+
+    # ingest 赛季：sources_root 作为权威输入根（相对路径基于 data_root/仓库根）。
+    ingest_root: Path | None = None
+    ingest_cfg = season.get("ingest") if isinstance(season.get("ingest"), dict) else None
+    if ingest_cfg:
+        raw_root = ingest_cfg.get("sources_root")
+        if isinstance(raw_root, str) and raw_root.strip():
+            ingest_root = Path(raw_root)
+            if not ingest_root.is_absolute():
+                base = Path(data_root) if data_root else _REPO_ROOT
+                ingest_root = (base / ingest_root).resolve()
+
     root = snapshot_root or default_snapshot_root(Path(data_root) if data_root else None, season_id)
 
     previous_report_dir = season.get("report_dir")
@@ -600,6 +653,7 @@ def publish_snapshot(
         log_dirs,
         preserve_log_dir_order=preserve_log_dir_order,
         interleave_log_dirs=interleave_log_dirs,
+        ingest_root=ingest_root,
     )
     # dry-run 始终真正构建与校验；skip 前必须确认当前快照三件套仍完整可读。
     if not dry_run and previous_snapshot is not None and previous_snapshot.is_dir():
@@ -657,6 +711,8 @@ def publish_snapshot(
             preserve_log_dir_order=preserve_log_dir_order,
             interleave_log_dirs=interleave_log_dirs,
             scoring_config=scoring_config,
+            season=season,
+            ingest_root=ingest_root,
             build_report=build_report,
         )
         build_duration = time.monotonic() - build_started
@@ -685,7 +741,7 @@ def publish_snapshot(
             keep_account_logs=keep_account_logs,
             source_fingerprint=source_fingerprint,
             registry_contract=_registry_contract(season),
-            source_log_dirs=log_dirs,
+            source_log_dirs=[ingest_root] if ingest_root is not None else log_dirs,
             source_file_count=len(source_stats),
             source_total_bytes=sum(int(size) for _path, size, _mtime in source_stats),
             build_duration_seconds=round(build_duration, 4),

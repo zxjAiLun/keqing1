@@ -10,6 +10,7 @@
     "check:ladder-live-semantics": "node --experimental-transform-types scripts/checkLadderLiveSemantics.ts",
     "check:ladder-season-semantics": "node --experimental-transform-types scripts/checkLadderSeasonSemantics.ts",
     "check:ladder-rank-semantics": "node --experimental-transform-types scripts/checkLadderRankSemantics.ts",
+    "check:ladder-ingest-semantics": "node --experimental-transform-types scripts/checkLadderIngestSemantics.ts",
     "lint": "eslint .",
     "preview": "vite preview"
   },
