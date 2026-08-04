@@ -9,11 +9,16 @@ import {
   startPlayWithYou,
   stopPlayWithYou,
   getPlayWithYouStatus,
+  listLadderCaptures,
+  confirmLadderCapture,
+  ignoreLadderCapture,
+  retryPublishLadderCapture,
   type NetworkId,
   type SpeedId,
   type DeviceId,
   type BotInfo,
   type PlayWithYouStatus,
+  type LadderCaptureEntry,
 } from "../api/playwithyouApi";
 
 const ACCENT = "#8e44ad";
@@ -98,6 +103,14 @@ export function PlayWithYouPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // R9-3 正式天梯捕获绑定（呼出前选择；开局后冻结）
+  const [captureEnabled, setCaptureEnabled] = useState(false);
+  const [captureSeason, setCaptureSeason] = useState("official-ladder-v1");
+  const [captureHuman, setCaptureHuman] = useState("nick@01");
+  const [captureBots, setCaptureBots] = useState(["70k@01", "70k@02", "70k@03"]);
+  const [captures, setCaptures] = useState<LadderCaptureEntry[]>([]);
+  const [captureBusy, setCaptureBusy] = useState<string | null>(null);
+
   const logRef = useRef<HTMLDivElement | null>(null);
   const pollingRef = useRef<number | null>(null);
 
@@ -133,6 +146,15 @@ export function PlayWithYouPage() {
         networks: [...networks],
         custom_paths: customPaths,
         device,
+        ladder_capture: captureEnabled
+          ? {
+              enabled: true,
+              season_id: captureSeason,
+              human_account_id: captureHuman,
+              bot_account_ids: [...captureBots],
+              mode: "confirm" as const,
+            }
+          : undefined,
       };
       const s = await startPlayWithYou(req);
       setStatus(s);
@@ -159,6 +181,60 @@ export function PlayWithYouPage() {
       setLoading(false);
     }
   };
+
+  const refreshCaptures = useCallback(async () => {
+    try {
+      const data = await listLadderCaptures();
+      setCaptures(data.captures);
+    } catch {
+      /* transient */
+    }
+  }, []);
+
+  const confirmCapture = async (captureId: string) => {
+    setCaptureBusy(captureId);
+    setError(null);
+    try {
+      await confirmLadderCapture(captureId);
+      await refreshCaptures();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "确认失败");
+    } finally {
+      setCaptureBusy(null);
+    }
+  };
+
+  const ignoreCapture = async (captureId: string) => {
+    setCaptureBusy(captureId);
+    setError(null);
+    try {
+      await ignoreLadderCapture(captureId);
+      await refreshCaptures();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "忽略失败");
+    } finally {
+      setCaptureBusy(null);
+    }
+  };
+
+  const retryPublish = async (captureId: string) => {
+    setCaptureBusy(captureId);
+    setError(null);
+    try {
+      await retryPublishLadderCapture(captureId);
+      await refreshCaptures();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "重试失败");
+    } finally {
+      setCaptureBusy(null);
+    }
+  };
+
+  useEffect(() => {
+    refreshCaptures();
+    const timer = window.setInterval(refreshCaptures, 5000);
+    return () => window.clearInterval(timer);
+  }, [refreshCaptures]);
 
   useEffect(() => stopPolling, [stopPolling]);
 
@@ -314,6 +390,72 @@ export function PlayWithYouPage() {
             );
           })}
         </div>
+
+        {/* R9-3 正式天梯捕获绑定 */}
+        <div
+          style={{
+            marginTop: 14,
+            padding: 12,
+            borderRadius: 8,
+            border: `1px solid ${captureEnabled ? ACCENT : "var(--border)"}`,
+            background: captureEnabled ? "rgba(142,68,173,0.04)" : "var(--surface-subtle)",
+          }}
+        >
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={captureEnabled}
+              disabled={isRunning}
+              onChange={(e) => setCaptureEnabled(e.target.checked)}
+            />
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>
+              ☑ 计入正式天梯（tenhou_rank_progression）
+            </span>
+          </label>
+          <div style={hintStyle}>
+            开启后对局结束后确认录入 official-ladder-v1 赛季；开局后绑定冻结，不可中途修改。
+          </div>
+          {captureEnabled && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 10 }}>
+              <div>
+                <label style={labelStyle}>赛季</label>
+                <input
+                  value={captureSeason}
+                  disabled={isRunning}
+                  onChange={(e) => setCaptureSeason(e.target.value)}
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <label style={labelStyle}>人类账号</label>
+                <input
+                  value={captureHuman}
+                  disabled={isRunning}
+                  onChange={(e) => setCaptureHuman(e.target.value)}
+                  style={inputStyle}
+                />
+              </div>
+              <div style={{ gridColumn: "1 / -1" }}>
+                <label style={labelStyle}>Bot 账号（3 个，顺序对应 AI 槽位）</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {captureBots.map((bot, index) => (
+                    <input
+                      key={index}
+                      value={bot}
+                      disabled={isRunning}
+                      onChange={(e) => {
+                        const next = [...captureBots];
+                        next[index] = e.target.value;
+                        setCaptureBots(next);
+                      }}
+                      style={{ ...inputStyle, flex: 1 }}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Status / live log */}
@@ -387,6 +529,135 @@ export function PlayWithYouPage() {
               ? status.log_tail.join("\n")
               : "（暂无日志，呼出后这里会实时滚动显示 bot / gateway 输出）"}
           </div>
+
+          {/* 冻结的正式天梯绑定（开局后不可修改） */}
+          {status.ladder_capture?.enabled && (
+            <div
+              style={{
+                marginTop: 10,
+                fontSize: 12,
+                padding: "8px 10px",
+                borderRadius: 6,
+                border: "1px solid rgba(142,68,173,0.4)",
+                background: "rgba(142,68,173,0.06)",
+                color: "var(--text-secondary)",
+              }}
+            >
+              ☑ 正式天梯（已冻结）：
+              <b style={{ color: ACCENT }}>{status.ladder_capture.season_id}</b> ·
+              人类 <b>{status.ladder_capture.human_account_id}</b> ·
+              Bot {status.ladder_capture.bot_account_ids.join(" / ")} ·
+              模式 {status.ladder_capture.mode}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* R9-3 已捕获正式天梯对局（等待确认） */}
+      {captures.length > 0 && (
+        <div className="card" style={{ padding: 14, marginTop: 12 }}>
+          <SectionTitle
+            title="已捕获正式天梯对局"
+            description="对局结束后确认录入 official-ladder-v1；状态：waiting_start / in_game / pending_confirmation / published / ignored / incomplete / conflict / accepted_publish_failed"
+          />
+          {captures.map((c) => (
+            <div
+              key={c.capture_id}
+              style={{
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                padding: 12,
+                marginBottom: 10,
+                background: "var(--surface-subtle)",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                  <b style={{ color: "var(--text-primary)" }}>{c.match?.match_id || c.capture_id}</b>
+                  <span style={{ color: "var(--text-muted)" }}> · {c.season_id}</span>
+                  {c.tenhou_log_url && (
+                    <a
+                      href={c.tenhou_log_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ marginLeft: 8, color: ACCENT, fontWeight: 700 }}
+                    >
+                      打开天凤牌谱 ↗
+                    </a>
+                  )}
+                </div>
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    padding: "3px 8px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border)",
+                    color: c.state === "pending_confirmation" ? "#27ae60" : "var(--text-muted)",
+                  }}
+                >
+                  {c.state}
+                </span>
+              </div>
+              {c.match?.players && c.match.players.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  {[...c.match.players]
+                    .sort((a, b) => a.final_score - b.final_score)
+                    .map((p, index) => (
+                      <div key={p.account_id} style={{ fontSize: 12, padding: "2px 0" }}>
+                        <span style={{ display: "inline-block", width: 120, color: "var(--text-primary)", fontWeight: 700 }}>
+                          {p.account_id}
+                        </span>
+                        <span style={{ display: "inline-block", width: 80, color: "var(--text-muted)" }}>
+                          {p.final_score}
+                        </span>
+                        <span style={{ color: "var(--text-secondary)" }}>
+                          {index + 1} 位（seat {p.seat}）
+                        </span>
+                      </div>
+                    ))}
+                </div>
+              )}
+              <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
+                验证 observer：{(c.score_observers ?? []).join(" / ") || "—"}
+                {c.state === "accepted_publish_failed" && (
+                  <span style={{ color: "var(--error)" }}> · 已确认但发布失败，可重试</span>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                {c.state === "pending_confirmation" && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => confirmCapture(c.capture_id)}
+                      disabled={captureBusy === c.capture_id}
+                      style={{ height: 30, padding: "0 12px", background: "#27ae60", color: "#fff", borderRadius: 6, fontSize: 12, cursor: "pointer" }}
+                    >
+                      确认录入并发布
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => ignoreCapture(c.capture_id)}
+                      disabled={captureBusy === c.capture_id}
+                      style={{ height: 30, padding: "0 12px", background: "transparent", color: "var(--text-muted)", border: "1px solid var(--border)", borderRadius: 6, fontSize: 12, cursor: "pointer" }}
+                    >
+                      忽略本局
+                    </button>
+                  </>
+                )}
+                {c.state === "accepted_publish_failed" && (
+                  <button
+                    type="button"
+                    onClick={() => retryPublish(c.capture_id)}
+                    disabled={captureBusy === c.capture_id}
+                    style={{ height: 30, padding: "0 12px", background: ACCENT, color: "#fff", borderRadius: 6, fontSize: 12, cursor: "pointer" }}
+                  >
+                    重新发布
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </PageShell>
