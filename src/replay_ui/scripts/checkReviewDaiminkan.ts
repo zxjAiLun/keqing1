@@ -170,6 +170,7 @@ function daiminkanEntry(): DecisionLogEntry {
     last_discard: { actor: 1, pai: '6m' },
     is_obs: false,
     chosen: { type: 'daiminkan', actor: 0, pai: '6m', consumed: ['6m', '6m', '6m'], target: 1 },
+    gt_action: { type: 'daiminkan', actor: 0, pai: '6m', consumed: ['6m', '6m', '6m'], target: 1 },
     candidates: [
       { action: { type: 'daiminkan', actor: 0, pai: '6m', consumed: ['6m', '6m', '6m'], target: 1 }, logit: 1 },
       { action: { type: 'none', actor: 0 }, logit: 0 },
@@ -257,6 +258,7 @@ function singleMeldEntry(action: Action, hand: string[], melds: MeldEntry[]): De
     hand,
     melds: { 0: melds, 1: [], 2: [], 3: [] },
     chosen: action,
+    gt_action: action,
     candidates: [],
   };
 }

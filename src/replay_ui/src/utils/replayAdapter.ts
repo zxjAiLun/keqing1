@@ -129,6 +129,35 @@ export function buildCandidateScores(entry: DecisionLogEntry): CandidateScore[] 
 export type ReplayBoardPhase = 'pre' | 'reach' | 'post';
 
 /**
+ * 牌谱实际动作的唯一来源（P2-3）。
+ * - gt_action 存在 → gt_action
+ * - obs 步 → chosen（观察步的 chosen 就是他家实际动作）
+ * - 明确 pass/none → none
+ * - 其他 gt_action=null 且 chosen 非 none → null + diagnostic（模型建议不是牌谱事实）
+ */
+export function getActualReplayAction(
+  entry: DecisionLogEntry | null | undefined,
+): Action | null {
+  if (!entry) return null;
+  const gt = entry.gt_action;
+  if (gt) return gt;
+  const chosen = entry.chosen;
+  if (entry.is_obs && chosen) {
+    return chosen.type === 'none' ? { type: 'none', actor: chosen.actor } : chosen;
+  }
+  if (chosen?.type === 'none') {
+    return { type: 'none', actor: chosen.actor };
+  }
+  if (typeof console !== 'undefined') {
+    console.error(
+      `[replayAdapter] entry ${entry.step ?? '?'} gt_action 缺失且 chosen 非 none（${chosen?.type ?? '?'}）`
+      + ' — 不将模型建议作为牌谱实际动作',
+    );
+  }
+  return null;
+}
+
+/**
  * 跨 entry 合并白名单：只允许长生命周期棋盘字段从上一 entry 继承。
  * 决策级字段（hand/tsumo_pai/chosen/gt_action/candidates/actor_to_move/
  * last_discard/is_obs/board_phase/source_event_index/teacher_reviews）缺失时
@@ -148,9 +177,10 @@ function mergeReplayEntryWithPrevious(
       mergedRecord[key] = prevEntry[key];
     }
   }
-  // 决策级字段缺失时显式诊断（不继承上一巡）
+  // 决策级字段缺失时显式诊断（不继承上一巡）。
+  // 注意区分：字段不存在（键缺失）vs 字段存在但合法为 null（如 tsumo_pai / last_discard）。
   for (const key of ['hand', 'tsumo_pai', 'chosen', 'gt_action', 'actor_to_move', 'last_discard', 'is_obs', 'board_phase'] as const) {
-    if (mergedRecord[key] == null) {
+    if (!(key in mergedRecord)) {
       if (typeof console !== 'undefined') {
         console.error(`[replayAdapter] entry ${entry.step ?? '?'} missing decision field: ${key}（不继承上一巡）`);
       }
@@ -401,17 +431,17 @@ function applyKakanAction(
 }
 
 function supportsPostActionPhase(entry: DecisionLogEntry): boolean {
-  const action = entry.gt_action ?? entry.chosen;
-  return ['dahai', 'chi', 'pon', 'daiminkan', 'ankan', 'kakan', 'hora', 'ryukyoku'].includes(action?.type ?? '');
+  const action = getActualReplayAction(entry);
+  return action != null && ['dahai', 'chi', 'pon', 'daiminkan', 'ankan', 'kakan', 'hora', 'ryukyoku'].includes(action.type);
 }
 
 function supportsReachPhase(entry: DecisionLogEntry): boolean {
-  const action = entry.gt_action ?? entry.chosen;
+  const action = getActualReplayAction(entry);
   return action?.type === 'reach';
 }
 
 function isResponseNoneAction(entry: DecisionLogEntry | null | undefined): boolean {
-  const action = entry?.gt_action ?? entry?.chosen;
+  const action = getActualReplayAction(entry);
   return action?.type === 'none';
 }
 
@@ -423,7 +453,7 @@ export function isCollapsibleResponsePassStep(
   entry: DecisionLogEntry | null | undefined,
   prevEntry?: DecisionLogEntry | null,
 ): boolean {
-  const prevAction = prevEntry ? (prevEntry.gt_action ?? prevEntry.chosen) : null;
+  const prevAction = getActualReplayAction(prevEntry);
   return Boolean(
     entry
     && prevEntry
@@ -468,8 +498,8 @@ export function entryToBattleState(
   const melds = Array.isArray(mergedEntry.melds)
     ? mergedEntry.melds as MeldEntry[][]
     : toArray(mergedEntry.melds) as MeldEntry[][];
-  const action = mergedEntry.gt_action ?? mergedEntry.chosen;
-  const isMeldAction = (MELD_ACTION_TYPES as readonly string[]).includes(action?.type ?? '');
+  const action = getActualReplayAction(mergedEntry);
+  const isMeldAction = action != null && (MELD_ACTION_TYPES as readonly string[]).includes(action.type);
   const isPreDiscardPhase = phase === 'pre' && action?.type === 'dahai';
   const suppressSnapshotDrawActor = action?.type === 'none';
   const pendingDiscardActorFromSnapshot =
@@ -560,7 +590,7 @@ export function entryToBattleState(
       return nextState;
     }
 
-    if (isMeldAction) {
+    if (isMeldAction && action) {
       // 完整矩阵：
       //   before & pre  → 原样
       //   after  & post → 原样
@@ -609,13 +639,18 @@ export function entryToBattleState(
     replay_draw_actor: null,
   };
 
-  if (phase === 'reach' && supportsReachPhase(mergedEntry)) {
+  if (phase === 'reach' && action?.type === 'reach') {
     nextState.pending_reach[action.actor] = true;
     nextState.actor_to_move = action.actor;
     return nextState;
   }
 
   if (!supportsPostActionPhase(mergedEntry)) {
+    return baseState;
+  }
+
+  if (!action) {
+    // actual action 缺失（gt_action=null 且 chosen 非 none）：不得把模型建议当牌谱动作
     return baseState;
   }
 
@@ -647,7 +682,7 @@ export function entryToBattleState(
     return nextState;
   }
 
-  if (isMeldAction) {
+  if (isMeldAction && action) {
     if (needsMeldRewind(baseState, action)) {
       // snapshot 已经是动作后状态（meld 已在、consumed 已移除）：不再前向应用
       return baseState;

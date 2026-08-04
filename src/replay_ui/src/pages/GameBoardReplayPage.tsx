@@ -7,7 +7,7 @@ import { Tile } from '../components/BattleBoard/Tile';
 import { ReplayDecisionPanel } from '../components/DecisionPanel/ReplayDecisionPanel';
 import { ReplayStatsDialog } from '../components/ReviewWorkspace/ReplayStatsDialog';
 import { ReplayWorkspaceNavigation } from '../components/ReviewWorkspace/ReplayWorkspaceNavigation';
-import { entryToBattleState, buildLogitData, hasReplayPostAction, hasReplayReachPhase, isCollapsibleResponsePassStep, type ReplayBoardPhase } from '../utils/replayAdapter';
+import { entryToBattleState, buildLogitData, getActualReplayAction, hasReplayPostAction, hasReplayReachPhase, isCollapsibleResponsePassStep, type ReplayBoardPhase } from '../utils/replayAdapter';
 import { buildReplayHandsForBoard, removeTileOnce, type ReplayEvent } from '../utils/replayHands';
 import { useReplayPlayer } from '../hooks/useReplayPlayer';
 import { replayApi } from '../api/replayApi';
@@ -31,7 +31,7 @@ const REPLAY_BOARD_PHASE_LABELS: Record<ReplayBoardPhase, string> = {
 };
 
 function isForcedRiichiTsumogiriEntry(entry: ReplayData['log'][number] | null | undefined): boolean {
-  const action = entry?.gt_action ?? entry?.chosen;
+  const action = getActualReplayAction(entry);
   return Boolean(
     entry
     && !entry.is_obs
@@ -324,7 +324,7 @@ export function GameBoardReplayPage() {
 
   const isOwnDiscardStep = useCallback((step: number) => {
     if (!data || step < 0 || step >= data.log.length) return false;
-    const action = data.log[step]?.gt_action ?? data.log[step]?.chosen;
+    const action = getActualReplayAction(data.log[step]);
     return action?.type === 'dahai' && action.actor === viewPlayerId;
   }, [data, viewPlayerId]);
 
@@ -863,7 +863,7 @@ function buildReplayResultSummary(
   playerNames: string[],
 ): ResultSummary | null {
   if (!events || !entry) return null;
-  const action = (entry.gt_action ?? entry.chosen) as Action | undefined;
+  const action = getActualReplayAction(entry) as Action | null;
   if (!action || (action.type !== 'hora' && action.type !== 'ryukyoku')) return null;
   const kyokuKey = entry.kyoku_key;
   if (!kyokuKey) return null;

@@ -10,8 +10,8 @@
 //   - source_event_index 缺失时走 legacy 窗口匹配（前后 obs 边界内找动作事件），
 //     失败返回 null + 对齐诊断，绝不悄悄沿用旧 cursor。
 
-import type { Action } from '../types/battle';
-import type { ReplayBoardPhase } from './replayAdapter';
+import type { Action } from '../types/replay';
+import { getActualReplayAction, type ReplayBoardPhase } from './replayAdapter.ts';
 import type { DecisionLogEntry, ReplayData } from '../types/replay';
 
 export type ReplayEvent = Record<string, unknown>;
@@ -113,7 +113,8 @@ export interface ReplayHandsBoundary {
 
 /**
  * 确定当前 entry 在原始 events 中的动作事件边界。
- * 优先 source_event_index；缺失时在前后 obs 事件窗口内匹配动作。
+ * 优先 source_event_index，但必须验证事件与动作匹配（P2-2）；
+ * 缺失或失配时走前后 obs 边界内的 legacy 窗口匹配。
  * 无法对齐时返回 null 并输出诊断。
  */
 export function resolveEntryEventBoundary(
@@ -122,7 +123,7 @@ export function resolveEntryEventBoundary(
   data: ReplayData,
   entry: DecisionLogEntry,
 ): ReplayHandsBoundary | null {
-  const action = (entry.gt_action ?? entry.chosen) as Action | null | undefined;
+  const action = getActualReplayAction(entry);
   if (!action) return { actionIndex: -1, aligned: true };
 
   // 无事件动作（pass/none）：停在最近的 obs 边界（该步不产生新事件）
@@ -141,8 +142,14 @@ export function resolveEntryEventBoundary(
   const sei = entry.source_event_index;
   if (typeof sei === 'number') {
     const local = sei - rangeStartIdx;
-    if (local >= 1 && local < kyokuEvents.length) {
+    if (local >= 1 && local < kyokuEvents.length && eventMatchesAction(kyokuEvents[local], action)) {
       return { actionIndex: local, aligned: true, actionEvent: kyokuEvents[local] };
+    }
+    if (typeof console !== 'undefined') {
+      console.error(
+        `[replayHands] event boundary diagnostic: entry step=${entry.step} sei=${sei} 指向的事件与动作不匹配`
+        + `（${action.type} ${action.pai ?? ''} by ${action.actor}），尝试 legacy 窗口匹配`,
+      );
     }
   }
 
@@ -202,8 +209,21 @@ export function buildReplayHandsForBoard(
   const boundary = resolveEntryEventBoundary(kyokuEvents, range.startIdx, data, currentEntry);
   if (!boundary) return null; // 对齐失败：输出诊断后不返回陈旧手牌
 
-  const action = (currentEntry.gt_action ?? currentEntry.chosen) as Action | null | undefined;
-  if (!action || action.type === 'none' || boundary.actionIndex < 1) {
+  const action = getActualReplayAction(currentEntry);
+  if (!action) {
+    // 无实际动作（gt_action 缺失且 chosen 非 none）：不把模型建议当牌谱事件
+    return hands.map((tiles) => [...tiles]);
+  }
+
+  if (action.type === 'none') {
+    // none/pass：该步不产生新事件，但手牌应反映"当前时点"——
+    // 应用 start_kyoku 到最近事件边界的全部既有事件，而不是返回开局配牌。
+    const endIdx = Math.min(Math.max(boundary.actionIndex, 0), kyokuEvents.length - 1);
+    for (let i = 1; i <= endIdx; i++) applyReplayEventToHands(hands, kyokuEvents[i]);
+    return hands.map((tiles) => [...tiles]);
+  }
+
+  if (boundary.actionIndex < 1) {
     return hands.map((tiles) => [...tiles]);
   }
 
@@ -277,7 +297,7 @@ export function findFirstHandDivergence(
   if (!events || !data) return null;
   for (let step = 0; step < data.log.length; step++) {
     const entry = data.log[step];
-    const action = (entry.gt_action ?? entry.chosen) as Action | null | undefined;
+    const action = getActualReplayAction(entry);
     if (!action || action.type === 'none') continue;
 
     const sei = entry.source_event_index;
