@@ -10,8 +10,8 @@
 //   G10：真实 kakan step 475（replay_54beeaed，player 0）pre/post 正确
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { entryToBattleState, buildLogitData } from '../src/utils/replayAdapter.ts';
-import { buildReplayHandsForBoard, findFirstHandDivergence } from '../src/utils/replayHands.ts';
+import { entryToBattleState, buildLogitData, getActualReplayAction } from '../src/utils/replayAdapter.ts';
+import { buildReplayHandsForBoard, findFirstHandDivergence, findKyokuEventRange, resolveEntryEventBoundary } from '../src/utils/replayHands.ts';
 import type { DecisionLogEntry, ReplayData } from '../src/types/replay.ts';
 
 const REPO = resolve(import.meta.dirname, '../../..');
@@ -38,9 +38,27 @@ function sameMultiset(a: string[], b: string[]): boolean {
   return multiset(a) === multiset(b);
 }
 
+function findKyokuRangeStart(events: Record<string, unknown>[], entry: DecisionLogEntry): number {
+  return findKyokuEventRange(events, entry)?.startIdx ?? 0;
+}
+
+function applyDahaiToHand(tiles: string[], pai?: string): string[] {
+  const hand = [...tiles];
+  if (!pai) return hand;
+  const idx = hand.indexOf(pai);
+  if (idx >= 0) {
+    hand.splice(idx, 1);
+    return hand;
+  }
+  const norm = pai.endsWith('r') ? pai.slice(0, 2) : pai;
+  const normIdx = hand.findIndex((t) => (t.endsWith('r') ? t.slice(0, 2) : t) === norm);
+  if (normIdx >= 0) hand.splice(normIdx, 1);
+  return hand;
+}
+
 const BOARD_FACT_KEYS = [
   'hand', 'tsumo_pai', 'melds', 'discards', 'actor_to_move', 'last_discard',
-  'gt_action', 'scores', 'reached', 'dora_markers', 'source_event_index',
+  'gt_action', 'scores', 'reached', 'dora_markers',
 ];
 
 // ---------------------------------------------------------------------------
@@ -194,6 +212,58 @@ for (const step of [3, 8, 30]) {
       && JSON.stringify(a.melds) === JSON.stringify(b.melds)
       && JSON.stringify(a.discards) === JSON.stringify(b.discards),
     `R6: teacher overlay 不改变 step ${step} 棋盘事实`,
+  );
+}
+
+// --- Gate D：none/pass step 的 Oracle 不应是开局配牌 -------------------------
+
+const passEntry = data.log.find((e) => getActualReplayAction(e)?.type === 'none');
+check(Boolean(passEntry), `Gate D: fixture 应含 none/pass entry`);
+if (passEntry) {
+  const rebuiltPass = buildReplayHandsForBoard(events, data, passEntry, 'pre');
+  check(rebuiltPass != null, `Gate D: none/pass step 应能重建手牌`);
+  if (rebuiltPass) {
+    const startHand = events[findKyokuRangeStart(events, passEntry)].tehais[VIEW] as string[] ?? [];
+    check(
+      !sameMultiset(rebuiltPass[VIEW], startHand),
+      `Gate D: none/pass Oracle 不应返回开局配牌（rebuilt=${rebuiltPass[VIEW].join('')}）`,
+    );
+  }
+}
+
+// --- Gate E：错误 source_event_index 不静默显示错误手牌 ----------------------
+
+const gateEStep8 = byStep.get(8);
+if (gateEStep8) {
+  const corrupted = JSON.parse(JSON.stringify(gateEStep8)) as DecisionLogEntry;
+  corrupted.source_event_index = 3; // 指向事件 3（dahai 2s by 0），与 step 8 动作不匹配
+  const range = findKyokuEventRange(events, corrupted);
+  const boundary = range
+    ? resolveEntryEventBoundary(events.slice(range.startIdx, range.endIdx), range.startIdx, data, corrupted)
+    : null;
+  check(boundary == null || boundary.actionEvent?.pai === 'P', `Gate E: sei 失配应被校验拦截或经 legacy 对齐到正确事件`);
+  const rebuilt = buildReplayHandsForBoard(events, data, corrupted, 'post');
+  if (rebuilt) {
+    const expectedPost = applyDahaiToHand([...(gateEStep8.hand ?? []), ...(gateEStep8.tsumo_pai ? [gateEStep8.tsumo_pai] : [])], (gateEStep8.gt_action ?? gateEStep8.chosen)?.pai);
+    check(sameMultiset(rebuilt[VIEW], expectedPost), `Gate E: sei 失配不应产生错误手牌（rebuilt=${rebuilt[VIEW].join('')}）`);
+  }
+}
+
+// --- Gate F：gt_action=null 且 chosen 非 none 时不修改棋盘 -------------------
+
+const step3 = byStep.get(3);
+if (step3) {
+  const incomplete = JSON.parse(JSON.stringify(step3)) as DecisionLogEntry;
+  delete incomplete.gt_action;
+  incomplete.chosen = { type: 'pon', actor: VIEW, pai: '5p', consumed: ['5p', '5p'], target: 2 };
+  const state = entryToBattleState(incomplete, names, VIEW, 'post');
+  check(
+    sameMultiset(state.hand, step3.hand ?? []) && state.tsumo_pai === step3.tsumo_pai,
+    `Gate F: gt_action=null 且 chosen 非 none 时 post 不得应用模型建议（hand=${state.hand.join('')}）`,
+  );
+  check(
+    JSON.stringify(state.melds) === JSON.stringify(entryToBattleState(step3, names, VIEW, 'pre').melds),
+    `Gate F: gt_action=null 时不得新增模型建议的副露`,
   );
 }
 
