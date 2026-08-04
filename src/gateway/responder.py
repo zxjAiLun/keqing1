@@ -197,6 +197,8 @@ class Taikyoku(Base):
             log_url = 'https://tenhou.net/3/?log={}&tw={}'.format(log, seat)
             logger.info('log({}): {}'.format(state.name, log_url))
             sent['log'] = log_url
+            # 显式全局座位（collector 用它绑定正式账号；与 URL tw 必须一致）
+            sent['tenhou_log_seat'] = seat
 
         await send_to_mjai(sent)
         await send_to_tenhou({'tag': 'NEXTREADY'})

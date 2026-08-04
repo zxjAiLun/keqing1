@@ -114,10 +114,10 @@ def test_collector_derives_human_seat(tmp_path: Path) -> None:
     assert collector._account_for_seat(1) == "nick@01"  # noqa: SLF001
 
 
-def test_tenhou_log_seat_explicit_overrides_tw(tmp_path: Path) -> None:
-    """显式 tenhou_log_seat 优先于 URL tw。"""
+def test_tenhou_log_seat_consistent_with_tw_accepted(tmp_path: Path) -> None:
+    """C44：explicit tenhou_log_seat 与 URL tw 一致 -> 接受。"""
     collector = _collector(tmp_path)
-    collector.observe("70k@01", _start_game(tw=0, tenhou_log_seat=3))
+    collector.observe("70k@01", _start_game(tw=3, tenhou_log_seat=3))
     assert collector._seat_of == {"70k@01": 3}  # noqa: SLF001
 
 
@@ -518,8 +518,8 @@ def test_observer_seat_rebind_conflict(tmp_path: Path) -> None:
     assert _read_state(collector.capture_dir)["state"] == "conflict"
 
 
-def test_end_game_progressive_pending_without_finalize(tmp_path: Path) -> None:
-    """C21：end_game 后不调用 finalize（进程异常退出），pending 仍可恢复。"""
+def test_end_game_progressive_provisional_without_finalize(tmp_path: Path) -> None:
+    """C21+C33：第一份 end_game 后不 finalize -> provisional_result 已落盘（不可确认）。"""
     global_scores = [42100, 28300, 18100, 11500]
     collector = _collector(tmp_path)
     collector.observe("70k@01", _start_game(tw=2))
@@ -529,8 +529,8 @@ def test_end_game_progressive_pending_without_finalize(tmp_path: Path) -> None:
     # 不调用 finalize：provisional pending 已渐进落盘
     pending = _read_pending(collector.capture_dir)
     assert len(pending) == 1
-    assert pending[0]["state"] == "pending_confirmation"
-    # 重新创建 collector（模拟重启恢复）也能看到同一 pending
+    assert pending[0]["state"] == "provisional_result"  # C33：未封口，不可确认
+    # 重新创建 collector（模拟重启恢复）也能看到同一 provisional
     recovered = _collector(tmp_path)
     assert len(_read_pending(recovered.capture_dir)) == 1
 
@@ -783,3 +783,280 @@ def test_retry_clears_publish_error(tmp_path: Path, season_env, monkeypatch) -> 
     published = json.loads(state_file.read_text(encoding="utf-8"))
     assert published["state"] == "published"
     assert "publish_error" not in published
+
+
+# --- R9-3 review fixes round 3: seal model + source admission (C33-C45) ----
+
+def test_first_end_game_only_provisional(tmp_path: Path) -> None:
+    """C33：第一份 end_game 只生成 provisional，不可 confirm。"""
+    global_scores = [42100, 28300, 18100, 11500]
+    collector = _collector(tmp_path)
+    collector.observe("70k@01", _start_game(tw=2))
+    collector.observe("70k@02", _start_game(tw=0))
+    collector.observe("70k@03", _start_game(tw=3))
+    collector.observe("70k@01", _end_game(global_scores, tw=2))
+    pending = _read_pending(collector.capture_dir)
+    assert len(pending) == 1
+    assert pending[0]["state"] == "provisional_result"
+    assert pending[0]["match"]["occurred_at"]  # occurred_at 已冻结
+
+
+def test_all_observers_seal_pending(tmp_path: Path) -> None:
+    """C34：三份一致结果后才 seal 为 pending_confirmation。"""
+    global_scores = [42100, 28300, 18100, 11500]
+    collector = _collector(tmp_path)
+    collector.observe("70k@01", _start_game(tw=2))
+    collector.observe("70k@02", _start_game(tw=0))
+    collector.observe("70k@03", _start_game(tw=3))
+    collector.observe("70k@01", _end_game(global_scores, tw=2))
+    assert _read_pending(collector.capture_dir)[0]["state"] == "provisional_result"
+    collector.observe("70k@02", _end_game(global_scores, tw=0))
+    collector.observe("70k@03", _end_game(global_scores, tw=3))
+    pending = _read_pending(collector.capture_dir)
+    assert len(pending) == 1
+    assert pending[0]["state"] == "pending_confirmation"
+
+
+def test_single_observer_sealed_at_finalize(tmp_path: Path) -> None:
+    """C35：单 observer 场景在 finalize 时 seal。"""
+    global_scores = [42100, 28300, 18100, 11500]
+    collector = _collector(tmp_path)
+    collector.observe("70k@01", _start_game(tw=2))
+    collector.observe("70k@02", _start_game(tw=0))
+    collector.observe("70k@03", _start_game(tw=3))
+    collector.observe("70k@01", _end_game(global_scores, tw=2))
+    collector.finalize()
+    pending = _read_pending(collector.capture_dir)
+    assert len(pending) == 1
+    assert pending[0]["state"] == "pending_confirmation"
+
+
+def test_confirm_then_finalize_does_not_overwrite(tmp_path: Path, season_env) -> None:
+    """C36：confirm 后 observe/finalize，published 不被覆盖。"""
+    from gateway.api import playwithyou as pwy_api
+    from gateway.playwithyou_capture import CAPTURE_SCHEMA, capture_dir_for_session
+
+    capture_dir = capture_dir_for_session(Path(season_env["root"]) / "data", "abc123")
+    pending_dir = capture_dir / "pending"
+    pending_dir.mkdir(parents=True)
+    payload = {
+        "schema": CAPTURE_SCHEMA,
+        "capture_id": "abc123:tenhou:sealed",
+        "session_id": "abc123",
+        "state": "pending_confirmation",
+        "season_id": "official-ladder-v1",
+        "match": {
+            "match_id": "tenhou:sealed",
+            "occurred_at": "2026-08-04T07:00:00Z",
+            "game_length": "hanchan",
+            "players": [
+                {"account_id": "nick@01", "seat": 0, "final_score": 42100},
+                {"account_id": "70k@01", "seat": 1, "final_score": 28300},
+                {"account_id": "70k@02", "seat": 2, "final_score": 18100},
+                {"account_id": "70k@03", "seat": 3, "final_score": 11500},
+            ],
+        },
+        "tenhou_log_url": "x",
+        "observer_accounts": [],
+        "score_observers": ["70k@01"],
+    }
+    (pending_dir / "tenhou_sealed.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    pwy_api._confirm_capture("abc123:tenhou:sealed")
+    assert json.loads((pending_dir / "tenhou_sealed.json").read_text(encoding="utf-8"))["state"] == "published"
+
+    # launcher 继续 observe/finalize：_already_terminal 阻止覆盖回 pending
+    collector = PlayWithYouCaptureCollector(
+        binding=_binding(),
+        capture_dir=capture_dir,
+    )
+    global_scores = [42100, 28300, 18100, 11500]
+    collector.observe("70k@01", _start_game(tw=1, match_id="sealed"))
+    collector.observe("70k@02", _start_game(tw=0, match_id="sealed"))
+    collector.observe("70k@03", _start_game(tw=3, match_id="sealed"))
+    collector.observe("70k@01", _end_game(global_scores, tw=1))
+    collector.finalize()
+    state = json.loads((pending_dir / "tenhou_sealed.json").read_text(encoding="utf-8"))
+    assert state["state"] == "published"  # 不被覆盖回 pending
+
+
+def test_ignore_then_finalize_does_not_recreate(tmp_path: Path, season_env) -> None:
+    """C37：ignore 后再 observe/finalize，不重新生成 pending。"""
+    from gateway.api import playwithyou as pwy_api
+    from gateway.playwithyou_capture import CAPTURE_SCHEMA, capture_dir_for_session
+
+    capture_dir = capture_dir_for_session(Path(season_env["root"]) / "data", "abc123")
+    pending_dir = capture_dir / "pending"
+    pending_dir.mkdir(parents=True)
+    payload = {
+        "schema": CAPTURE_SCHEMA,
+        "capture_id": "abc123:tenhou:ignored2",
+        "session_id": "abc123",
+        "state": "pending_confirmation",
+        "season_id": "official-ladder-v1",
+        "match": {
+            "match_id": "tenhou:ignored2",
+            "occurred_at": "2026-08-04T07:00:00Z",
+            "game_length": "hanchan",
+            "players": [
+                {"account_id": "nick@01", "seat": 0, "final_score": 42100},
+                {"account_id": "70k@01", "seat": 1, "final_score": 28300},
+                {"account_id": "70k@02", "seat": 2, "final_score": 18100},
+                {"account_id": "70k@03", "seat": 3, "final_score": 11500},
+            ],
+        },
+        "tenhou_log_url": "x",
+        "observer_accounts": [],
+        "score_observers": ["70k@01"],
+    }
+    (pending_dir / "tenhou_ignored2.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    pwy_api.ignore_ladder_capture("abc123:tenhou:ignored2")
+    assert list(pending_dir.glob("*.json")) == []
+
+    collector = PlayWithYouCaptureCollector(binding=_binding(), capture_dir=capture_dir)
+    global_scores = [42100, 28300, 18100, 11500]
+    collector.observe("70k@01", _start_game(tw=1, match_id="ignored2"))
+    collector.observe("70k@02", _start_game(tw=0, match_id="ignored2"))
+    collector.observe("70k@03", _start_game(tw=3, match_id="ignored2"))
+    collector.observe("70k@01", _end_game(global_scores, tw=1))
+    collector.finalize()
+    assert list(pending_dir.glob("*.json")) == []  # 不复活
+
+
+def test_occurred_at_frozen_after_first_generation(tmp_path: Path) -> None:
+    """C38：occurred_at 在首次生成后永久不变。"""
+    global_scores = [42100, 28300, 18100, 11500]
+    collector = _collector(tmp_path)
+    collector.observe("70k@01", _start_game(tw=2))
+    collector.observe("70k@02", _start_game(tw=0))
+    collector.observe("70k@03", _start_game(tw=3))
+    collector.observe("70k@01", _end_game(global_scores, tw=2))
+    first = _read_pending(collector.capture_dir)[0]["match"]["occurred_at"]
+    collector.observe("70k@02", _end_game(global_scores, tw=0))
+    collector.observe("70k@03", _end_game(global_scores, tw=3))
+    collector.finalize()
+    second = _read_pending(collector.capture_dir)[0]["match"]["occurred_at"]
+    assert second == first
+
+
+def test_explicit_seat_conflicts_with_url_tw(tmp_path: Path) -> None:
+    """C45：explicit tenhou_log_seat 与 URL tw 不同 -> conflict。"""
+    collector = _collector(tmp_path)
+    collector.observe("70k@01", _start_game(tw=0, tenhou_log_seat=3))
+    collector.finalize()
+    assert _read_state(collector.capture_dir)["state"] == "conflict"
+    assert _read_pending(collector.capture_dir) == []
+
+
+# --- Source admission validation (C39-C43) ---------------------------------
+
+def _write_confirm_payload(tmp_path: Path, *, match_id: str = "tenhou:admit", players: list | None = None) -> dict:
+    """写一个 hand-crafted pending capture 并返回 capture_id。"""
+    from gateway.playwithyou_capture import CAPTURE_SCHEMA, capture_dir_for_session
+
+    if players is None:
+        players = [
+            {"account_id": "nick@01", "seat": 0, "final_score": 42100},
+            {"account_id": "70k@01", "seat": 1, "final_score": 28300},
+            {"account_id": "70k@02", "seat": 2, "final_score": 18100},
+            {"account_id": "70k@03", "seat": 3, "final_score": 11500},
+        ]
+    capture_dir = capture_dir_for_session(tmp_path / "data", "abc123")
+    pending_dir = capture_dir / "pending"
+    pending_dir.mkdir(parents=True)
+    payload = {
+        "schema": CAPTURE_SCHEMA,
+        "capture_id": f"abc123:{match_id}",
+        "session_id": "abc123",
+        "state": "pending_confirmation",
+        "season_id": "official-ladder-v1",
+        "match": {
+            "match_id": match_id,
+            "occurred_at": "2026-08-04T07:00:00Z",
+            "game_length": "hanchan",
+            "players": players,
+        },
+        "tenhou_log_url": "x",
+        "observer_accounts": [],
+        "score_observers": ["70k@01"],
+    }
+    (pending_dir / f"{match_id.replace(':', '_')}.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    return f"abc123:{match_id}"
+
+
+def _assert_rejected_without_source(tmp_path: Path, season_env, capture_id: str) -> None:
+    from gateway.api import playwithyou as pwy_api
+
+    with pytest.raises(Exception, match="校验失败"):
+        pwy_api._confirm_capture(capture_id)
+    sources_root = Path(season_env["season"]["ingest"]["sources_root"])
+    assert list((sources_root / "playwithyou").glob("*.jsonl")) == []
+
+
+def test_duplicate_account_rejected_no_source(tmp_path: Path, season_env) -> None:
+    """C39：重复 account -> 拒绝，source 不存在。"""
+    players = [
+        {"account_id": "nick@01", "seat": 0, "final_score": 42100},
+        {"account_id": "nick@01", "seat": 1, "final_score": 28300},
+        {"account_id": "70k@02", "seat": 2, "final_score": 18100},
+        {"account_id": "70k@03", "seat": 3, "final_score": 11500},
+    ]
+    capture_id = _write_confirm_payload(tmp_path, match_id="tenhou:dup", players=players)
+    _assert_rejected_without_source(tmp_path, season_env, capture_id)
+
+
+def test_seat_missing_rejected_no_source(tmp_path: Path, season_env) -> None:
+    """C40：seat 缺失或重复 -> 拒绝，source 不存在。"""
+    players = [
+        {"account_id": "nick@01", "seat": 0, "final_score": 42100},
+        {"account_id": "70k@01", "seat": 0, "final_score": 28300},
+        {"account_id": "70k@02", "seat": 2, "final_score": 18100},
+        {"account_id": "70k@03", "seat": 3, "final_score": 11500},
+    ]
+    capture_id = _write_confirm_payload(tmp_path, match_id="tenhou:seat", players=players)
+    _assert_rejected_without_source(tmp_path, season_env, capture_id)
+
+
+def test_unregistered_account_rejected_no_source(tmp_path: Path, season_env) -> None:
+    """C41：未注册 account -> 拒绝，source 不存在。"""
+    players = [
+        {"account_id": "nick@01", "seat": 0, "final_score": 42100},
+        {"account_id": "ghost@01", "seat": 1, "final_score": 28300},
+        {"account_id": "70k@02", "seat": 2, "final_score": 18100},
+        {"account_id": "70k@03", "seat": 3, "final_score": 11500},
+    ]
+    capture_id = _write_confirm_payload(tmp_path, match_id="tenhou:ghost", players=players)
+    _assert_rejected_without_source(tmp_path, season_env, capture_id)
+
+
+def test_bad_match_metadata_rejected_no_source(tmp_path: Path, season_env) -> None:
+    """C42：occurred_at / match_id 非法 -> 拒绝，source 不存在。"""
+    from gateway.playwithyou_capture import CAPTURE_SCHEMA, capture_dir_for_session
+
+    capture_dir = capture_dir_for_session(tmp_path / "data", "abc123")
+    pending_dir = capture_dir / "pending"
+    pending_dir.mkdir(parents=True)
+    payload = {
+        "schema": CAPTURE_SCHEMA,
+        "capture_id": "abc123:tenhou:badmeta",
+        "session_id": "abc123",
+        "state": "pending_confirmation",
+        "season_id": "official-ladder-v1",
+        "match": {
+            "match_id": "tenhou:badmeta",
+            "occurred_at": "not-a-date",
+            "game_length": "hanchan",
+            "players": [
+                {"account_id": "nick@01", "seat": 0, "final_score": 42100},
+                {"account_id": "70k@01", "seat": 1, "final_score": 28300},
+                {"account_id": "70k@02", "seat": 2, "final_score": 18100},
+                {"account_id": "70k@03", "seat": 3, "final_score": 11500},
+            ],
+        },
+        "tenhou_log_url": "x",
+        "observer_accounts": [],
+        "score_observers": ["70k@01"],
+    }
+    (pending_dir / "tenhou_badmeta.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    _assert_rejected_without_source(tmp_path, season_env, "abc123:tenhou:badmeta")
