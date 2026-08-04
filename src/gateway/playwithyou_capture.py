@@ -32,6 +32,7 @@ CAPTURE_SCHEMA = "keqing.playwithyou.capture.v1"
 CAPTURE_STATES = (
     "waiting_start",
     "in_game",
+    "provisional_result",
     "pending_confirmation",
     "published",
     "ignored",
@@ -42,7 +43,12 @@ CAPTURE_STATES = (
 
 # 各子目录允许的状态（discovery 校验用）。
 STATE_BY_SUBDIR = {
-    "pending": {"pending_confirmation", "published", "accepted_publish_failed"},
+    "pending": {
+        "provisional_result",
+        "pending_confirmation",
+        "published",
+        "accepted_publish_failed",
+    },
     "ignored": {"ignored"},
     "errors": {"incomplete", "conflict"},
 }
@@ -146,6 +152,9 @@ class PlayWithYouCaptureCollector:
     _state: str = "waiting_start"
     _conflict_reason: str | None = None
     _finalized: bool = False
+    # 封口状态：一旦 seal，collector 不再重写 payload（confirm/ignore 后不得复活）。
+    _sealed: bool = False
+    _occurred_at: str | None = None
 
     # --- observation --------------------------------------------------------
 
@@ -161,18 +170,29 @@ class PlayWithYouCaptureCollector:
             # 渐进持久化：每次观察都在锁内完成完整状态转换。
             self._try_complete()
 
-    def _global_seat_for(self, observer: str, message: Mapping[str, Any]) -> int | None:
-        """observer 的全局座位：优先 tenhou_log_seat，其次 log URL 的 tw。"""
-        explicit = message.get("tenhou_log_seat")
-        if isinstance(explicit, int) and explicit in (0, 1, 2, 3):
-            return explicit
-        if isinstance(explicit, str) and explicit.isdigit() and int(explicit) in (0, 1, 2, 3):
-            return int(explicit)
+    def _global_seats_for(self, observer: str, message: Mapping[str, Any]) -> tuple[int | None, int | None]:
+        """observer 的全局座位：explicit（tenhou_log_seat）与 URL tw 分别解析。
+
+        两者都出现时必须一致（P2-1/C45）；否则由调用方判定冲突。
+        """
+        explicit: int | None = None
+        raw_explicit = message.get("tenhou_log_seat")
+        if isinstance(raw_explicit, int) and raw_explicit in (0, 1, 2, 3):
+            explicit = raw_explicit
+        elif isinstance(raw_explicit, str) and raw_explicit.isdigit() and int(raw_explicit) in (0, 1, 2, 3):
+            explicit = int(raw_explicit)
         log_url = message.get("log")
-        return extract_tenhou_log_seat(log_url if isinstance(log_url, str) else None)
+        tw_seat = extract_tenhou_log_seat(log_url if isinstance(log_url, str) else None)
+        return explicit, tw_seat
 
     def _on_start_game(self, observer: str, message: Mapping[str, Any]) -> None:
-        seat = self._global_seat_for(observer, message)
+        explicit, tw_seat = self._global_seats_for(observer, message)
+        if explicit is not None and tw_seat is not None and explicit != tw_seat:
+            self._set_conflict(
+                f"observer {observer} 的 tenhou_log_seat={explicit} 与 URL tw={tw_seat} 不一致"
+            )
+            return
+        seat = explicit if explicit is not None else tw_seat
         if seat is None:
             return  # 无法确定全局座位：本局无法完成，但不是冲突
         if observer in self._seat_of and self._seat_of[observer] != seat:
@@ -270,8 +290,52 @@ class PlayWithYouCaptureCollector:
 
     # --- progressive completion ---------------------------------------------
 
+    def _already_terminal(self) -> bool:
+        """pending/<slug>.json 已被 published/accepted_publish_failed，或 ignored/ 已有同名
+        —— confirm/ignore 后 collector（launcher 进程）不得复活该局（C36/C37）。"""
+        path = self._pending_path()
+        if path is None:
+            return False
+        ignored = self.capture_dir / "ignored" / path.name
+        if ignored.is_file():
+            return True
+        if path.is_file():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+            if payload.get("state") in ("published", "accepted_publish_failed"):
+                return True
+        return False
+
+    def _build_players(self, final_scores: Sequence[int]) -> list[dict[str, Any]] | None:
+        players = [
+            {
+                "account_id": account_id,
+                "seat": seat,
+                "final_score": final_scores[seat],
+            }
+            for seat in range(4)
+            if (account_id := self._account_for_seat(seat)) is not None
+        ]
+        return players if len(players) == 4 else None
+
+    def _seal(self, players: Sequence[Mapping[str, Any]]) -> None:
+        """封口：occurred_at 冻结，payload 一次性写入 pending_confirmation，不再重写。"""
+        if self._occurred_at is None:
+            self._occurred_at = datetime.now(timezone.utc).isoformat()
+        self._state = "pending_confirmation"
+        self._sealed = True
+        self._write_pending(players, occurred_at=self._occurred_at)
+        self._write_state()
+
     def _try_complete(self) -> None:
-        """锁内调用：完整且一致 -> 立即写 provisional pending；冲突 -> 已移除。"""
+        """锁内调用：
+
+        - 完整且所有 observer 分数一致（len==3）-> seal 为 pending_confirmation；
+        - 只有部分 observer 分数 -> 写 provisional_result（不可 confirm，C33）；
+        - finalize 用单份有效分数 seal（C35）。
+        """
         self.capture_dir.mkdir(parents=True, exist_ok=True)
 
         if self._state == "conflict":
@@ -283,29 +347,33 @@ class PlayWithYouCaptureCollector:
         if self._canonical_log_id() is None or human_seat is None or not self._global_scores_by_observer:
             self._write_state()
             return
+        if self._sealed:
+            return  # 封口后不再重写
 
         final_scores = next(iter(self._global_scores_by_observer.values()))
-        players = [
-            {
-                "account_id": account_id,
-                "seat": seat,
-                "final_score": final_scores[seat],
-            }
-            for seat in range(4)
-            if (account_id := self._account_for_seat(seat)) is not None
-        ]
-        if len(players) != 4:
+        players = self._build_players(final_scores)
+        if players is None:
             self._write_state()
             return
 
-        self._state = "pending_confirmation"
-        self._write_pending(players)
-        self._write_state()
+        if self._occurred_at is None:
+            self._occurred_at = datetime.now(timezone.utc).isoformat()
+
+        if self._already_terminal():
+            return  # confirm/ignore 之后不得复活
+
+        if len(self._global_scores_by_observer) >= 3:
+            self._seal(players)
+        else:
+            # 部分 observer 分数：provisional，不可确认（C33）。
+            self._state = "provisional_result"
+            self._write_pending(players, state="provisional_result", occurred_at=self._occurred_at)
+            self._write_state()
 
     # --- finalize -----------------------------------------------------------
 
     def finalize(self) -> None:
-        """launcher 退出时调用一次：兜底触发 completion / 写 incomplete 详情。"""
+        """launcher 退出时调用一次：兜底 seal / 写 incomplete 详情。"""
         with self._lock:
             if self._finalized:
                 return
@@ -314,6 +382,13 @@ class PlayWithYouCaptureCollector:
                 self._write_state()  # errors/ 已在 _set_conflict 立即写出
                 return
             self._try_complete()
+            if self._state == "provisional_result" and not self._sealed and not self._already_terminal():
+                # 单 observer / 部分 observer 场景：finalize 时以现有有效分数 seal（C35）。
+                final_scores = next(iter(self._global_scores_by_observer.values()))
+                players = self._build_players(final_scores)
+                if players is not None:
+                    self._seal(players)
+                    return
             if self._state in ("incomplete", "waiting_start", "in_game"):
                 # 没有完整结果：写 errors/ 详情，让 discovery/UI 可见（C22）。
                 self._state = "incomplete"
@@ -336,7 +411,13 @@ class PlayWithYouCaptureCollector:
         if path is not None and path.is_file():
             path.unlink(missing_ok=True)
 
-    def _write_pending(self, players: Sequence[Mapping[str, Any]]) -> None:
+    def _write_pending(
+        self,
+        players: Sequence[Mapping[str, Any]],
+        *,
+        state: str = "pending_confirmation",
+        occurred_at: str | None = None,
+    ) -> None:
         target = self._pending_path()
         if target is None:
             return
@@ -345,11 +426,11 @@ class PlayWithYouCaptureCollector:
             "schema": CAPTURE_SCHEMA,
             "capture_id": self._capture_id(),
             "session_id": self.binding.session_id,
-            "state": "pending_confirmation",
+            "state": state,
             "season_id": self.binding.season_id,
             "match": {
                 "match_id": self._canonical_log_id(),
-                "occurred_at": datetime.now(timezone.utc).isoformat(),
+                "occurred_at": occurred_at or self._occurred_at or datetime.now(timezone.utc).isoformat(),
                 "game_length": self.game_length,
                 "players": players,
             },
