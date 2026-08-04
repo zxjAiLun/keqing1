@@ -265,6 +265,9 @@ if (step3) {
     JSON.stringify(state.melds) === JSON.stringify(entryToBattleState(step3, names, VIEW, 'pre').melds),
     `Gate F: gt_action=null 时不得新增模型建议的副露`,
   );
+  // P2-1：无可靠事件边界时 Oracle 重建应返回 null，不得伪装成开局配牌
+  const rebuilt = buildReplayHandsForBoard(events, data, incomplete, 'pre');
+  check(rebuilt === null, `Gate F/P2-1: gt_action=null 时 buildReplayHandsForBoard 应返回 null（不得返回开局配牌）`);
 }
 
 // ---------------------------------------------------------------------------

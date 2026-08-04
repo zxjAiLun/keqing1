@@ -211,8 +211,9 @@ export function buildReplayHandsForBoard(
 
   const action = getActualReplayAction(currentEntry);
   if (!action) {
-    // 无实际动作（gt_action 缺失且 chosen 非 none）：不把模型建议当牌谱事件
-    return hands.map((tiles) => [...tiles]);
+    // 无实际动作（gt_action 缺失且 chosen 非 none）：无可靠事件边界可重建，
+    // 未知不能伪装成开局配牌 → 返回 null（P2-1）。
+    return null;
   }
 
   if (action.type === 'none') {
