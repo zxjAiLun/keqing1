@@ -112,8 +112,6 @@ DAN_FOURTH_PT: dict[str, dict[str, int]] = {
     "hanchan": {f"{n}dan": -15 * (n + 2) for n in range(1, 11)},
 }
 
-TENHOU_INITIAL_PT = 4000  # 十段 promotion threshold; 天鳳位 has no target
-
 # --- Rating ----------------------------------------------------------------
 
 RATING_PLACEMENT_POINTS = (30, 10, -10, -30)
@@ -130,15 +128,6 @@ def _rating_correction(games_before: int) -> Decimal:
 def _round_up_2dp(value: Decimal) -> Decimal:
     """Round the third decimal place and below up (切り上げ)."""
     return (value * 100).to_integral_value(rounding=ROUND_CEILING) / 100
-
-
-def _rank_number(rank_id: str) -> int:
-    """Rank as a comparable number: 0 for kyu/newcomer, n for dan, 20 for tenhou."""
-    if rank_id == "tenhou":
-        return 20
-    if rank_id in DAN_INITIAL_PT:
-        return int(rank_id.removesuffix("dan"))
-    return 0
 
 
 def _is_dan(rank_id: str) -> bool:
@@ -170,6 +159,7 @@ class Tenhou4pRanked:
         room_policy: str = "highest_common_eligible",
         room: str | None = None,
         membership: str = "premium",
+        premium_days_remaining: int | None = None,
         initial_rank: str = "newcomer",
         initial_rating: float = 1500.0,
     ):
@@ -179,16 +169,34 @@ class Tenhou4pRanked:
             raise ValueError(f"unknown room_policy: {room_policy!r}")
         if initial_rank not in RANK_NAMES:
             raise ValueError(f"unknown initial_rank: {initial_rank!r}")
+        if membership not in {"premium", "free"}:
+            raise ValueError(f"unknown membership: {membership!r}")
+        if not str(version).strip():
+            raise ValueError("version 不能为空")
+        initial_rating_value = Decimal(str(initial_rating))
+        if not initial_rating_value.is_finite():
+            raise ValueError(f"initial_rating 必须有限: {initial_rating!r}")
+        if room is not None and room not in POSITIVE_PT[game_length]:
+            raise ValueError(f"unknown room: {room!r}")
+        if room_policy == "fixed" and room is None:
+            raise ValueError("fixed room policy requires an explicit room")
+        if premium_days_remaining is not None and premium_days_remaining < 0:
+            raise ValueError(f"premium_days_remaining 不能为负: {premium_days_remaining}")
         self.version = str(version)
         self.game_length = game_length
         self.room_policy = room_policy
         self.membership = membership
+        self.premium_days_remaining = premium_days_remaining
         self.initial_rank = initial_rank
-        self.initial_rating = Decimal(str(initial_rating))
-        # ``fixed`` room policy requires an explicit room.
-        self.fixed_room = room or ("houou" if room_policy == "fixed" else None)
-        if room_policy == "fixed" and self.fixed_room not in POSITIVE_PT[game_length]:
-            raise ValueError(f"unknown fixed room: {self.fixed_room!r}")
+        self.initial_rating = initial_rating_value
+        self.fixed_room = room
+
+    @property
+    def premium_valid(self) -> bool:
+        """有效付费会员：membership=premium 且剩余天数有效（缺省视为有效）。"""
+        if self.membership != "premium":
+            return False
+        return self.premium_days_remaining is None or self.premium_days_remaining > 0
 
     # --- RankSystem protocol ------------------------------------------------
 
@@ -209,7 +217,7 @@ class Tenhou4pRanked:
                 rank_id=rank_id,
                 rank_name=RANK_NAMES[rank_id],
                 ordinal=ordinal,
-                initial_pt=TENHOU_INITIAL_PT,
+                initial_pt=None,
                 target_pt=None,
                 is_tenhou=True,
             )
@@ -230,23 +238,37 @@ class Tenhou4pRanked:
         )
 
     def _eligible(self, state: PlayerRankState, room: str) -> bool:
-        """Tenhou room admission based on pre-match rank and rating."""
-        rank_num = _rank_number(state.rank_id)
+        """Tenhou room admission based on pre-match rank and rating.
+
+        官方规则（https://tenhou.net/man/index.html）：
+        - 一般：新人~三段，以及四段 R1800 未满
+        - 上級：1級以上（含1級）、低于七段 R2000 门槛；低于1級但付费有效期
+          满足条件者也可进入
+        - 特上：四段 R1800 以上
+        - 鳳凰：七段 R2000 以上的有效付费会员
+        """
+        ordinal = RANK_ORDINALS[state.rank_id]
         rating = float(state.rating)
+        is_kyu = ordinal < RANK_ORDINALS["1dan"]
+        dan = None if is_kyu else ordinal - RANK_ORDINALS["1dan"] + 1
         if room == "ippan":
-            if rank_num == 0:
+            if is_kyu:
                 return True
-            if rank_num <= 3:
+            if dan <= 3:
                 return True
-            if rank_num == 4:
+            if dan == 4:
                 return rating < 1800
             return False
         if room == "joukyuu":
-            return 1 <= rank_num <= 7 and rating < 2000
+            if ordinal >= RANK_ORDINALS["1kyu"]:
+                if is_kyu:
+                    return True  # 1級：无需额外付费条件
+                return dan <= 7 and rating < 2000
+            return self.premium_valid  # 低于1級：付费有效期例外
         if room == "tokujou":
-            return rank_num >= 4 and rating >= 1800
+            return dan is not None and dan >= 4 and rating >= 1800
         if room == "houou":
-            return rank_num >= 7 and rating >= 2000 and self.membership == "premium"
+            return dan is not None and dan >= 7 and rating >= 2000 and self.premium_valid
         raise ValueError(f"unknown room: {room!r}")
 
     def _fixed_room(self) -> str:
@@ -301,39 +323,42 @@ class Tenhou4pRanked:
     ) -> RankUpdate:
         if placement not in (1, 2, 3, 4):
             raise ValueError(f"placement must be 1..4, got {placement}")
-        pt_delta = (
-            int(table.positive_pt[placement - 1])
-            if placement < 4
-            else self._fourth_pt(state.rank_id, table.game_length)
-        )
-        raw_pt = int(state.pt) + pt_delta
 
         rank_before = state.rank_id
         rank_after = state.rank_id
-        pt_after = raw_pt
         transition = "none"
 
         if rank_before == "tenhou":
+            # 天鳳位 PT 栏为 ``---``：不再产生任何 PTΔ，也不继续积累。
+            pt_delta = 0
             pt_after = int(state.pt)
-        elif _is_dan(rank_before):
-            n = int(rank_before.removesuffix("dan"))
-            if raw_pt >= DAN_PROMOTION_PT[rank_before]:
-                rank_after = "tenhou" if n == 10 else f"{n + 1}dan"
-                pt_after = self.rank_meta(rank_after).initial_pt or 0
-                transition = "tenhou" if n == 10 else "promotion"
-            elif raw_pt < 0:
-                rank_after = "1kyu" if n == 1 else f"{n - 1}dan"
-                pt_after = self.rank_meta(rank_after).initial_pt or 0
-                transition = "demotion"
-            else:
-                pt_after = raw_pt
-        else:  # newcomer / kyu: never demote, PT floored at 0
-            if raw_pt >= KYU_PROMOTION_PT[rank_before]:
-                rank_after = _next_rank(rank_before)
-                pt_after = self.rank_meta(rank_after).initial_pt or 0
-                transition = "promotion"
-            else:
-                pt_after = max(0, raw_pt)
+        else:
+            pt_delta = (
+                int(table.positive_pt[placement - 1])
+                if placement < 4
+                else self._fourth_pt(rank_before, table.game_length)
+            )
+            raw_pt = int(state.pt) + pt_delta
+            pt_after = raw_pt
+            if _is_dan(rank_before):
+                n = int(rank_before.removesuffix("dan"))
+                if raw_pt >= DAN_PROMOTION_PT[rank_before]:
+                    rank_after = "tenhou" if n == 10 else f"{n + 1}dan"
+                    pt_after = self.rank_meta(rank_after).initial_pt or 0
+                    transition = "tenhou" if n == 10 else "promotion"
+                elif raw_pt < 0:
+                    rank_after = "1kyu" if n == 1 else f"{n - 1}dan"
+                    pt_after = self.rank_meta(rank_after).initial_pt or 0
+                    transition = "demotion"
+                else:
+                    pt_after = raw_pt
+            else:  # newcomer / kyu: never demote, PT floored at 0
+                if raw_pt >= KYU_PROMOTION_PT[rank_before]:
+                    rank_after = _next_rank(rank_before)
+                    pt_after = self.rank_meta(rank_after).initial_pt or 0
+                    transition = "promotion"
+                else:
+                    pt_after = max(0, raw_pt)
 
         # Rating: official Tenhou formula with table-average floor + round-up.
         avg_effective = max(table.avg_rating, RATING_FLOOR)
@@ -358,14 +383,33 @@ class Tenhou4pRanked:
         )
 
     def scoring_block(self) -> dict[str, Any]:
-        """Serializable scoring description for the report manifest."""
+        """Serializable scoring description for the report/manifest.
+
+        report builder 以本方法为单一事实来源，不再自行重建公式字符串。
+        """
         return {
             "system": self.system_id,
             "version": self.version,
             "game_length": self.game_length,
             "room_policy": self.room_policy,
             "membership": self.membership,
+            "premium_days_remaining": self.premium_days_remaining,
             "initial_rank": self.initial_rank,
             "initial_rating": float(self.initial_rating),
             "room": self.fixed_room if self.room_policy == "fixed" else None,
+            "pt_profile": self.system_id,
+            # 动态段位/卓别下不存在单一 4-tuple PT 表。
+            "pt_rank_deltas": None,
+            "pt_initial": None,
+            "pt_target": None,
+            "rank_name": None,
+            "rating_initial": float(self.initial_rating),
+            "rating_formula": (
+                "delta = game_count_correction * "
+                "(placement_point + (max(table_avg_rating, 1500) - player_rating) / 40), "
+                "rounded up to 2 decimals"
+            ),
+            "rating_game_count_correction": "1 - games * 0.002 if games < 400 else 0.2",
+            "rating_scaling": 1.0,
+            "sources": ["https://tenhou.net/man/index.html"],
         }
