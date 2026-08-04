@@ -12,6 +12,7 @@
     "check:ladder-rank-semantics": "node --experimental-transform-types scripts/checkLadderRankSemantics.ts",
     "check:ladder-ingest-semantics": "node --experimental-transform-types scripts/checkLadderIngestSemantics.ts",
     "check:playwithyou-capture-semantics": "node --experimental-transform-types scripts/checkPlaywithyouCaptureSemantics.ts",
+    "check:review-daiminkan": "node --experimental-transform-types scripts/checkReviewDaiminkan.ts",
     "lint": "eslint .",
     "preview": "vite preview"
   },

@@ -1,10 +1,10 @@
 // src/replay_ui/src/utils/replayAdapter.ts
 // DecisionLogEntry → BattleState 适配，供 MahjongTable 消费
 
-import type { DecisionLogEntry } from '../types/replay';
+import type { Action, DecisionLogEntry } from '../types/replay';
 import type { BattleState, DiscardEntry, MeldEntry } from '../types/battle';
-import { TILE_ORDER } from './tileUtils';
-import { sameReplayAction } from './tileUtils';
+import { TILE_ORDER } from './tileUtils.ts';
+import { sameReplayAction } from './tileUtils.ts';
 
 // ---------------------------------------------------------------------------
 // 柱状图数据结构
@@ -178,15 +178,89 @@ function popLastDiscardIfMatches(
   return { discards: next };
 }
 
-function popLastMeld(
-  melds: MeldEntry[][],
-  actor: number,
-): { melds: MeldEntry[][]; removed?: MeldEntry } {
-  const next = cloneMelds(melds);
-  const actorMelds = [...(next[actor] ?? [])];
-  const removed = actorMelds.pop();
-  next[actor] = actorMelds;
-  return { melds: next, removed };
+const MELD_ACTION_TYPES = ['chi', 'pon', 'daiminkan', 'ankan', 'kakan'] as const;
+
+function normalizedTileList(tiles: string[]): string {
+  return [...tiles].sort().join('|');
+}
+
+function sameMeldShape(a: MeldEntry, b: MeldEntry): boolean {
+  return a.type === b.type
+    && a.pai === b.pai
+    && a.target === b.target
+    && normalizedTileList(a.consumed) === normalizedTileList(b.consumed);
+}
+
+function meldShapeForAction(action: Action): MeldEntry {
+  return {
+    type: action.type as MeldEntry['type'],
+    pai: action.pai ?? '',
+    consumed: [...(action.consumed ?? [])],
+    target: action.target ?? action.actor,
+  };
+}
+
+function needsMeldRewind(state: BattleState, action: Action): boolean {
+  if (!(MELD_ACTION_TYPES as readonly string[]).includes(action?.type ?? '')) return false;
+  const actorMelds = state.melds[action.actor] ?? [];
+  return actorMelds.some((meld) => sameMeldShape(meld, meldShapeForAction(action)));
+}
+
+function addTileOnce(hand: string[], tile?: string): string[] {
+  if (!tile) return [...hand];
+  return [...hand, tile];
+}
+
+/** 把副露动作回退为动作前状态（pre phase 专用）。 */
+function rewindMeldAction(
+  state: BattleState,
+  action: Action,
+  viewPlayerId: number,
+): BattleState {
+  const melds = cloneMelds(state.melds);
+  const actorMelds = [...(melds[action.actor] ?? [])];
+  const shape = meldShapeForAction(action);
+
+  // 匹配此次动作新增的 meld（type/pai/target/consumed），不是简单 popLast
+  let removeIndex = -1;
+  for (let i = actorMelds.length - 1; i >= 0; i--) {
+    if (sameMeldShape(actorMelds[i], shape)) { removeIndex = i; break; }
+  }
+  const targetIndex = removeIndex >= 0 ? removeIndex : actorMelds.length - 1;
+  const removed = actorMelds[targetIndex];
+  const remaining = actorMelds.filter((_, i) => i !== targetIndex);
+
+  let hand = [...state.hand];
+  if (action.type === 'kakan' && removed && removed.consumed.length >= 4) {
+    // kakan 前态是原 pon：consumed = [手牌1, 手牌2, 被鸣, 加杠]，加杠牌放回手中
+    remaining.push({
+      type: 'pon',
+      pai: removed.consumed[2] ?? removed.pai,
+      consumed: removed.consumed.slice(0, 2),
+      target: removed.target,
+    });
+    if (action.actor === viewPlayerId) {
+      for (const tile of removed.consumed.slice(3)) hand = addTileOnce(hand, tile);
+    }
+  } else if (action.actor === viewPlayerId) {
+    for (const tile of action.consumed ?? []) hand = addTileOnce(hand, tile);
+  }
+
+  const lastDiscard =
+    action.type === 'ankan'
+      ? null
+      : action.pai
+        ? { actor: action.target ?? action.actor, pai: action.pai, pai_raw: action.pai }
+        : null;
+
+  return {
+    ...state,
+    hand,
+    melds: { ...melds, [action.actor]: remaining },
+    last_discard: lastDiscard,
+    actor_to_move: action.actor,
+    tsumo_pai: null,
+  };
 }
 
 function supportsPostActionPhase(entry: DecisionLogEntry): boolean {
@@ -350,21 +424,21 @@ export function entryToBattleState(
     }
 
     if (['chi', 'pon', 'daiminkan', 'ankan', 'kakan'].includes(action.type)) {
-      const { melds: prevMelds } = popLastMeld(baseState.melds, action.actor);
-      nextState.melds = prevMelds;
-      nextState.actor_to_move = action.actor;
-      nextState.last_discard = action.type === 'ankan'
-        ? null
-        : action.pai
-          ? { actor: action.target ?? action.actor, pai: action.pai, pai_raw: action.pai }
-          : null;
-      return nextState;
+      if (!needsMeldRewind(baseState, action)) {
+        // snapshot 已是动作前：无需回退
+        return baseState;
+      }
+      return rewindMeldAction(baseState, action, viewPlayerId);
     }
 
     return baseState;
   }
 
   if (phase === 'pre') {
+    if (action && needsMeldRewind(baseState, action)) {
+      // 动作前：把 snapshot 中的副露动作回退（恢复 consumed、正确 meld、last_discard）
+      return rewindMeldAction(baseState, action, viewPlayerId);
+    }
     return baseState;
   }
 
@@ -419,6 +493,10 @@ export function entryToBattleState(
   }
 
   if (['chi', 'pon', 'daiminkan', 'ankan', 'kakan'].includes(action.type)) {
+    if (needsMeldRewind(baseState, action)) {
+      // snapshot 已经是动作后状态（meld 已在、consumed 已移除）：不再前向应用
+      return baseState;
+    }
     const meldType = action.type as MeldEntry['type'];
     if (action.actor === viewPlayerId) {
       let hand = [...nextState.hand];

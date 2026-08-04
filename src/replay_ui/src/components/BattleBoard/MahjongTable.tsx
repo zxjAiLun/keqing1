@@ -51,7 +51,6 @@ function chunkDiscards(discards: DiscardEntry[], cols: number): DiscardEntry[][]
 // ---------------------------------------------------------------------------
 const SELF_HAND_GAP = HAND_TILE_GAP;
 const SELF_HAND_DRAW_GAP = HAND_DRAW_GAP;
-const SELF_HAND_RESERVED_WIDTH = TILE_SIZES.large.w * 14 + SELF_HAND_GAP * 12 + SELF_HAND_DRAW_GAP;
 const SELF_HAND_BAR_MAX_HEIGHT = Math.round(TILE_SIZES.large.h * 1.05);
 const SELF_HAND_BAR_WIDTH = TILE_SIZES.large.w * 0.8;
 const SELF_HAND_BAR_MIN_VISIBLE_PCT = 1;
@@ -638,17 +637,24 @@ function PlayerZone({
     const hasLogitHints = Boolean(logitData?.length);
     const showLogitHints = hasLogitHints && !hideLogitHints;
 
-    return (
-      <div style={{ display: "flex", flexDirection: "row", alignItems: "flex-end", gap: 12 }}>
+    // 手牌宽度按实际数量计算：门清 13/14 张、1/2/3 副露时自然收缩到 10/11、7/8、4/5 张，
+    // 四副露只剩 1/2 张——不再固定预留 14 张宽度（避免大吊车时手牌与副露之间出现巨大空白）。
+    const actualHandWidth =
+      sortedHand.length * TILE_SIZES.large.w
+      + Math.max(0, sortedHand.length - 1) * SELF_HAND_GAP
+      + (tsumoPai ? SELF_HAND_DRAW_GAP + TILE_SIZES.large.w : 0);
 
-        {/* 手牌区：固定宽度，左对齐。Melds在手牌右下方 */}
+    return (
+      <div style={{ display: "flex", flexDirection: "row", alignItems: "flex-end", justifyContent: "center", gap: 12, width: "100%", maxWidth: "100%" }}>
+
+        {/* 手牌 + 副露：作为一组底部水平居中；手牌在左、副露在右，仅间隔 8px */}
         <div style={{ display: "flex", flexDirection: "row", alignItems: "flex-end", gap: 8 }}>
-          {/* 手牌：固定宽度区域，左对齐 */}
+          {/* 手牌：按实际宽度，左对齐 */}
           <div
             onClick={hasLogitHints ? onSelfHandHintToggle : undefined}
             style={{
               position: "relative",
-              width: SELF_HAND_RESERVED_WIDTH,
+              width: actualHandWidth,
               cursor: hasLogitHints ? "pointer" : undefined,
             }}
           >
@@ -658,7 +664,7 @@ function PlayerZone({
                 position: "absolute", bottom: "100%", left: 0,
                 display: "flex", gap: SELF_HAND_GAP, paddingBottom: 3,
                 pointerEvents: "none", alignItems: "flex-end",
-                width: SELF_HAND_RESERVED_WIDTH,
+                width: actualHandWidth,
               }}>
                 {(() => {
                   const visibleLogitData = logitData ?? [];
@@ -729,7 +735,7 @@ function PlayerZone({
               </div>
             )}
             {/* 手牌：左对齐 */}
-            <div style={{ display: "flex", gap: SELF_HAND_GAP, flexWrap: "nowrap", width: SELF_HAND_RESERVED_WIDTH }}>
+            <div style={{ display: "flex", gap: SELF_HAND_GAP, flexWrap: "nowrap", width: actualHandWidth }}>
               {sortedHand.map((tile, i) => {
                 const d = logitData?.find(x => x.pai === tile && !x.isTsumo) ?? logitData?.find(x => x.pai === tile);
                 const showDecisionFrames = showLogitHints;

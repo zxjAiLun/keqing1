@@ -101,7 +101,36 @@ function buildCalledMeldTiles(
   return displayTiles;
 }
 
+export function validateMeldTiles(meld: MeldEntry): boolean {
+  // 空牌/空字符串禁止渲染成空白牌框
+  if (meld.consumed.some((tile) => !tile)) {
+    if (typeof console !== "undefined") console.error("Malformed meld (empty consumed tile)", meld);
+    return false;
+  }
+  let ok = true;
+  switch (meld.type) {
+    case "chi":
+    case "pon":
+      ok = meld.consumed.length === 2 && Boolean(meld.pai);
+      break;
+    case "daiminkan":
+      ok = meld.consumed.length === 3 && Boolean(meld.pai);
+      break;
+    case "ankan":
+      ok = meld.consumed.length >= 4;
+      break;
+    case "kakan":
+      ok = meld.consumed.length >= 4;
+      break;
+    default:
+      ok = false;
+  }
+  if (!ok && typeof console !== "undefined") console.error("Malformed meld (tile count)", meld);
+  return ok;
+}
+
 export function buildMeldDisplayTiles(actor: number, meld: MeldEntry): MeldDisplayTile[] {
+  validateMeldTiles(meld);
   if (meld.type === "kakan" && meld.consumed.length >= 4) {
     const baseHandTiles = meld.consumed.slice(0, 2);
     const calledTile = meld.consumed[2] ?? meld.pai;
