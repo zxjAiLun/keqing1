@@ -18,6 +18,7 @@ Design notes:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -105,6 +106,8 @@ class PWYSession:
         self.speed = speed
         self.device = device
         self.started_at = started_at
+        self.capture_dir: Optional[Path] = None
+        self.binding: Optional[dict] = None
         self.log_lines: List[str] = []
         # Keep the original launcher output outside the FastAPI process.  The
         # status endpoint is intentionally in-memory for simplicity, but a
@@ -175,6 +178,109 @@ def _resolve_spec(network: str, custom_paths: Dict[int, str], slot: int) -> Opti
     return network
 
 
+def _ladder_data_root() -> Path:
+    raw = os.environ.get("KEQING_LADDER_DATA_ROOT", "").strip()
+    return Path(raw) if raw else PROJECT_ROOT / "keqing-data"
+
+
+def _ladder_config_dir() -> Path:
+    from replay import ladder as ladder_data
+
+    return ladder_data.resolve_config_dir(PROJECT_ROOT)
+
+
+def _spec_to_model_id(spec: str, project_root: Path) -> Optional[str]:
+    """把 launcher spec 映射到正式赛季的 model_id（用于账号归属校验）。
+
+    已知命名 spec 直接映射；自定义 checkpoint 需在调用方与 registry
+    checkpoint 逐字比较 resolved path。
+    """
+    known = {"70k": "70k", "ext_mortal": "ext_mortal", "V3_74000": "V3_74000", "V2_74000": "V2_74000"}
+    if spec in known:
+        return known[spec]
+    if spec == "mortal":
+        return None  # 不在正式赛季模型池
+    return None  # 自定义路径由调用方与 registry checkpoint 比对
+
+
+def _validate_ladder_capture(capture: LadderCaptureRequest, specs: List[str]) -> None:
+    """启动 subprocess 前的正式天梯绑定校验（C2 gate）。"""
+    if not capture.enabled:
+        return
+    if capture.mode != "confirm":
+        raise ValueError("本轮 ladder_capture 只支持 mode=confirm")
+    if len(specs) != 3:
+        raise ValueError("正式天梯捕获要求恰好 1 人类 + 3 bot（quantity=3）")
+    season_id = (capture.season_id or "").strip()
+    if not season_id:
+        raise ValueError("ladder_capture.season_id 不能为空")
+
+    from replay import ladder as ladder_data
+
+    try:
+        season = ladder_data.get_season_config(_ladder_config_dir(), season_id)
+    except ladder_data.SeasonNotFoundError as exc:
+        raise ValueError(f"赛季不存在: {season_id}") from exc
+    if str(season.get("status") or "") != "running":
+        raise ValueError(f"赛季 {season_id} 不是 running 状态，不能正式计分")
+    scoring = season.get("scoring") if isinstance(season.get("scoring"), dict) else {}
+    if scoring.get("system") != "tenhou_rank_progression":
+        raise ValueError(f"赛季 {season_id} 未启用 tenhou_rank_progression")
+    ingest = season.get("ingest") if isinstance(season.get("ingest"), dict) else {}
+    if not ingest.get("sources_root"):
+        raise ValueError(f"赛季 {season_id} 缺少 ingest.sources_root")
+
+    registered = {
+        str(account.get("account_id"))
+        for model in season.get("models", []) or []
+        if isinstance(model, dict)
+        for account in model.get("accounts", []) or []
+        if isinstance(account, dict)
+    }
+    human_id = (capture.human_account_id or "").strip()
+    bot_ids = [str(item).strip() for item in capture.bot_account_ids if str(item).strip()]
+    all_ids = [human_id, *bot_ids]
+    if not human_id or len(bot_ids) != 3:
+        raise ValueError("ladder_capture 需要恰好 1 个 human + 3 个 bot 账号")
+    if len(set(all_ids)) != 4:
+        raise ValueError("四个正式账号必须互不重复")
+    missing = sorted(set(all_ids) - registered)
+    if missing:
+        raise ValueError(f"正式账号未在赛季 {season_id} 注册: {missing}")
+
+    # bot 账号所属模型与所选 spec 一致（C2：不得选 V3 checkpoint 绑 70k@01）
+    model_by_account: Dict[str, str] = {}
+    for model in season.get("models", []) or []:
+        if not isinstance(model, dict):
+            continue
+        model_id = str(model.get("model_id") or "")
+        for account in model.get("accounts", []) or []:
+            if isinstance(account, dict):
+                model_by_account[str(account.get("account_id") or "")] = model_id
+    for spec, account_id in zip(specs, bot_ids, strict=True):
+        model_id = _spec_to_model_id(spec, PROJECT_ROOT)
+        if model_id is None:
+            # 自定义 checkpoint：resolved path 必须与 registry checkpoint 完全一致
+            from inference.bot_registry import resolve_bot_spec
+
+            _kind, resolved_path = resolve_bot_spec(spec, PROJECT_ROOT)
+            expected = ""
+            for model in season.get("models", []) or []:
+                if isinstance(model, dict) and model.get("model_id") == model_by_account.get(account_id):
+                    expected = str(model.get("checkpoint") or "")
+                    break
+            if resolved_path is None or Path(str(resolved_path)).resolve() != Path(expected).resolve():
+                raise ValueError(
+                    f"custom checkpoint 与 {account_id} 的注册 checkpoint 不一致，拒绝正式捕获"
+                )
+            continue
+        if model_by_account.get(account_id) != model_id:
+            raise ValueError(
+                f"账号 {account_id} 属于模型 {model_by_account.get(account_id)}，"
+                f"不能绑定 spec {spec!r}（{model_id}）"
+            )
+
+
 def _current_session() -> Optional[PWYSession]:
     with _LOCK:
         # Prefer a running session, else the most recently created.
@@ -185,6 +291,18 @@ def _current_session() -> Optional[PWYSession]:
             last_id = _HISTORY[-1]
             return SESSIONS.get(last_id)
     return None
+
+
+def _binding_view(session: Optional[PWYSession]) -> Optional[LadderCaptureView]:
+    if session is None or session.binding is None:
+        return None
+    return LadderCaptureView(
+        enabled=True,
+        season_id=str(session.binding.get("season_id") or ""),
+        human_account_id=str(session.binding.get("human_account_id") or ""),
+        bot_account_ids=[str(item) for item in session.binding.get("bot_account_ids") or []],
+        mode=str(session.binding.get("mode") or "confirm"),
+    )
 
 
 def _kill_tree(pid: int) -> None:
@@ -299,6 +417,23 @@ class StartPlayWithYouRequest(BaseModel):
     device: str = "cuda"
     name_prefix: str = "NoName"
     tenhou_cookie: Optional[str] = None
+    ladder_capture: Optional["LadderCaptureRequest"] = None
+
+
+class LadderCaptureRequest(BaseModel):
+    enabled: bool = False
+    season_id: str = ""
+    human_account_id: str = ""
+    bot_account_ids: List[str] = []
+    mode: str = "confirm"
+
+
+class LadderCaptureView(BaseModel):
+    enabled: bool = False
+    season_id: str = ""
+    human_account_id: str = ""
+    bot_account_ids: List[str] = []
+    mode: str = "confirm"
 
 
 class PlayWithYouStatus(BaseModel):
@@ -310,6 +445,7 @@ class PlayWithYouStatus(BaseModel):
     bots: List[Dict[str, str]] = []  # [{name, spec}]
     log_tail: List[str] = []
     started_at: Optional[float] = None
+    ladder_capture: Optional[LadderCaptureView] = None
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +515,34 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
     names = [name_prefix] if count == 1 else [f"{name_prefix}-{i + 1}" for i in range(count)]
     device = req.device if req.device in ("cuda", "cpu") else "cuda"
 
+    # session_id 提前生成（R9-3）：binding 冻结必须在启动 launcher 之前。
+    session_id = uuid.uuid4().hex[:12]
+
+    # R9-3 正式天梯捕获：启动前完成全部校验并冻结 binding。
+    capture_dir: Optional[Path] = None
+    if req.ladder_capture is not None and req.ladder_capture.enabled:
+        try:
+            _validate_ladder_capture(req.ladder_capture, specs)
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        from gateway.playwithyou_capture import capture_dir_for_session
+
+        capture_dir = capture_dir_for_session(_ladder_data_root(), session_id)
+        (capture_dir / "pending").mkdir(parents=True, exist_ok=True)
+        (capture_dir / "ignored").mkdir(parents=True, exist_ok=True)
+        (capture_dir / "errors").mkdir(parents=True, exist_ok=True)
+        binding = {
+            "session_id": session_id,
+            "season_id": req.ladder_capture.season_id,
+            "human_account_id": req.ladder_capture.human_account_id,
+            "bot_account_ids": [str(item) for item in req.ladder_capture.bot_account_ids],
+            "mode": req.ladder_capture.mode,
+            "frozen_at": time.time(),
+        }
+        tmp_binding = capture_dir / "binding.tmp"
+        tmp_binding.write_text(json.dumps(binding, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp_binding, capture_dir / "binding.json")
+
     command = [
         sys.executable,
         "-u",
@@ -401,6 +565,8 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
         "--gateway-owner-token",
         GATEWAY_OWNER_TOKEN,
     ]
+    if capture_dir is not None:
+        command += ["--ladder-capture-dir", str(capture_dir)]
     if req.tenhou_cookie:
         command += ["--tenhou-cookie", req.tenhou_cookie]
 
@@ -427,7 +593,6 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"启动失败: {exc}")
 
-    session_id = uuid.uuid4().hex[:12]
     session = PWYSession(
         session_id=session_id,
         proc=proc,
@@ -439,6 +604,9 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
         device=device,
         started_at=time.time(),
     )
+    if req.ladder_capture is not None and req.ladder_capture.enabled:
+        session.capture_dir = capture_dir
+        session.binding = binding
     with _LOCK:
         SESSIONS[session_id] = session
         _HISTORY.append(session_id)
@@ -454,6 +622,7 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
         bots=[{"name": n, "spec": s} for n, s in zip(names, specs)],
         log_tail=session.tail(50),
         started_at=session.started_at,
+        ladder_capture=_binding_view(session),
     )
 
 
@@ -470,6 +639,7 @@ def playwithyou_status() -> PlayWithYouStatus:
             bots=[{"name": n, "spec": s} for n, s in zip(session.names, session.specs)],
             log_tail=session.tail(200),
             started_at=session.started_at,
+            ladder_capture=_binding_view(session),
         )
     # No in-memory session, but a launcher may still be alive as an orphan
     # (e.g. the backend process was restarted and lost its session record).
@@ -525,3 +695,211 @@ def stop_playwithyou() -> PlayWithYouStatus:
         else [],
         started_at=session.started_at if session else None,
     )
+
+
+# ---------------------------------------------------------------------------
+# R9-3: ladder capture review & confirm
+# ---------------------------------------------------------------------------
+
+def _capture_root() -> Path:
+    return _ladder_data_root() / "captures" / "playwithyou"
+
+
+def _discover_captures() -> List[dict]:
+    """扫描持久化捕获目录，重发现 pending/ignored/state（不依赖 SESSIONS 内存）。"""
+    captures: List[dict] = []
+    root = _capture_root()
+    if not root.is_dir():
+        return captures
+    for session_dir in sorted(root.iterdir()):
+        if not session_dir.is_dir():
+            continue
+        for subdir in ("pending", "ignored", "errors"):
+            folder = session_dir / subdir
+            if not folder.is_dir():
+                continue
+            for path in sorted(folder.glob("*.json")):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                captures.append(
+                    {
+                        "capture_id": payload.get("capture_id") or path.stem,
+                        "session_id": payload.get("session_id") or session_dir.name,
+                        "state": payload.get("state") or subdir,
+                        "season_id": payload.get("season_id"),
+                        "match": payload.get("match"),
+                        "tenhou_log_url": payload.get("tenhou_log_url"),
+                        "observer_accounts": payload.get("observer_accounts") or [],
+                        "score_observers": payload.get("score_observers") or [],
+                        "_path": str(path),
+                    }
+                )
+    return captures
+
+
+def _capture_file(capture_id: str) -> Path:
+    for entry in _discover_captures():
+        if entry["capture_id"] == capture_id:
+            return Path(entry["_path"])
+    raise HTTPException(status_code=404, detail=f"capture 不存在: {capture_id}")
+
+
+def _safe_source_filename(match_id: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256(match_id.encode("utf-8")).hexdigest()[:16]
+    return f"tenhou-{digest}.jsonl"
+
+
+def _write_source_atomic(path: Path, line: str) -> str:
+    """一局一个 JSONL 文件，原子写入；返回现有内容（用于幂等判定）。"""
+    import os as _os
+
+    existing = None
+    if path.is_file():
+        existing = path.read_text(encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.{_os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    tmp.write_text(line, encoding="utf-8")
+    _os.replace(tmp, path)
+    return existing
+
+
+def _confirm_capture(capture_id: str) -> dict:
+    from gateway.playwithyou_capture import CAPTURE_SCHEMA
+
+    path = _capture_file(capture_id)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"capture 无法解析: {exc}") from exc
+    if payload.get("schema") != CAPTURE_SCHEMA:
+        raise HTTPException(status_code=400, detail="capture schema 无效")
+    state = payload.get("state")
+    if state == "published":
+        # 幂等：已确认的对局重复 confirm 为 no-op（source 文件已存在，publisher 可 skip）。
+        return {"capture_id": capture_id, "state": "published"}
+    if state not in ("pending_confirmation", "accepted_publish_failed"):
+        raise HTTPException(status_code=409, detail=f"capture 状态不允许确认: {state}")
+
+    season_id = str(payload.get("season_id") or "")
+    match = payload.get("match") or {}
+    players = match.get("players") or []
+    if len(players) != 4:
+        raise HTTPException(status_code=400, detail="capture match 需要恰好四名玩家")
+
+    from replay import ladder as ladder_data
+
+    try:
+        season = ladder_data.get_season_config(_ladder_config_dir(), season_id)
+    except ladder_data.SeasonNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if str(season.get("status") or "") != "running":
+        raise HTTPException(status_code=409, detail=f"赛季 {season_id} 不是 running")
+    ingest = season.get("ingest") if isinstance(season.get("ingest"), dict) else {}
+    raw_root = ingest.get("sources_root")
+    if not raw_root:
+        raise HTTPException(status_code=409, detail=f"赛季 {season_id} 缺少 ingest.sources_root")
+    sources_root = Path(str(raw_root))
+    if not sources_root.is_absolute():
+        sources_root = (_ladder_data_root() / raw_root).resolve()
+
+    pwy_source = sources_root / "playwithyou"
+    pwy_source.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(
+        {
+            "match_id": match.get("match_id"),
+            "occurred_at": match.get("occurred_at"),
+            "game_length": match.get("game_length") or "hanchan",
+            "players": players,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ) + "\n"
+    target = pwy_source / _safe_source_filename(str(match.get("match_id") or capture_id))
+    existing = _write_source_atomic(target, line)
+    if existing is not None and existing.rstrip("\n") != line.rstrip("\n"):
+        raise HTTPException(
+            status_code=409,
+            detail="同 match_id 已存在不同内容的 source 文件，拒绝覆盖（conflict）",
+        )
+
+    # 同步发布（本轮不引入后台队列）。
+    registry_path = _ladder_config_dir() / f"{season_id}.json"
+    if not registry_path.is_file():
+        raise HTTPException(status_code=500, detail=f"赛季注册表不存在: {registry_path}")
+    try:
+        from scripts.mortal.publish_ladder_snapshot import publish_snapshot
+
+        result = publish_snapshot(
+            registry_path=registry_path,
+            log_dirs=[],
+        )
+    except Exception as exc:
+        # source 已写入、publish 失败：保留 accepted，标记 accepted_publish_failed。
+        _set_capture_state(path, "accepted_publish_failed", reason=str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail=f"已确认但发布失败（可 retry-publish）: {exc}",
+        ) from exc
+
+    _set_capture_state(path, "published")
+    return {
+        "capture_id": capture_id,
+        "state": "published",
+        "snapshot_dir": result.get("snapshot_dir"),
+        "games": result.get("games"),
+    }
+
+
+def _set_capture_state(path: Path, state: str, *, reason: str = "") -> None:
+    import os as _os
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    payload["state"] = state
+    if reason:
+        payload["publish_error"] = reason
+    tmp = path.with_name(f".{path.name}.{_os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _os.replace(tmp, path)
+
+
+@router.get("/captures")
+def list_ladder_captures() -> dict:
+    captures = [
+        {key: value for key, value in entry.items() if not key.startswith("_")}
+        for entry in _discover_captures()
+    ]
+    return {"captures": captures}
+
+
+@router.post("/captures/{capture_id}/confirm")
+def confirm_ladder_capture(capture_id: str) -> dict:
+    return _confirm_capture(capture_id)
+
+
+@router.post("/captures/{capture_id}/ignore")
+def ignore_ladder_capture(capture_id: str) -> dict:
+    path = _capture_file(capture_id)
+    ignored_dir = path.parent.parent / "ignored"
+    ignored_dir.mkdir(parents=True, exist_ok=True)
+    import os as _os
+
+    _os.replace(path, ignored_dir / path.name)
+    return {"capture_id": capture_id, "state": "ignored"}
+
+
+@router.post("/captures/{capture_id}/retry-publish")
+def retry_publish_ladder_capture(capture_id: str) -> dict:
+    path = _capture_file(capture_id)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"capture 无法解析: {exc}") from exc
+    if payload.get("state") != "accepted_publish_failed":
+        raise HTTPException(status_code=409, detail=f"只有 accepted_publish_failed 可 retry: {payload.get('state')}")
+    return _confirm_capture(capture_id)
