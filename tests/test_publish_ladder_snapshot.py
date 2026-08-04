@@ -968,8 +968,8 @@ def test_conflicting_cli_rank_points_fails_before_skip(tmp_path: Path):
 
 def test_tenhou_manifest_uses_resolved_scoring_block(tmp_path: Path):
     """Tenhou 动态 profile：manifest 不写虚假的固定 rank_points，
-    并记录解析后的默认值（省略 room_policy 时展开为 highest_common_eligible）。"""
-    season = _season_with_scoring({"system": "tenhou_4p_ranked", "version": "2026-08-04"})
+    并记录解析后的默认值（tier_policy / positive_pt_tables）。"""
+    season = _season_with_scoring({"system": "tenhou_rank_progression", "version": "v1"})
     registry_path = _write_registry(tmp_path, season)
     log_dir = tmp_path / "logs"
     log_dir.mkdir(parents=True)
@@ -982,11 +982,15 @@ def test_tenhou_manifest_uses_resolved_scoring_block(tmp_path: Path):
     )
     manifest = json.loads((Path(result["snapshot_dir"]) / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["rank_points"] is None
-    assert manifest["scoring_system"] == "tenhou_4p_ranked"
-    assert manifest["scoring_version"] == "2026-08-04"
-    assert manifest["room_policy"] == "highest_common_eligible"  # 默认值已展开
-    assert manifest["scoring"]["system"] == "tenhou_4p_ranked"
+    assert manifest["scoring_system"] == "tenhou_rank_progression"
+    assert manifest["scoring_version"] == "v1"
+    assert manifest["room_policy"] is None
+    assert manifest["scoring"]["system"] == "tenhou_rank_progression"
+    assert manifest["scoring"]["tier_policy"] == "individual_highest"
     assert manifest["scoring"]["pt_rank_deltas"] is None
+    assert manifest["scoring"]["positive_pt_tables"]["tokujou-equivalent"] == [75, 30, 0]
+    assert "room_policy" not in manifest["scoring"]
+    assert "room" not in manifest["scoring"]
     assert manifest["scoring_config_hash"]
 
 

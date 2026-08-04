@@ -367,13 +367,13 @@ def build_report(
 
         # 四位共用同一份赛前状态快照：不允许逐个更新污染桌均 Rating / 段位。
         pre_states = [state.player_state() for state in table_account_states]
-        table = rank_system.resolve_table(pre_states)
-        table_avg_rating = sum(state.rating for state in pre_states) / 4
+        match = rank_system.match_context(pre_states)
+        table_avg_rating = match.avg_rating
 
         updates: list[dict[str, Any]] = []
         for seat, state in enumerate(table_account_states):
             placement = int(placements[seat])
-            update = rank_system.apply_result(pre_states[seat], placement=placement, table=table)
+            update = rank_system.apply_result(pre_states[seat], placement=placement, match=match)
             updates.append(
                 {
                     "seat": seat,
@@ -420,9 +420,10 @@ def build_report(
                 "rank": placement,
                 "final_score": int(entry["final_score"]),
                 "score_delta": int(entry["score_delta"]),
-                "table_room": table.room,
-                "game_length": table.game_length,
+                "game_length": match.game_length,
                 "table_avg_rating_before": float(table_avg_rating),
+                "pt_tier": update.pt_tier,
+                "positive_pt": list(update.positive_pt) if update.positive_pt else None,
                 "rank_before": update.rank_before,
                 "pt_before": int(update.pt_before),
                 "pt_delta": int(update.pt_delta),

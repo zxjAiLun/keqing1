@@ -17,10 +17,9 @@ import pytest
 from scripts.mortal import build_platform_account_report as account_report
 
 TENHOU_SCORING = {
-    "system": "tenhou_4p_ranked",
-    "version": "2026-08-04",
+    "system": "tenhou_rank_progression",
+    "version": "v1",
     "game_length": "hanchan",
-    "room_policy": "highest_common_eligible",
     "initial_rank": "newcomer",
     "initial_rating": 1500,
 }
@@ -121,7 +120,7 @@ def test_tenhou_engine_progresses_newcomer(tmp_path: Path, monkeypatch: pytest.M
     assert a["tenhou_reached"] is False
 
 
-def test_ledger_records_transitions_and_room(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ledger_records_transitions_and_tier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _build(
         tmp_path,
         TENHOU_SCORING,
@@ -135,9 +134,11 @@ def test_ledger_records_transitions_and_room(tmp_path: Path, monkeypatch: pytest
     a_rows = _by_account(rows, "testmodel@01")
     assert len(a_rows) == 2
     first = a_rows[0]
-    # 四名新人（低于1级）只能进一般卓；计分引擎不引入天凤付费领域
-    assert first["table_room"] == "ippan"
+    # 四名新人 -> 个人档位 ippan（一般档 +30/+15/0），不记录卓别
+    assert "table_room" not in first
     assert first["game_length"] == "hanchan"
+    assert first["pt_tier"] == "ippan-equivalent"
+    assert first["positive_pt"] == [30, 15, 0]
     assert first["rank_before"] == "newcomer"
     assert first["rank_after"] == "9kyu"
     assert first["transition"] == "promotion"
@@ -211,12 +212,15 @@ def test_report_scoring_block_describes_tenhou(tmp_path: Path, monkeypatch: pyte
         monkeypatch,
     )
     scoring = report["scoring"]
-    assert scoring["system"] == "tenhou_4p_ranked"
-    assert scoring["version"] == "2026-08-04"
-    assert scoring["room_policy"] == "highest_common_eligible"
-    assert "membership" not in scoring
+    assert scoring["system"] == "tenhou_rank_progression"
+    assert scoring["version"] == "v1"
+    assert scoring["tier_policy"] == "individual_highest"
+    assert "room_policy" not in scoring
+    assert "room" not in scoring
     assert scoring["initial_rank"] == "newcomer"
     assert scoring["initial_rating"] == 1500.0
+    assert scoring["positive_pt_tables"]["ippan-equivalent"] == [30, 15, 0]
+    assert scoring["positive_pt_tables"]["houou-equivalent"] == [90, 45, 0]
 
 
 # --- 复审 H3/H4：--rank-points 与 scoring_config 权威性 --------------------
