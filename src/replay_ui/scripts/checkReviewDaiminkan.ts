@@ -132,9 +132,10 @@ const realKakanBackPre = entryToBattleState(realKakanPostEntry, NAMES, 0, 'pre')
 check(realKakanBackPre.melds[0].length === 3, `kakan post→pre 副露应恢复为 3 组`);
 check(realKakanBackPre.melds[0][2].type === 'pon' && realKakanBackPre.melds[0][2].pai === 'N',
   `kakan post→pre 第 3 组应在原索引恢复为 pon N（H6）`);
-check(realKakanBackPre.tsumo_pai === 'N', `kakan post→pre 加杠牌应回到 tsumo_pai（得到 ${realKakanBackPre.tsumo_pai}）`);
+check(realKakanBackPre.hand.includes('N'), `kakan post→pre 加杠牌应放回暗手（得到 ${realKakanBackPre.hand}）`);
+check(realKakanBackPre.tsumo_pai === null, `kakan post→pre 不应猜测 tsumo（K2，得到 ${realKakanBackPre.tsumo_pai}）`);
 check(realKakanBackPre.last_discard === null, `kakan 动作前 last_discard 应为 null（H7，加杠不是对弃牌的响应）`);
-check(realKakanBackPre.hand.length === 4, `kakan post→pre 暗手应保持 4 张`);
+check(realKakanBackPre.hand.length === 5, `kakan post→pre 暗手应为 5 张（4 + 加杠）`);
 
 // 往返：post→pre→post 无漂移
 const realKakanBackPost = entryToBattleState(realKakanPostEntry, NAMES, 0, 'post');
@@ -299,11 +300,63 @@ const kakanPre = entryToBattleState(kakanEntry, NAMES, 0, 'pre');
 check(kakanPre.melds[0].length === 1 && kakanPre.melds[0][0].type === 'pon',
   `kakan pre 应回退为 pon（得到 ${kakanPre.melds[0][0]?.type}）`);
 check(kakanPre.melds[0][0].consumed.length === 2, `kakan pre 的 pon consumed 应为 2 张`);
-check(kakanPre.tsumo_pai === '6p', `kakan pre 加杠牌应回到 tsumo_pai（得到 ${kakanPre.tsumo_pai}）`);
-check(kakanPre.hand.length === 1, `kakan pre 暗手应保持 1 张（加杠牌不在暗手）`);
+check(kakanPre.hand.includes('6p'), `kakan pre 加杠牌应放回暗手（K2，得到 ${kakanPre.hand}）`);
+check(kakanPre.tsumo_pai === null, `kakan pre 不应猜测 tsumo（K2，得到 ${kakanPre.tsumo_pai}）`);
 const kakanPost = entryToBattleState(kakanEntry, NAMES, 0, 'post');
 check(kakanPost.melds[0].length === 1 && kakanPost.melds[0][0].type === 'kakan',
   `kakan post 应保持 kakan（不追加 pon）`);
+check(kakanPost.melds[0][0].consumed.length === 4, `kakan post meld consumed 应为严格 4 张（K1）`);
+
+// K1：action.consumed 为 4 张（规范化输入）时，也按原 pon 构造严格 4 张
+const kakan4Entry = singleMeldEntry(
+  { type: 'kakan', actor: 0, pai: '6p', consumed: ['6p', '6p', '6p', '6p'], target: 2 },
+  ['9p'],
+  [meld('kakan', '6p', ['6p', '6p', '6p', '6p'], 2)],
+);
+const kakan4Pre = entryToBattleState(kakan4Entry, NAMES, 0, 'pre');
+check(kakan4Pre.melds[0].length === 1 && kakan4Pre.melds[0][0].type === 'pon',
+  `kakan（4 张 action consumed）pre 也应回退为 pon`);
+const kakan4Post = entryToBattleState(kakan4Entry, NAMES, 0, 'post');
+check(kakan4Post.melds[0][0].type === 'kakan' && kakan4Post.melds[0][0].consumed.length === 4,
+  `kakan（4 张 action consumed）post meld 仍严格 4 张（K1）`);
+
+// K1：原 pon 含赤牌时 canonical consumed 保留赤牌组成
+const redPonEntry = singleMeldEntry(
+  { type: 'kakan', actor: 0, pai: '5p', consumed: ['5pr', '5p', '5p'], target: 2 },
+  ['9p'],
+  [meld('pon', '5p', ['5pr', '5p'], 2)],
+);
+const redPonPost = entryToBattleState(redPonEntry, NAMES, 0, 'post');
+check(
+  redPonPost.melds[0][0].type === 'kakan'
+    && JSON.stringify(redPonPost.melds[0][0].consumed) === JSON.stringify(['5pr', '5p', '5p', '5p']),
+  `kakan canonical consumed 应保留原 pon 赤牌：['5pr','5p','5p','5p']（K1，得到 ${JSON.stringify(redPonPost.melds[0][0]?.consumed)}）`,
+);
+
+// K4：ankan 杠牌来自本巡摸牌（tsumo=4p，手 3 张）
+const ankanTsumoEntry = singleMeldEntry(
+  { type: 'ankan', actor: 0, consumed: ['4p', '4p', '4p', '4p'] },
+  ['9p', '4p', '4p', '4p'],
+  [],
+);
+const ankanTsumoEntryWithTsumo: DecisionLogEntry = { ...ankanTsumoEntry, tsumo_pai: '4p' };
+const ankanTsumoPost = entryToBattleState(ankanTsumoEntryWithTsumo, NAMES, 0, 'post');
+check(ankanTsumoPost.hand.filter((t) => t === '4p').length === 0, `ankan 摸牌来源：post 手应无 4p（K4）`);
+check(ankanTsumoPost.tsumo_pai === null, `ankan 摸牌来源：post tsumo 应为 null（K4）`);
+check(ankanTsumoPost.melds[0][0].type === 'ankan', `ankan 摸牌来源：post 应有 ankan 副露（K4）`);
+
+// K4：ankan 全部来自手牌、另摸入不同牌（tsumo=3s 保留）
+const ankanHandEntryWithTsumo: DecisionLogEntry = {
+  ...singleMeldEntry(
+    { type: 'ankan', actor: 0, consumed: ['7m', '7m', '7m', '7m'] },
+    ['9p', '7m', '7m', '7m', '7m'],
+    [],
+  ),
+  tsumo_pai: '3s',
+};
+const ankanHandPost = entryToBattleState(ankanHandEntryWithTsumo, NAMES, 0, 'post');
+check(ankanHandPost.hand.filter((t) => t === '7m').length === 0, `ankan 手牌来源：post 手应无 7m（K4）`);
+check(ankanHandPost.tsumo_pai === '3s', `ankan 手牌来源：post 应保留无关 tsumo 3s（K4，得到 ${ankanHandPost.tsumo_pai}）`);
 
 // --- G：副露校验与拒绝渲染 --------------------------------------------------
 

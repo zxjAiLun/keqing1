@@ -257,11 +257,10 @@ function rewindMeldAction(
   const remaining = actorMelds.filter((_, i) => i !== targetIndex);
 
   let hand = [...state.hand];
-  let tsumoPai = state.tsumo_pai;
 
   if (action.type === 'kakan' && removed) {
-    // kakan 前态是原 pon：consumed[0..1] 为 pon 手牌、consumed[2] 为被鸣牌，
-    // consumed[3] 为加杠的那张（动作前为摸到的 tsumo_pai）。
+    // kakan 前态是原 pon：consumed[0..1] 为 pon 手牌、consumed[2] 为被鸣牌、
+    // consumed[3] 为加杠牌。
     const restoredPon: MeldEntry = {
       type: 'pon',
       pai: removed.consumed[2] ?? removed.pai,
@@ -271,8 +270,10 @@ function rewindMeldAction(
     // 在原索引插回，保持副露时间顺序不漂移
     remaining.splice(targetIndex, 0, restoredPon);
     if (action.actor === viewPlayerId) {
+      // K2：加杠牌来源无法从动作后 meld 推断（可能是本巡摸牌，也可能是手牌原有）。
+      // 不猜测 tsumo，统一放回暗手；tsumo_pai 保持动作后快照值。
       const addedTile = removed.consumed[3] ?? removed.pai;
-      if (addedTile) tsumoPai = addedTile;
+      if (addedTile) hand = addTileOnce(hand, addedTile);
     }
   } else if (action.actor === viewPlayerId) {
     for (const tile of action.consumed ?? []) hand = addTileOnce(hand, tile);
@@ -291,7 +292,7 @@ function rewindMeldAction(
     melds: { ...melds, [action.actor]: remaining },
     last_discard: lastDiscard,
     actor_to_move: action.actor,
-    tsumo_pai: tsumoPai,
+    tsumo_pai: state.tsumo_pai,
   };
 }
 
@@ -368,11 +369,13 @@ function applyKakanAction(
   }
   const pon = actorMelds[ponIndex];
   const addedTile = action.pai ?? '';
+  // K1：canonical consumed 严格四张，从原 pon 构造，兼容 action.consumed 为 3 张或 4 张：
+  //   [...pon.consumed, pon.pai, addedTile]
+  // 保留原 pon 的赤牌组成与被鸣牌身份，不再"action.consumed + pai"补一张。
   const kakan: MeldEntry = {
     type: 'kakan',
     pai: action.pai ?? '',
-    // 真实编码 consumed 只有 3 张；加杠牌恒等于 pai，补足成 4 张便于展示与校验
-    consumed: [...(action.consumed ?? []), ...(addedTile ? [addedTile] : [])],
+    consumed: [...pon.consumed, pon.pai, ...(addedTile ? [addedTile] : [])],
     target: action.target ?? pon.target,
   };
   actorMelds[ponIndex] = kakan;
