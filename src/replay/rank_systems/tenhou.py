@@ -1,17 +1,18 @@
-"""Tenhou four-player ranked ladder profile.
+"""Tenhou rank progression profile (four-player).
 
-Implements the official Tenhou rank/PT progression (four-player mahjong):
+Scores a fixed match stream with Tenhou-style rank / PT / Rating semantics but
+does NOT simulate the real Tenhou platform's room isolation, matchmaking
+eligibility, or table choice: any four accounts may share a table, and each
+player resolves their own PT tier independently from their pre-match rank and
+rating.
 
 - rank ladder: ``新人 -> 9級..1級 -> 初段..十段 -> 天鳳位``
-- rooms: 一般 / 上級 / 特上 / 鳳凰, each for tonpuu (東風) and hanchan (東南)
-- promotion / demotion discards overflow: promoted players restart at the new
-  rank's initial PT; 初段~十段 demote when PT goes negative
-- kyu ranks never demote: PT is floored at 0
-- rating follows the official Tenhou formula with the table-average floor of
-  ``max(avg, 1500)`` and round-up to two decimals
-- room selection under ``highest_common_eligible`` is strict: if the four
-  players share no eligible room the table fails loudly instead of silently
-  reusing an arbitrary PT table
+- per-player progression tier (ippan / joukyuu / tokujou / houou) drives the
+  positive placement PT; the 4th-place penalty comes from the player's own rank
+- promotion / demotion discards overflow; 初段~十段 demote when PT goes negative
+- kyu ranks never demote: PT is floored at 0; 天鳳位 PT is frozen at 0
+- rating uses the shared pre-match table average with ``max(avg, 1500)`` floor
+  and round-up to two decimals
 
 Sources: https://tenhou.net/man/index.html
 """
@@ -22,11 +23,10 @@ from decimal import ROUND_CEILING, Decimal
 from typing import Any, Sequence
 
 from .base import (
+    MatchContext,
     PlayerRankState,
     RankMeta,
-    RankResolutionError,
     RankUpdate,
-    TableContext,
 )
 
 # --- Rank ladder -----------------------------------------------------------
@@ -58,9 +58,33 @@ RANK_NAMES: dict[str, str] = {
 RANK_ORDER: tuple[str, ...] = tuple(RANK_NAMES)
 RANK_ORDINALS: dict[str, int] = {rank_id: index + 1 for index, rank_id in enumerate(RANK_ORDER)}
 
+# --- Per-player progression tiers -------------------------------------------
+
+# 个人计分档位：按"第一个满足项"取档，不表示真人平台的房间准入。
+TIER_ORDER = ("ippan", "joukyuu", "tokujou", "houou")
+TIER_NAMES_ZH: dict[str, str] = {
+    "ippan": "一般",
+    "joukyuu": "上级",
+    "tokujou": "特上",
+    "houou": "凤凰",
+}
+TIER_CONTRACT_KEYS: dict[str, str] = {
+    tier: f"{tier}-equivalent" for tier in TIER_ORDER
+}
+
+
+def tier_contract_key(tier: str) -> str:
+    """公共契约中的档位名（如 ``tokujou-equivalent``）。"""
+    return TIER_CONTRACT_KEYS[tier]
+
+
+def tier_zh(tier: str) -> str:
+    return TIER_NAMES_ZH[tier]
+
+
 # --- PT tables -------------------------------------------------------------
 
-# Positive placement PT by (game_length, room). 3rd place is always 0.
+# Positive placement PT by (game_length, tier). 3rd place is always 0.
 POSITIVE_PT: dict[str, dict[str, tuple[int, int, int]]] = {
     "hanchan": {
         "ippan": (30, 15, 0),
@@ -139,32 +163,25 @@ def _next_rank(rank_id: str) -> str:
     return RANK_ORDER[index + 1]
 
 
-class Tenhou4pRanked:
-    """Tenhou four-player ranked progression (``tenhou_4p_ranked``).
+class TenhouRankProgression:
+    """Tenhou rank progression (``tenhou_rank_progression``).
 
-    ``room_policy``:
-    - ``highest_common_eligible`` (default, strict): pick the highest room all
-      four players are eligible for; fail loudly when none exists.
-    - ``fixed``: always use the configured room; marked in the manifest as not
-      a full Tenhou match simulation.
+    只模拟段位/Rating 演进，不模拟天凤平台的房间隔离、匹配资格或付费账号：
+    任何四个账号都能同桌，每人独立按赛前段位与 Rating 解析本局 PT 档位。
     """
 
-    system_id = "tenhou_4p_ranked"
+    system_id = "tenhou_rank_progression"
 
     def __init__(
         self,
         version: str,
         *,
         game_length: str = "hanchan",
-        room_policy: str = "highest_common_eligible",
-        room: str | None = None,
         initial_rank: str = "newcomer",
         initial_rating: float = 1500.0,
     ):
         if game_length not in POSITIVE_PT:
             raise ValueError(f"unknown game_length: {game_length!r}")
-        if room_policy not in {"highest_common_eligible", "fixed"}:
-            raise ValueError(f"unknown room_policy: {room_policy!r}")
         if initial_rank not in RANK_NAMES:
             raise ValueError(f"unknown initial_rank: {initial_rank!r}")
         if not str(version).strip():
@@ -172,16 +189,10 @@ class Tenhou4pRanked:
         initial_rating_value = Decimal(str(initial_rating))
         if not initial_rating_value.is_finite():
             raise ValueError(f"initial_rating 必须有限: {initial_rating!r}")
-        if room is not None and room not in POSITIVE_PT[game_length]:
-            raise ValueError(f"unknown room: {room!r}")
-        if room_policy == "fixed" and room is None:
-            raise ValueError("fixed room policy requires an explicit room")
         self.version = str(version)
         self.game_length = game_length
-        self.room_policy = room_policy
         self.initial_rank = initial_rank
         self.initial_rating = initial_rating_value
-        self.fixed_room = room
 
     # --- RankSystem protocol ------------------------------------------------
 
@@ -222,73 +233,38 @@ class Tenhou4pRanked:
             target_pt=KYU_PROMOTION_PT[rank_id],
         )
 
-    def _eligible(self, state: PlayerRankState, room: str) -> bool:
-        """Tenhou room admission based on pre-match rank and rating.
+    def progression_tier(self, state: PlayerRankState) -> str:
+        """个人计分档位：按赛前段位与 Rating，取第一个满足项。
 
-        模型天梯模拟段位/Rating 演进，不引入天凤账号的付费/订阅领域。
-        官方规则（https://tenhou.net/man/index.html）：
-        - 一般：新人~三段，以及四段 R1800 未满
-        - 上級：1級可进；一段~七段 R2000 未满
-        - 特上：四段 R1800 以上
-        - 鳳凰：七段 R2000 以上
+        - 七段以上且 R>=2000 -> houou
+        - 四段以上且 R>=1800 -> tokujou
+        - 1級以上             -> joukyuu
+        - 新人~2級            -> ippan
+
+        这是 PT 进度档位，不是平台准入资格：高段位低 R 仍有档位，不报错。
         """
         ordinal = RANK_ORDINALS[state.rank_id]
         rating = float(state.rating)
-        is_kyu = ordinal < RANK_ORDINALS["1dan"]
-        dan = None if is_kyu else ordinal - RANK_ORDINALS["1dan"] + 1
-        if room == "ippan":
-            if is_kyu:
-                return True
-            if dan <= 3:
-                return True
-            if dan == 4:
-                return rating < 1800
-            return False
-        if room == "joukyuu":
-            if ordinal == RANK_ORDINALS["1kyu"]:
-                return True
-            return dan is not None and dan <= 7 and rating < 2000
-        if room == "tokujou":
-            return dan is not None and dan >= 4 and rating >= 1800
-        if room == "houou":
-            return dan is not None and dan >= 7 and rating >= 2000
-        raise ValueError(f"unknown room: {room!r}")
+        dan = None if ordinal < RANK_ORDINALS["1dan"] else ordinal - RANK_ORDINALS["1dan"] + 1
+        if dan is not None and dan >= 7 and rating >= 2000:
+            return "houou"
+        if dan is not None and dan >= 4 and rating >= 1800:
+            return "tokujou"
+        if ordinal >= RANK_ORDINALS["1kyu"]:
+            return "joukyuu"
+        return "ippan"
 
-    def _fixed_room(self) -> str:
-        if self.fixed_room is None:
-            raise RankResolutionError("fixed room policy requires a configured room")
-        return self.fixed_room
+    def positive_pt_for(self, state: PlayerRankState) -> tuple[int, int, int]:
+        """该玩家本局一/二/三位正分档位（个人独立，不从全桌读取）。"""
+        tier = self.progression_tier(state)
+        return POSITIVE_PT[self.game_length][tier]
 
-    def resolve_table(self, players: Sequence[PlayerRankState]) -> TableContext:
+    def match_context(self, players: Sequence[PlayerRankState]) -> MatchContext:
+        """共享上下文只负责 game_length 与赛前桌均 Rating。"""
         if len(players) != 4:
             raise ValueError(f"expected four players, got {len(players)}")
         raw_avg = sum(player.rating for player in players) / 4
-        if self.room_policy == "fixed":
-            room = self._fixed_room()
-            if self.game_length not in POSITIVE_PT or room not in POSITIVE_PT[self.game_length]:
-                raise RankResolutionError(f"no PT table for room {room!r} / {self.game_length}")
-            return TableContext(
-                room=room,
-                game_length=self.game_length,
-                positive_pt=POSITIVE_PT[self.game_length][room],
-                avg_rating=raw_avg,
-                strict=False,
-            )
-        # highest_common_eligible: 鳳凰 -> 特上 -> 上級 -> 一般
-        for room in ("houou", "tokujou", "joukyuu", "ippan"):
-            if all(self._eligible(player, room) for player in players):
-                return TableContext(
-                    room=room,
-                    game_length=self.game_length,
-                    positive_pt=POSITIVE_PT[self.game_length][room],
-                    avg_rating=raw_avg,
-                    strict=True,
-                )
-        ranks = ", ".join(player.rank_id for player in players)
-        raise RankResolutionError(
-            f"no common eligible room for players [{ranks}] "
-            f"(ratings {[float(p.rating) for p in players]}) under highest_common_eligible"
-        )
+        return MatchContext(game_length=self.game_length, avg_rating=raw_avg)
 
     def _fourth_pt(self, rank_id: str, game_length: str) -> int:
         if rank_id == "tenhou":
@@ -302,7 +278,7 @@ class Tenhou4pRanked:
         state: PlayerRankState,
         *,
         placement: int,
-        table: TableContext,
+        match: MatchContext,
     ) -> RankUpdate:
         if placement not in (1, 2, 3, 4):
             raise ValueError(f"placement must be 1..4, got {placement}")
@@ -315,12 +291,17 @@ class Tenhou4pRanked:
             # 天鳳位 PT 栏为 ``---``：不再产生任何 PTΔ，也不继续积累。
             pt_delta = 0
             pt_after = int(state.pt)
+            pt_tier: str | None = None
+            positive_pt: tuple[int, int, int] | None = None
         else:
-            pt_delta = (
-                int(table.positive_pt[placement - 1])
-                if placement < 4
-                else self._fourth_pt(rank_before, table.game_length)
-            )
+            tier = self.progression_tier(state)
+            pt_tier = tier_contract_key(tier)
+            if placement < 4:
+                positive_pt = POSITIVE_PT[match.game_length][tier]
+                pt_delta = int(positive_pt[placement - 1])
+            else:
+                positive_pt = None
+                pt_delta = self._fourth_pt(rank_before, match.game_length)
             raw_pt = int(state.pt) + pt_delta
             pt_after = raw_pt
             if _is_dan(rank_before):
@@ -343,8 +324,8 @@ class Tenhou4pRanked:
                 else:
                     pt_after = max(0, raw_pt)
 
-        # Rating: official Tenhou formula with table-average floor + round-up.
-        avg_effective = max(table.avg_rating, RATING_FLOOR)
+        # Rating: 四人共享赛前桌均 R，max(avg, 1500) 下限 + 两位向上取整。
+        avg_effective = max(match.avg_rating, RATING_FLOOR)
         correction = _rating_correction(state.games)
         delta_raw = correction * (
             Decimal(RATING_PLACEMENT_POINTS[placement - 1])
@@ -363,6 +344,8 @@ class Tenhou4pRanked:
             rating_before=state.rating,
             rating_delta_raw=delta_raw,
             rating_after=rating_after,
+            pt_tier=pt_tier,
+            positive_pt=positive_pt,
         )
 
     def scoring_block(self) -> dict[str, Any]:
@@ -374,16 +357,19 @@ class Tenhou4pRanked:
             "system": self.system_id,
             "version": self.version,
             "game_length": self.game_length,
-            "room_policy": self.room_policy,
+            "tier_policy": "individual_highest",
             "initial_rank": self.initial_rank,
             "initial_rating": float(self.initial_rating),
-            "room": self.fixed_room if self.room_policy == "fixed" else None,
             "pt_profile": self.system_id,
-            # 动态段位/卓别下不存在单一 4-tuple PT 表。
+            # 动态档位下不存在单一 4-tuple PT 表。
             "pt_rank_deltas": None,
             "pt_initial": None,
             "pt_target": None,
             "rank_name": None,
+            "positive_pt_tables": {
+                tier_contract_key(tier): list(POSITIVE_PT[self.game_length][tier])
+                for tier in TIER_ORDER
+            },
             "rating_initial": float(self.initial_rating),
             "rating_formula": (
                 "delta = game_count_correction * "

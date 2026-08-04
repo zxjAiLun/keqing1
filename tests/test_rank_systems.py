@@ -1,6 +1,7 @@
 """Lock Tenhou rank/rating semantics and legacy-profile compatibility.
 
-Golden cases from the Round 8 spec:
+Golden cases from the Round 8 spec plus the Round 8 follow-up (mixed-rank
+progression tiers):
 
 - 新人 0 + 一般南一位 +30 -> 9级 0（溢出舍弃）
 - 1级 90 + 一般南二位 +15 -> 初段 200
@@ -11,6 +12,7 @@ Golden cases from the Round 8 spec:
 - 级位 0 受四位负分 -> 保持级位 0 不降级
 - 桌均 R 低于 1500 -> 按 1500 参与公式
 - 四位共用同一份赛前 Rating（不逐个更新污染桌均值）
+- 混合段位同桌永不拒绝；每人独立 PT 档位；四位负分只看个人赛前段位
 """
 
 from __future__ import annotations
@@ -21,286 +23,270 @@ import pytest
 
 from replay.rank_systems import (
     LegacyFixedProfile,
+    MatchContext,
     PlayerRankState,
-    RankResolutionError,
-    Tenhou4pRanked,
+    TenhouRankProgression,
     create_rank_system,
 )
-from replay.rank_systems.tenhou import POSITIVE_PT
 
 
 def _state(rank_id: str, pt: int, rating: float = 1500.0, games: int = 0) -> PlayerRankState:
     return PlayerRankState(rank_id=rank_id, pt=pt, rating=Decimal(str(rating)), games=games)
 
 
-def _table(room: str = "ippan", game_length: str = "hanchan", avg: float = 1600.0) -> object:
-    from replay.rank_systems.base import TableContext
-
-    return TableContext(
-        room=room,
-        game_length=game_length,
-        positive_pt=POSITIVE_PT[game_length][room],
-        avg_rating=Decimal(str(avg)),
-        strict=True,
-    )
+def _match(game_length: str = "hanchan", avg: float = 1600.0) -> MatchContext:
+    return MatchContext(game_length=game_length, avg_rating=Decimal(str(avg)))
 
 
 @pytest.fixture()
-def ranked() -> Tenhou4pRanked:
-    return Tenhou4pRanked(version="test")
+def ranked() -> TenhouRankProgression:
+    return TenhouRankProgression(version="test")
 
 
 # --- Golden PT transitions --------------------------------------------------
 
-def test_newcomer_promotion_discards_overflow(ranked: Tenhou4pRanked) -> None:
-    update = ranked.apply_result(_state("newcomer", 0), placement=1, table=_table("ippan"))
+def test_newcomer_promotion_discards_overflow(ranked: TenhouRankProgression) -> None:
+    update = ranked.apply_result(_state("newcomer", 0), placement=1, match=_match())
     assert update.pt_delta == 30
     assert update.transition == "promotion"
     assert update.rank_after == "9kyu"
     assert update.pt_after == 0
 
 
-def test_1kyu_promotion_to_1dan(ranked: Tenhou4pRanked) -> None:
-    update = ranked.apply_result(_state("1kyu", 90), placement=2, table=_table("ippan"))
+def test_1kyu_promotion_to_1dan(ranked: TenhouRankProgression) -> None:
+    update = ranked.apply_result(_state("1kyu", 90), placement=2, match=_match())
     assert update.pt_delta == 15
     assert update.transition == "promotion"
     assert update.rank_after == "1dan"
     assert update.pt_after == 200
 
 
-def test_1dan_demotes_on_negative_pt(ranked: Tenhou4pRanked) -> None:
-    update = ranked.apply_result(_state("1dan", 0), placement=4, table=_table("houou", "hanchan"))
+def test_1dan_demotes_on_negative_pt(ranked: TenhouRankProgression) -> None:
+    update = ranked.apply_result(_state("1dan", 0), placement=4, match=_match())
     assert update.pt_delta == -45
     assert update.transition == "demotion"
     assert update.rank_after == "1kyu"
     assert update.pt_after == 0
 
 
-def test_7dan_promotion_resets_to_next_initial(ranked: Tenhou4pRanked) -> None:
-    update = ranked.apply_result(_state("7dan", 2770), placement=1, table=_table("houou", "hanchan"))
+def test_7dan_promotion_resets_to_next_initial(ranked: TenhouRankProgression) -> None:
+    # 七段 R2100 -> 凤凰档，一位 +90
+    update = ranked.apply_result(
+        _state("7dan", 2770, rating=2100.0), placement=1, match=_match(avg=2100.0)
+    )
     assert update.pt_delta == 90
     assert update.transition == "promotion"
     assert update.rank_after == "8dan"
     assert update.pt_after == 1600
 
 
-def test_8dan_demotes_to_7dan_initial(ranked: Tenhou4pRanked) -> None:
-    update = ranked.apply_result(_state("8dan", 10), placement=4, table=_table("houou", "hanchan"))
+def test_8dan_demotes_to_7dan_initial(ranked: TenhouRankProgression) -> None:
+    update = ranked.apply_result(_state("8dan", 10), placement=4, match=_match(avg=2100.0))
     assert update.pt_delta == -150
     assert update.transition == "demotion"
     assert update.rank_after == "7dan"
     assert update.pt_after == 1400
 
 
-def test_10dan_promotes_to_tenhou(ranked: Tenhou4pRanked) -> None:
-    update = ranked.apply_result(_state("10dan", 3950), placement=1, table=_table("houou", "hanchan"))
+def test_10dan_promotes_to_tenhou(ranked: TenhouRankProgression) -> None:
+    update = ranked.apply_result(_state("10dan", 3950), placement=1, match=_match(avg=2200.0))
     assert update.transition == "tenhou"
     assert update.rank_after == "tenhou"
 
 
-def test_tenhou_pt_delta_is_zero_for_all_placements(ranked: Tenhou4pRanked) -> None:
-    for placement in (1, 2, 3, 4):
-        update = ranked.apply_result(
-            _state("tenhou", 0, rating=2000.0),
-            placement=placement,
-            table=_table("houou", "hanchan", avg=2000.0),
-        )
-        assert update.pt_delta == 0
-        assert update.pt_after == 0
-        assert update.transition == "none"
-        assert update.rank_after == "tenhou"
-        # Rating 仍正常变化
-        assert update.rating_after != update.rating_before
-
-
-def test_tenhou_rank_meta_has_no_pt(ranked: Tenhou4pRanked) -> None:
-    meta = ranked.rank_meta("tenhou")
-    assert meta.initial_pt is None
-    assert meta.target_pt is None
-    assert meta.is_tenhou is True
-
-
-def test_config_validation_requires_version() -> None:
-    with pytest.raises(ValueError, match="version"):
-        Tenhou4pRanked(version="")
-
-
-def test_config_validation_rejects_unknown_room() -> None:
-    with pytest.raises(ValueError, match="unknown room"):
-        Tenhou4pRanked(version="test", room_policy="fixed", room="lobby")
-
-
-def test_config_validation_rejects_non_finite_rating() -> None:
-    with pytest.raises(ValueError, match="initial_rating"):
-        Tenhou4pRanked(version="test", initial_rating=float("nan"))
-
-
-def test_kyu_never_demotes_pt_floored_at_zero(ranked: Tenhou4pRanked) -> None:
-    update = ranked.apply_result(_state("1kyu", 5), placement=4, table=_table("houou", "hanchan"))
+def test_kyu_never_demotes_pt_floored_at_zero(ranked: TenhouRankProgression) -> None:
+    update = ranked.apply_result(_state("1kyu", 5), placement=4, match=_match())
     assert update.pt_delta == -30
     assert update.transition == "none"
     assert update.rank_after == "1kyu"
     assert update.pt_after == 0
 
 
-def test_newcomer_fourth_has_no_penalty(ranked: Tenhou4pRanked) -> None:
-    update = ranked.apply_result(_state("newcomer", 0), placement=4, table=_table("ippan", "hanchan"))
+def test_newcomer_fourth_has_no_penalty(ranked: TenhouRankProgression) -> None:
+    update = ranked.apply_result(_state("newcomer", 0), placement=4, match=_match())
     assert update.pt_delta == 0
     assert update.pt_after == 0
 
 
-def test_2kyu_fourth_hanchan_penalty(ranked: Tenhou4pRanked) -> None:
-    update = ranked.apply_result(_state("2kyu", 10), placement=4, table=_table("ippan", "hanchan"))
+def test_2kyu_fourth_hanchan_penalty(ranked: TenhouRankProgression) -> None:
+    update = ranked.apply_result(_state("2kyu", 10), placement=4, match=_match())
     assert update.pt_delta == -15
     assert update.pt_after == 0  # floored, no demotion
 
 
-def test_tonpuu_tables_are_lower(ranked: Tenhou4pRanked) -> None:
-    update = ranked.apply_result(_state("2kyu", 10), placement=4, table=_table("ippan", "tonpuu"))
+def test_tonpuu_tables_are_lower(ranked: TenhouRankProgression) -> None:
+    update = ranked.apply_result(_state("2kyu", 10), placement=4, match=_match("tonpuu"))
     assert update.pt_delta == -10
-    first = ranked.apply_result(_state("newcomer", 0), placement=1, table=_table("houou", "tonpuu"))
-    assert first.pt_delta == 60
+    first = ranked.apply_result(_state("newcomer", 0), placement=1, match=_match("tonpuu"))
+    assert first.pt_delta == 20
 
 
 # --- Rating semantics -------------------------------------------------------
 
-def test_rating_uses_1500_floor_for_low_table_average(ranked: Tenhou4pRanked) -> None:
+def test_rating_uses_1500_floor_for_low_table_average(ranked: TenhouRankProgression) -> None:
     update = ranked.apply_result(
         _state("newcomer", 0, rating=1500.0),
         placement=1,
-        table=_table("ippan", "hanchan", avg=1400.0),
+        match=_match(avg=1400.0),
     )
     # Without the floor: 30 + (1400-1500)/40 = 27.5. Floor applies -> 30.
     assert update.rating_delta_raw == Decimal("30")
     assert update.rating_after == Decimal("1530")
 
 
-def test_rating_round_up_two_decimals(ranked: Tenhou4pRanked) -> None:
+def test_rating_round_up_two_decimals(ranked: TenhouRankProgression) -> None:
     update = ranked.apply_result(
         _state("newcomer", 0, rating=1511.04),
         placement=2,
-        table=_table("ippan", "hanchan", avg=1600.0),
+        match=_match(avg=1600.0),
     )
     assert update.rating_delta_raw == Decimal("12.224")
     assert update.rating_after == Decimal("1511.04") + Decimal("12.23")
 
 
-def test_rating_round_up_negative_toward_plus_infinity(ranked: Tenhou4pRanked) -> None:
+def test_rating_round_up_negative_toward_plus_infinity(ranked: TenhouRankProgression) -> None:
     update = ranked.apply_result(
         _state("1dan", 200, rating=2001.11),
         placement=4,
-        table=_table("houou", "hanchan", avg=1500.0),
+        match=_match(avg=1500.0),
     )
     # delta_raw = -30 + (1500 - 2001.11)/40 = -42.52775 -> ceil -> -42.52
     assert update.rating_delta_raw == Decimal("-42.52775")
     assert update.rating_after == Decimal("2001.11") + Decimal("-42.52")
 
 
-def test_rating_correction_before_and_after_400_games(ranked: Tenhou4pRanked) -> None:
+def test_rating_correction_before_and_after_400_games(ranked: TenhouRankProgression) -> None:
     early = ranked.apply_result(
         _state("newcomer", 0, rating=1500.0, games=100),
         placement=1,
-        table=_table("ippan", "hanchan", avg=1500.0),
+        match=_match(avg=1500.0),
     )
     # 1 - 100*0.002 = 0.8 -> 0.8 * 30 = 24
     assert early.rating_delta_raw == Decimal("24")
     late = ranked.apply_result(
         _state("newcomer", 0, rating=1500.0, games=400),
         placement=1,
-        table=_table("ippan", "hanchan", avg=1500.0),
+        match=_match(avg=1500.0),
     )
     assert late.rating_delta_raw == Decimal("6")  # 0.2 * 30
 
 
-# --- Table resolution -------------------------------------------------------
+# --- Per-player progression tiers (Round 8 follow-up) -----------------------
 
-def test_room_selection_highest_common_eligible(ranked: Tenhou4pRanked) -> None:
-    # 1級 可进上级卓；级位低于 1級 只能进一般卓
-    assert ranked.resolve_table([_state("1kyu", 50, rating=1600)] * 4).room == "joukyuu"
-    assert ranked.resolve_table([_state("2kyu", 30, rating=1600)] * 4).room == "ippan"
-    assert ranked.resolve_table([_state("1dan", 200, rating=1600)] * 4).room == "joukyuu"
-    assert ranked.resolve_table([_state("4dan", 800, rating=1900)] * 4).room == "tokujou"
-    assert ranked.resolve_table([_state("7dan", 1400, rating=2100)] * 4).room == "houou"
-
-
-def test_1kyu_hanchan_first_place_scores_joukyuu(ranked: Tenhou4pRanked) -> None:
-    table = ranked.resolve_table([_state("1kyu", 90, rating=1600)] * 4)
-    assert table.room == "joukyuu"
-    update = ranked.apply_result(_state("1kyu", 90), placement=1, table=table)
-    assert update.pt_delta == 60
+def test_progression_tier_boundaries(ranked: TenhouRankProgression) -> None:
+    # J3：Rating 门槛边界
+    assert ranked.progression_tier(_state("newcomer", 0, rating=1500)) == "ippan"
+    assert ranked.progression_tier(_state("2kyu", 30, rating=1500)) == "ippan"
+    assert ranked.progression_tier(_state("1kyu", 90, rating=1600)) == "joukyuu"
+    assert ranked.progression_tier(_state("4dan", 800, rating=1799.99)) == "joukyuu"
+    assert ranked.progression_tier(_state("4dan", 800, rating=1800.0)) == "tokujou"
+    assert ranked.progression_tier(_state("7dan", 1400, rating=1999.99)) == "tokujou"
+    assert ranked.progression_tier(_state("7dan", 1400, rating=2000.0)) == "houou"
 
 
-def test_1dan_and_high_rating_4dan_share_joukyuu(ranked: Tenhou4pRanked) -> None:
+def test_high_dan_low_rating_still_has_tier(ranked: TenhouRankProgression) -> None:
+    # J4：高段低 R 仍有档位，不报错
+    assert ranked.progression_tier(_state("8dan", 1600, rating=1600)) == "joukyuu"
+    assert ranked.progression_tier(_state("10dan", 2000, rating=1500)) == "joukyuu"
+
+
+def test_mixed_rank_table_never_rejected(ranked: TenhouRankProgression) -> None:
+    # J1：混合段位同桌永不拒绝，不抛任何"无共同卓"错误
     players = [
-        _state("1dan", 200, rating=1500.0),
+        _state("newcomer", 0, rating=1500.0),
+        _state("1kyu", 90, rating=1600.0),
         _state("4dan", 800, rating=1900.0),
-        _state("1dan", 200, rating=1500.0),
-        _state("4dan", 800, rating=1900.0),
+        _state("10dan", 2000, rating=2200.0),
     ]
-    assert ranked.resolve_table(players).room == "joukyuu"
+    match = ranked.match_context(players)
+    assert match.game_length == "hanchan"
+    assert match.avg_rating == Decimal("1800")  # (1500+1600+1900+2200)/4
 
 
-def test_houou_requires_rank_and_rating_only() -> None:
-    # 凤凰卓只要求段位与 Rating，不引入天凤账号付费领域。
-    table = Tenhou4pRanked(version="test").resolve_table([_state("7dan", 1400, rating=2100)] * 4)
-    assert table.room == "houou"
-    # 7dan R1999：凤凰门槛未到 -> 特上（R>=1800 且段位>=四段）
-    low = Tenhou4pRanked(version="test").resolve_table([_state("7dan", 1400, rating=1999)] * 4)
-    assert low.room == "tokujou"
-
-
-def test_no_common_room_raises_loudly(ranked: Tenhou4pRanked) -> None:
-    # 2kyu（仅一般）与 8段 R2100（仅特上/凤凰）：无共同卓
-    players = [
-        _state("2kyu", 30, rating=1600),
-        _state("8dan", 1600, rating=2100),
-        _state("8dan", 1600, rating=2100),
-        _state("8dan", 1600, rating=2100),
+def test_players_resolve_independent_tiers(ranked: TenhouRankProgression) -> None:
+    # J2：同一局四人可分别使用不同正分档位
+    cases = [
+        ("newcomer", 1500.0, 30),
+        ("1kyu", 1600.0, 60),
+        ("4dan", 1900.0, 75),
+        ("10dan", 2200.0, 90),
     ]
-    with pytest.raises(RankResolutionError):
-        ranked.resolve_table(players)
+    players = [_state(rank, 0, rating=rating) for rank, rating, _ in cases]
+    match = ranked.match_context(players)
+    for (rank, rating, expected), state in zip(cases, players, strict=True):
+        update = ranked.apply_result(state, placement=1, match=match)
+        assert update.pt_delta == expected
+        assert update.pt_tier is not None
 
 
-def test_fixed_room_policy_uses_configured_room() -> None:
-    fixed = Tenhou4pRanked(version="test", room_policy="fixed", room="houou", game_length="hanchan")
-    table = fixed.resolve_table([_state("newcomer", 0, rating=1500)] * 4)
-    assert table.room == "houou"
-    assert table.strict is False
-    assert table.positive_pt == (90, 45, 0)
+def test_fourth_penalty_depends_only_on_own_rank(ranked: TenhouRankProgression) -> None:
+    # J5：四位负分只取个人赛前段位，不受同桌他人影响
+    cases = [
+        ("newcomer", 0),
+        ("1kyu", -30),
+        ("7dan", -135),
+        ("10dan", -180),
+    ]
+    players = [_state(rank, 0, rating=1800.0) for rank, _ in cases]
+    match = ranked.match_context(players)
+    for (rank, expected), state in zip(cases, players, strict=True):
+        update = ranked.apply_result(state, placement=4, match=match)
+        assert update.pt_delta == expected
+        assert update.positive_pt is None
 
 
-def test_factory_passes_fixed_room_to_tenhou() -> None:
-    system = create_rank_system(
-        {
-            "system": "tenhou_4p_ranked",
-            "version": "2026-08-04",
-            "room_policy": "fixed",
-            "room": "tokujou",
-            "game_length": "hanchan",
-        }
-    )
-    assert system.system_id == "tenhou_4p_ranked"
-    table = system.resolve_table([_state("newcomer", 0, rating=1500)] * 4)
-    assert table.room == "tokujou"
-    assert table.positive_pt == (75, 30, 0)
-    update = system.apply_result(_state("newcomer", 0), placement=1, table=table)
-    assert update.pt_delta == 75
-
-
-def test_fixed_policy_requires_explicit_room() -> None:
-    with pytest.raises(ValueError, match="fixed room policy requires"):
-        Tenhou4pRanked(version="test", room_policy="fixed")
-
-
-def test_table_averages_pre_match_ratings(ranked: Tenhou4pRanked) -> None:
+def test_match_context_averages_pre_match_ratings(ranked: TenhouRankProgression) -> None:
     players = [
         _state("1dan", 200, rating=1500.0),
         _state("1dan", 200, rating=1600.0),
         _state("1dan", 200, rating=1700.0),
         _state("1dan", 200, rating=1800.0),
     ]
-    table = ranked.resolve_table(players)
-    assert table.avg_rating == Decimal("1650")
+    match = ranked.match_context(players)
+    assert match.avg_rating == Decimal("1650")
+
+
+# --- 天鳳位 ----------------------------------------------------------------
+
+def test_tenhou_pt_delta_is_zero_for_all_placements(ranked: TenhouRankProgression) -> None:
+    for placement in (1, 2, 3, 4):
+        update = ranked.apply_result(
+            _state("tenhou", 0, rating=2000.0),
+            placement=placement,
+            match=_match(avg=2000.0),
+        )
+        assert update.pt_delta == 0
+        assert update.pt_after == 0
+        assert update.transition == "none"
+        assert update.rank_after == "tenhou"
+        assert update.pt_tier is None
+        assert update.positive_pt is None
+        # Rating 仍正常变化
+        assert update.rating_after != update.rating_before
+
+
+def test_tenhou_rank_meta_has_no_pt(ranked: TenhouRankProgression) -> None:
+    meta = ranked.rank_meta("tenhou")
+    assert meta.initial_pt is None
+    assert meta.target_pt is None
+    assert meta.is_tenhou is True
+
+
+# --- Config validation ------------------------------------------------------
+
+def test_config_validation_requires_version() -> None:
+    with pytest.raises(ValueError, match="version"):
+        TenhouRankProgression(version="")
+
+
+def test_config_validation_rejects_unknown_game_length() -> None:
+    with pytest.raises(ValueError, match="game_length"):
+        TenhouRankProgression(version="test", game_length="sanma")
+
+
+def test_config_validation_rejects_non_finite_rating() -> None:
+    with pytest.raises(ValueError, match="initial_rating"):
+        TenhouRankProgression(version="test", initial_rating=float("nan"))
 
 
 # --- Legacy profile compatibility -------------------------------------------
@@ -311,12 +297,13 @@ def test_legacy_profile_reproduces_historical_behavior() -> None:
     assert state.rank_id == "7dan"
     assert state.pt == 1400
     assert state.rating == Decimal("1500")
-    table = legacy.resolve_table([state] * 4)
-    update = legacy.apply_result(state, placement=1, table=table)
+    match = legacy.match_context([state] * 4)
+    update = legacy.apply_result(state, placement=1, match=match)
     assert update.pt_delta == 90
     assert update.pt_after == 1490
     assert update.transition == "none"
     assert update.rank_after == "7dan"
+    assert update.pt_tier is None
     # Historical rating formula keeps exact 30.0 (no 1500 floor effect here).
     assert update.rating_after == Decimal("1530")
 
@@ -324,32 +311,29 @@ def test_legacy_profile_reproduces_historical_behavior() -> None:
 def test_legacy_does_not_floor_table_average() -> None:
     legacy = LegacyFixedProfile()
     state = legacy.initial_state()
-    table = legacy.resolve_table([_state("7dan", 1400, rating=1500)] * 4)
-    assert table.avg_rating == Decimal("1500")
-    # Simulate the historical report builder path where the average came from
-    # the actual pre-match ratings (may be below 1500 in theory).
-    low_table = _table("houou", "hanchan", avg=1400.0)
-    update = legacy.apply_result(state, placement=1, table=low_table)
-    # Old formula: 1.0 * (30 + (1400-1500)/40) = 27.5 (no floor).
+    match = legacy.match_context([_state("7dan", 1400, rating=1500)] * 4)
+    assert match.avg_rating == Decimal("1500")
+    # 历史公式：1.0 * (30 + (1400-1500)/40) = 27.5（无 1500 下限）。
+    low_match = _match(avg=1400.0)
+    update = legacy.apply_result(state, placement=1, match=low_match)
     assert update.rating_delta_raw == Decimal("27.5")
 
 
-# --- Factory -----------------------------------------------------------------
+# --- Factory ----------------------------------------------------------------
 
 def test_create_rank_system_factory() -> None:
     assert create_rank_system(None).system_id == "tenhou_houou_7dan_fixed"
     ranked = create_rank_system(
         {
-            "system": "tenhou_4p_ranked",
-            "version": "2026-08-04",
+            "system": "tenhou_rank_progression",
+            "version": "v1",
             "game_length": "hanchan",
-            "room_policy": "highest_common_eligible",
             "initial_rank": "newcomer",
             "initial_rating": 1500,
         }
     )
-    assert ranked.system_id == "tenhou_4p_ranked"
-    assert ranked.version == "2026-08-04"
+    assert ranked.system_id == "tenhou_rank_progression"
+    assert ranked.version == "v1"
     initial = ranked.initial_state()
     assert initial.rank_id == "newcomer"
     assert initial.pt == 0
@@ -359,3 +343,6 @@ def test_create_rank_system_factory() -> None:
 def test_create_rank_system_unknown_raises() -> None:
     with pytest.raises(ValueError, match="unknown rank system"):
         create_rank_system({"system": "majsoul_ranked_v1", "version": "x"})
+    # 旧名 tenhou_4p_ranked 不再接受（未合并的 v2 数据无迁移需求）
+    with pytest.raises(ValueError, match="unknown rank system"):
+        create_rank_system({"system": "tenhou_4p_ranked", "version": "2026-08-04"})

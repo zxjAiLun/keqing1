@@ -9,7 +9,7 @@ rewriting the report pipeline.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal, Protocol, Sequence
 
@@ -37,20 +37,21 @@ class RankMeta:
 
 
 @dataclass(frozen=True)
-class TableContext:
-    """Resolved table for one game.
+class MatchContext:
+    """Shared per-game context.
 
-    ``avg_rating`` is the raw pre-match table average; profiles that floor the
-    average (e.g. Tenhou's ``max(avg, 1500)``) apply the floor inside
-    ``apply_result`` so the legacy profile can keep its exact historical
-    behavior.
+    Only carries what is genuinely shared by the table:
+
+    - ``game_length`` (tonpuu / hanchan)
+    - ``avg_rating``: the raw pre-match table-average rating
+
+    This profile family does NOT simulate Tenhou room isolation / matchmaking /
+    eligibility: any four accounts may share a table and each player resolves
+    their own PT tier independently from their pre-match rank and rating.
     """
 
-    room: str
     game_length: str
-    positive_pt: tuple[int, int, int]
     avg_rating: Decimal
-    strict: bool = field(default=False)
 
 
 Transition = Literal["none", "promotion", "demotion", "tenhou"]
@@ -73,9 +74,9 @@ class RankUpdate:
     rating_delta_raw: Decimal
     rating_after: Decimal
 
-
-class RankResolutionError(ValueError):
-    """No table could be resolved for the given players under the room policy."""
+    # 本局该玩家的个人计分档位（无档位概念或天凤位时为 None）。
+    pt_tier: str | None = None
+    positive_pt: tuple[int, int, int] | None = None
 
 
 class RankSystem(Protocol):
@@ -85,13 +86,13 @@ class RankSystem(Protocol):
     version: str
 
     def initial_state(self) -> PlayerRankState: ...
-    def resolve_table(self, players: Sequence[PlayerRankState]) -> TableContext: ...
+    def match_context(self, players: Sequence[PlayerRankState]) -> MatchContext: ...
     def apply_result(
         self,
         state: PlayerRankState,
         *,
         placement: int,
-        table: TableContext,
+        match: MatchContext,
     ) -> RankUpdate: ...
     def rank_meta(self, rank_id: str) -> RankMeta: ...
     def scoring_block(self) -> dict[str, Any]: ...

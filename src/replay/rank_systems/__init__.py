@@ -8,25 +8,23 @@ ladder loaders never need to change.
 from __future__ import annotations
 
 from .base import (
+    MatchContext,
     PlayerRankState,
     RankMeta,
-    RankResolutionError,
     RankSystem,
     RankUpdate,
-    TableContext,
 )
 from .legacy import LegacyFixedProfile
-from .tenhou import Tenhou4pRanked
+from .tenhou import TenhouRankProgression
 
 __all__ = [
     "LegacyFixedProfile",
+    "MatchContext",
     "PlayerRankState",
     "RankMeta",
-    "RankResolutionError",
     "RankSystem",
     "RankUpdate",
-    "TableContext",
-    "Tenhou4pRanked",
+    "TenhouRankProgression",
     "create_rank_system",
 ]
 
@@ -57,13 +55,10 @@ def create_rank_system(config: dict | None) -> RankSystem:
                 for value in (config.get("rank_points") or [90, 45, 0, -135])
             ),
         )
-    if system == Tenhou4pRanked.system_id:
-        room = config.get("room")
-        return Tenhou4pRanked(
+    if system == TenhouRankProgression.system_id:
+        return TenhouRankProgression(
             version=version,
             game_length=str(config.get("game_length") or "hanchan"),
-            room_policy=str(config.get("room_policy") or "highest_common_eligible"),
-            room=str(room) if room is not None else None,
             initial_rank=str(config.get("initial_rank") or "newcomer"),
             initial_rating=float(config.get("initial_rating") or 1500.0),
         )
