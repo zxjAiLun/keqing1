@@ -783,17 +783,29 @@ def write_source_idempotent(path: Path, line: str) -> str:
     """一局一个 JSONL 文件的幂等写入（进程内并发安全）。
 
     - 文件不存在：原子创建，返回 ``"created"``；
-    - 已存在且内容相同：no-op，返回 ``"existing"``；
-    - 已存在且内容不同：抛 SourceConflictError，绝不改写旧 source（C17）。
+    - 已存在且与 merge 内容键一致（同 match_id + 同 game_length + 同 canonical
+      players，忽略 occurred_at）：no-op，保留现有 occurred_at，返回 ``"existing"``；
+    - 已存在但玩家/分数不同：抛 SourceConflictError，绝不改写旧 source（C17/C31）。
 
-    检查-比较-写入在同一临界区内，避免两个并发请求互相覆盖（C31）。
+    内容键与 ``ladder_ingest.merge_ladder_matches`` 的去重语义完全一致（P2-2）。
     """
+    import json as _json
     import os as _os
+
+    from replay import ladder_ingest
+
+    def _content_key_of(line_text: str) -> tuple:
+        match = ladder_ingest.parse_match_record(
+            _json.loads(line_text),
+            source_type="playwithyou",
+            source_ref=path.name,
+        )
+        return (match.match_id, match.game_length, ladder_ingest.canonical_players(match))
 
     with _SOURCE_WRITE_LOCK:
         if path.is_file():
             existing = path.read_text(encoding="utf-8")
-            if existing.rstrip("\n") == line.rstrip("\n"):
+            if _content_key_of(existing) == _content_key_of(line):
                 return "existing"
             raise SourceConflictError(f"同 match_id 已存在不同内容: {path.name}")
         tmp = path.with_name(f".{path.name}.{_os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
@@ -839,6 +851,24 @@ def _confirm_capture(capture_id: str) -> dict:
         sources_root = ladder_ingest.resolve_ingest_sources_root(PROJECT_ROOT, season)
     except ladder_ingest.LadderIngestError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    # 写 source 前先按 ingest 契约校验（P1-2/C39-C42）：非法记录绝不进入正式 source。
+    registered_accounts = {
+        str(account.get("account_id"))
+        for model in season.get("models", []) or []
+        if isinstance(model, dict)
+        for account in model.get("accounts", []) or []
+        if isinstance(account, dict)
+    }
+    try:
+        candidate = ladder_ingest.parse_match_record(
+            match,
+            source_type="playwithyou",
+            source_ref=f"capture:{capture_id}",
+        )
+        ladder_ingest.validate_match(candidate, registered_accounts)
+    except ladder_ingest.LadderIngestError as exc:
+        raise HTTPException(status_code=409, detail=f"capture 校验失败，未写入 source: {exc}") from exc
 
     pwy_source = sources_root / "playwithyou"
     pwy_source.mkdir(parents=True, exist_ok=True)

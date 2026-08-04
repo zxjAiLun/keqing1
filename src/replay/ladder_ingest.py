@@ -222,6 +222,48 @@ class NativeLogAdapter:
             )
 
 
+def parse_match_record(
+    raw: Mapping[str, Any],
+    *,
+    source_type: str,
+    source_ref: str | None = None,
+) -> LadderMatch:
+    """公共 JSON record parser：capture API 与 JSONL adapter 共用同一套校验。
+
+    ``raw`` 形如：
+    ``{"match_id": "...", "occurred_at": "...", "game_length": "hanchan",
+        "players": [{"account_id": "...", "seat": 0, "final_score": 42100}, ...]}``
+    """
+    match_id = raw.get("match_id")
+    if not isinstance(match_id, str) or not match_id.strip():
+        raise LadderIngestError(f"{source_ref or source_type} match_id 必须是非空字符串")
+    occurred_raw = raw.get("occurred_at")
+    if not isinstance(occurred_raw, str):
+        raise LadderIngestError(f"{source_ref or source_type} 缺少 occurred_at")
+    game_length = str(raw.get("game_length") or "hanchan")
+    raw_players = raw.get("players")
+    if not isinstance(raw_players, list) or len(raw_players) != 4:
+        raise LadderIngestError(f"{source_ref or source_type} players 必须恰好四项")
+    players: list[LadderMatchPlayer] = []
+    for index, entry in enumerate(raw_players):
+        if not isinstance(entry, dict):
+            raise LadderIngestError(f"{source_ref or source_type} players[{index}] 必须是对象")
+        account_id = str(entry.get("account_id") or "").strip()
+        seat = int(entry.get("seat") or 0)
+        final_score = int(entry.get("final_score") or 0)
+        players.append(
+            LadderMatchPlayer(account_id=account_id, seat=seat, final_score=final_score)
+        )
+    return LadderMatch(
+        match_id=match_id,
+        occurred_at=_parse_iso(occurred_raw),
+        game_length=game_length,
+        players=tuple(players),
+        source_type=source_type,
+        source_ref=source_ref,
+    )
+
+
 class _JsonlMatchAdapter:
     """Shared JSONL parsing for capture/manual sources.
 
@@ -244,37 +286,11 @@ class _JsonlMatchAdapter:
                         raise LadderIngestError(
                             f"{path.name}:{line_number} JSON 无法解析: {exc}"
                         ) from exc
-                    yield self._parse_record(raw, path, line_number)
-
-    def _parse_record(self, raw: Mapping[str, Any], path: Path, line_number: int) -> LadderMatch:
-        match_id = raw.get("match_id")
-        if not isinstance(match_id, str) or not match_id.strip():
-            raise LadderIngestError(f"{path.name}:{line_number} match_id 必须是非空字符串")
-        occurred_raw = raw.get("occurred_at")
-        if not isinstance(occurred_raw, str):
-            raise LadderIngestError(f"{path.name}:{line_number} 缺少 occurred_at")
-        game_length = str(raw.get("game_length") or "hanchan")
-        raw_players = raw.get("players")
-        if not isinstance(raw_players, list) or len(raw_players) != 4:
-            raise LadderIngestError(f"{path.name}:{line_number} players 必须恰好四项")
-        players: list[LadderMatchPlayer] = []
-        for index, entry in enumerate(raw_players):
-            if not isinstance(entry, dict):
-                raise LadderIngestError(f"{path.name}:{line_number} players[{index}] 必须是对象")
-            account_id = str(entry.get("account_id") or "").strip()
-            seat = int(entry.get("seat") or 0)
-            final_score = int(entry.get("final_score") or 0)
-            players.append(
-                LadderMatchPlayer(account_id=account_id, seat=seat, final_score=final_score)
-            )
-        return LadderMatch(
-            match_id=match_id,
-            occurred_at=_parse_iso(occurred_raw),
-            game_length=game_length,
-            players=tuple(players),
-            source_type=self.source_type,
-            source_ref=f"{path.name}:{line_number}",
-        )
+                    yield parse_match_record(
+                        raw,
+                        source_type=self.source_type,
+                        source_ref=f"{path.name}:{line_number}",
+                    )
 
 
 class PlayWithYouResultAdapter(_JsonlMatchAdapter):
