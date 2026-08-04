@@ -66,6 +66,8 @@ MAX_LOG_LINES = 4000
 PWY_LOG_DIR = PROJECT_ROOT / "logs" / "playwithyou"
 
 _LOCK = threading.Lock()
+# 单进程内 source 文件 create-if-absent 的并发保护（P2-3：并发 confirm 不得互相覆盖）。
+_SOURCE_WRITE_LOCK = threading.Lock()
 # session_id -> PWYSession
 SESSIONS: Dict[str, "PWYSession"] = {}
 # Keep a short history of finished sessions so the GUI can still show the last run.
@@ -778,23 +780,26 @@ def _safe_source_filename(match_id: str) -> str:
 
 
 def write_source_idempotent(path: Path, line: str) -> str:
-    """一局一个 JSONL 文件的幂等写入。
+    """一局一个 JSONL 文件的幂等写入（进程内并发安全）。
 
     - 文件不存在：原子创建，返回 ``"created"``；
     - 已存在且内容相同：no-op，返回 ``"existing"``；
     - 已存在且内容不同：抛 SourceConflictError，绝不改写旧 source（C17）。
+
+    检查-比较-写入在同一临界区内，避免两个并发请求互相覆盖（C31）。
     """
     import os as _os
 
-    if path.is_file():
-        existing = path.read_text(encoding="utf-8")
-        if existing.rstrip("\n") == line.rstrip("\n"):
-            return "existing"
-        raise SourceConflictError(f"同 match_id 已存在不同内容: {path.name}")
-    tmp = path.with_name(f".{path.name}.{_os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
-    tmp.write_text(line, encoding="utf-8")
-    _os.replace(tmp, path)
-    return "created"
+    with _SOURCE_WRITE_LOCK:
+        if path.is_file():
+            existing = path.read_text(encoding="utf-8")
+            if existing.rstrip("\n") == line.rstrip("\n"):
+                return "existing"
+            raise SourceConflictError(f"同 match_id 已存在不同内容: {path.name}")
+        tmp = path.with_name(f".{path.name}.{_os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+        tmp.write_text(line, encoding="utf-8")
+        _os.replace(tmp, path)
+        return "created"
 
 
 def _confirm_capture(capture_id: str) -> dict:
@@ -891,6 +896,9 @@ def _set_capture_state(path: Path, state: str, *, reason: str = "") -> None:
     payload["state"] = state
     if reason:
         payload["publish_error"] = reason
+    elif state == "published":
+        # retry 成功后清除旧的 publish_error（P3/C32）。
+        payload.pop("publish_error", None)
     tmp = path.with_name(f".{path.name}.{_os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     _os.replace(tmp, path)
@@ -921,8 +929,9 @@ def ignore_ladder_capture(capture_id: str) -> dict:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=500, detail=f"capture 无法解析: {exc}") from exc
-    if payload.get("state") == "published":
-        raise HTTPException(status_code=409, detail="已发布的捕获不能忽略")
+    if payload.get("state") in {"published", "accepted_publish_failed"}:
+        # 一旦正式 source 已 accepted，只能 retry-publish，不能通过 ignore 撤销（P2-1/C30）。
+        raise HTTPException(status_code=409, detail="已确认（含发布失败待重试）的捕获不能忽略")
     payload["state"] = "ignored"
     _set_capture_state(path, "ignored")
     ignored_dir = path.parent.parent / "ignored"
