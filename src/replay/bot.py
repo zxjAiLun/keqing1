@@ -250,6 +250,8 @@ def run_replay_from_source(
         if pending is not None:
             if _is_player_action(event, player_id):
                 pending["gt_action"] = event
+                # 自家决策 entry 也带原始事件序号，供前端按事件边界对齐（与 obs entry 一致）
+                pending["source_event_index"] = event_index
             else:
                 chosen = pending.get("chosen") or {}
                 candidates = pending.get("candidates", [])

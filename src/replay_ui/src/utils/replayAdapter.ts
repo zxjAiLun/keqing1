@@ -128,21 +128,35 @@ export function buildCandidateScores(entry: DecisionLogEntry): CandidateScore[] 
 
 export type ReplayBoardPhase = 'pre' | 'reach' | 'post';
 
+/**
+ * 跨 entry 合并白名单：只允许长生命周期棋盘字段从上一 entry 继承。
+ * 决策级字段（hand/tsumo_pai/chosen/gt_action/candidates/actor_to_move/
+ * last_discard/is_obs/board_phase/source_event_index/teacher_reviews）缺失时
+ * 必须显式报诊断，严禁静默继承上一巡，避免两套状态机串味。
+ */
+const MERGE_FALLBACK_KEYS = ['discards', 'melds', 'dora_markers', 'reached', 'scores'] as const;
+
 function mergeReplayEntryWithPrevious(
   entry: DecisionLogEntry,
   prevEntry?: DecisionLogEntry | null,
 ): DecisionLogEntry {
   if (!prevEntry) return entry;
-  return {
-    ...prevEntry,
-    ...entry,
-    is_obs: entry.is_obs === true,
-    discards: entry.discards ?? prevEntry.discards,
-    melds: entry.melds ?? prevEntry.melds,
-    dora_markers: entry.dora_markers ?? prevEntry.dora_markers,
-    reached: entry.reached ?? prevEntry.reached,
-    scores: entry.scores ?? prevEntry.scores,
-  };
+  const merged: DecisionLogEntry = { ...entry };
+  const mergedRecord = merged as unknown as Record<string, unknown>;
+  for (const key of MERGE_FALLBACK_KEYS) {
+    if (mergedRecord[key] == null && prevEntry[key] != null) {
+      mergedRecord[key] = prevEntry[key];
+    }
+  }
+  // 决策级字段缺失时显式诊断（不继承上一巡）
+  for (const key of ['hand', 'tsumo_pai', 'chosen', 'gt_action', 'actor_to_move', 'last_discard', 'is_obs', 'board_phase'] as const) {
+    if (mergedRecord[key] == null) {
+      if (typeof console !== 'undefined') {
+        console.error(`[replayAdapter] entry ${entry.step ?? '?'} missing decision field: ${key}（不继承上一巡）`);
+      }
+    }
+  }
+  return merged;
 }
 
 function cloneDiscards(discards: DiscardEntry[][]): DiscardEntry[][] {
