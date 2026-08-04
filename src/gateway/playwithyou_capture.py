@@ -1,18 +1,18 @@
 """Play-with-you ladder capture: shared collector in the launcher process.
 
 The three ``GatewayBotClient`` instances run in ONE launcher process (separate
-threads) and share a single :class:`PlayWithYouCaptureCollector`.  Each bot
-observes ``start_game`` (binding its own seat from ``message["id"]``) and
-``end_game`` (final scores).  Identity mapping is seat-based, never name-based,
-so duplicate NoName display names are irrelevant.
+threads) and share a single :class:`PlayWithYouCaptureCollector`.  All state
+transitions are serialized under a re-entrant lock.
 
-Progress is persisted progressively (after every start_game / end_game), so a
-forced Windows process-tree kill of the launcher does not lose a finished game:
-the collector writes observation state and, once a complete consistent result
-is available, a provisional pending file immediately.
+Coordinate system (P1-1 review fix):
 
-The capture directory lives OUTSIDE the season ``sources_root`` on purpose:
-unconfirmed pending/ignored files must not perturb the ingest fingerprint.
+- ``start_game["id"]`` is the LOCAL MJAI seat (actor 0 = this connection), NOT a
+  global Tenhou seat — three observers typically all see ``id == 0``.
+- The global seat of each observer comes from ``tenhou_log_seat`` (bridge-added)
+  or is parsed from the ``tw`` query param of the per-connection log URL.
+- Each connection's ``end_game.scores`` is its OWN rotated local perspective.
+  Scores are canonicalized back to the unified global-log coordinates before
+  any comparison / account binding.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -81,6 +82,36 @@ def extract_tenhou_match_id(log_url: str | None) -> str | None:
     return f"tenhou:{match.group(1)}"
 
 
+def extract_tenhou_log_seat(log_url: str | None) -> int | None:
+    """从 log URL 的 ``tw`` 参数解析该观察者的全局座位（0..3）。
+
+    例如 ``...&tw=2`` -> 2。无 ``tw`` 或非法时返回 None。
+    """
+    if not log_url:
+        return None
+    match = re.search(r"(?:^|[?&])tw=(\d)", log_url)
+    if not match:
+        return None
+    seat = int(match.group(1))
+    return seat if seat in (0, 1, 2, 3) else None
+
+
+def canonicalize_scores(
+    local_scores: Sequence[int],
+    observer_log_seat: int,
+) -> tuple[int, int, int, int]:
+    """把某 observer 的本地旋转视角分数转回统一全局坐标。
+
+    本地视角 ``local[i]`` 对应全局座位 ``(observer_log_seat + i) % 4``，
+    因此 ``global_scores[g] = local_scores[(g - observer_log_seat) % 4]``。
+    """
+    if observer_log_seat not in (0, 1, 2, 3):
+        raise ValueError(f"observer_log_seat 必须为 0..3，得到 {observer_log_seat}")
+    return tuple(
+        int(local_scores[(seat - observer_log_seat) % 4]) for seat in range(4)
+    )
+
+
 def capture_dir_for_session(data_root: Path, session_id: str) -> Path:
     """每个 session 一个捕获目录（不在 sources_root 内）。"""
     return data_root / "captures" / "playwithyou" / session_id
@@ -99,16 +130,18 @@ def _safe_slug(value: str) -> str:
 
 @dataclass
 class PlayWithYouCaptureCollector:
-    """共享 collector：三名 bot observer 的消息累积 + 渐进持久化。"""
+    """共享 collector：三名 bot observer 的消息累积 + 渐进持久化（线程安全）。"""
 
     binding: CaptureBinding
     capture_dir: Path
     game_length: str = "hanchan"
 
+    _lock: threading.RLock = field(default_factory=threading.RLock)
     _seat_of: dict[str, int] = field(default_factory=dict)
     _log_id_by_observer: dict[str, str] = field(default_factory=dict)
     _log_url_by_observer: dict[str, str] = field(default_factory=dict)
-    _end_scores: list[tuple[str, list[int]]] = field(default_factory=list)
+    # observer -> 规范化后的全局分数（tuple，顺序即全局 seat）
+    _global_scores_by_observer: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
     _terminal: bool = False
     _state: str = "waiting_start"
     _conflict_reason: str | None = None
@@ -117,30 +150,40 @@ class PlayWithYouCaptureCollector:
     # --- observation --------------------------------------------------------
 
     def observe(self, observer_account_id: str, message: Mapping[str, Any]) -> None:
-        mtype = message.get("type")
-        if mtype == "start_game":
-            self._on_start_game(observer_account_id, message)
-        elif mtype == "end_game":
-            self._on_end_game(observer_account_id, message)
-        elif mtype == "error":
-            self._terminal = True
-        # 渐进持久化：每次观察都更新 state；完整且一致时立即写 provisional pending。
-        self._try_complete()
+        with self._lock:
+            mtype = message.get("type")
+            if mtype == "start_game":
+                self._on_start_game(observer_account_id, message)
+            elif mtype == "end_game":
+                self._on_end_game(observer_account_id, message)
+            elif mtype == "error":
+                self._terminal = True
+            # 渐进持久化：每次观察都在锁内完成完整状态转换。
+            self._try_complete()
+
+    def _global_seat_for(self, observer: str, message: Mapping[str, Any]) -> int | None:
+        """observer 的全局座位：优先 tenhou_log_seat，其次 log URL 的 tw。"""
+        explicit = message.get("tenhou_log_seat")
+        if isinstance(explicit, int) and explicit in (0, 1, 2, 3):
+            return explicit
+        if isinstance(explicit, str) and explicit.isdigit() and int(explicit) in (0, 1, 2, 3):
+            return int(explicit)
+        log_url = message.get("log")
+        return extract_tenhou_log_seat(log_url if isinstance(log_url, str) else None)
 
     def _on_start_game(self, observer: str, message: Mapping[str, Any]) -> None:
-        try:
-            seat = int(message["id"])
-        except (KeyError, TypeError, ValueError):
-            return
-        if seat not in (0, 1, 2, 3):
-            return
+        seat = self._global_seat_for(observer, message)
+        if seat is None:
+            return  # 无法确定全局座位：本局无法完成，但不是冲突
         if observer in self._seat_of and self._seat_of[observer] != seat:
-            self._set_conflict(f"observer {observer} 重复上报不同 seat: {self._seat_of[observer]} vs {seat}")
+            self._set_conflict(
+                f"observer {observer} 重复上报不同全局 seat: {self._seat_of[observer]} vs {seat}"
+            )
             return
         self._seat_of[observer] = seat
 
         log_url = message.get("log")
-        match_id = extract_tenhou_match_id(log_url) if isinstance(log_url, str) else None
+        match_id = extract_tenhou_match_id(log_url if isinstance(log_url, str) else None)
         if match_id is None:
             return
         if observer in self._log_id_by_observer and self._log_id_by_observer[observer] != match_id:
@@ -165,20 +208,36 @@ class PlayWithYouCaptureCollector:
         if not isinstance(raw_scores, list) or len(raw_scores) != 4:
             return
         try:
-            scores = [int(value) for value in raw_scores]
+            local_scores = [int(value) for value in raw_scores]
         except (TypeError, ValueError):
             return
-        for other, other_scores in self._end_scores:
-            if other_scores != scores:
+        seat = self._seat_of.get(observer)
+        if seat is None:
+            return  # 尚未绑定全局 seat，无法规范化
+        global_scores = canonicalize_scores(local_scores, seat)
+        previous = self._global_scores_by_observer.get(observer)
+        if previous is not None:
+            if previous != global_scores:
                 self._set_conflict(
-                    f"observer {observer} 分数与 {other} 不一致，拒绝确认"
+                    f"observer {observer} 重复上报不同终局分数（规范化后），拒绝确认"
+                )
+            return  # 同 observer 重复相同结果：no-op
+        for other, other_scores in self._global_scores_by_observer.items():
+            if other_scores != global_scores:
+                self._set_conflict(
+                    f"observer {observer} 规范化后分数与 {other} 不一致，拒绝确认"
                 )
                 return
-        self._end_scores.append((observer, scores))
+        self._global_scores_by_observer[observer] = global_scores
 
     def _set_conflict(self, reason: str) -> None:
+        """冲突必须立即持久化（删除 pending + 写 errors + 写 state），
+        不依赖 launcher 正常退出（P2-2/C29）。"""
         self._state = "conflict"
         self._conflict_reason = reason
+        self._remove_pending()
+        self._write_error("conflict")
+        self._write_state()
 
     # --- seat resolution -----------------------------------------------------
 
@@ -212,7 +271,7 @@ class PlayWithYouCaptureCollector:
     # --- progressive completion ---------------------------------------------
 
     def _try_complete(self) -> None:
-        """每次观察后调用：完整且一致 -> 立即写 provisional pending；冲突 -> 移除 pending。"""
+        """锁内调用：完整且一致 -> 立即写 provisional pending；冲突 -> 已移除。"""
         self.capture_dir.mkdir(parents=True, exist_ok=True)
 
         if self._state == "conflict":
@@ -221,11 +280,11 @@ class PlayWithYouCaptureCollector:
             return
 
         human_seat = self._human_seat()
-        if self._canonical_log_id() is None or human_seat is None or not self._end_scores:
+        if self._canonical_log_id() is None or human_seat is None or not self._global_scores_by_observer:
             self._write_state()
             return
 
-        final_scores = self._end_scores[0][1]
+        final_scores = next(iter(self._global_scores_by_observer.values()))
         players = [
             {
                 "account_id": account_id,
@@ -246,20 +305,20 @@ class PlayWithYouCaptureCollector:
     # --- finalize -----------------------------------------------------------
 
     def finalize(self) -> None:
-        """launcher 退出时调用一次：兜底触发 completion / 写 errors 详情。"""
-        if self._finalized:
-            return
-        self._finalized = True
-        if self._state == "conflict":
-            self._write_error("conflict")
-            self._write_state()
-            return
-        self._try_complete()
-        if self._state in ("incomplete", "waiting_start", "in_game"):
-            # 没有完整结果：写 errors/ 详情，让 discovery/UI 可见（C22）。
-            self._state = "incomplete"
-            self._write_error("incomplete")
-            self._write_state()
+        """launcher 退出时调用一次：兜底触发 completion / 写 incomplete 详情。"""
+        with self._lock:
+            if self._finalized:
+                return
+            self._finalized = True
+            if self._state == "conflict":
+                self._write_state()  # errors/ 已在 _set_conflict 立即写出
+                return
+            self._try_complete()
+            if self._state in ("incomplete", "waiting_start", "in_game"):
+                # 没有完整结果：写 errors/ 详情，让 discovery/UI 可见（C22）。
+                self._state = "incomplete"
+                self._write_error("incomplete")
+                self._write_state()
 
     # --- persistence ---------------------------------------------------------
 
@@ -296,7 +355,7 @@ class PlayWithYouCaptureCollector:
             },
             "tenhou_log_url": self._canonical_log_url(),
             "observer_accounts": sorted(self._seat_of),
-            "score_observers": [observer for observer, _scores in self._end_scores],
+            "score_observers": sorted(self._global_scores_by_observer),
         }
         _atomic_write(target, payload)
 
@@ -325,7 +384,7 @@ class PlayWithYouCaptureCollector:
             },
             "tenhou_log_url": self._canonical_log_url(),
             "observer_accounts": sorted(self._seat_of),
-            "score_observers": [observer for observer, _scores in self._end_scores],
+            "score_observers": sorted(self._global_scores_by_observer),
             "conflict_reason": self._conflict_reason,
         }
         _atomic_write(target, payload)
@@ -339,7 +398,7 @@ class PlayWithYouCaptureCollector:
             "match_id": self._canonical_log_id(),
             "seats": dict(sorted(self._seat_of.items())),
             "human_account_id": self.binding.human_account_id,
-            "score_observers": [observer for observer, _scores in self._end_scores],
+            "score_observers": sorted(self._global_scores_by_observer),
             "conflict_reason": self._conflict_reason,
         }
         _atomic_write(self.capture_dir / "state.json", state)
