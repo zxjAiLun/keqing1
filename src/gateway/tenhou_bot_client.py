@@ -68,6 +68,9 @@ class BotClientConfig:
     # "Speed" control: pause this many seconds on our own turn before reacting,
     # so games are watchable and we don't hammer the relay. 0 = as fast as possible.
     think_delay: float = 0.0
+    # R9-3 ladder capture: this bot's official account + shared collector sink.
+    ladder_account_id: str | None = None
+    capture_sink: Any | None = None
 
     def resolved_model_path(self) -> Path | None:
         kind, resolved = resolve_bot_spec(self.bot_name, self.project_root)
@@ -195,6 +198,16 @@ class GatewayBotClient:
         return message
 
     def handle_message(self, message: dict[str, Any]) -> dict[str, Any]:
+        # R9-3: observe to the shared ladder capture collector before acting;
+        # a collector failure must never affect the relay/game.
+        if self.config.capture_sink is not None and self.config.ladder_account_id:
+            try:
+                self.config.capture_sink.observe(self.config.ladder_account_id, message)
+            except Exception:
+                logger.exception(
+                    "[%s] ladder capture observe failed; continuing",
+                    self.config.name,
+                )
         mtype = message.get("type")
         if mtype == "hello":
             return {
