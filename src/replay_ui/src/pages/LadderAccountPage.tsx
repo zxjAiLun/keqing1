@@ -98,8 +98,12 @@ export function LadderAccountPage() {
               <div style={{ minWidth: 260 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                   <span style={{ fontSize: 18, fontWeight: 800, color: 'var(--text-primary)' }}>{account.display_name}</span>
-                  {account.rank_name && <span style={rankBadgeStyle}>{account.rank_name}</span>}
-                  {account.tenhou_reached && <span style={rankBadgeStyle}>天凤位</span>}
+                  {account.rank_name && (
+                    <span style={rankBadgeStyle}>
+                      {account.rank_name}
+                      {account.tenhou_reached ? ' 👑' : ''}
+                    </span>
+                  )}
                   {account.promotions ? <span style={progressionBadgeStyle('promotion')}>升段 ×{account.promotions}</span> : null}
                   {account.demotions ? <span style={progressionBadgeStyle('demotion')}>降段 ×{account.demotions}</span> : null}
                   {account.highest_rank_id && account.highest_rank_id !== account.rank_id && (
@@ -124,23 +128,21 @@ export function LadderAccountPage() {
 
               <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'flex-start' }}>
                 <div style={{ minWidth: 200 }}>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 3 }}>
-                    {ptTarget !== null
-                      ? `PT（${fmtPt(account.pt_current)} / ${fmtPt(ptTarget)}）`
-                      : '天凤位（不再计分）'}
-                  </div>
-                  {ptTarget !== null ? (
-                    <div style={{ height: 8, borderRadius: 4, background: 'var(--page-bg)', border: '1px solid var(--border)', overflow: 'hidden' }}>
-                      <div style={{ width: `${ptProgress}%`, height: '100%', background: (account?.pt_current ?? 0) < ptTarget ? 'var(--accent)' : 'var(--success)' }} />
-                    </div>
+                  {ptTarget === null ? (
+                    <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--success)' }}>天凤位 · 不再计算 PT</div>
                   ) : (
-                    <div style={{ fontSize: 12, color: 'var(--success)' }}>已达成天凤位</div>
+                    <>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 3 }}>
+                        PT（{fmtPt(account.pt_current)} / {fmtPt(ptTarget)}）
+                      </div>
+                      <div style={{ height: 8, borderRadius: 4, background: 'var(--page-bg)', border: '1px solid var(--border)', overflow: 'hidden' }}>
+                        <div style={{ width: `${ptProgress}%`, height: '100%', background: (account?.pt_current ?? 0) < ptTarget ? 'var(--accent)' : 'var(--success)' }} />
+                      </div>
+                      <div style={{ marginTop: 3, fontSize: 11, color: 'var(--text-muted)' }}>
+                        {account.pt_current >= ptTarget ? '已达到升段 PT' : `距升段还差 ${fmtPt(ptTarget - account.pt_current)}`}
+                      </div>
+                    </>
                   )}
-                  <div style={{ marginTop: 3, fontSize: 11, color: 'var(--text-muted)' }}>
-                    {ptTarget !== null
-                      ? account.pt_current >= ptTarget ? '已达到升段 PT' : `距升段还差 ${fmtPt(ptTarget - account.pt_current)}`
-                      : '天凤位（不再计分）'}
-                  </div>
                 </div>
                 <div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Rating</div>

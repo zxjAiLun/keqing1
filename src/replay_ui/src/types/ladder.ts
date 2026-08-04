@@ -134,6 +134,10 @@ export interface LadderCurvePoint {
   rank_id?: string;
   rank_name?: string;
   pt_target?: number | null;
+  /** 曲线点上的段位变化（数据已就绪；UI 展示为后续增强） */
+  rank_before?: string;
+  rank_after?: string;
+  transition?: string;
 }
 
 export interface LadderRecentGame {

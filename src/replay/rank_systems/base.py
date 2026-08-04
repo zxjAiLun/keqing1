@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Literal, Protocol, Sequence
+from typing import Any, Literal, Protocol, Sequence
 
 
 @dataclass(frozen=True)
@@ -94,3 +94,4 @@ class RankSystem(Protocol):
         table: TableContext,
     ) -> RankUpdate: ...
     def rank_meta(self, rank_id: str) -> RankMeta: ...
+    def scoring_block(self) -> dict[str, Any]: ...

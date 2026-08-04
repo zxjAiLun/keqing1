@@ -21,7 +21,6 @@ TENHOU_SCORING = {
     "version": "2026-08-04",
     "game_length": "hanchan",
     "room_policy": "highest_common_eligible",
-    "membership": "premium",
     "initial_rank": "newcomer",
     "initial_rating": 1500,
 }
@@ -136,13 +135,13 @@ def test_ledger_records_transitions_and_room(tmp_path: Path, monkeypatch: pytest
     a_rows = _by_account(rows, "testmodel@01")
     assert len(a_rows) == 2
     first = a_rows[0]
-    # 默认 premium 付费例外：新人亦满足上级卓准入（官方"低于1级付费可进上级"）
-    assert first["table_room"] == "joukyuu"
+    # 四名新人（低于1级）只能进一般卓；计分引擎不引入天凤付费领域
+    assert first["table_room"] == "ippan"
     assert first["game_length"] == "hanchan"
     assert first["rank_before"] == "newcomer"
     assert first["rank_after"] == "9kyu"
     assert first["transition"] == "promotion"
-    assert first["pt_delta"] == 60
+    assert first["pt_delta"] == 30
     second = a_rows[1]
     assert second["rank_before"] == "9kyu"
     assert second["rank_after"] == "8kyu"
@@ -215,7 +214,7 @@ def test_report_scoring_block_describes_tenhou(tmp_path: Path, monkeypatch: pyte
     assert scoring["system"] == "tenhou_4p_ranked"
     assert scoring["version"] == "2026-08-04"
     assert scoring["room_policy"] == "highest_common_eligible"
-    assert scoring["membership"] == "premium"
+    assert "membership" not in scoring
     assert scoring["initial_rank"] == "newcomer"
     assert scoring["initial_rating"] == 1500.0
 
