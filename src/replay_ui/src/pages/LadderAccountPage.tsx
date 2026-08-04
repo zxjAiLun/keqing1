@@ -222,7 +222,7 @@ export function LadderAccountPage() {
                     <th style={thStyle}>场次</th>
                     <th style={thStyle}>顺位</th>
                     <th style={thStyle}>段位变化</th>
-                    <th style={thStyle}>卓</th>
+                    <th style={thStyle}>计分档位</th>
                     <th style={{ ...thStyle, textAlign: 'right' }}>终局分</th>
                     <th style={{ ...thStyle, textAlign: 'right' }}>分数Δ</th>
                     <th style={{ ...thStyle, textAlign: 'right' }}>PTΔ</th>
@@ -252,7 +252,7 @@ export function LadderAccountPage() {
                         )}
                       </td>
                       <td style={{ ...tdStyle, color: 'var(--text-muted)' }}>
-                        {game.table_room ? `${roomLabel(game.table_room)}${game.game_length === 'tonpuu' ? ' 東風' : ' 東南'}` : '—'}
+                        {game.pt_tier ? tierDisplay(game.pt_tier, game.positive_pt) : '—'}
                       </td>
                       <td style={{ ...tdStyle, ...numStyle }}>{game.final_score.toLocaleString()}</td>
                       <td style={{ ...tdStyle, ...numStyle }}>{fmtSignedInt(game.score_delta)}</td>
@@ -305,19 +305,27 @@ const progressionBadgeStyle = (kind: 'promotion' | 'demotion'): CSSProperties =>
   padding: '2px 6px',
 });
 
-function roomLabel(room: string): string {
-  const names: Record<string, string> = {
-    ippan: '一般',
-    joukyuu: '上級',
-    tokujou: '特上',
-    houou: '鳳凰',
-  };
-  return names[room] ?? room;
+const TIER_ZH: Record<string, string> = {
+  'ippan-equivalent': '一般',
+  'joukyuu-equivalent': '上级',
+  'tokujou-equivalent': '特上',
+  'houou-equivalent': '凤凰',
+};
+
+function tierDisplay(tier: string, positivePt?: number[] | null): string {
+  const name = TIER_ZH[tier] ?? tier.replace('-equivalent', '');
+  if (positivePt && positivePt.length === 3) {
+    return `${name}档 · +${positivePt[0]}/+${positivePt[1]}/${positivePt[2]}`;
+  }
+  return `${name}档`;
 }
 
 function scoringProfileLabel(scoring: LadderSeasonScoring): string {
+  if (scoring.system === 'tenhou_rank_progression') {
+    return `天凤式段位进度 ${scoring.version || ''} · 个人档位结算`;
+  }
   if (scoring.system) {
-    return [scoring.system, scoring.version, scoring.room_policy].filter(Boolean).join(' · ');
+    return [scoring.system, scoring.version, scoring.tier_policy].filter(Boolean).join(' · ');
   }
   return scoring.pt_profile || 'legacy';
 }

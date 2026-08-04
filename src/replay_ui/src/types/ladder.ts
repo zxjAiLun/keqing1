@@ -32,6 +32,10 @@ export interface LadderSeasonScoring {
   system?: string;
   version?: string;
   game_length?: string;
+  /** 个人计分档位策略（tenhou_rank_progression = individual_highest） */
+  tier_policy?: string;
+  positive_pt_tables?: Record<string, number[]>;
+  /** 已废弃的房间字段；仅旧 profile 可能带 */
   room_policy?: string;
   membership?: string;
   initial_rank?: string;
@@ -145,8 +149,11 @@ export interface LadderRecentGame {
   rank: number;
   final_score: number;
   score_delta: number;
-  table_room?: string;
   game_length?: string;
+  /** 个人计分档位（如 tokujou-equivalent）；天凤位/legacy 为 null */
+  pt_tier?: string | null;
+  /** 该玩家本局一/二/三位正分档位；四位或天凤位为 null */
+  positive_pt?: number[] | null;
   rank_before?: string | null;
   pt_before?: number | null;
   pt_delta: number;

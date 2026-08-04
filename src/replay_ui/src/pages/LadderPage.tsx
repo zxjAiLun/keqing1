@@ -243,8 +243,11 @@ export function LadderPage() {
 }
 
 function scoringLabel(scoring: LadderSeasonScoring): string {
+  if (scoring.system === 'tenhou_rank_progression') {
+    return `天凤式段位进度 ${scoring.version || ''} · 个人档位结算`;
+  }
   if (scoring.system) {
-    const parts = [scoring.system, scoring.version, scoring.room_policy, scoring.game_length].filter(Boolean);
+    const parts = [scoring.system, scoring.version, scoring.tier_policy, scoring.game_length].filter(Boolean);
     return parts.join(' · ');
   }
   const parts: string[] = [scoring.pt_profile || 'pt'];
