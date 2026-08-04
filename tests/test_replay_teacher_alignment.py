@@ -218,6 +218,7 @@ def test_duplicate_teacher_identity_not_silently_dropped(tmp_path):
     attached = _attach_teacher_report_overlays(decisions, [report_path], expected_replay_id=EXPECTED_REPLAY_ID)
     overlay = attached["teacher_review_overlays"][0]
     assert overlay["alignment_stats"]["duplicate_teacher_identity"] >= 1
+    assert overlay["alignment"] == "mixed", "重复身份不应被顶层标成纯 exact"
     step3_local = _own_entry(attached, 3)
     reviews = [r for r in (step3_local.get("teacher_reviews") or []) if r["model"] == "70k"]
     assert len(reviews) == 1, "重复身份只挂载一条，不得重复附加"
@@ -263,3 +264,73 @@ def test_legacy_step_fallback_is_degraded(tmp_path):
     assert any(review["model"] == "70k" for review in (step8.get("teacher_reviews") or [])), (
         "旧报告应通过 step legacy fallback 挂载到 step 8"
     )
+
+
+def test_v1_missing_top_level_replay_id_blocks_exact(tmp_path):
+    """V1：删除报告顶层 replay_id、保留 entry identity → 不得 exact，只走 legacy。"""
+    decisions = _load_decisions()
+    report_path = _write_report(tmp_path, decisions, "70k")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert "replay_id" in report
+    del report["replay_id"]
+    report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+
+    attached = _attach_teacher_report_overlays(decisions, [report_path], expected_replay_id=EXPECTED_REPLAY_ID)
+    overlay = attached["teacher_review_overlays"][0]
+    assert overlay["replay_verified"] is False
+    assert overlay["alignment_stats"]["exact_event_identity"] == 0
+    assert overlay["alignment_stats"]["identity_carrying_entries"] > 0, "身份三元组仍应被统计"
+    assert overlay["alignment_stats"]["legacy_step"] > 0, "缺 replay_id 时只能走 legacy"
+    assert overlay["alignment"] != "exact_event_identity"
+
+
+def test_v2_stripped_replay_id_cannot_bypass_cross_replay(tmp_path):
+    """V2：replay B 报告删掉顶层 replay_id、保留会与 A 碰撞的身份 → 不得 exact 挂载。"""
+    decisions = _load_decisions()
+    report_path = _write_report(tmp_path, decisions, "70k", replay_id="replay_other_game")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["replay_id"] == "replay_other_game"
+    del report["replay_id"]
+    report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+
+    attached = _attach_teacher_report_overlays(decisions, [report_path], expected_replay_id=EXPECTED_REPLAY_ID)
+    overlay = attached["teacher_review_overlays"][0]
+    assert overlay["replay_verified"] is False
+    assert overlay["alignment_stats"]["exact_event_identity"] == 0, "删掉 replay_id 不得通过身份 exact 挂载"
+    assert overlay["alignment"] != "exact_event_identity"
+    # legacy step 挂载是允许的降级路径；关键是"身份碰撞"不能成为 exact 依据
+    step3 = _own_entry(attached, 3)
+    if step3.get("teacher_reviews"):
+        assert overlay["alignment_stats"]["legacy_step"] > 0, "若 step 3 被挂载，只能来自 legacy_step"
+
+
+def test_v3_no_expected_replay_id_no_self_certification(tmp_path):
+    """V3：expected_replay_id=None、报告自带 replay_id → 不得"自证"为 verified。"""
+    decisions = _load_decisions()
+    report_path = _write_report(tmp_path, decisions, "70k")
+    attached = _attach_teacher_report_overlays(decisions, [report_path])  # 不传 expected_replay_id
+    overlay = attached["teacher_review_overlays"][0]
+    assert overlay["replay_verified"] is False, "报告自身 replay_id 不构成验证"
+    assert overlay["alignment_stats"]["exact_event_identity"] == 0
+    assert overlay["alignment"] != "exact_event_identity"
+
+
+def test_v4_duplicate_identity_yields_mixed(tmp_path):
+    """V4：exact 条目 + duplicate identity → 顶层 alignment=mixed。"""
+    decisions = _load_decisions()
+    report_path = _write_report(tmp_path, decisions, "70k")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    step3_teacher = None
+    for kyoku in report["review"]["kyokus"]:
+        for entry in kyoku["entries"]:
+            if entry.get("step") == 3:
+                step3_teacher = entry
+    assert step3_teacher is not None
+    report["review"]["kyokus"][0]["entries"].append(dict(step3_teacher))
+    report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+
+    attached = _attach_teacher_report_overlays(decisions, [report_path], expected_replay_id=EXPECTED_REPLAY_ID)
+    overlay = attached["teacher_review_overlays"][0]
+    assert overlay["alignment_stats"]["exact_event_identity"] > 0
+    assert overlay["alignment_stats"]["duplicate_teacher_identity"] >= 1
+    assert overlay["alignment"] == "mixed", "存在重复身份时不得标为纯 exact"

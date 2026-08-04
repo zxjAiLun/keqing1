@@ -395,13 +395,20 @@ def _alignment_label(
     legacy_action_order: int,
     ambiguous: int,
     unmatched: int,
+    duplicate: int,
     replay_mismatch: bool,
 ) -> str:
     """顶层 alignment 语义：mixed 不会被 exact 掩盖。"""
     if replay_mismatch:
         return "replay_mismatch"
     if exact > 0:
-        if legacy_step > 0 or legacy_action_order > 0 or ambiguous > 0 or unmatched > 0:
+        if (
+            legacy_step > 0
+            or legacy_action_order > 0
+            or ambiguous > 0
+            or unmatched > 0
+            or duplicate > 0
+        ):
             return "mixed"
         return "exact_event_identity"
     if legacy_step > 0:
@@ -520,27 +527,28 @@ def _attach_teacher_report_overlays(
             continue
 
         report_replay_id = report.get("replay_id") if isinstance(report, dict) else None
-        replay_verified = False
-        if expected_replay_id is not None:
-            if report_replay_id is not None:
-                if str(report_replay_id) != str(expected_replay_id):
-                    # 跨 replay 报告：明确拒绝，不做任何挂载（P1：身份域闭合）
-                    overlays.append(
-                        {
-                            "model": _infer_teacher_model_tag(report, report_path) if isinstance(report, dict) else None,
-                            "report_path": str(report_path),
-                            "teacher_decision_count": 0,
-                            "attached_decision_count": 0,
-                            "alignment": "replay_mismatch",
-                            "expected_replay_id": str(expected_replay_id),
-                            "actual_replay_id": str(report_replay_id),
-                        }
-                    )
-                    continue
-                replay_verified = True
-            # 报告缺失 replay_id：不能确认所属牌谱 → 只走 legacy（degraded），不视为 exact
-        elif report_replay_id is not None:
-            replay_verified = True  # 无 expected 可对，按报告自身 replay_id 自证
+        # replay_verified 只在 expected 与报告 JSON replay_id 都已知且完全一致时为 True。
+        # expected 缺失或报告缺 replay_id 时不允许"报告自证"或依赖文件名，一律不视为 exact。
+        replay_verified = bool(
+            expected_replay_id is not None
+            and report_replay_id is not None
+            and str(report_replay_id) == str(expected_replay_id)
+        )
+        if expected_replay_id is not None and report_replay_id is not None:
+            if str(report_replay_id) != str(expected_replay_id):
+                # 跨 replay 报告：明确拒绝，不做任何挂载（P1：身份域闭合）
+                overlays.append(
+                    {
+                        "model": _infer_teacher_model_tag(report, report_path) if isinstance(report, dict) else None,
+                        "report_path": str(report_path),
+                        "teacher_decision_count": 0,
+                        "attached_decision_count": 0,
+                        "alignment": "replay_mismatch",
+                        "expected_replay_id": str(expected_replay_id),
+                        "actual_replay_id": str(report_replay_id),
+                    }
+                )
+                continue
 
         try:
             model_tag, report_player_id, teacher_entries = _load_teacher_report_entries(report_path, decisions)
@@ -570,9 +578,13 @@ def _attach_teacher_report_overlays(
             return True
 
         for teacher_entry in teacher_entries:
-            identity = _teacher_identity_key(teacher_entry)
-            if identity is not None:
+            raw_identity = _teacher_identity_key(teacher_entry)
+            if raw_identity is not None:
                 identity_carrying_entries += 1
+            # replay_verified=false 时即使 entry 携带身份三元组，
+            # 也只能走 step/action-order legacy，绝不 exact（P1）。
+            identity = raw_identity if replay_verified else None
+            if identity is not None:
                 if identity in seen_teacher_identities:
                     # 报告内重复身份：拒绝第二条，不静默消失（P3）
                     duplicate_teacher_identity += 1
@@ -633,6 +645,7 @@ def _attach_teacher_report_overlays(
                     legacy_action_order=legacy_action_order,
                     ambiguous=ambiguous,
                     unmatched=unmatched,
+                    duplicate=duplicate_teacher_identity,
                     replay_mismatch=False,
                 ),
                 "replay_verified": replay_verified,
