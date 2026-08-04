@@ -129,12 +129,34 @@ class LegacyFixedProfile:
         )
 
     def scoring_block(self) -> dict[str, Any]:
+        """Serializable scoring description for the report/manifest.
+
+        历史公式：无 R1500 下限、无两位取整，与 ``apply_result`` 完全一致。
+        """
         return {
             "system": self.system_id,
             "version": self.version,
             "game_length": self.game_length,
             "room_policy": self.room_policy,
             "membership": self.membership,
+            "premium_days_remaining": None,
             "initial_rank": self.initial_rank,
             "initial_rating": float(self.initial_rating),
+            "room": self.room,
+            "pt_profile": "houou_7dan_hanchan",
+            "pt_rank_deltas": [float(value) for value in self.rank_points],
+            "pt_initial": float(self.initial_pt),
+            "pt_target": float(self.target_pt),
+            "rank_name": "七段" if self.initial_rank == "7dan" else self.initial_rank,
+            "rating_initial": float(self.initial_rating),
+            "rating_formula": (
+                "delta = game_count_correction * "
+                "(rank_result + (table_avg_rating - player_rating) / 40)"
+            ),
+            "rating_game_count_correction": "1 - games * 0.002 if games < 400 else 0.2",
+            "rating_scaling": 1.0,
+            "sources": [
+                "https://doramahjong.org/osusume/02/0012.html",
+                "https://tenhou.net/man/",
+            ],
         }

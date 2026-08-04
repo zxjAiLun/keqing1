@@ -166,7 +166,7 @@ def write_manifest(
         "compact": True,
         "kept_account_logs": bool(keep_account_logs),
         "build_contract_version": SNAPSHOT_BUILD_CONTRACT_VERSION,
-        "rank_points": rank_points,
+        "rank_points": effective_rank_points(rank_points, scoring_config),
         "scoring_system": str((scoring_config or {}).get("system") or ""),
         "scoring_version": str((scoring_config or {}).get("version") or ""),
         "scoring_config_hash": scoring_hash,
@@ -220,6 +220,19 @@ def scoring_config_hash(scoring_config: dict[str, Any] | None) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
+
+
+def effective_rank_points(rank_points: str, scoring_config: dict[str, Any] | None) -> str:
+    """manifest 中实际生效的 rank_points。
+
+    - 显式 scoring_config 带 rank_points 时以配置为准（CLI 仅允许默认值）；
+    - 否则使用 CLI --rank-points（builder 的 legacy engine 实际采用它）。
+    """
+    if scoring_config is not None:
+        configured = scoring_config.get("rank_points")
+        if configured is not None:
+            return ",".join(str(value) for value in configured)
+    return rank_points
 
 
 @contextmanager
@@ -416,7 +429,7 @@ def _should_skip_unchanged(
         return False
     if manifest.get("source_fingerprint") != source_fingerprint:
         return False
-    if manifest.get("rank_points") != rank_points:
+    if manifest.get("rank_points") != effective_rank_points(rank_points, scoring_config):
         return False
     if manifest.get("scoring_config_hash") != scoring_config_hash(scoring_config):
         return False

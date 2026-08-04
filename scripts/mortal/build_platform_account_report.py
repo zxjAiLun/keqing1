@@ -285,8 +285,22 @@ def build_report(
 ) -> dict[str, Any]:
     account_log_dir = prepare_output_dir(output_dir)
 
-    # 版本化计分引擎：scoring_config 显式选择 profile；缺省沿用 legacy fixed
-    effective_scoring = scoring_config if scoring_config is not None else dict(_DEFAULT_SCORING_CONFIG)
+    # 版本化计分引擎：scoring_config 显式选择 profile。
+    # - 无 scoring_config：legacy fixed profile，但必须采用 CLI --rank-points
+    #   （否则 --rank-points 就变成只影响元数据的静默回归）。
+    # - 有 scoring_config：profile 为权威；若 CLI rank_points 非默认值则视为冲突拒绝。
+    if scoring_config is not None:
+        if tuple(float(value) for value in rank_points) != tuple(HOUOU_7DAN_HANCHAN_PT):
+            raise ValueError(
+                "--rank-points 与显式 scoring_config 冲突：自定义 rank_points "
+                "必须写在 scoring_config.rank_points 中，不要同时传 CLI"
+            )
+        effective_scoring = dict(scoring_config)
+    else:
+        effective_scoring = {
+            **_DEFAULT_SCORING_CONFIG,
+            "rank_points": [float(value) for value in rank_points],
+        }
     rank_system = create_rank_system(effective_scoring)
     system_id = rank_system.system_id
     is_legacy_fixed = system_id == "tenhou_houou_7dan_fixed"
@@ -323,6 +337,9 @@ def build_report(
                     rank_id=initial.rank_id,
                     pt=initial.pt,
                     rating=initial.rating,
+                    # 初始段位即历史最高起点：首场即降段时 highest 仍是初始段位。
+                    highest_rank_id=initial.rank_id,
+                    tenhou_reached=initial.rank_id == "tenhou",
                 )
             table_account_states.append(accounts[account_id])
 
@@ -393,7 +410,9 @@ def build_report(
                 "rank_name": after_meta.rank_name,
                 "pt_target": after_meta.target_pt,
                 "rating_before": float(update.rating_before),
-                "rating_delta": float(update.rating_delta_raw),
+                # 原始（未取整）Δ 与有效 Δ 分离：保证 before + rating_delta == after
+                "rating_delta_raw": float(update.rating_delta_raw),
+                "rating_delta": float(update.rating_after - update.rating_before),
                 "rating_after": float(update.rating_after),
                 "games_before": int(state.games) - 1,
                 "games_after": int(state.games),
@@ -409,6 +428,9 @@ def build_report(
                     "pt": int(update.pt_after),
                     "rank_id": update.rank_after,
                     "rank_name": after_meta.rank_name,
+                    "rank_before": update.rank_before,
+                    "rank_after": update.rank_after,
+                    "transition": update.transition,
                     "pt_target": after_meta.target_pt,
                     "games": int(state.games),
                 }
@@ -416,7 +438,8 @@ def build_report(
 
     account_ids = sorted(accounts)
     if is_legacy_fixed:
-        stat_rank_pts = [float(value) for value in rank_points]
+        # stat_report 的"平均顺位列 PT"以 profile 的 rank_points 为权威。
+        stat_rank_pts = [float(value) for value in rank_system.rank_points]
         stat_profile = "houou_7dan_hanchan"
     else:
         # 动态段位/卓别下 stat_report 的"平均顺位列 PT"失去意义；仍生成详细统计，
@@ -485,34 +508,8 @@ def build_report(
             }
         )
 
-    scoring_payload = {
-        "system": system_id,
-        "version": rank_system.version,
-        "game_length": rank_system.game_length,
-        "room_policy": getattr(rank_system, "room_policy", "fixed"),
-        "membership": getattr(rank_system, "membership", None),
-        "initial_rank": getattr(rank_system, "initial_rank", None),
-        "initial_rating": float(getattr(rank_system, "initial_rating", 1500.0)),
-        "rating_formula": "delta = game_count_correction * (placement_point + (max(table_avg_rating, 1500) - player_rating) / 40), rounded up to 2dp",
-        "rating_game_count_correction": "1 - games * 0.002 if games < 400 else 0.2",
-        "rating_scaling": 1.0,
-        "pt_profile": system_id,
-        "pt_rank_deltas": [float(value) for value in rank_points],
-        "pt_initial": None,
-        "pt_target": None,
-        "rank_name": None,
-        "sources": [
-            "https://tenhou.net/man/index.html",
-        ],
-    }
-    if is_legacy_fixed:
-        scoring_payload.update(
-            {
-                "pt_initial": INITIAL_PT,
-                "pt_target": PT_TARGET,
-                "rank_name": RANK_NAME,
-            }
-        )
+    # profile 自述的完整 scoring 描述（公式/PT 契约/房间策略）为单一事实来源。
+    scoring_payload = rank_system.scoring_block()
 
     report = {
         "schema": REPORT_SCHEMA,
