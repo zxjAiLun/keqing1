@@ -20,10 +20,10 @@ from decimal import Decimal
 from typing import Any, Sequence
 
 from .base import (
+    MatchContext,
     PlayerRankState,
     RankMeta,
     RankUpdate,
-    TableContext,
 )
 
 _RATING_RESULTS = (30, 10, -10, -30)
@@ -78,22 +78,16 @@ class LegacyFixedProfile:
             target_pt=int(self.target_pt),
         )
 
-    def resolve_table(self, players: Sequence[PlayerRankState]) -> TableContext:
+    def match_context(self, players: Sequence[PlayerRankState]) -> MatchContext:
         raw_avg = sum(player.rating for player in players) / 4
-        return TableContext(
-            room=self.room,
-            game_length=self.game_length,
-            positive_pt=tuple(self.rank_points[:3]),
-            avg_rating=raw_avg,
-            strict=False,
-        )
+        return MatchContext(game_length=self.game_length, avg_rating=raw_avg)
 
     def apply_result(
         self,
         state: PlayerRankState,
         *,
         placement: int,
-        table: TableContext,
+        match: MatchContext,
     ) -> RankUpdate:
         if placement not in (1, 2, 3, 4):
             raise ValueError(f"placement must be 1..4, got {placement}")
@@ -108,7 +102,7 @@ class LegacyFixedProfile:
         )
         delta_raw = correction * (
             Decimal(_RATING_RESULTS[placement - 1])
-            + (table.avg_rating - state.rating) / Decimal(40)
+            + (match.avg_rating - state.rating) / Decimal(40)
         )
         rating_after = state.rating + delta_raw
 
