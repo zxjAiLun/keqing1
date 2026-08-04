@@ -58,7 +58,8 @@ SNAPSHOT_RECOMMENDED_FILES = (
 DEFAULT_RETAIN_SNAPSHOTS = 24
 
 # report 派生逻辑契约版本：未来算法更新时递增，避免相同源日志复用旧产物
-SNAPSHOT_BUILD_CONTRACT_VERSION = "v1"
+# v2：版本化计分引擎（tenhou_4p_ranked / legacy fixed profile）取代固定七段常量
+SNAPSHOT_BUILD_CONTRACT_VERSION = "v2"
 
 
 class PublishError(Exception):
@@ -108,6 +109,7 @@ def build_snapshot(
     rank_points: str,
     preserve_log_dir_order: bool,
     interleave_log_dirs: bool,
+    scoring_config: dict[str, Any] | None = None,
     build_report: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """在全新快照目录构建完整 report（staging）。"""
@@ -123,6 +125,7 @@ def build_snapshot(
         rank_points=account_report.parse_rank_points(rank_points),
         preserve_log_dir_order=preserve_log_dir_order,
         interleave_log_dirs=interleave_log_dirs,
+        scoring_config=scoring_config,
     )
     if not isinstance(report, dict):
         raise PublishError("构建脚本未返回 report 字典")
@@ -146,11 +149,13 @@ def write_manifest(
     build_duration_seconds: float = 0.0,
     materialize_duration_seconds: float = 0.0,
     snapshot_total_bytes: int = 0,
-    rank_points: str = "90,45,0,-135",
     platform_model_label: str | None = None,
     preserve_log_dir_order: bool = False,
     interleave_log_dirs: bool = False,
+    resolved_scoring: dict[str, Any] | None = None,
+    scoring_hash: str = "",
 ) -> Path:
+    scoring = resolved_scoring or {}
     manifest = {
         "schema": MANIFEST_SCHEMA,
         "season_id": season_id,
@@ -161,7 +166,14 @@ def write_manifest(
         "compact": True,
         "kept_account_logs": bool(keep_account_logs),
         "build_contract_version": SNAPSHOT_BUILD_CONTRACT_VERSION,
-        "rank_points": rank_points,
+        # 实际解析后的计分 profile（report/stat/manifest 同一份）。
+        "scoring": scoring,
+        "scoring_system": scoring.get("system"),
+        "scoring_version": scoring.get("version"),
+        "scoring_config_hash": scoring_hash,
+        "room_policy": scoring.get("room_policy"),
+        # Tenhou 动态 profile 无固定 PT 表 -> null；legacy 记真实 4-tuple。
+        "rank_points": manifest_rank_points(scoring),
         "platform_model_label": platform_model_label,
         "preserve_log_dir_order": bool(preserve_log_dir_order),
         "interleave_log_dirs": bool(interleave_log_dirs),
@@ -203,6 +215,34 @@ def _registry_contract(season: dict[str, Any]) -> str:
     clone = dict(season)
     clone.pop("report_dir", None)
     return json.dumps(clone, sort_keys=True, ensure_ascii=False)
+
+
+def scoring_config_hash(scoring_config: dict[str, Any] | None) -> str:
+    """赛季 scoring 配置的规范化指纹（manifest 中锁定计分契约）。
+
+    基于解析后的 effective config（默认值已展开），而非未经展开的原始字典。
+    """
+    payload = scoring_config or {}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def manifest_rank_points(resolved_scoring_block: dict[str, Any]) -> str | None:
+    """manifest 中实际生效的 rank_points（来自 profile 的 resolved scoring block）。
+
+    - Tenhou 动态 profile：pt_rank_deltas 为 None -> manifest 记 null；
+    - legacy fixed profile：记真实的 4-tuple PT 表。
+    """
+    deltas = resolved_scoring_block.get("pt_rank_deltas")
+    if deltas is None:
+        return None
+
+    def _fmt(value: Any) -> str:
+        number = float(value)
+        return str(int(number)) if number.is_integer() else str(number)
+
+    return ",".join(_fmt(value) for value in deltas)
 
 
 @contextmanager
@@ -378,17 +418,20 @@ def _should_skip_unchanged(
     manifest: dict[str, Any],
     *,
     source_fingerprint: str,
-    rank_points: str,
+    rank_points: str | None,
     platform_model_label: str | None,
     keep_account_logs: bool,
     preserve_log_dir_order: bool,
     interleave_log_dirs: bool,
+    scoring_hash: str,
 ) -> bool:
     """当前 snapshot manifest 与本次发布条件一致时返回 True（跳过重建）。
 
     需要 season contract、build contract version、source_fingerprint、
-    rank_points、platform_model_label、keep_account_logs、
+    生效 rank_points、scoring_config_hash、platform_model_label、keep_account_logs、
     log ordering/interleave 参数全部一致。
+
+    ``rank_points`` 为已解析 profile 的 manifest 形式（Tenhou 动态 profile 为 None）。
     """
     if manifest.get("season_id") != season.get("season_id"):
         return False
@@ -399,6 +442,8 @@ def _should_skip_unchanged(
     if manifest.get("source_fingerprint") != source_fingerprint:
         return False
     if manifest.get("rank_points") != rank_points:
+        return False
+    if manifest.get("scoring_config_hash") != scoring_hash:
         return False
     if manifest.get("platform_model_label") != (platform_model_label or None):
         return False
@@ -523,6 +568,22 @@ def publish_snapshot(
     if retain_snapshots < 0:
         raise PublishError(f"retain_snapshots 不能为负: {retain_snapshots}")
 
+    # 版本化计分 profile 从赛季注册表的 scoring 块读取（legacy 赛季缺省走 fixed）。
+    scoring_config = season.get("scoring") if isinstance(season.get("scoring"), dict) else None
+
+    # scoring preflight：在任何 skip 判断之前解析 effective config，
+    # 冲突立即失败——否则"已有可跳过快照"的路径会绕过 builder 的冲突检查。
+    from scripts.mortal import build_platform_account_report as account_report
+
+    try:
+        effective_scoring, resolved_block = account_report.resolve_effective_scoring_contract(
+            scoring_config, rank_points
+        )
+    except ValueError as exc:
+        raise PublishError(str(exc)) from exc
+    scoring_hash = scoring_config_hash(effective_scoring)
+    expected_rank_points = manifest_rank_points(resolved_block)
+
     data_root = os.environ.get("KEQING_LADDER_DATA_ROOT", "").strip()
     root = snapshot_root or default_snapshot_root(Path(data_root) if data_root else None, season_id)
 
@@ -547,11 +608,12 @@ def publish_snapshot(
             season,
             prev_manifest,
             source_fingerprint=source_fingerprint,
-            rank_points=rank_points,
+            rank_points=expected_rank_points,
             platform_model_label=platform_model_label,
             keep_account_logs=keep_account_logs,
             preserve_log_dir_order=preserve_log_dir_order,
             interleave_log_dirs=interleave_log_dirs,
+            scoring_hash=scoring_hash,
         ):
             try:
                 ladder.validate_snapshot(season, previous_snapshot)
@@ -594,6 +656,7 @@ def publish_snapshot(
             rank_points=rank_points,
             preserve_log_dir_order=preserve_log_dir_order,
             interleave_log_dirs=interleave_log_dirs,
+            scoring_config=scoring_config,
             build_report=build_report,
         )
         build_duration = time.monotonic() - build_started
@@ -628,10 +691,12 @@ def publish_snapshot(
             build_duration_seconds=round(build_duration, 4),
             materialize_duration_seconds=round(materialize_duration, 4),
             snapshot_total_bytes=0,  # 占位；manifest 就位后重算
-            rank_points=rank_points,
             platform_model_label=platform_model_label,
             preserve_log_dir_order=preserve_log_dir_order,
             interleave_log_dirs=interleave_log_dirs,
+            # 以本次实际构建出的 report.scoring 为权威 resolved profile。
+            resolved_scoring=report.get("scoring") if isinstance(report.get("scoring"), dict) else resolved_block,
+            scoring_hash=scoring_hash,
         )
         # manifest 已在目录中，递归统计整个快照（含 manifest/account_logs）。
         # 第一次写入占位(0)改变 manifest 自身大小，第二轮统计即稳定。

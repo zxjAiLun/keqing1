@@ -20,8 +20,13 @@ from typing import Any
 
 SEASON_SCHEMA = "keqing.ladder.season.v1"
 REPORT_SCHEMA = "keqing.mortal.platform_account_report.v1"
+REPORT_SCHEMA_V2 = "keqing.mortal.platform_account_report.v2"
+REPORT_SCHEMAS = (REPORT_SCHEMA, REPORT_SCHEMA_V2)
 
-LADDER_SORTS = ("pt", "rating", "avg_rank", "games")
+LADDER_SORTS = ("rank", "pt", "rating", "avg_rank", "games")
+
+# v1 报告（固定七段）的 legacy 回退段位序（初段=11 ... 七段=17）。
+_LEGACY_RANK_ORDINAL = 17
 
 
 class LadderError(Exception):
@@ -336,7 +341,7 @@ def _load_account_summary(report_dir: Path) -> dict[str, Any]:
             code="season_report_decode_error",
             state="invalid",
         ) from exc
-    if not isinstance(report, dict) or report.get("schema") != REPORT_SCHEMA:
+    if not isinstance(report, dict) or report.get("schema") not in REPORT_SCHEMAS:
         raise SeasonDataError(
             "account_summary.json schema 无效",
             code="season_report_schema_invalid",
@@ -469,25 +474,72 @@ def _attach_snapshot_meta(season_pub: dict[str, Any], report_dir: Path) -> dict[
     return season_pub
 
 
-def _enrich_account_row(row: dict[str, Any], registry_index: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _enrich_account_row(
+    row: dict[str, Any],
+    registry_index: dict[str, dict[str, Any]],
+    scoring: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     account_id = str(row.get("account_id", ""))
     # 注册表为权威身份表；账号存在性已由 _validate_report_accounts 保证
     registry = registry_index[account_id]
     games = int(row.get("games") or 0)
     rank_1 = int(row.get("rank_1") or 0)
     rank_4 = int(row.get("rank_4") or 0)
-    pt_current = float(row.get("pt_current") or 0.0)
-    pt_target = float(row.get("pt_target") or 0.0)
+
+    rank_id = row.get("rank_id")
+    if isinstance(rank_id, str) and rank_id:
+        # v2 报告：版本化计分引擎产出的真实段位状态
+        rank_ordinal = int(row.get("rank_ordinal") or 0)
+        pt_initial = row.get("pt_initial")
+        pt_current = float(row.get("pt_current") or 0.0)
+        raw_target = row.get("pt_target")
+        pt_target = float(raw_target) if raw_target is not None else None
+        pt_progress = row.get("pt_progress")
+        rank_name = row.get("rank_name")
+        promotions = int(row.get("promotions") or 0)
+        demotions = int(row.get("demotions") or 0)
+        highest_rank_id = row.get("highest_rank_id")
+        tenhou_reached = bool(row.get("tenhou_reached"))
+        total_pt_delta = row.get("total_pt_delta")
+        avg_pt_delta = row.get("avg_pt_delta")
+    else:
+        # v1 报告（legacy fixed 七段）：回退为固定段位语义
+        rank_id = None
+        rank_ordinal = _LEGACY_RANK_ORDINAL
+        pt_initial = scoring.get("pt_initial") if scoring else None
+        pt_current = float(row.get("pt_current") or 0.0)
+        raw_target = row.get("pt_target") or (scoring.get("pt_target") if scoring else None)
+        pt_target = float(raw_target) if raw_target is not None else None
+        pt_progress = (pt_current / pt_target) if pt_target else None
+        rank_name = row.get("rank_name")
+        promotions = 0
+        demotions = 0
+        # v1 报告没有段位状态：不推导"历史最高"，避免与当前七段重复展示。
+        highest_rank_id = None
+        tenhou_reached = False
+        total_pt_delta = None
+        avg_pt_delta = None
+
     return {
         "account_id": account_id,
         "display_name": registry.get("display_name") or account_id,
         "model_id": registry["model_id"],
         "checkpoint": registry.get("checkpoint"),
         "games": games,
-        "rank_name": row.get("rank_name"),
+        "rank_id": rank_id,
+        "rank_name": rank_name,
+        "rank_ordinal": rank_ordinal,
+        "pt_initial": pt_initial,
         "pt_current": pt_current,
         "pt_target": pt_target,
-        "pt_gap": pt_target - pt_current,
+        "pt_gap": (pt_target - pt_current) if pt_target is not None else None,
+        "pt_progress": pt_progress,
+        "promotions": promotions,
+        "demotions": demotions,
+        "highest_rank_id": highest_rank_id,
+        "tenhou_reached": tenhou_reached,
+        "total_pt_delta": total_pt_delta,
+        "avg_pt_delta": avg_pt_delta,
         "rating": float(row.get("rating") or 0.0),
         "rank_1": rank_1,
         "rank_2": int(row.get("rank_2") or 0),
@@ -511,7 +563,11 @@ def _enrich_account_row(row: dict[str, Any], registry_index: dict[str, dict[str,
 
 
 def _summarize_models(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """展示性模型聚合：对账号表现按场数加权，不另算一套 Rating。"""
+    """展示性模型聚合：段位分布 + 最高/中位段位 + 平均 Rating + 总场数。
+
+    不同段位的 PT 不能直接平均：仅当模型内全部账号处于同一段位时才计算
+    ``avg_pt``（v1 legacy fixed 赛季保留该展示），跨段位时置 None。
+    """
     by_model: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         by_model.setdefault(str(row["model_id"]), []).append(row)
@@ -530,17 +586,56 @@ def _summarize_models(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 return None
             return sum(value * count for value, count in values) / total_games
 
+        rank_names = [str(item.get("rank_name") or item.get("rank_id") or "?") for item in items]
+        rank_ordinals = [int(item.get("rank_ordinal") or 0) for item in items]
+        distinct_ranks = {item.get("rank_id") for item in items}
+        # v1 legacy（全部无 rank_id，同一固定段位）与 v2 单一段位均可平均 PT。
+        same_rank = len(distinct_ranks) <= 1
+
+        highest = max(items, key=lambda item: int(item.get("rank_ordinal") or 0))
         summaries.append({
             "model_id": model_id,
             "accounts": len(items),
             "games": games,
-            "avg_pt": _weighted("pt_current"),
+            "avg_pt": _weighted("pt_current") if same_rank else None,
             "avg_rating": _weighted("rating"),
             "avg_rank": _weighted("avg_rank"),
             "avg_rank_pt": _weighted("avg_rank_pt"),
+            "rank_distribution": {name: rank_names.count(name) for name in sorted(set(rank_names))},
+            "highest_rank_id": highest.get("rank_id"),
+            "highest_rank_name": highest.get("rank_name"),
+            "highest_rank_ordinal": int(highest.get("rank_ordinal") or 0),
+            "median_rank_ordinal": _median(rank_ordinals),
+            "median_rank_name": _rank_name_for_ordinal(rank_ordinals, rank_names),
         })
-    summaries.sort(key=lambda item: (item["avg_pt"] is None, -(item["avg_pt"] or 0.0)))
+    summaries.sort(
+        key=lambda item: (
+            -(int(item.get("highest_rank_ordinal") or 0)),
+            item["avg_rating"] is None,
+            -(item["avg_rating"] or 0.0),
+        )
+    )
     return summaries
+
+
+def _median(values: list[int]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return float(ordered[mid])
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _rank_name_for_ordinal(ordinals: list[int], names: list[str]) -> str | None:
+    if not ordinals:
+        return None
+    ordered = sorted(zip(ordinals, names), key=lambda item: item[0])
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[mid][1]
+    return ordered[mid - 1][1]
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +665,15 @@ def _season_public(
         scoring = report.get("scoring")
         if isinstance(scoring, dict):
             payload["scoring"] = {
+                "system": scoring.get("system"),
+                "version": scoring.get("version"),
+                "game_length": scoring.get("game_length"),
+                "room_policy": scoring.get("room_policy"),
+                "membership": scoring.get("membership"),
+                "tier_policy": scoring.get("tier_policy"),
+                "positive_pt_tables": scoring.get("positive_pt_tables"),
+                "initial_rank": scoring.get("initial_rank"),
+                "initial_rating": scoring.get("initial_rating"),
                 "pt_profile": scoring.get("pt_profile"),
                 "pt_rank_deltas": scoring.get("pt_rank_deltas"),
                 "pt_initial": scoring.get("pt_initial"),
@@ -612,6 +716,7 @@ def list_seasons_catalog(project_root: Path, configs_dir: Path) -> dict[str, Any
             entry["data_ready"] = False
             entry["readiness"] = season_data_problem(exc)
         else:
+            entry = _season_public(season, report, is_default=is_default)
             entry["data_ready"] = True
             entry["readiness"] = {
                 "state": "ready",
@@ -631,14 +736,18 @@ def list_seasons_catalog(project_root: Path, configs_dir: Path) -> dict[str, Any
     }
 
 
-def load_ladder(project_root: Path, configs_dir: Path, season_id: str, sort: str = "pt") -> dict[str, Any]:
+def load_ladder(project_root: Path, configs_dir: Path, season_id: str, sort: str = "rank") -> dict[str, Any]:
     if sort not in LADDER_SORTS:
-        sort = "pt"
+        sort = "rank"
     season = get_season_config(configs_dir, season_id)
     report, validated_rows = _load_validated_report(project_root, season)
     registry_index = _registry_account_index(season)
-    rows = [_enrich_account_row(row, registry_index) for row in validated_rows]
-    if sort == "pt":
+    scoring = report.get("scoring") if isinstance(report.get("scoring"), dict) else None
+    rows = [_enrich_account_row(row, registry_index, scoring=scoring) for row in validated_rows]
+    if sort == "rank":
+        # 规范排序：段位序 DESC -> PT DESC -> Rating DESC -> account_id ASC
+        rows.sort(key=lambda row: (-int(row["rank_ordinal"]), -row["pt_current"], -row["rating"], row["account_id"]))
+    elif sort == "pt":
         rows.sort(key=lambda row: row["pt_current"], reverse=True)
     elif sort == "rating":
         rows.sort(key=lambda row: row["rating"], reverse=True)
@@ -666,11 +775,24 @@ def _read_rating_curve(report_dir: Path, account_id: str, max_points: int) -> li
             if row.get("account_id") != account_id:
                 continue
             try:
-                points.append({
+                point: dict[str, Any] = {
                     "games": int(float(row.get("games") or 0)),
                     "rating": float(row.get("rating") or 0.0),
                     "pt": float(row.get("pt") or 0.0),
-                })
+                }
+                if row.get("rank_id"):
+                    point["rank_id"] = row["rank_id"]
+                if row.get("rank_name"):
+                    point["rank_name"] = row["rank_name"]
+                if row.get("pt_target"):
+                    point["pt_target"] = float(row["pt_target"])
+                if row.get("rank_before"):
+                    point["rank_before"] = row["rank_before"]
+                if row.get("rank_after"):
+                    point["rank_after"] = row["rank_after"]
+                if row.get("transition"):
+                    point["transition"] = row["transition"]
+                points.append(point)
             except (TypeError, ValueError):
                 continue
     if max_points <= 0:
@@ -713,8 +835,16 @@ def _read_recent_games(report_dir: Path, account_id: str, limit: int) -> list[di
                 "rank": row.get("rank"),
                 "final_score": row.get("final_score"),
                 "score_delta": row.get("score_delta"),
+                "game_length": row.get("game_length"),
+                "pt_tier": row.get("pt_tier"),
+                "positive_pt": row.get("positive_pt"),
+                "rank_before": row.get("rank_before"),
+                "pt_before": row.get("pt_before"),
                 "pt_delta": row.get("pt_delta"),
+                "transition": row.get("transition"),
+                "rank_after": row.get("rank_after"),
                 "pt_after": row.get("pt_after"),
+                "rating_before": row.get("rating_before"),
                 "rating_after": row.get("rating_after"),
                 "source_log": row.get("source_log"),
             })
@@ -734,7 +864,8 @@ def load_account(
     report_dir = _report_dir(project_root, season)
     report, validated_rows = _load_validated_report(project_root, season)
     registry_index = _registry_account_index(season)
-    rows = [_enrich_account_row(row, registry_index) for row in validated_rows]
+    scoring = report.get("scoring") if isinstance(report.get("scoring"), dict) else None
+    rows = [_enrich_account_row(row, registry_index, scoring=scoring) for row in validated_rows]
     match = next((row for row in rows if row["account_id"] == account_id), None)
     if match is None:
         raise AccountNotFoundError(f"account 不存在: {account_id}")
@@ -777,11 +908,12 @@ def load_model(project_root: Path, configs_dir: Path, season_id: str, model_id: 
     report_dir = _report_dir(project_root, season)
     report, validated_rows = _load_validated_report(project_root, season)
     registry_index = _registry_account_index(season)
-    rows = [_enrich_account_row(row, registry_index) for row in validated_rows]
+    scoring = report.get("scoring") if isinstance(report.get("scoring"), dict) else None
+    rows = [_enrich_account_row(row, registry_index, scoring=scoring) for row in validated_rows]
     model_rows = [row for row in rows if row["model_id"] == model_id]
     if not model_rows:
         raise ModelNotFoundError(f"model 不存在: {model_id}")
-    model_rows.sort(key=lambda row: row["pt_current"], reverse=True)
+    model_rows.sort(key=lambda row: (-int(row["rank_ordinal"]), -row["pt_current"], -row["rating"], row["account_id"]))
     summary = next((item for item in _summarize_models(rows) if item["model_id"] == model_id), None)
     registry_model = next((m for m in _registry_models(season) if m.get("model_id") == model_id), {})
     return {
