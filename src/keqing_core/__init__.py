@@ -132,16 +132,18 @@ def _candidate_native_paths() -> list[_Path]:
     for root in search_roots:
         package_root = _Path(root) / "keqing_core"
         try:
-            package_exists = package_root.exists()
+            if not package_root.exists():
+                continue
+            discovered = sorted(
+                path
+                for path in package_root.glob("_native*")
+                if _is_native_extension(path)
+            )
         except OSError:
-            # A locked or inaccessible user-site package must not prevent the
-            # project-local native runtime from being discovered.
-            package_exists = False
-        if not package_exists:
+            # A locked or inaccessible user-site package (stat 或 glob 失败)
+            # 都不能阻止项目本地 native runtime 被发现。
             continue
-        candidates.extend(
-            sorted(path for path in package_root.glob("_native*") if _is_native_extension(path))
-        )
+        candidates.extend(discovered)
     deduped: list[_Path] = []
     seen: set[_Path] = set()
     for candidate in candidates:

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 from inference.review import same_action
 from mahjong_env.tiles import normalize_tile
+
+_logger = logging.getLogger(__name__)
 
 _RESPONSE_ACTION_TYPES = {"chi", "pon", "daiminkan", "ankan", "kakan", "hora"}
 _RESPONSE_PRIORITY = {
@@ -48,6 +52,30 @@ def _higher_priority_response_intercepted(
     return _same_response_source(pending_action, current_action)
 
 
+def _unique_kakan_target_meld(
+    melds, actor: int, added_tile: str
+) -> tuple[dict | None, str | None]:
+    """定位要被升级为 kakan 的原 pon（或已修复的 kakan）。
+
+    返回 (meld, issue)：唯一匹配时 meld 非空、issue 为 None；
+    找不到或多匹配时 meld 为 None，issue 说明原因，绝不猜测。
+    """
+    if not isinstance(melds, list) or not (0 <= actor < len(melds)):
+        return None, "missing_actor_melds"
+    matches = [
+        meld
+        for meld in (melds[actor] or [])
+        if isinstance(meld, dict)
+        and meld.get("type") in {"pon", "kakan"}
+        and normalize_tile(str(meld.get("pai", ""))) == normalize_tile(added_tile)
+    ]
+    if len(matches) == 1:
+        return matches[0], None
+    if len(matches) > 1:
+        return None, "multiple_melds"
+    return None, "no_matching_meld"
+
+
 def _repair_kakan_snapshots(decisions: dict, events: list[dict] | None) -> None:
     """Repair cached snapshots written by a native runtime without kakan_accepted."""
     if not events:
@@ -74,42 +102,56 @@ def _repair_kakan_snapshots(decisions: dict, events: list[dict] | None) -> None:
             int(key_data.get("kyoku", entry.get("kyoku", 0))),
             int(key_data.get("honba", entry.get("honba", 0))),
         )
+        # 小局边界：active 不跨局继承（N8）
         if active is not None and active[0] != entry_key:
             active = None
 
         if active is not None:
             _, added_tile, actor = active
-            hand = list(entry.get("hand") or [])
-            for index, tile in enumerate(hand):
-                if normalize_tile(str(tile)) == normalize_tile(added_tile):
-                    hand.pop(index)
-                    break
-            entry["hand"] = hand
-
             melds = entry.get("melds")
-            if isinstance(melds, list) and 0 <= actor < len(melds):
-                for meld in melds[actor] or []:
-                    if (
-                        isinstance(meld, dict)
-                        and meld.get("type") == "pon"
-                        and normalize_tile(str(meld.get("pai", ""))) == normalize_tile(added_tile)
-                    ):
-                        meld["type"] = "kakan"
-                        consumed = list(meld.get("consumed") or [])
-                        if len(consumed) < 4:
-                            consumed.append(added_tile)
-                        meld["consumed"] = consumed
-
-            entry["candidates"] = [
-                candidate
-                for candidate in (entry.get("candidates") or [])
-                if not (
-                    candidate.get("action", {}).get("type") in {"dahai", "kakan"}
-                    and candidate.get("action", {}).get("pai") is not None
-                    and normalize_tile(str(candidate["action"]["pai"])) == normalize_tile(added_tile)
-                    and not any(normalize_tile(str(tile)) == normalize_tile(added_tile) for tile in hand)
+            target, issue = _unique_kakan_target_meld(melds, actor, added_tile)
+            if target is None:
+                _logger.warning(
+                    "[kakan repair] step=%s actor=%s added=%s: %s，不做手牌/副露修改",
+                    entry.get("step"), actor, added_tile, issue,
                 )
-            ]
+            elif target.get("type") == "kakan":
+                # 已修复的快照：幂等 no-op（N4/N5）
+                pass
+            else:
+                # canonical kakan = 原 pon 手牌两张 + 原被鸣牌 + 加杠牌（严格四张）
+                hand = list(entry.get("hand") or [])
+                for index, tile in enumerate(hand):
+                    if normalize_tile(str(tile)) == normalize_tile(added_tile):
+                        hand.pop(index)
+                        break
+                entry["hand"] = hand
+
+                base_consumed = list(target.get("consumed") or [])
+                called_tile = str(target.get("pai_raw") or target.get("pai") or added_tile)
+                canonical_consumed = [*base_consumed, called_tile, added_tile]
+                if len(canonical_consumed) == 4:
+                    target["type"] = "kakan"
+                    target["consumed"] = canonical_consumed
+                    target["pai"] = added_tile
+                    target["pai_raw"] = added_tile
+                else:
+                    _logger.warning(
+                        "[kakan repair] step=%s actor=%s added=%s: 非标准 pon consumed=%s，不修改",
+                        entry.get("step"), actor, added_tile, base_consumed,
+                    )
+
+                entry["candidates"] = [
+                    candidate
+                    for candidate in (entry.get("candidates") or [])
+                    if not (
+                        isinstance(candidate.get("action"), dict)
+                        and candidate["action"].get("type") in {"dahai", "kakan"}
+                        and candidate["action"].get("pai") is not None
+                        and normalize_tile(str(candidate["action"]["pai"])) == normalize_tile(added_tile)
+                        and not any(normalize_tile(str(tile)) == normalize_tile(added_tile) for tile in hand)
+                    )
+                ]
 
         gt_action = entry.get("gt_action") or {}
         if gt_action.get("type") != "kakan":
