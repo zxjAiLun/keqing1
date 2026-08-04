@@ -304,7 +304,7 @@ def test_missing_ledger_rejected(tmp_path: Path):
 
 def test_rank_points_invalid_rejected(tmp_path: Path):
     registry_path = _write_registry(tmp_path, _running_season())
-    with pytest.raises(ValueError, match="four numbers"):
+    with pytest.raises(publisher.PublishError, match="four numbers"):
         publisher.publish_snapshot(
             registry_path=registry_path,
             log_dirs=[tmp_path / "logs"],
@@ -475,6 +475,7 @@ def test_current_snapshot_never_deleted(tmp_path: Path):
     assert (root / "s1").exists()
     assert (root / "s2").exists()
     assert not (root / "s0").exists()
+    assert result["retention_deleted"] == [str(root / "s0")]
 
 
 def test_previous_snapshot_kept_as_rollback_point(tmp_path: Path):
@@ -493,6 +494,7 @@ def test_previous_snapshot_kept_as_rollback_point(tmp_path: Path):
     assert (root / "s2").exists()
     assert (root / "s0").exists()
     assert not (root / "s1").exists()
+    assert result["retention_deleted"] == [str(root / "s1")]
 
 
 def test_retention_ignores_foreign_dirs_and_manifests(tmp_path: Path):
@@ -684,8 +686,6 @@ def test_materialize_failure_does_not_delete_foreign_snapshot(tmp_path: Path, mo
     foreign = root / "foreign-20260101-000000-000000-deadbeef"
     foreign.mkdir(parents=True)
     (foreign / "manifest.json").write_text("{}", encoding="utf-8")
-
-    real_replace = __import__("os").replace
 
     def failing_replace(src, dst):
         raise OSError("simulated replace failure")
@@ -926,3 +926,85 @@ def test_snapshot_total_bytes_matches_full_dir(tmp_path: Path):
     manifest = json.loads((snapshot_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["snapshot_total_bytes"] == publisher._dir_total_bytes(snapshot_dir)
     assert manifest["kept_account_logs"] is True
+
+
+# ---------------------------------------------------------------------------
+# Round 8 follow-up: scoring preflight before skip + resolved manifest
+# ---------------------------------------------------------------------------
+
+def _season_with_scoring(scoring: dict) -> dict:
+    season = _running_season()
+    season["scoring"] = scoring
+    return season
+
+
+def test_conflicting_cli_rank_points_fails_before_skip(tmp_path: Path):
+    """已有可 skip 快照 + 显式 scoring config + 冲突 CLI rank-points
+    → 必须在任何 skip 判断之前失败（不能被 unchanged-skip 绕过）。"""
+    season = _season_with_scoring(
+        {"system": "tenhou_houou_7dan_fixed", "version": "2026-07-01", "rank_points": [90, 45, 0, -135]}
+    )
+    registry_path = _write_registry(tmp_path, season)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "a.json.gz").write_text("", encoding="utf-8")
+    first = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[log_dir],
+        snapshot_root=tmp_path / "snapshots",
+        build_report=_fake_build([_row()], games=1),
+    )
+    assert first["registry_switched"] is True
+    # 相同输入但 CLI rank-points 与 scoring config 冲突：skip 之前即失败
+    with pytest.raises(publisher.PublishError, match="--rank-points 与显式 scoring_config 冲突"):
+        publisher.publish_snapshot(
+            registry_path=registry_path,
+            log_dirs=[log_dir],
+            snapshot_root=tmp_path / "snapshots",
+            rank_points="100,50,0,-150",
+            build_report=_fake_build([_row()], games=1),
+        )
+
+
+def test_tenhou_manifest_uses_resolved_scoring_block(tmp_path: Path):
+    """Tenhou 动态 profile：manifest 不写虚假的固定 rank_points，
+    并记录解析后的默认值（省略 room_policy 时展开为 highest_common_eligible）。"""
+    season = _season_with_scoring({"system": "tenhou_4p_ranked", "version": "2026-08-04"})
+    registry_path = _write_registry(tmp_path, season)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "a.json.gz").write_text("", encoding="utf-8")
+    result = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[log_dir],
+        snapshot_root=tmp_path / "snapshots",
+        build_report=_fake_build([_row()], games=1),
+    )
+    manifest = json.loads((Path(result["snapshot_dir"]) / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["rank_points"] is None
+    assert manifest["scoring_system"] == "tenhou_4p_ranked"
+    assert manifest["scoring_version"] == "2026-08-04"
+    assert manifest["room_policy"] == "highest_common_eligible"  # 默认值已展开
+    assert manifest["scoring"]["system"] == "tenhou_4p_ranked"
+    assert manifest["scoring"]["pt_rank_deltas"] is None
+    assert manifest["scoring_config_hash"]
+
+
+def test_legacy_manifest_reflects_custom_cli_rank_points(tmp_path: Path):
+    """无 scoring block + 自定义 CLI rank-points：manifest 记录 legacy system
+    与生效的 PT 表（与 builder/ledger 一致）。"""
+    registry_path = _write_registry(tmp_path, _running_season())
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "a.json.gz").write_text("", encoding="utf-8")
+    result = publisher.publish_snapshot(
+        registry_path=registry_path,
+        log_dirs=[log_dir],
+        snapshot_root=tmp_path / "snapshots",
+        rank_points="100,50,0,-150",
+        build_report=_fake_build([_row()], games=1),
+    )
+    manifest = json.loads((Path(result["snapshot_dir"]) / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["scoring_system"] == "tenhou_houou_7dan_fixed"
+    assert manifest["rank_points"] == "100,50,0,-150"
+    assert manifest["scoring"]["pt_rank_deltas"] == [100.0, 50.0, 0.0, -150.0]

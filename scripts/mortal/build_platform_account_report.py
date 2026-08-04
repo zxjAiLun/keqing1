@@ -25,6 +25,7 @@ from replay.rank_systems import PlayerRankState, create_rank_system  # noqa: E40
 
 TENHOU_RANK_RESULTS = (30.0, 10.0, -10.0, -30.0)
 HOUOU_7DAN_HANCHAN_PT = (90.0, 45.0, 0.0, -135.0)
+DEFAULT_RANK_POINTS = HOUOU_7DAN_HANCHAN_PT
 INITIAL_RATING = 1500.0
 INITIAL_PT = 1400.0
 PT_TARGET = 2800.0
@@ -272,6 +273,40 @@ def prepare_output_dir(output_dir: Path) -> Path:
     return account_log_dir
 
 
+def resolve_effective_scoring_contract(
+    scoring_config: dict[str, Any] | None,
+    rank_points: str | tuple[float, float, float, float],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """解析出最终生效的 scoring 契约（publisher 与 builder 共用单一实现）。
+
+    返回 ``(effective_config, resolved_scoring_block)``：
+
+    - 无 scoring_config：legacy fixed profile，但必须采用 CLI --rank-points
+      （否则 --rank-points 就变成只影响元数据的静默回归）。
+    - 有 scoring_config：profile 为权威；若 CLI rank_points 非默认值则视为冲突拒绝。
+    """
+    if isinstance(rank_points, str):
+        parsed_rank_points = parse_rank_points(rank_points)
+    else:
+        parsed_rank_points = tuple(float(value) for value in rank_points)
+    if scoring_config is not None:
+        if tuple(float(value) for value in parsed_rank_points) != tuple(
+            float(value) for value in DEFAULT_RANK_POINTS
+        ):
+            raise ValueError(
+                "--rank-points 与显式 scoring_config 冲突：自定义 rank_points "
+                "必须写在 scoring_config.rank_points 中，不要同时传 CLI"
+            )
+        effective_config = dict(scoring_config)
+    else:
+        effective_config = {
+            **_DEFAULT_SCORING_CONFIG,
+            "rank_points": [float(value) for value in parsed_rank_points],
+        }
+    profile = create_rank_system(effective_config)
+    return effective_config, profile.scoring_block()
+
+
 def build_report(
     *,
     log_dirs: Sequence[Path],
@@ -285,22 +320,9 @@ def build_report(
 ) -> dict[str, Any]:
     account_log_dir = prepare_output_dir(output_dir)
 
-    # 版本化计分引擎：scoring_config 显式选择 profile。
-    # - 无 scoring_config：legacy fixed profile，但必须采用 CLI --rank-points
-    #   （否则 --rank-points 就变成只影响元数据的静默回归）。
-    # - 有 scoring_config：profile 为权威；若 CLI rank_points 非默认值则视为冲突拒绝。
-    if scoring_config is not None:
-        if tuple(float(value) for value in rank_points) != tuple(HOUOU_7DAN_HANCHAN_PT):
-            raise ValueError(
-                "--rank-points 与显式 scoring_config 冲突：自定义 rank_points "
-                "必须写在 scoring_config.rank_points 中，不要同时传 CLI"
-            )
-        effective_scoring = dict(scoring_config)
-    else:
-        effective_scoring = {
-            **_DEFAULT_SCORING_CONFIG,
-            "rank_points": [float(value) for value in rank_points],
-        }
+    # 版本化计分引擎：与 publisher 共用同一解析，确保 CLI/config 冲突在任何
+    # skip 判断之前失败，且 effective config 与 resolved scoring block 一致。
+    effective_scoring, _resolved = resolve_effective_scoring_contract(scoring_config, rank_points)
     rank_system = create_rank_system(effective_scoring)
     system_id = rank_system.system_id
     is_legacy_fixed = system_id == "tenhou_houou_7dan_fixed"
