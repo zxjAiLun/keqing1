@@ -602,7 +602,7 @@ export function PlayWithYouPage() {
               {c.match?.players && c.match.players.length > 0 && (
                 <div style={{ marginTop: 8 }}>
                   {[...c.match.players]
-                    .sort((a, b) => a.final_score - b.final_score)
+                    .sort((a, b) => b.final_score - a.final_score || a.seat - b.seat)
                     .map((p, index) => (
                       <div key={p.account_id} style={{ fontSize: 12, padding: "2px 0" }}>
                         <span style={{ display: "inline-block", width: 120, color: "var(--text-primary)", fontWeight: 700 }}>
