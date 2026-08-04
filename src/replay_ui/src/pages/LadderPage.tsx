@@ -9,11 +9,11 @@ import { PageHeader, PageShell } from '../components/Layout/PageScaffold';
 import { useLadderSeasonCatalog } from '../hooks/useLadderSeasonCatalog';
 import { useVisibleLiveQuery } from '../hooks/useVisibleLiveQuery';
 import { routes, withLadderSeason } from '../routes';
-import type { LadderAccountRow, LadderModelSummary, LadderResponse } from '../types/ladder';
+import type { LadderAccountRow, LadderModelSummary, LadderResponse, LadderSeasonScoring } from '../types/ladder';
 import { fmtPt, fmtRank, fmtRate, fmtRating } from '../utils/ladderFormat';
 
 const SORT_OPTIONS = [
-  { value: 'pt', label: '按 PT' },
+  { value: 'rank', label: '按段位' },
   { value: 'rating', label: '按 Rating' },
   { value: 'avg_rank', label: '按平均顺位' },
   { value: 'games', label: '按场数' },
@@ -21,7 +21,7 @@ const SORT_OPTIONS = [
 
 export function LadderPage() {
   const navigate = useNavigate();
-  const [sort, setSort] = useState('pt');
+  const [sort, setSort] = useState('rank');
 
   const catalog = useLadderSeasonCatalog();
   const { seasons, activeSeasonId, loading: catalogLoading } = catalog;
@@ -143,10 +143,23 @@ export function LadderPage() {
                   <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{model.accounts} 账号 · {model.games} 场</span>
                 </div>
                 <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
-                  <span>均PT <b style={modelValueStyle}>{fmtPt(model.avg_pt)}</b></span>
+                  {model.avg_pt !== null && (
+                    <span>均PT <b style={modelValueStyle}>{fmtPt(model.avg_pt)}</b></span>
+                  )}
+                  <span>最高 <b style={modelValueStyle}>{model.highest_rank_name || model.highest_rank_id || '—'}</b></span>
+                  <span>中位 <b style={modelValueStyle}>{model.median_rank_name || '—'}</b></span>
                   <span>均R <b style={modelValueStyle}>{fmtRating(model.avg_rating)}</b></span>
                   <span>均顺位 <b style={modelValueStyle}>{fmtRank(model.avg_rank)}</b></span>
                 </div>
+                {model.rank_distribution && Object.keys(model.rank_distribution).length > 0 && (
+                  <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+                    {Object.entries(model.rank_distribution).map(([name, count]) => (
+                      <span key={name} style={{ fontSize: 10, color: 'var(--text-muted)', border: '1px solid var(--border)', borderRadius: 4, padding: '1px 5px' }}>
+                        {name} ×{count}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </button>
             ))}
           </div>
@@ -159,8 +172,9 @@ export function LadderPage() {
                   <th style={thStyle}>排名</th>
                   <th style={thStyle}>账号</th>
                   <th style={thStyle}>模型</th>
+                  <th style={thStyle}>段位</th>
                   <th style={{ ...thStyle, textAlign: 'right' }}>PT</th>
-                  <th style={{ ...thStyle, textAlign: 'right' }}>距目标</th>
+                  <th style={{ ...thStyle, textAlign: 'right' }}>升段进度</th>
                   <th style={{ ...thStyle, textAlign: 'right' }}>Rating</th>
                   <th style={{ ...thStyle, textAlign: 'right' }}>场数</th>
                   <th style={{ ...thStyle, textAlign: 'right' }}>平均顺位</th>
@@ -183,9 +197,21 @@ export function LadderPage() {
                     <td style={{ ...tdStyle, fontWeight: 800, color: 'var(--text-muted)' }}>{row.rank_position}</td>
                     <td style={{ ...tdStyle, fontWeight: 800, color: 'var(--accent)' }}>{row.display_name}</td>
                     <td style={{ ...tdStyle, color: 'var(--text-secondary)' }}>{row.model_id}</td>
-                    <td style={{ ...tdStyle, ...numStyle, fontWeight: 800 }}>{fmtPt(row.pt_current)}</td>
-                    <td style={{ ...tdStyle, ...numStyle, color: row.pt_gap > 0 ? 'var(--text-muted)' : 'var(--success)' }}>
-                      {row.pt_gap > 0 ? `-${fmtPt(row.pt_gap)}` : '达标'}
+                    <td style={{ ...tdStyle, fontWeight: 800 }}>
+                      {row.rank_name || '七段'}
+                      {row.tenhou_reached ? ' 👑' : ''}
+                    </td>
+                    <td style={{ ...tdStyle, ...numStyle, fontWeight: 800 }}>
+                      {row.pt_target !== null ? fmtPt(row.pt_current) : '—'}
+                    </td>
+                    <td style={{ ...tdStyle, ...numStyle }}>
+                      {row.pt_target !== null && row.pt_target > 0 ? (
+                        <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+                          {fmtPt(row.pt_current)}/{fmtPt(row.pt_target)}
+                        </span>
+                      ) : (
+                        <span style={{ color: 'var(--success)' }}>天凤位</span>
+                      )}
                     </td>
                     <td style={{ ...tdStyle, ...numStyle }}>{fmtRating(row.rating)}</td>
                     <td style={{ ...tdStyle, ...numStyle }}>{row.games}</td>
@@ -204,7 +230,7 @@ export function LadderPage() {
 
           {ladder.season.scoring && (
             <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text-muted)' }}>
-              {ladder.season.scoring.pt_profile} · PT {ladder.season.scoring.pt_rank_deltas?.join('/')} · 初始 {ladder.season.scoring.pt_initial} → 目标 {ladder.season.scoring.pt_target} · {ladder.season.scoring.rank_name}
+              {scoringLabel(ladder.season.scoring)}
             </div>
           )}
 
@@ -214,6 +240,22 @@ export function LadderPage() {
       )}
     </PageShell>
   );
+}
+
+function scoringLabel(scoring: LadderSeasonScoring): string {
+  if (scoring.system === 'tenhou_rank_progression') {
+    return `天凤式段位进度 ${scoring.version || ''} · 个人档位结算`;
+  }
+  if (scoring.system) {
+    const parts = [scoring.system, scoring.version, scoring.tier_policy, scoring.game_length].filter(Boolean);
+    return parts.join(' · ');
+  }
+  const parts: string[] = [scoring.pt_profile || 'pt'];
+  if (scoring.pt_rank_deltas) parts.push(`PT ${scoring.pt_rank_deltas.join('/')}`);
+  if (scoring.pt_initial != null) parts.push(`初始 ${scoring.pt_initial}`);
+  if (scoring.pt_target != null) parts.push(`目标 ${scoring.pt_target}`);
+  if (scoring.rank_name) parts.push(scoring.rank_name);
+  return parts.join(' · ');
 }
 
 const selectStyle: CSSProperties = {

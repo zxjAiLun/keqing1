@@ -6,6 +6,17 @@
   "report_dir": "artifacts/experiments/model_pool_2026_07/V3_final_rank_mc_warmstart_2026_07/league_1000h_balanced/platform_accounts",
   "league_summary": "artifacts/experiments/model_pool_2026_07/V3_final_rank_mc_warmstart_2026_07/league_1000h_balanced/league_summary.json",
   "games_expected": 1000,
+  "scoring": {
+    "system": "tenhou_houou_7dan_fixed",
+    "version": "2026-07-01",
+    "game_length": "hanchan",
+    "room": "houou",
+    "initial_rank": "7dan",
+    "initial_pt": 1400,
+    "initial_rating": 1500,
+    "rank_points": [90, 45, 0, -135],
+    "target_pt": 2800
+  },
   "models": [
     {
       "model_id": "70k",

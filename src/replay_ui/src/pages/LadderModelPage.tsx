@@ -88,17 +88,17 @@ export function LadderModelPage() {
 
       {!loading && detail && model && (
         <>
-          {/* 模型汇总（展示性聚合，不另算 Rating） */}
+          {/* 模型汇总（展示性聚合，不另算 Rating；跨段位不平均 PT） */}
           {model.summary && (
             <section className="card" style={{ padding: 14, marginBottom: 12 }}>
               <div style={{ display: 'flex', gap: 22, flexWrap: 'wrap', fontSize: 12 }}>
                 {[
                   ['账号数', String(model.summary.accounts)],
                   ['总场数', String(model.summary.games)],
-                  ['平均 PT', fmtPt(model.summary.avg_pt)],
+                  ['最高段位', model.summary.highest_rank_name || model.summary.highest_rank_id || '—'],
+                  ['中位段位', model.summary.median_rank_name || '—'],
                   ['平均 Rating', fmtRating(model.summary.avg_rating)],
                   ['平均顺位', fmtRank(model.summary.avg_rank)],
-                  ['平均顺位列PT', model.summary.avg_rank_pt === null ? '—' : model.summary.avg_rank_pt.toFixed(2)],
                 ].map(([label, value]) => (
                   <div key={label}>
                     <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>{label}</div>
@@ -106,6 +106,15 @@ export function LadderModelPage() {
                   </div>
                 ))}
               </div>
+              {model.summary.rank_distribution && Object.keys(model.summary.rank_distribution).length > 0 && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                  {Object.entries(model.summary.rank_distribution).map(([name, count]) => (
+                    <span key={name} style={{ fontSize: 11, color: 'var(--text-muted)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 7px' }}>
+                      {name} <b style={{ color: 'var(--text-primary)' }}>×{count}</b>
+                    </span>
+                  ))}
+                </div>
+              )}
             </section>
           )}
 
@@ -117,8 +126,8 @@ export function LadderModelPage() {
                 <thead>
                   <tr style={{ color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', textAlign: 'left' }}>
                     <th style={thStyle}>账号</th>
+                    <th style={thStyle}>段位</th>
                     <th style={{ ...thStyle, textAlign: 'right' }}>PT</th>
-                    <th style={{ ...thStyle, textAlign: 'right' }}>距目标</th>
                     <th style={{ ...thStyle, textAlign: 'right' }}>Rating</th>
                     <th style={{ ...thStyle, textAlign: 'right' }}>场数</th>
                     <th style={{ ...thStyle, textAlign: 'right' }}>平均顺位</th>
@@ -139,9 +148,12 @@ export function LadderModelPage() {
                       title={`查看 ${row.display_name} 账号详情`}
                     >
                       <td style={{ ...tdStyle, fontWeight: 800, color: 'var(--accent)' }}>{row.display_name}</td>
-                      <td style={{ ...tdStyle, ...numStyle, fontWeight: 800 }}>{fmtPt(row.pt_current)}</td>
-                      <td style={{ ...tdStyle, ...numStyle, color: row.pt_gap > 0 ? 'var(--text-muted)' : 'var(--success)' }}>
-                        {row.pt_gap > 0 ? `-${fmtPt(row.pt_gap)}` : '达标'}
+                      <td style={{ ...tdStyle, fontWeight: 800 }}>
+                        {row.rank_name || '七段'}
+                        {row.tenhou_reached ? ' 👑' : ''}
+                      </td>
+                      <td style={{ ...tdStyle, ...numStyle, fontWeight: 800 }}>
+                        {row.pt_target !== null ? fmtPt(row.pt_current) : '—'}
                       </td>
                       <td style={{ ...tdStyle, ...numStyle }}>{fmtRating(row.rating)}</td>
                       <td style={{ ...tdStyle, ...numStyle }}>{row.games}</td>
