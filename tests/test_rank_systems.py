@@ -120,11 +120,6 @@ def test_tenhou_rank_meta_has_no_pt(ranked: Tenhou4pRanked) -> None:
     assert meta.is_tenhou is True
 
 
-def test_config_validation_rejects_invalid_membership() -> None:
-    with pytest.raises(ValueError, match="unknown membership"):
-        Tenhou4pRanked(version="test", membership="premuim")
-
-
 def test_config_validation_requires_version() -> None:
     with pytest.raises(ValueError, match="version"):
         Tenhou4pRanked(version="")
@@ -220,8 +215,9 @@ def test_rating_correction_before_and_after_400_games(ranked: Tenhou4pRanked) ->
 # --- Table resolution -------------------------------------------------------
 
 def test_room_selection_highest_common_eligible(ranked: Tenhou4pRanked) -> None:
-    # 1級 及以上可进上级卓（无需额外付费条件）
+    # 1級 可进上级卓；级位低于 1級 只能进一般卓
     assert ranked.resolve_table([_state("1kyu", 50, rating=1600)] * 4).room == "joukyuu"
+    assert ranked.resolve_table([_state("2kyu", 30, rating=1600)] * 4).room == "ippan"
     assert ranked.resolve_table([_state("1dan", 200, rating=1600)] * 4).room == "joukyuu"
     assert ranked.resolve_table([_state("4dan", 800, rating=1900)] * 4).room == "tokujou"
     assert ranked.resolve_table([_state("7dan", 1400, rating=2100)] * 4).room == "houou"
@@ -244,27 +240,19 @@ def test_1dan_and_high_rating_4dan_share_joukyuu(ranked: Tenhou4pRanked) -> None
     assert ranked.resolve_table(players).room == "joukyuu"
 
 
-def test_low_rank_premium_exception_grants_joukyuu() -> None:
-    premium = Tenhou4pRanked(version="test", premium_days_remaining=30)
-    assert premium.resolve_table([_state("2kyu", 30, rating=1600)] * 4).room == "joukyuu"
-    free = Tenhou4pRanked(version="test", membership="free")
-    assert free.resolve_table([_state("2kyu", 30, rating=1600)] * 4).room == "ippan"
-    expired = Tenhou4pRanked(version="test", premium_days_remaining=0)
-    assert expired.resolve_table([_state("2kyu", 30, rating=1600)] * 4).room == "ippan"
-
-
-def test_houou_requires_premium_membership() -> None:
-    free = Tenhou4pRanked(version="test", membership="free")
-    table = free.resolve_table([_state("7dan", 1400, rating=2100)] * 4)
-    assert table.room == "tokujou"
-    expired = Tenhou4pRanked(version="test", premium_days_remaining=0)
-    assert expired.resolve_table([_state("7dan", 1400, rating=2100)] * 4).room == "tokujou"
+def test_houou_requires_rank_and_rating_only() -> None:
+    # 凤凰卓只要求段位与 Rating，不引入天凤账号付费领域。
+    table = Tenhou4pRanked(version="test").resolve_table([_state("7dan", 1400, rating=2100)] * 4)
+    assert table.room == "houou"
+    # 7dan R1999：凤凰门槛未到 -> 特上（R>=1800 且段位>=四段）
+    low = Tenhou4pRanked(version="test").resolve_table([_state("7dan", 1400, rating=1999)] * 4)
+    assert low.room == "tokujou"
 
 
 def test_no_common_room_raises_loudly(ranked: Tenhou4pRanked) -> None:
-    # 3kyu（仅一般/上级付费例外）与 8段 R2100（仅特上/凤凰）：无共同卓
+    # 2kyu（仅一般）与 8段 R2100（仅特上/凤凰）：无共同卓
     players = [
-        _state("3kyu", 50, rating=1600),
+        _state("2kyu", 30, rating=1600),
         _state("8dan", 1600, rating=2100),
         _state("8dan", 1600, rating=2100),
         _state("8dan", 1600, rating=2100),
@@ -356,7 +344,6 @@ def test_create_rank_system_factory() -> None:
             "version": "2026-08-04",
             "game_length": "hanchan",
             "room_policy": "highest_common_eligible",
-            "membership": "premium",
             "initial_rank": "newcomer",
             "initial_rating": 1500,
         }

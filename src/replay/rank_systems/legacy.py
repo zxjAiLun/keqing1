@@ -53,10 +53,6 @@ class LegacyFixedProfile:
         return "fixed"
 
     @property
-    def membership(self) -> str | None:
-        return None
-
-    @property
     def initial_rating_decimal(self) -> Decimal:
         return Decimal(str(self.initial_rating))
 
@@ -138,8 +134,6 @@ class LegacyFixedProfile:
             "version": self.version,
             "game_length": self.game_length,
             "room_policy": self.room_policy,
-            "membership": self.membership,
-            "premium_days_remaining": None,
             "initial_rank": self.initial_rank,
             "initial_rating": float(self.initial_rating),
             "room": self.room,

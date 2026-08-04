@@ -59,16 +59,11 @@ def create_rank_system(config: dict | None) -> RankSystem:
         )
     if system == Tenhou4pRanked.system_id:
         room = config.get("room")
-        premium_days = config.get("premium_days_remaining")
         return Tenhou4pRanked(
             version=version,
             game_length=str(config.get("game_length") or "hanchan"),
             room_policy=str(config.get("room_policy") or "highest_common_eligible"),
             room=str(room) if room is not None else None,
-            membership=str(config.get("membership") or "premium"),
-            premium_days_remaining=(
-                int(premium_days) if premium_days is not None else None
-            ),
             initial_rank=str(config.get("initial_rank") or "newcomer"),
             initial_rating=float(config.get("initial_rating") or 1500.0),
         )

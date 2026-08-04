@@ -158,8 +158,6 @@ class Tenhou4pRanked:
         game_length: str = "hanchan",
         room_policy: str = "highest_common_eligible",
         room: str | None = None,
-        membership: str = "premium",
-        premium_days_remaining: int | None = None,
         initial_rank: str = "newcomer",
         initial_rating: float = 1500.0,
     ):
@@ -169,8 +167,6 @@ class Tenhou4pRanked:
             raise ValueError(f"unknown room_policy: {room_policy!r}")
         if initial_rank not in RANK_NAMES:
             raise ValueError(f"unknown initial_rank: {initial_rank!r}")
-        if membership not in {"premium", "free"}:
-            raise ValueError(f"unknown membership: {membership!r}")
         if not str(version).strip():
             raise ValueError("version 不能为空")
         initial_rating_value = Decimal(str(initial_rating))
@@ -180,23 +176,12 @@ class Tenhou4pRanked:
             raise ValueError(f"unknown room: {room!r}")
         if room_policy == "fixed" and room is None:
             raise ValueError("fixed room policy requires an explicit room")
-        if premium_days_remaining is not None and premium_days_remaining < 0:
-            raise ValueError(f"premium_days_remaining 不能为负: {premium_days_remaining}")
         self.version = str(version)
         self.game_length = game_length
         self.room_policy = room_policy
-        self.membership = membership
-        self.premium_days_remaining = premium_days_remaining
         self.initial_rank = initial_rank
         self.initial_rating = initial_rating_value
         self.fixed_room = room
-
-    @property
-    def premium_valid(self) -> bool:
-        """有效付费会员：membership=premium 且剩余天数有效（缺省视为有效）。"""
-        if self.membership != "premium":
-            return False
-        return self.premium_days_remaining is None or self.premium_days_remaining > 0
 
     # --- RankSystem protocol ------------------------------------------------
 
@@ -240,12 +225,12 @@ class Tenhou4pRanked:
     def _eligible(self, state: PlayerRankState, room: str) -> bool:
         """Tenhou room admission based on pre-match rank and rating.
 
+        模型天梯模拟段位/Rating 演进，不引入天凤账号的付费/订阅领域。
         官方规则（https://tenhou.net/man/index.html）：
         - 一般：新人~三段，以及四段 R1800 未满
-        - 上級：1級以上（含1級）、低于七段 R2000 门槛；低于1級但付费有效期
-          满足条件者也可进入
+        - 上級：1級可进；一段~七段 R2000 未满
         - 特上：四段 R1800 以上
-        - 鳳凰：七段 R2000 以上的有效付费会员
+        - 鳳凰：七段 R2000 以上
         """
         ordinal = RANK_ORDINALS[state.rank_id]
         rating = float(state.rating)
@@ -260,15 +245,13 @@ class Tenhou4pRanked:
                 return rating < 1800
             return False
         if room == "joukyuu":
-            if ordinal >= RANK_ORDINALS["1kyu"]:
-                if is_kyu:
-                    return True  # 1級：无需额外付费条件
-                return dan <= 7 and rating < 2000
-            return self.premium_valid  # 低于1級：付费有效期例外
+            if ordinal == RANK_ORDINALS["1kyu"]:
+                return True
+            return dan is not None and dan <= 7 and rating < 2000
         if room == "tokujou":
             return dan is not None and dan >= 4 and rating >= 1800
         if room == "houou":
-            return dan is not None and dan >= 7 and rating >= 2000 and self.premium_valid
+            return dan is not None and dan >= 7 and rating >= 2000
         raise ValueError(f"unknown room: {room!r}")
 
     def _fixed_room(self) -> str:
@@ -392,8 +375,6 @@ class Tenhou4pRanked:
             "version": self.version,
             "game_length": self.game_length,
             "room_policy": self.room_policy,
-            "membership": self.membership,
-            "premium_days_remaining": self.premium_days_remaining,
             "initial_rank": self.initial_rank,
             "initial_rating": float(self.initial_rating),
             "room": self.fixed_room if self.room_policy == "fixed" else None,
