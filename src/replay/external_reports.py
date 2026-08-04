@@ -98,6 +98,34 @@ def _actual_action(entry: dict) -> dict | None:
     return None
 
 
+def _action_actor(action: dict | None) -> int | None:
+    if not isinstance(action, dict):
+        return None
+    actor = action.get("actor")
+    if actor is None:
+        return None
+    try:
+        return int(actor)
+    except (TypeError, ValueError):
+        return None
+
+
+def _decision_kind(action: dict | None) -> str | None:
+    """把实际动作归类为事件对齐用的 decision_kind。"""
+    if not isinstance(action, dict):
+        return None
+    action_type = action.get("type")
+    if action_type == "dahai":
+        return "draw_discard"
+    if action_type == "reach":
+        return "reach"
+    if action_type in {"chi", "pon", "daiminkan", "ankan", "kakan"}:
+        return "call"
+    if action_type == "none":
+        return "pass"
+    return None
+
+
 def _first_local_entry(decisions: dict) -> dict:
     entry = next(
         (
@@ -389,6 +417,9 @@ def build_naga_teacher_reports(raw: dict, decisions: dict, player_id: int, repla
                 report_entries[model_index].append(
                     {
                         "step": local_entry.get("step"),
+                        "source_event_index": local_entry.get("source_event_index"),
+                        "actor": _action_actor(actual),
+                        "decision_kind": _decision_kind(actual),
                         "junme": local_entry.get("junme"),
                         "tiles_left": local_entry.get("tiles_left"),
                         "actual": actual,

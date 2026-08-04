@@ -40,6 +40,7 @@ python_files = [
     "test_replay_ryukyoku_obs.py",
     "test_replay_server_ippatsu_fix.py",
     "test_replay_state_reconstruction.py",
+    "test_replay_teacher_alignment.py",
     "test_replay_tsumogiri_reconstruction.py",
     "test_gateway_*.py",
     "test_responder_playwithyou.py",
