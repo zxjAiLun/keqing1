@@ -634,7 +634,8 @@ def build_ingest_report(
 
     source_entries: list[tuple[SourceAdapter, Path]] = []
     native_dir = sources_root / "native"
-    if native_dir.is_dir():
+    # 空 native 目录不是 source（无日志时不得因缺 index.jsonl 拒绝整个发布）。
+    if native_dir.is_dir() and any(native_dir.glob("*.json.gz")):
         raw_mapping = (ingest.get("native") or {}).get("name_to_account") or {}
         name_to_account: dict[str, str] = {}
         # 显式映射优先；缺失时回退 display_name -> account_id
