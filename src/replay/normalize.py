@@ -119,39 +119,49 @@ def _repair_kakan_snapshots(decisions: dict, events: list[dict] | None) -> None:
                 # 已修复的快照：幂等 no-op（N4/N5）
                 pass
             else:
-                # canonical kakan = 原 pon 手牌两张 + 原被鸣牌 + 加杠牌（严格四张）
-                hand = list(entry.get("hand") or [])
-                for index, tile in enumerate(hand):
-                    if normalize_tile(str(tile)) == normalize_tile(added_tile):
-                        hand.pop(index)
-                        break
-                entry["hand"] = hand
-
+                # 先验证，后修改（P1/P2）：canonical 完整校验通过才原子提交，
+                # 失败时 hand/melds/candidates 全部保持不变。
                 base_consumed = list(target.get("consumed") or [])
                 called_tile = str(target.get("pai_raw") or target.get("pai") or added_tile)
                 canonical_consumed = [*base_consumed, called_tile, added_tile]
-                if len(canonical_consumed) == 4:
+                family = normalize_tile(added_tile)
+                canonical_valid = (
+                    len(base_consumed) == 2
+                    and len(canonical_consumed) == 4
+                    and all(normalize_tile(str(tile)) == family for tile in canonical_consumed)
+                )
+                if not canonical_valid:
+                    _logger.warning(
+                        "[kakan repair] step=%s actor=%s added=%s: canonical 校验失败 "
+                        "(base=%s called=%s) → 完整 no-op",
+                        entry.get("step"), actor, added_tile, base_consumed, called_tile,
+                    )
+                else:
+                    # 原子执行：删 hand 残留加杠牌（存在才删）、pon 升级、
+                    # 写 canonical consumed / pai / pai_raw、过滤失效候选
+                    hand = list(entry.get("hand") or [])
+                    for index, tile in enumerate(hand):
+                        if normalize_tile(str(tile)) == normalize_tile(added_tile):
+                            hand.pop(index)
+                            break
+                    entry["hand"] = hand
+
                     target["type"] = "kakan"
                     target["consumed"] = canonical_consumed
                     target["pai"] = added_tile
                     target["pai_raw"] = added_tile
-                else:
-                    _logger.warning(
-                        "[kakan repair] step=%s actor=%s added=%s: 非标准 pon consumed=%s，不修改",
-                        entry.get("step"), actor, added_tile, base_consumed,
-                    )
 
-                entry["candidates"] = [
-                    candidate
-                    for candidate in (entry.get("candidates") or [])
-                    if not (
-                        isinstance(candidate.get("action"), dict)
-                        and candidate["action"].get("type") in {"dahai", "kakan"}
-                        and candidate["action"].get("pai") is not None
-                        and normalize_tile(str(candidate["action"]["pai"])) == normalize_tile(added_tile)
-                        and not any(normalize_tile(str(tile)) == normalize_tile(added_tile) for tile in hand)
-                    )
-                ]
+                    entry["candidates"] = [
+                        candidate
+                        for candidate in (entry.get("candidates") or [])
+                        if not (
+                            isinstance(candidate.get("action"), dict)
+                            and candidate["action"].get("type") in {"dahai", "kakan"}
+                            and candidate["action"].get("pai") is not None
+                            and normalize_tile(str(candidate["action"]["pai"])) == normalize_tile(added_tile)
+                            and not any(normalize_tile(str(tile)) == normalize_tile(added_tile) for tile in hand)
+                        )
+                    ]
 
         gt_action = entry.get("gt_action") or {}
         if gt_action.get("type") != "kakan":

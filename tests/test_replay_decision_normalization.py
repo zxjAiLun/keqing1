@@ -343,3 +343,39 @@ def test_n8_active_repair_not_inherited_across_kyoku():
     nk = normalized["log"][2]
     assert "N" in nk["hand"], "下一个小局不继承 active 修复"
     assert nk["melds"][0][0]["type"] == "pon"
+
+
+def test_n9_malformed_consumed_length_is_complete_noop():
+    """唯一 pon 但 consumed 长度非标准 → hand/melds/candidates 全部不变。"""
+    malformed_pon = {"type": "pon", "pai": "N", "pai_raw": "N", "consumed": ["N"], "target": 3}
+    candidates = [
+        {"action": {"type": "dahai", "actor": 0, "pai": "N"}},
+        {"action": {"type": "dahai", "actor": 0, "pai": "7p"}},
+    ]
+    entries = _kakan_log_entries([malformed_pon], added_in_hand=True, candidates=candidates)
+    decisions = _make_decisions(entries)
+    before = copy.deepcopy(decisions)
+    normalized = normalize_replay_decisions(decisions, events=_kakan_events())
+
+    stale = normalized["log"][1]
+    stale_before = before["log"][1]
+    assert stale["hand"] == stale_before["hand"], "hand 不得改变（残留加杠牌仍在）"
+    assert stale["melds"] == stale_before["melds"], "melds 不得改变"
+    assert stale["candidates"] == stale_before["candidates"], "candidates 不得被过滤"
+    assert stale["melds"][0][0]["type"] == "pon"
+
+
+def test_n10_wrong_tile_family_is_complete_noop():
+    """consumed 两张但其中一张牌族错误 → 完整 no-op + diagnostic。"""
+    wrong_family_pon = {"type": "pon", "pai": "N", "pai_raw": "N", "consumed": ["N", "S"], "target": 3}
+    entries = _kakan_log_entries([wrong_family_pon], added_in_hand=True)
+    decisions = _make_decisions(entries)
+    before = copy.deepcopy(decisions)
+    normalized = normalize_replay_decisions(decisions, events=_kakan_events())
+
+    stale = normalized["log"][1]
+    stale_before = before["log"][1]
+    assert stale["hand"] == stale_before["hand"]
+    assert stale["melds"] == stale_before["melds"]
+    assert stale["candidates"] == stale_before["candidates"]
+    assert stale["melds"][0][0]["type"] == "pon"
