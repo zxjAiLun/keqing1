@@ -514,7 +514,8 @@ def _enrich_account_row(
         rank_name = row.get("rank_name")
         promotions = 0
         demotions = 0
-        highest_rank_id = rank_name if isinstance(rank_name, str) else None
+        # v1 报告没有段位状态：不推导"历史最高"，避免与当前七段重复展示。
+        highest_rank_id = None
         tenhou_reached = False
         total_pt_delta = None
         avg_pt_delta = None
@@ -783,6 +784,12 @@ def _read_rating_curve(report_dir: Path, account_id: str, max_points: int) -> li
                     point["rank_name"] = row["rank_name"]
                 if row.get("pt_target"):
                     point["pt_target"] = float(row["pt_target"])
+                if row.get("rank_before"):
+                    point["rank_before"] = row["rank_before"]
+                if row.get("rank_after"):
+                    point["rank_after"] = row["rank_after"]
+                if row.get("transition"):
+                    point["transition"] = row["transition"]
                 points.append(point)
             except (TypeError, ValueError):
                 continue

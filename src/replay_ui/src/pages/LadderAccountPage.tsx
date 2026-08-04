@@ -127,7 +127,7 @@ export function LadderAccountPage() {
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 3 }}>
                     {ptTarget !== null
                       ? `PT（${fmtPt(account.pt_current)} / ${fmtPt(ptTarget)}）`
-                      : `PT（${fmtPt(account.pt_current)} / 天凤位）`}
+                      : '天凤位（不再计分）'}
                   </div>
                   {ptTarget !== null ? (
                     <div style={{ height: 8, borderRadius: 4, background: 'var(--page-bg)', border: '1px solid var(--border)', overflow: 'hidden' }}>

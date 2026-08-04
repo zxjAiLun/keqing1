@@ -98,6 +98,48 @@ def test_10dan_promotes_to_tenhou(ranked: Tenhou4pRanked) -> None:
     assert update.rank_after == "tenhou"
 
 
+def test_tenhou_pt_delta_is_zero_for_all_placements(ranked: Tenhou4pRanked) -> None:
+    for placement in (1, 2, 3, 4):
+        update = ranked.apply_result(
+            _state("tenhou", 0, rating=2000.0),
+            placement=placement,
+            table=_table("houou", "hanchan", avg=2000.0),
+        )
+        assert update.pt_delta == 0
+        assert update.pt_after == 0
+        assert update.transition == "none"
+        assert update.rank_after == "tenhou"
+        # Rating 仍正常变化
+        assert update.rating_after != update.rating_before
+
+
+def test_tenhou_rank_meta_has_no_pt(ranked: Tenhou4pRanked) -> None:
+    meta = ranked.rank_meta("tenhou")
+    assert meta.initial_pt is None
+    assert meta.target_pt is None
+    assert meta.is_tenhou is True
+
+
+def test_config_validation_rejects_invalid_membership() -> None:
+    with pytest.raises(ValueError, match="unknown membership"):
+        Tenhou4pRanked(version="test", membership="premuim")
+
+
+def test_config_validation_requires_version() -> None:
+    with pytest.raises(ValueError, match="version"):
+        Tenhou4pRanked(version="")
+
+
+def test_config_validation_rejects_unknown_room() -> None:
+    with pytest.raises(ValueError, match="unknown room"):
+        Tenhou4pRanked(version="test", room_policy="fixed", room="lobby")
+
+
+def test_config_validation_rejects_non_finite_rating() -> None:
+    with pytest.raises(ValueError, match="initial_rating"):
+        Tenhou4pRanked(version="test", initial_rating=float("nan"))
+
+
 def test_kyu_never_demotes_pt_floored_at_zero(ranked: Tenhou4pRanked) -> None:
     update = ranked.apply_result(_state("1kyu", 5), placement=4, table=_table("houou", "hanchan"))
     assert update.pt_delta == -30
@@ -178,24 +220,54 @@ def test_rating_correction_before_and_after_400_games(ranked: Tenhou4pRanked) ->
 # --- Table resolution -------------------------------------------------------
 
 def test_room_selection_highest_common_eligible(ranked: Tenhou4pRanked) -> None:
-    assert ranked.resolve_table([_state("1kyu", 50, rating=1600)] * 4).room == "ippan"
+    # 1級 及以上可进上级卓（无需额外付费条件）
+    assert ranked.resolve_table([_state("1kyu", 50, rating=1600)] * 4).room == "joukyuu"
     assert ranked.resolve_table([_state("1dan", 200, rating=1600)] * 4).room == "joukyuu"
     assert ranked.resolve_table([_state("4dan", 800, rating=1900)] * 4).room == "tokujou"
     assert ranked.resolve_table([_state("7dan", 1400, rating=2100)] * 4).room == "houou"
+
+
+def test_1kyu_hanchan_first_place_scores_joukyuu(ranked: Tenhou4pRanked) -> None:
+    table = ranked.resolve_table([_state("1kyu", 90, rating=1600)] * 4)
+    assert table.room == "joukyuu"
+    update = ranked.apply_result(_state("1kyu", 90), placement=1, table=table)
+    assert update.pt_delta == 60
+
+
+def test_1dan_and_high_rating_4dan_share_joukyuu(ranked: Tenhou4pRanked) -> None:
+    players = [
+        _state("1dan", 200, rating=1500.0),
+        _state("4dan", 800, rating=1900.0),
+        _state("1dan", 200, rating=1500.0),
+        _state("4dan", 800, rating=1900.0),
+    ]
+    assert ranked.resolve_table(players).room == "joukyuu"
+
+
+def test_low_rank_premium_exception_grants_joukyuu() -> None:
+    premium = Tenhou4pRanked(version="test", premium_days_remaining=30)
+    assert premium.resolve_table([_state("2kyu", 30, rating=1600)] * 4).room == "joukyuu"
+    free = Tenhou4pRanked(version="test", membership="free")
+    assert free.resolve_table([_state("2kyu", 30, rating=1600)] * 4).room == "ippan"
+    expired = Tenhou4pRanked(version="test", premium_days_remaining=0)
+    assert expired.resolve_table([_state("2kyu", 30, rating=1600)] * 4).room == "ippan"
 
 
 def test_houou_requires_premium_membership() -> None:
     free = Tenhou4pRanked(version="test", membership="free")
     table = free.resolve_table([_state("7dan", 1400, rating=2100)] * 4)
     assert table.room == "tokujou"
+    expired = Tenhou4pRanked(version="test", premium_days_remaining=0)
+    assert expired.resolve_table([_state("7dan", 1400, rating=2100)] * 4).room == "tokujou"
 
 
 def test_no_common_room_raises_loudly(ranked: Tenhou4pRanked) -> None:
+    # 3kyu（仅一般/上级付费例外）与 8段 R2100（仅特上/凤凰）：无共同卓
     players = [
-        _state("1kyu", 50, rating=1600),  # only ippan
-        _state("5dan", 1000, rating=1600),  # joukyuu only (R<1800)
-        _state("5dan", 1000, rating=1600),
-        _state("5dan", 1000, rating=1600),
+        _state("3kyu", 50, rating=1600),
+        _state("8dan", 1600, rating=2100),
+        _state("8dan", 1600, rating=2100),
+        _state("8dan", 1600, rating=2100),
     ]
     with pytest.raises(RankResolutionError):
         ranked.resolve_table(players)
@@ -207,6 +279,29 @@ def test_fixed_room_policy_uses_configured_room() -> None:
     assert table.room == "houou"
     assert table.strict is False
     assert table.positive_pt == (90, 45, 0)
+
+
+def test_factory_passes_fixed_room_to_tenhou() -> None:
+    system = create_rank_system(
+        {
+            "system": "tenhou_4p_ranked",
+            "version": "2026-08-04",
+            "room_policy": "fixed",
+            "room": "tokujou",
+            "game_length": "hanchan",
+        }
+    )
+    assert system.system_id == "tenhou_4p_ranked"
+    table = system.resolve_table([_state("newcomer", 0, rating=1500)] * 4)
+    assert table.room == "tokujou"
+    assert table.positive_pt == (75, 30, 0)
+    update = system.apply_result(_state("newcomer", 0), placement=1, table=table)
+    assert update.pt_delta == 75
+
+
+def test_fixed_policy_requires_explicit_room() -> None:
+    with pytest.raises(ValueError, match="fixed room policy requires"):
+        Tenhou4pRanked(version="test", room_policy="fixed")
 
 
 def test_table_averages_pre_match_ratings(ranked: Tenhou4pRanked) -> None:

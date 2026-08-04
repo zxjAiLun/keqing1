@@ -59,9 +59,11 @@ def _write_game(log_dir: Path, name: str, scores: list[int]) -> None:
 
 def _build(
     tmp_path: Path,
-    scoring_config: dict,
+    scoring_config: dict | None,
     game_scores: list[list[int]],
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    rank_points: tuple[float, float, float, float] = (90.0, 45.0, 0.0, -135.0),
 ) -> dict:
     def _stub(**kwargs):
         return {
@@ -74,7 +76,7 @@ def _build(
 
     monkeypatch.setattr(account_report, "build_stat_report", _stub)
     log_dir = tmp_path / "logs"
-    log_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
     for index, scores in enumerate(game_scores):
         _write_game(log_dir, f"game_{index:03d}", scores)
     return account_report.build_report(
@@ -82,7 +84,7 @@ def _build(
         output_dir=tmp_path / "out",
         mortal_root=Path("third_party/Mortal"),
         platform_model_label="testmodel",
-        rank_points=(90.0, 45.0, 0.0, -135.0),
+        rank_points=rank_points,
         scoring_config=scoring_config,
     )
 
@@ -134,12 +136,13 @@ def test_ledger_records_transitions_and_room(tmp_path: Path, monkeypatch: pytest
     a_rows = _by_account(rows, "testmodel@01")
     assert len(a_rows) == 2
     first = a_rows[0]
-    assert first["table_room"] == "ippan"
+    # 默认 premium 付费例外：新人亦满足上级卓准入（官方"低于1级付费可进上级"）
+    assert first["table_room"] == "joukyuu"
     assert first["game_length"] == "hanchan"
     assert first["rank_before"] == "newcomer"
     assert first["rank_after"] == "9kyu"
     assert first["transition"] == "promotion"
-    assert first["pt_delta"] == 30
+    assert first["pt_delta"] == 60
     second = a_rows[1]
     assert second["rank_before"] == "9kyu"
     assert second["rank_after"] == "8kyu"
@@ -215,3 +218,105 @@ def test_report_scoring_block_describes_tenhou(tmp_path: Path, monkeypatch: pyte
     assert scoring["membership"] == "premium"
     assert scoring["initial_rank"] == "newcomer"
     assert scoring["initial_rating"] == 1500.0
+
+
+# --- 复审 H3/H4：--rank-points 与 scoring_config 权威性 --------------------
+
+def test_custom_rank_points_drive_legacy_engine_without_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = _build(
+        tmp_path,
+        None,
+        [[40000, 25000, 20000, 15000]],
+        monkeypatch,
+        rank_points=(100.0, 50.0, 0.0, -150.0),
+    )
+    a = next(row for row in report["accounts"] if row["account_id"] == "testmodel@01")
+    # 1位按 100 计分（旧实现错误地仍用 90）
+    assert a["pt_current"] == 1500
+    assert a["total_pt_delta"] == 100
+    assert report["scoring"]["pt_rank_deltas"] == [100.0, 50.0, 0.0, -150.0]
+
+
+def test_explicit_scoring_config_rank_points_authoritative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = {**LEGACY_SCORING, "rank_points": [100, 50, 0, -150]}
+    report = _build(tmp_path, config, [[40000, 25000, 20000, 15000]], monkeypatch)
+    a = next(row for row in report["accounts"] if row["account_id"] == "testmodel@01")
+    assert a["pt_current"] == 1500
+    assert report["scoring"]["pt_rank_deltas"] == [100.0, 50.0, 0.0, -150.0]
+
+
+def test_conflicting_cli_rank_points_with_scoring_config_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(ValueError, match="--rank-points 与显式 scoring_config 冲突"):
+        _build(
+            tmp_path,
+            LEGACY_SCORING,
+            [[40000, 25000, 20000, 15000]],
+            monkeypatch,
+            rank_points=(100.0, 50.0, 0.0, -150.0),
+        )
+
+
+# --- 复审 H6：初始段位计入历史最高 ----------------------------------------
+
+def test_initial_rank_is_historical_high_on_first_demotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scoring = {**TENHOU_SCORING, "initial_rank": "7dan"}
+    # testmodel@01 一直四位：七段 1400 - 12×135 -> 第 11 场降为六段
+    games = [[15000, 40000, 25000, 20000]] * 12
+    report = _build(tmp_path, scoring, games, monkeypatch)
+    a = next(row for row in report["accounts"] if row["account_id"] == "testmodel@01")
+    assert a["rank_id"] == "6dan"
+    assert a["rank_ordinal"] == 16
+    assert a["demotions"] >= 1
+    assert a["highest_rank_id"] == "7dan"
+
+
+# --- 复审 H7：rating_delta 数据契约 ---------------------------------------
+
+def test_ledger_rating_before_plus_delta_equals_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _build(
+        tmp_path,
+        TENHOU_SCORING,
+        [[40000, 25000, 20000, 15000]] * 4,
+        monkeypatch,
+    )
+    rows = _ledger_rows(tmp_path)
+    assert rows
+    for row in rows:
+        assert "rating_delta_raw" in row
+        assert abs((row["rating_before"] + row["rating_delta"]) - row["rating_after"]) < 1e-9
+
+
+# --- 复审 H8：legacy 公式元数据与实际一致 ---------------------------------
+
+def test_legacy_rating_formula_matches_actual_behavior(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = _build(tmp_path, LEGACY_SCORING, [[40000, 25000, 20000, 15000]], monkeypatch)
+    assert "max(table_avg_rating, 1500)" not in report["scoring"]["rating_formula"]
+    assert "rounded up" not in report["scoring"]["rating_formula"]
+    tenhou = _build(tmp_path, TENHOU_SCORING, [[40000, 25000, 20000, 15000]], monkeypatch)
+    assert "max(table_avg_rating, 1500)" in tenhou["scoring"]["rating_formula"]
+
+
+def test_tenhou_account_total_pt_delta_does_not_grow_at_tenhou(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 以天凤位开局（R2000 可进凤凰卓）：继续对局 PTΔ=0，累计不增长
+    scoring = {**TENHOU_SCORING, "initial_rank": "tenhou", "initial_rating": 2000}
+    report = _build(tmp_path, scoring, [[40000, 25000, 20000, 15000]] * 2, monkeypatch)
+    a = next(row for row in report["accounts"] if row["account_id"] == "testmodel@01")
+    assert a["rank_id"] == "tenhou"
+    assert a["tenhou_reached"] is True
+    assert a["total_pt_delta"] == 0
+    assert a["pt_current"] == 0
+    assert a["pt_target"] is None

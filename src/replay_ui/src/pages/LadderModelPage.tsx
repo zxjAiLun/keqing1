@@ -152,7 +152,9 @@ export function LadderModelPage() {
                         {row.rank_name || '七段'}
                         {row.tenhou_reached ? ' 👑' : ''}
                       </td>
-                      <td style={{ ...tdStyle, ...numStyle, fontWeight: 800 }}>{fmtPt(row.pt_current)}</td>
+                      <td style={{ ...tdStyle, ...numStyle, fontWeight: 800 }}>
+                        {row.pt_target !== null ? fmtPt(row.pt_current) : '—'}
+                      </td>
                       <td style={{ ...tdStyle, ...numStyle }}>{fmtRating(row.rating)}</td>
                       <td style={{ ...tdStyle, ...numStyle }}>{row.games}</td>
                       <td style={{ ...tdStyle, ...numStyle }}>{fmtRank(row.avg_rank)}</td>

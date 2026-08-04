@@ -201,7 +201,9 @@ export function LadderPage() {
                       {row.rank_name || '七段'}
                       {row.tenhou_reached ? ' 👑' : ''}
                     </td>
-                    <td style={{ ...tdStyle, ...numStyle, fontWeight: 800 }}>{fmtPt(row.pt_current)}</td>
+                    <td style={{ ...tdStyle, ...numStyle, fontWeight: 800 }}>
+                      {row.pt_target !== null ? fmtPt(row.pt_current) : '—'}
+                    </td>
                     <td style={{ ...tdStyle, ...numStyle }}>
                       {row.pt_target !== null && row.pt_target > 0 ? (
                         <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
