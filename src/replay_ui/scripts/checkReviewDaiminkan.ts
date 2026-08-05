@@ -22,7 +22,11 @@ import { entryToBattleState } from '../src/utils/replayAdapter.ts';
 import {
   buildMeldDisplayTiles,
   computeSelfHandWidth,
+  computeSelfSeatGeometry,
   getSeatModel,
+  SELF_HAND_MELD_GAP,
+  SELF_SEAT_SHELL_WIDTH_PX,
+  SELF_SEAT_SIDE_MARGIN,
   validateMeldTiles,
 } from '../src/components/BattleBoard/seatLayout.ts';
 import type { Action, DecisionLogEntry, MeldEntry } from '../src/types/replay.ts';
@@ -441,6 +445,53 @@ function assertKakanStackedOn(target: number, expectedClaimedIndex: number) {
 assertKakanStackedOn(3, 0);
 assertKakanStackedOn(2, 1);
 assertKakanStackedOn(1, 2);
+
+// --- J：自家底部固定区域几何（Commit A 收口）---------------------------------
+// 手牌 lane 宽度 = shell − meldLane − 固定 gap（flex:1 可计算），
+// 副露 lane 右吸附 → meldRight 对 0~4 副露与 13/14 摸打恒定不变。
+const JW = 48, JG = 1, JDG = 4;
+// south large 副露组宽：最宽为 daiminkan（横置 66 + 3×48 + 3×4 = 222），
+// 其余 pon/chi/kakan 为 66 + 2×48 + 3×4 = 174、ankan 为 4×48 + 3×4 = 204。
+const MELD_GROUP_WIDTH_MAX = 222;
+const MELD_GROUP_GAP = 3;
+function meldLaneWidthMax(count: number): number {
+  return count <= 0 ? 0 : count * MELD_GROUP_WIDTH_MAX + (count - 1) * MELD_GROUP_GAP;
+}
+
+const meldRights = new Set<number>();
+for (let m = 0; m <= 4; m++) {
+  const geometry = computeSelfSeatGeometry({
+    shellWidth: SELF_SEAT_SHELL_WIDTH_PX,
+    sideMargin: SELF_SEAT_SIDE_MARGIN,
+    handMeldGap: SELF_HAND_MELD_GAP,
+    meldLaneWidth: meldLaneWidthMax(m),
+  });
+  meldRights.add(geometry.meldRight);
+  check(
+    geometry.meldLeft - geometry.handRight === SELF_HAND_MELD_GAP,
+    `meld=${m}: 手牌/副露间隔应恒为 ${SELF_HAND_MELD_GAP}px（得到 ${geometry.meldLeft - geometry.handRight}）`,
+  );
+  // 暗手 = 13 − 3×m（BattleState 的 hand 不含摸牌；摸牌时最多 14 − 12 = 2 张可见）
+  const handCount = Math.max(13 - 3 * m, 0);
+  const handContent = computeSelfHandWidth(handCount, handCount > 0, JW, JG, JDG);
+  check(
+    handContent <= geometry.handLaneWidth,
+    `meld=${m} hand=${handCount}: 手牌内容 ${handContent}px ≤ hand lane ${geometry.handLaneWidth}px（不裁切）`,
+  );
+}
+check(meldRights.size === 1, `meldRight 对 0~4 副露应保持不变（${[...meldRights].join(',')}）`);
+
+// 13→14→13 摸打（0 副��）：handLeft / meldRight 不变，仅手牌内容在 lane 内伸缩
+const g13 = computeSelfSeatGeometry({ shellWidth: SELF_SEAT_SHELL_WIDTH_PX, sideMargin: SELF_SEAT_SIDE_MARGIN, handMeldGap: SELF_HAND_MELD_GAP, meldLaneWidth: 0 });
+check(
+  computeSelfHandWidth(13, false, JW, JG, JDG) <= g13.handLaneWidth
+  && computeSelfHandWidth(13, true, JW, JG, JDG) <= g13.handLaneWidth,
+  `13→14 张手牌内容都在 lane 内（不裁切）`,
+);
+check(
+  g13.meldLeft - g13.handRight === SELF_HAND_MELD_GAP,
+  `0 副露时手牌/副露间隔仍恒为 ${SELF_HAND_MELD_GAP}px`,
+);
 
 if (failures > 0) {
   console.error(`review daiminkan regression FAILED (${failures} issues)`);
