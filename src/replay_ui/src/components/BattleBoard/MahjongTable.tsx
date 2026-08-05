@@ -662,14 +662,15 @@ function PlayerZone({
         }}
       >
         {/* selfHandLane：flex:1 占据 shell 剩余宽度（shell − meldLane − 固定 gap），
-            手牌内容右吸附（justifyContent:flex-end），tile row + 柱状图共用同一 content
-            基准；手牌张数变化只在 lane 内伸缩，不推动副露锚点。 */}
+            手牌内容左吸附（tile row 从 lane 左边缘开始，x = SELF_HAND_ORIGIN_X_PX）；
+            柱状图在 tile row 容器内绝对定位、跟随牌面；
+            手牌张数变化只在 lane 内伸缩，不推动副露锚点。 */}
         <div
           onClick={hasLogitHints ? onSelfHandHintToggle : undefined}
           style={{
             display: "flex",
             flexDirection: "row",
-            justifyContent: "flex-end",
+            justifyContent: "flex-start",
             alignItems: "flex-end",
             position: "relative",
             flex: "1 1 auto",
