@@ -22,6 +22,7 @@ import { entryToBattleState } from '../src/utils/replayAdapter.ts';
 import {
   buildMeldDisplayTiles,
   computeSelfHandWidth,
+  getSeatModel,
   validateMeldTiles,
 } from '../src/components/BattleBoard/seatLayout.ts';
 import type { Action, DecisionLogEntry, MeldEntry } from '../src/types/replay.ts';
@@ -408,6 +409,38 @@ check(
   computeSelfHandWidth(1, true, TW, TG, DG) === 2 * TW + TG + DG,
   `1 张 + 摸牌应为 2*w + gap + drawGap`,
 );
+
+// --- I：主视角底部双 lane + kakan 组内锚点（Commit A/B/C） ------------------
+// Commit A：south 手牌 lane 左吸附、副露 lane 右吸附、row 布局、副露在右侧。
+const south = getSeatModel('south');
+check(
+  south.concealedAxis === 'row' && south.meldAxis === 'row' && south.meldPlacement === 'after',
+  `south 手牌/副露应为 row 布局且副露在右侧（after）`,
+);
+check(south.concealedReverse === false, `south 手牌不应 reverse`);
+
+// Commit B：kakan 加杠牌叠在原 pon 横置被鸣牌正上方（组内锚点，非整组偏移）。
+function assertKakanStackedOn(target: number, expectedClaimedIndex: number) {
+  const tiles = buildMeldDisplayTiles(0, meld('kakan', 'N', ['N', 'N', 'N', 'N'], target));
+  check(tiles.length === 4, `kakan(target=${target}) 应渲染 4 张`);
+  const stackedIndex = tiles.findIndex((t) => t.stackedOn !== undefined);
+  check(stackedIndex >= 0, `kakan(target=${target}) 应有 1 张加杠叠牌`);
+  if (stackedIndex < 0) return;
+  const stacked = tiles[stackedIndex];
+  check(
+    stacked.stackedOn === expectedClaimedIndex,
+    `kakan(target=${target}) 叠牌应锚定在被鸣牌索引 ${expectedClaimedIndex}（得到 ${stacked.stackedOn}）`,
+  );
+  check(
+    tiles[expectedClaimedIndex].rotated === true,
+    `kakan(target=${target}) 被锚定牌应为横置被鸣牌`,
+  );
+  check(stacked.tile === 'N' && stacked.rotated === false, `kakan(target=${target}) 叠牌应为直立加杠牌`);
+}
+// left / across / right 三种被鸣来源：claimed index 分别为 0 / 1 / 2
+assertKakanStackedOn(3, 0);
+assertKakanStackedOn(2, 1);
+assertKakanStackedOn(1, 2);
 
 if (failures > 0) {
   console.error(`review daiminkan regression FAILED (${failures} issues)`);
