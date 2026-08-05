@@ -25,7 +25,7 @@ import type { BattleState, Action, DiscardEntry, MeldEntry } from "../../types/b
 import type { LogitTileData } from "../../utils/replayAdapter";
 import { BAKAZE_CN, JIKAZE_CN } from "../../utils/constants";
 import { sortHand } from "../../utils/tileUtils";
-import { buildMeldDisplayTiles, computeSelfHandWidth, getKakanStackOffset, getMeldTileOrientation, getSeatModel, SELF_HAND_LEFT_OFFSET, SELF_HAND_MELD_GAP, SELF_SEAT_SHELL_WIDTH_PX, SELF_SEAT_SIDE_MARGIN, type LayoutAxis, type SeatPosition } from "./seatLayout";
+import { buildMeldDisplayTiles, computeSelfHandContentOffset, computeSelfHandWidth, computeSouthMeldLaneWidth, getKakanStackOffset, getMeldTileOrientation, getSeatModel, SELF_HAND_LEFT_OFFSET, SELF_HAND_MELD_GAP, SELF_SEAT_SHELL_WIDTH_PX, SELF_SEAT_SIDE_MARGIN, type LayoutAxis, type SeatPosition } from "./seatLayout";
 import { TABLECLOTH_OPTIONS } from "./tableclothOptions";
 import type { TableclothId } from "./tableclothOptions";
 
@@ -650,6 +650,15 @@ function PlayerZone({
       SELF_HAND_DRAW_GAP,
     );
 
+    // P1 修复：144px 目标偏移必须受 lane 可用宽度约束。
+    // hand lane 宽度 = shell − 副露 lane（保守按最宽 daiminkan 估算）− 固定 gap；
+    // 3+ 副露时 lane 变窄，偏移自动收缩，保证不压 24px 间隔、不重叠副露。
+    const handLaneWidth = Math.max(
+      0,
+      SELF_SEAT_SHELL_WIDTH_PX - SELF_HAND_MELD_GAP - computeSouthMeldLaneWidth(melds.length),
+    );
+    const effectiveHandOffset = computeSelfHandContentOffset(SELF_HAND_LEFT_OFFSET, handLaneWidth, actualHandWidth);
+
     return (
       <div
         style={{
@@ -678,8 +687,8 @@ function PlayerZone({
             cursor: hasLogitHints ? "pointer" : undefined,
           }}
         >
-            {/* 手牌：左对齐 */}
-            <div style={{ display: "flex", gap: SELF_HAND_GAP, flexWrap: "nowrap", width: actualHandWidth, position: "relative", marginLeft: SELF_HAND_LEFT_OFFSET }}>
+            {/* 手牌：左对齐 + 可收缩左偏移（3+ 副露自动收窄） */}
+            <div style={{ display: "flex", gap: SELF_HAND_GAP, flexWrap: "nowrap", width: actualHandWidth, position: "relative", marginLeft: effectiveHandOffset }}>
             {/* 柱状图层（回放模式，绝对定位在手牌上方） */}
             {showLogitHints && (
               <div style={{

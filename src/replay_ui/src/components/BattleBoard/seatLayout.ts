@@ -4,15 +4,29 @@ import { BASE_TABLE_WIDTH, MELD_GROUP_GAP } from "./tableLayout.ts";
 
 // ── 自家底部固定区域常量（Commit A 收口 + R2 手牌起点）───────────────────
 // shell 右边缘保持 1240（right margin 40）不动，宽度由真实牌桌坐标推导：
-// shell 左边缘 = meldRight − shellWidth = SELF_HAND_ORIGIN_X_PX。
-// 手牌 tile row 在 hand lane 内左吸附，因此第一张牌从 x = SELF_HAND_ORIGIN_X_PX
-// 开始；副露 lane 右吸附（meldRight = 1240 恒定）。
+// shell 左边缘 = meldRight − shellWidth = SELF_HAND_ORIGIN_X_PX（hand lane 左边界）。
+// 手牌 tile row 左吸附，并在 lane 内额外应用可收缩的 SELF_HAND_LEFT_OFFSET：
+// 可见第一张牌起点 = handLeft + effectiveOffset（见 computeSelfHandContentOffset）。
+// 副露 lane 右吸附（meldRight = 1240 恒定）。
 // 最坏组合：4 组最宽副露（daiminkan，south large：66 + 3×48 + 3×4 = 222）≈ 897px，
 // 加暗手 1 张 + 摸牌 = 2 张可见（2×48 + 1 + 4 = 101px），再计固定 24px gap；
 // shell 1080 → 四副露 hand lane = 1080 − 897 − 24 = 159 ≥ 101，不裁切、不重叠。
 export const SELF_HAND_ORIGIN_X_PX = 160;
-/** 手牌内容（tile row + 柱状图）相对 lane 左边缘的整体左偏移：3 个牌的宽度。 */
+/** 手牌内容（tile row + 柱状图）相对 lane 左边缘的目标左偏移：3 个牌的宽度。 */
 export const SELF_HAND_LEFT_OFFSET = 3 * TILE_SIZES.large.w;
+
+/**
+ * 手牌内容在 lane 内的有效左偏移（P1 修复：偏移必须受 lane 可用宽度约束）。
+ * 大屏常用 0~2 副露保持完整 desiredOffset；3+ 副露 lane 变窄时自动收缩，
+ * 保证 effectiveOffset + handContentWidth ≤ handLaneWidth（不压 24px 间隔、不重叠副露）。
+ */
+export function computeSelfHandContentOffset(
+  desiredOffset: number,
+  handLaneWidth: number,
+  handContentWidth: number,
+): number {
+  return Math.max(0, Math.min(desiredOffset, handLaneWidth - handContentWidth));
+}
 export const SELF_SEAT_SIDE_MARGIN = 40;
 export const SELF_SEAT_SHELL_WIDTH_PX =
   BASE_TABLE_WIDTH - SELF_SEAT_SIDE_MARGIN - SELF_HAND_ORIGIN_X_PX;

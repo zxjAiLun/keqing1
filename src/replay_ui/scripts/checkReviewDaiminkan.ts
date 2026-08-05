@@ -21,12 +21,14 @@
 import { entryToBattleState } from '../src/utils/replayAdapter.ts';
 import {
   buildMeldDisplayTiles,
+  computeSelfHandContentOffset,
   computeSelfHandWidth,
   computeSelfSeatGeometry,
   computeSouthMeldLaneWidth,
   getKakanStackOffset,
   getMeldTileOrientation,
   getSeatModel,
+  SELF_HAND_LEFT_OFFSET,
   SELF_HAND_MELD_GAP,
   SELF_HAND_ORIGIN_X_PX,
   SELF_SEAT_SHELL_WIDTH_PX,
@@ -466,6 +468,7 @@ const JW = TILE_SIZES.large.w, JG = HAND_TILE_GAP, JDG = HAND_DRAW_GAP;
 
 const meldRights = new Set<number>();
 const handLefts = new Set<number>();
+const effectiveOffsets = new Set<number>();
 for (let m = 0; m <= 4; m++) {
   const geometry = computeSelfSeatGeometry({
     shellWidth: SELF_SEAT_SHELL_WIDTH_PX,
@@ -487,16 +490,31 @@ for (let m = 0; m <= 4; m++) {
     handContent <= geometry.handLaneWidth,
     `meld=${m} hand=${handCount}: 手牌内容 ${handContent}px ≤ hand lane ${geometry.handLaneWidth}px（不裁切）`,
   );
+  // P1：144px 目标偏移必须受 lane 约束（effectiveOffset + 内容 ≤ lane）
+  const effectiveOffset = computeSelfHandContentOffset(SELF_HAND_LEFT_OFFSET, geometry.handLaneWidth, handContent);
+  effectiveOffsets.add(effectiveOffset);
+  check(
+    effectiveOffset + handContent <= geometry.handLaneWidth,
+    `meld=${m}: effectiveOffset(${effectiveOffset}) + 手牌内容(${handContent}) ≤ hand lane(${geometry.handLaneWidth})`,
+  );
+  if (m <= 2) {
+    check(effectiveOffset === SELF_HAND_LEFT_OFFSET, `meld=${m}: 应保持完整 ${SELF_HAND_LEFT_OFFSET}px 偏移（得到 ${effectiveOffset}）`);
+  } else {
+    check(effectiveOffset < SELF_HAND_LEFT_OFFSET, `meld=${m}: 偏移应自动收缩（得到 ${effectiveOffset}）`);
+  }
+  // 可见牌面起点 = lane 左边界 + effectiveOffset
+  const visibleTileStart = geometry.handLeft + effectiveOffset;
+  check(visibleTileStart >= geometry.handLeft, `meld=${m}: 可见牌面起点 ${visibleTileStart} 应 ≥ lane 左边界`);
 }
 check(meldRights.size === 1, `meldRight 对 0~4 副露应保持不变（${[...meldRights].join(',')}）`);
 check(
   [...meldRights][0] === BASE_TABLE_WIDTH - SELF_SEAT_SIDE_MARGIN,
   `meldRight 应等于真实牌桌坐标 tableWidth − rightMargin`,
 );
-check(handLefts.size === 1, `handLeft 对 0~4 副露必须保持不变（${[...handLefts].join(',')}）`);
+check(handLefts.size === 1, `handLeft（lane 左边界）对 0~4 副露必须保持不变（${[...handLefts].join(',')}）`);
 check(
   [...handLefts][0] === SELF_HAND_ORIGIN_X_PX,
-  `south 手牌起点必须为设计坐标 x=${SELF_HAND_ORIGIN_X_PX}（得到 ${[...handLefts][0]}）`,
+  `south hand lane 左边界必须为设计坐标 x=${SELF_HAND_ORIGIN_X_PX}（得到 ${[...handLefts][0]}）`,
 );
 check(
   SELF_SEAT_SHELL_WIDTH_PX === BASE_TABLE_WIDTH - SELF_SEAT_SIDE_MARGIN - SELF_HAND_ORIGIN_X_PX,
