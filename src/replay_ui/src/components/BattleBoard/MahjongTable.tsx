@@ -382,7 +382,17 @@ function MeldBlock({ pid, meld, position }: { pid: number; meld: MeldEntry; posi
               />
             )}
             {stackedTile && (
-              <div style={{ position: "absolute", inset: 0, transform: stackOffset, pointerEvents: "none" }}>
+              // kakan 加杠牌锚定在基础 tile box（横置被鸣牌）内居中叠放，
+              // 不随整组居中、不悬空在组上缘。
+              <div style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                transform: stackOffset,
+                pointerEvents: "none",
+              }}>
                 <OrientedTile tile={stackedTile.tile} size={meldTileSize} orientation={meldOrientation} />
               </div>
             )}
