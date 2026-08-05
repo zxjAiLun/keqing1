@@ -24,8 +24,11 @@ import {
   computeSelfHandWidth,
   computeSelfSeatGeometry,
   computeSouthMeldLaneWidth,
+  getKakanStackOffset,
+  getMeldTileOrientation,
   getSeatModel,
   SELF_HAND_MELD_GAP,
+  SELF_HAND_ORIGIN_X_PX,
   SELF_SEAT_SHELL_WIDTH_PX,
   SELF_SEAT_SIDE_MARGIN,
   validateMeldTiles,
@@ -442,7 +445,14 @@ function assertKakanStackedOn(target: number, expectedClaimedIndex: number) {
     tiles[expectedClaimedIndex].rotated === true,
     `kakan(target=${target}) 被锚定牌应为横置被鸣牌`,
   );
-  check(stacked.tile === 'N' && stacked.rotated === false, `kakan(target=${target}) 叠牌应为直立加杠牌`);
+  check(
+    stacked.rotated === true,
+    `kakan(target=${target}) 第四张必须与被鸣牌同为横置牌`,
+  );
+  check(
+    stacked.rotated === tiles[expectedClaimedIndex].rotated,
+    `kakan(target=${target}) 第四张与被鸣牌必须使用相同旋转语义`,
+  );
 }
 // left / across / right 三种被鸣来源：claimed index 分别为 0 / 1 / 2
 assertKakanStackedOn(3, 0);
@@ -455,6 +465,7 @@ assertKakanStackedOn(1, 2);
 const JW = TILE_SIZES.large.w, JG = HAND_TILE_GAP, JDG = HAND_DRAW_GAP;
 
 const meldRights = new Set<number>();
+const handLefts = new Set<number>();
 for (let m = 0; m <= 4; m++) {
   const geometry = computeSelfSeatGeometry({
     shellWidth: SELF_SEAT_SHELL_WIDTH_PX,
@@ -464,6 +475,7 @@ for (let m = 0; m <= 4; m++) {
     meldLaneWidth: computeSouthMeldLaneWidth(m),
   });
   meldRights.add(geometry.meldRight);
+  handLefts.add(geometry.handLeft);
   check(
     geometry.meldLeft - geometry.handRight === SELF_HAND_MELD_GAP,
     `meld=${m}: 手牌/副露间隔应恒为 ${SELF_HAND_MELD_GAP}px（得到 ${geometry.meldLeft - geometry.handRight}）`,
@@ -481,6 +493,15 @@ check(
   [...meldRights][0] === BASE_TABLE_WIDTH - SELF_SEAT_SIDE_MARGIN,
   `meldRight 应等于真实牌桌坐标 tableWidth − rightMargin`,
 );
+check(handLefts.size === 1, `handLeft 对 0~4 副露必须保持不变（${[...handLefts].join(',')}）`);
+check(
+  [...handLefts][0] === SELF_HAND_ORIGIN_X_PX,
+  `south 手牌起点必须为设计坐标 x=${SELF_HAND_ORIGIN_X_PX}（得到 ${[...handLefts][0]}）`,
+);
+check(
+  SELF_SEAT_SHELL_WIDTH_PX === BASE_TABLE_WIDTH - SELF_SEAT_SIDE_MARGIN - SELF_HAND_ORIGIN_X_PX,
+  `shell 宽度必须由真实牌桌坐标推导（得到 ${SELF_SEAT_SHELL_WIDTH_PX}）`,
+);
 
 // 13→14→13 摸打（0 副��）：handLeft / meldRight 不变，仅手牌内容在 lane 内伸缩
 const g13 = computeSelfSeatGeometry({ shellWidth: SELF_SEAT_SHELL_WIDTH_PX, tableWidth: BASE_TABLE_WIDTH, rightMargin: SELF_SEAT_SIDE_MARGIN, handMeldGap: SELF_HAND_MELD_GAP, meldLaneWidth: 0 });
@@ -492,6 +513,35 @@ check(
 check(
   g13.meldLeft - g13.handRight === SELF_HAND_MELD_GAP,
   `0 副露时手牌/副露间隔仍恒为 ${SELF_HAND_MELD_GAP}px`,
+);
+
+// --- K：meld 朝向矩阵与 kakan 叠放偏移（R2）---------------------------------
+// 普通副露牌 vs 横置被鸣牌/kakan 叠牌的朝向矩阵：south 0/90、north 180/270、
+// east 90/0、west 270/180。
+check(getMeldTileOrientation('south', false) === 0 && getMeldTileOrientation('south', true) === 90, `south meld 朝向 0/90`);
+check(getMeldTileOrientation('north', false) === 180 && getMeldTileOrientation('north', true) === 270, `north meld 朝向 180/270`);
+check(getMeldTileOrientation('east', false) === 90 && getMeldTileOrientation('east', true) === 0, `east meld 朝向 90/0`);
+check(getMeldTileOrientation('west', false) === 270 && getMeldTileOrientation('west', true) === 180, `west meld 朝向 270/180`);
+
+// 叠放偏移由 TILE_SIZES 推导，不硬编码 24/14。
+const liftLarge = Math.ceil(TILE_SIZES.large.w / 2);
+const liftNormal = Math.ceil(TILE_SIZES.normal.w / 2);
+const southStack = getKakanStackOffset('south', 'large');
+check(
+  southStack.x === 0 && southStack.y === -liftLarge,
+  `south kakan 应垂直向上叠放半张牌，无横向漂移（${JSON.stringify(southStack)}）`,
+);
+check(
+  getKakanStackOffset('north', 'normal').x === 0 && getKakanStackOffset('north', 'normal').y === liftNormal,
+  `north kakan 应垂直向下叠放（朝中心）`,
+);
+check(
+  getKakanStackOffset('east', 'normal').x === liftNormal && getKakanStackOffset('east', 'normal').y === 0,
+  `east kakan 应向右叠放（朝中心）`,
+);
+check(
+  getKakanStackOffset('west', 'normal').x === -liftNormal && getKakanStackOffset('west', 'normal').y === 0,
+  `west kakan 应向左叠放（朝中心）`,
 );
 
 if (failures > 0) {
