@@ -662,23 +662,30 @@ function PlayerZone({
         }}
       >
         {/* selfHandLane：flex:1 占据 shell 剩余宽度（shell − meldLane − 固定 gap），
-            手牌内容左对齐；手牌张数变化只在 lane 内伸缩，不推动副露锚点。 */}
+            手牌内容右吸附（justifyContent:flex-end），tile row + 柱状图共用同一 content
+            基准；手牌张数变化只在 lane 内伸缩，不推动副露锚点。 */}
         <div
           onClick={hasLogitHints ? onSelfHandHintToggle : undefined}
           style={{
+            display: "flex",
+            flexDirection: "row",
+            justifyContent: "flex-end",
+            alignItems: "flex-end",
             position: "relative",
             flex: "1 1 auto",
             minWidth: 0,
             cursor: hasLogitHints ? "pointer" : undefined,
           }}
         >
+            {/* 手牌：左对齐 */}
+            <div style={{ display: "flex", gap: SELF_HAND_GAP, flexWrap: "nowrap", width: actualHandWidth, position: "relative" }}>
             {/* 柱状图层（回放模式，绝对定位在手牌上方） */}
             {showLogitHints && (
               <div style={{
                 position: "absolute", bottom: "100%", left: 0,
                 display: "flex", gap: SELF_HAND_GAP, paddingBottom: 3,
                 pointerEvents: "none", alignItems: "flex-end",
-                width: actualHandWidth,
+                width: "100%",
               }}>
                 {(() => {
                   const visibleLogitData = logitData ?? [];
@@ -748,8 +755,7 @@ function PlayerZone({
                 })()}
               </div>
             )}
-            {/* 手牌：左对齐 */}
-            <div style={{ display: "flex", gap: SELF_HAND_GAP, flexWrap: "nowrap", width: actualHandWidth }}>
+
               {sortedHand.map((tile, i) => {
                 const d = logitData?.find(x => x.pai === tile && !x.isTsumo) ?? logitData?.find(x => x.pai === tile);
                 const showDecisionFrames = showLogitHints;
