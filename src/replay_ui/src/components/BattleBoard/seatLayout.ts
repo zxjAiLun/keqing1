@@ -1,5 +1,13 @@
 import type { MeldEntry } from "../../types/battle";
 
+// ── 自家底部固定区域常量（Commit A 收口）──────────────────────────────
+// 最坏组合：4 组最宽副露（daiminkan，south large：66 + 3×48 + 3×4 = 222）≈ 897px，
+// 加暗手 1 张 + 摸牌 = 2 张可见（2×48 + 1 + 4 = 101px），再计固定 24px gap → 总 ≥ 1022。
+// shell 取 1120，保证 0~4 副露、13/14 摸打时 hand lane 恒 ≥ 手牌内容宽度（不裁切、不重叠）。
+export const SELF_SEAT_SHELL_WIDTH_PX = 1120;
+export const SELF_SEAT_SIDE_MARGIN = 40;
+export const SELF_HAND_MELD_GAP = 24;
+
 export type SeatPosition = "south" | "north" | "east" | "west";
 export type LayoutAxis = "row" | "column";
 export type RelativeCallSide = "left" | "across" | "right" | "self";
@@ -163,9 +171,58 @@ export function computeSelfHandWidth(
   drawGap: number,
 ): number {
   const tileCount = handCount + (hasTsumoPai ? 1 : 0);
-  // flex 子元素数 = tileCount，普通 gap 数 = tileCount - 1；摸牌另加 drawGap margin
+  // flex 子元素数 = tileCount，普通 gap 数 = tileCount - 1；��牌另加 drawGap margin
   const normalGapCount =
     Math.max(0, handCount - 1)
     + (hasTsumoPai && handCount > 0 ? 1 : 0);
   return tileCount * tileWidth + normalGapCount * tileGap + (hasTsumoPai ? drawGap : 0);
+}
+
+/**
+ * 自家底部固定区域的确定性几何（Commit A 收口）。
+ *
+ * 布局契约：
+ *   - shell 拥有确定宽度（SELF_SEAT_SHELL_WIDTH_PX），右吸附于牌桌右侧；
+ *   - SelfHandLane 宽度 = shell − meldLaneWidth − handMeldGap（可计算，非随暗手伸缩）；
+ *   - 手牌与副露之间 gap 恒定 = handMeldGap；
+ *   - SelfMeldLane 右吸附 → meldRight = sideMargin + shellWidth，对任意 0~4 副露不变。
+ *
+ * 手牌内容（left-aligned）恒小于 lane 宽度：手牌张数与副露数反比
+ * （14 − 3×meldCount），因此 0~4 副露、13/14 张摸打都不裁切。
+ */
+export interface SelfSeatGeometry {
+  shellWidth: number;
+  sideMargin: number;
+  handMeldGap: number;
+  handLaneWidth: number;
+  meldLaneWidth: number;
+  handLeft: number;
+  handRight: number;
+  meldLeft: number;
+  meldRight: number;
+}
+
+export function computeSelfSeatGeometry(params: {
+  shellWidth: number;
+  sideMargin: number;
+  handMeldGap: number;
+  meldLaneWidth: number;
+}): SelfSeatGeometry {
+  const { shellWidth, sideMargin, handMeldGap, meldLaneWidth } = params;
+  const handLaneWidth = Math.max(shellWidth - meldLaneWidth - handMeldGap, 0);
+  const handLeft = sideMargin;
+  const handRight = handLeft + handLaneWidth;
+  const meldLeft = handRight + handMeldGap;
+  const meldRight = meldLeft + meldLaneWidth;
+  return {
+    shellWidth,
+    sideMargin,
+    handMeldGap,
+    handLaneWidth,
+    meldLaneWidth,
+    handLeft,
+    handRight,
+    meldLeft,
+    meldRight,
+  };
 }

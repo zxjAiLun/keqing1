@@ -25,7 +25,7 @@ import type { BattleState, Action, DiscardEntry, MeldEntry } from "../../types/b
 import type { LogitTileData } from "../../utils/replayAdapter";
 import { BAKAZE_CN, JIKAZE_CN } from "../../utils/constants";
 import { sortHand } from "../../utils/tileUtils";
-import { buildMeldDisplayTiles, computeSelfHandWidth, getSeatModel, type LayoutAxis, type SeatPosition } from "./seatLayout";
+import { buildMeldDisplayTiles, computeSelfHandWidth, getSeatModel, SELF_HAND_MELD_GAP, SELF_SEAT_SHELL_WIDTH_PX, SELF_SEAT_SIDE_MARGIN, type LayoutAxis, type SeatPosition } from "./seatLayout";
 import { TABLECLOTH_OPTIONS } from "./tableclothOptions";
 import type { TableclothId } from "./tableclothOptions";
 
@@ -55,13 +55,6 @@ const SELF_HAND_BAR_MAX_HEIGHT = Math.round(TILE_SIZES.large.h * 1.05);
 const SELF_HAND_BAR_WIDTH = TILE_SIZES.large.w * 0.8;
 const SELF_HAND_BAR_MIN_VISIBLE_PCT = 1;
 const SELF_HAND_TEACHER_BAR_GAP = 2;
-
-// ── 主视角底部固定区域（Commit A）：固定手牌区 + 右吸附副露区 ──
-// 自家底部整体是一个右吸附的固定宽 shell：手牌 lane 左吸附（宽度随内容伸缩），
-// 副露 lane 右吸附。手牌张数变化只改变手牌 lane 内部宽度，不推动副露锚点。
-const SELF_SEAT_SHELL_WIDTH_PX = 960;
-const SELF_SEAT_SIDE_MARGIN = 40;
-const SELF_HAND_MELD_GAP = 24;
 
 function normalizeOrientation(orientation: number): 0 | 90 | 180 | 270 {
   const normalized = ((orientation % 360) + 360) % 360;
@@ -671,20 +664,20 @@ function PlayerZone({
           display: "flex",
           flexDirection: "row",
           alignItems: "flex-end",
-          justifyContent: "space-between",
-          columnGap: SELF_HAND_MELD_GAP,
-          width: `min(${SELF_SEAT_SHELL_WIDTH_PX}px, calc(100% - ${SELF_SEAT_SIDE_MARGIN * 2}px))`,
+          gap: SELF_HAND_MELD_GAP,
+          width: SELF_SEAT_SHELL_WIDTH_PX,
           maxWidth: "100%",
         }}
       >
-        {/* selfHandLane：固定左吸附；手牌/摸牌变化只在区内伸缩，不推动副露锚点 */}
+        {/* selfHandLane：flex:1 占据 shell 剩余宽度（shell − meldLane − 固定 gap），
+            手牌内容左对齐；手牌张数变化只在 lane 内伸缩，不推动副露锚点。 */}
         <div
           onClick={hasLogitHints ? onSelfHandHintToggle : undefined}
           style={{
             position: "relative",
-            width: actualHandWidth,
+            flex: "1 1 auto",
+            minWidth: 0,
             cursor: hasLogitHints ? "pointer" : undefined,
-            flexShrink: 0,
           }}
         >
             {/* 柱状图层（回放模式，绝对定位在手牌上方） */}
@@ -796,7 +789,7 @@ function PlayerZone({
               )}
             </div>
           </div>
-          {/* selfMeldLane：右吸附固定副露区，锚点不随手牌变化 */}
+          {/* selfMeldLane：flex:0 右吸附，锚点 = shell 右侧，不随手牌变化 */}
           <div style={{ flexShrink: 0, paddingBottom: 0 }}>
             <MeldArea pid={pid} melds={melds} position={position} />
           </div>
