@@ -412,16 +412,6 @@ export function GameBoardReplayPage() {
   // 优先使用后端返回的真实玩家名，fallback 到 P0/P1/P2/P3
   const playerNames = normalizeReplayPlayerNames(data);
 
-  const switchPerspective = (nextPid: number) => {
-    if (!replayIdFromRoute) return;
-    const nextParams = new URLSearchParams(location.search);
-    nextParams.delete('id');
-    nextParams.set('player_id', String(nextPid));
-    nextParams.set('step', String(currentStep));
-    nextParams.set('phase', boardPhase);
-    navigate(`${routes.reviewWorkspace(replayIdFromRoute)}?${nextParams.toString()}`);
-  };
-
   const isForcedRiichiTsumogiri = isForcedRiichiTsumogiriEntry(currentEntry);
 
   // 适配数据
@@ -614,7 +604,6 @@ export function GameBoardReplayPage() {
           </div>
           <div className="review-workspace-nav-section">
                         <ReplayWorkspaceNavigation
-              onBack={() => navigate(routes.home)}
               onShowStats={() => setShowStats(true)}
               kyokuOrder={data.kyoku_order}
               currentKyoku={currentKyoku}
@@ -636,10 +625,6 @@ export function GameBoardReplayPage() {
               onNextOwnDiscard={jumpToNextOwnDiscard}
               onPrevDiff={jumpToPrevDiff}
               onNextDiff={jumpToNextDiff}
-              playerNames={playerNames}
-              viewPlayerId={viewPlayerId}
-              perspectiveDisabled={!replayIdFromRoute}
-              onSwitchPerspective={switchPerspective}
             />
           </div>
           <div className="review-workspace-right-meta">
