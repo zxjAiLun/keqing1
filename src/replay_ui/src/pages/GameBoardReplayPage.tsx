@@ -83,7 +83,7 @@ export function GameBoardReplayPage() {
   const [noMeld, setNoMeld] = useState(false);
   const [autoTsumogiri, setAutoTsumogiri] = useState(false);
   const [showStats, setShowStats] = useState(false);
-  const [activeDrawer, setActiveDrawer] = useState<'left' | 'right' | null>(null);
+  const [activeDrawer, setActiveDrawer] = useState<'right' | null>(null);
   const [boardPhase, setBoardPhase] = useState<ReplayBoardPhase>('pre');
   const boardViewportRef = useRef<HTMLDivElement>(null);
   const workspaceShellRef = useRef<HTMLDivElement>(null);
@@ -528,7 +528,6 @@ export function GameBoardReplayPage() {
   }
 
   const phaseLabel = REPLAY_BOARD_PHASE_LABELS[boardPhase];
-  const leftPanelId = 'review-workspace-left-panel';
   const rightPanelId = 'review-workspace-right-panel';
 
   return (
@@ -536,70 +535,18 @@ export function GameBoardReplayPage() {
       {showStats && data && <ReplayStatsDialog data={data} onClose={() => setShowStats(false)} />}
 
       <div className="review-workspace-grid">
-        <aside
-          className="review-workspace-left"
-          id={leftPanelId}
-          data-open={activeDrawer === 'left'}
-          aria-label="回放导航"
-        >
-          <div className="review-workspace-panel-header review-workspace-drawer-only">
-            <span>回放导航</span>
-            <button
-              type="button"
-              className="review-workspace-panel-header__close"
-              onClick={() => setActiveDrawer(null)}
-              aria-label="关闭回放导航"
-            >×</button>
-          </div>
-          <div className="review-workspace-panel-body">
-            <ReplayWorkspaceNavigation
-              onBack={() => navigate(routes.home)}
-              onShowStats={() => setShowStats(true)}
-              kyokuOrder={data.kyoku_order}
-              currentKyoku={currentKyoku}
-              onGoToKyoku={handleGoToKyoku}
-              kyokuLabel={kyokuLabel}
-              currentStep={currentStep}
-              totalSteps={totalSteps}
-              boardPhase={boardPhase}
-              onGoToStep={handleGoToStep}
-              onPrevKyoku={() => handleGoToKyoku(Math.max(0, currentKyoku - 1))}
-              onNextKyoku={() => handleGoToKyoku(Math.min(totalKyoku - 1, currentKyoku + 1))}
-              prevKyokuDisabled={currentKyoku === 0}
-              nextKyokuDisabled={currentKyoku === totalKyoku - 1}
-              onPrevStep={handleStepBackward}
-              onNextStep={handleStepForward}
-              prevStepDisabled={currentStep === 0 && boardPhase === 'pre'}
-              nextStepDisabled={currentStep === totalSteps - 1 && !currentHasPostPhase && !currentHasReachPhase}
-              onPrevOwnDiscard={jumpToPrevOwnDiscard}
-              onNextOwnDiscard={jumpToNextOwnDiscard}
-              onPrevDiff={jumpToPrevDiff}
-              onNextDiff={jumpToNextDiff}
-              playerNames={playerNames}
-              viewPlayerId={viewPlayerId}
-              perspectiveDisabled={!replayIdFromRoute}
-              onSwitchPerspective={switchPerspective}
-            />
-          </div>
-        </aside>
+
 
         <div className="review-workspace-center">
           <div className="review-workspace-compact-toolbar">
             <button
               type="button"
               className="review-workspace-compact-toolbar__button"
-              aria-expanded={activeDrawer === 'left'}
-              aria-controls={leftPanelId}
-              onClick={() => setActiveDrawer((current) => (current === 'left' ? null : 'left'))}
-            >回放导航</button>
-            <span>{kyokuLabel || '回放'} · {currentStep + 1}/{totalSteps}</span>
-            <button
-              type="button"
-              className="review-workspace-compact-toolbar__button"
               aria-expanded={activeDrawer === 'right'}
               aria-controls={rightPanelId}
               onClick={() => setActiveDrawer((current) => (current === 'right' ? null : 'right'))}
-            >决策分析</button>
+            >回放导航 · 决策分析</button>
+            <span>{kyokuLabel || '回放'} · {currentStep + 1}/{totalSteps}</span>
           </div>
           <div className="review-workspace-board" ref={boardViewportRef}>
             {effectiveBattleState ? (
@@ -657,13 +604,43 @@ export function GameBoardReplayPage() {
           aria-label="决策分析"
         >
           <div className="review-workspace-panel-header">
-            <span>决策分析</span>
+            <span>回放导航 · 决策分析</span>
             <button
               type="button"
               className="review-workspace-panel-header__close review-workspace-drawer-only"
               onClick={() => setActiveDrawer(null)}
               aria-label="关闭决策分析"
             >×</button>
+          </div>
+          <div className="review-workspace-nav-section">
+                        <ReplayWorkspaceNavigation
+              onBack={() => navigate(routes.home)}
+              onShowStats={() => setShowStats(true)}
+              kyokuOrder={data.kyoku_order}
+              currentKyoku={currentKyoku}
+              onGoToKyoku={handleGoToKyoku}
+              kyokuLabel={kyokuLabel}
+              currentStep={currentStep}
+              totalSteps={totalSteps}
+              boardPhase={boardPhase}
+              onGoToStep={handleGoToStep}
+              onPrevKyoku={() => handleGoToKyoku(Math.max(0, currentKyoku - 1))}
+              onNextKyoku={() => handleGoToKyoku(Math.min(totalKyoku - 1, currentKyoku + 1))}
+              prevKyokuDisabled={currentKyoku === 0}
+              nextKyokuDisabled={currentKyoku === totalKyoku - 1}
+              onPrevStep={handleStepBackward}
+              onNextStep={handleStepForward}
+              prevStepDisabled={currentStep === 0 && boardPhase === 'pre'}
+              nextStepDisabled={currentStep === totalSteps - 1 && !currentHasPostPhase && !currentHasReachPhase}
+              onPrevOwnDiscard={jumpToPrevOwnDiscard}
+              onNextOwnDiscard={jumpToNextOwnDiscard}
+              onPrevDiff={jumpToPrevDiff}
+              onNextDiff={jumpToNextDiff}
+              playerNames={playerNames}
+              viewPlayerId={viewPlayerId}
+              perspectiveDisabled={!replayIdFromRoute}
+              onSwitchPerspective={switchPerspective}
+            />
           </div>
           <div className="review-workspace-right-meta">
             当前视角：P{viewPlayerId} {replayPlayerDisplayName(playerNames, viewPlayerId)} · {phaseLabel}

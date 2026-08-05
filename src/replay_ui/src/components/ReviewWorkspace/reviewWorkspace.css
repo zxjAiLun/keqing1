@@ -67,8 +67,8 @@
   color: var(--accent);
 }
 
-/* 左右面板：紧凑布局下为抽屉（absolute 于 shell 内，不遮挡 MainLayout 顶栏） */
-.review-workspace-left,
+/* 右面板：紧凑布局下为抽屉（absolute 于 shell 内，不遮挡 MainLayout 顶栏）；
+   宽布局为静态右栏（导航 + Q/P 分析共用一个竖栏）。 */
 .review-workspace-right {
   position: absolute;
   top: 0;
@@ -86,13 +86,6 @@
     visibility 0s linear 0.2s;
 }
 
-.review-workspace-left {
-  left: 0;
-  width: min(300px, 86%);
-  border-right: 1px solid var(--border);
-  transform: translateX(-105%);
-}
-
 .review-workspace-right {
   right: 0;
   width: min(360px, 92%);
@@ -100,12 +93,21 @@
   transform: translateX(105%);
 }
 
-.review-workspace-left[data-open="true"],
 .review-workspace-right[data-open="true"] {
   transform: translateX(0);
   visibility: visible;
   pointer-events: auto;
   transition-delay: 0s;
+}
+
+/* 右栏内导航区（对局/步进/视角控制）：固定在上方，超高时内部滚动 */
+.review-workspace-nav-section {
+  flex-shrink: 1;
+  min-height: 0;
+  max-height: 55%;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
 }
 
 .review-workspace-scrim {
@@ -165,13 +167,12 @@
   overflow: hidden;
 }
 
-/* 宽布局：三栏并排，抽屉相关元素退场 */
+/* 宽布局：两栏并排（牌桌 + 右栏：导航 + 分析），抽屉相关元素退场 */
 @container (min-width: 1160px) {
   .review-workspace-grid {
-    grid-template-columns: 220px minmax(0, 1fr) 360px;
+    grid-template-columns: minmax(0, 1fr) 380px;
   }
 
-  .review-workspace-left,
   .review-workspace-right {
     position: static;
     width: auto;
