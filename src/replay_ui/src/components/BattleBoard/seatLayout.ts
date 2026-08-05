@@ -1,4 +1,6 @@
 import type { MeldEntry } from "../../types/battle";
+import { TILE_SIZES } from "./tileSizes.ts";
+import { MELD_GROUP_GAP } from "./tableLayout.ts";
 
 // ── 自家底部固定区域常量（Commit A 收口）──────────────────────────────
 // 最坏组合：4 组最宽副露（daiminkan，south large：66 + 3×48 + 3×4 = 222）≈ 897px，
@@ -182,17 +184,20 @@ export function computeSelfHandWidth(
  * 自家底部固定区域的确定性几何（Commit A 收口）。
  *
  * 布局契约：
- *   - shell 拥有确定宽度（SELF_SEAT_SHELL_WIDTH_PX），右吸附于牌桌右侧；
+ *   - shell 拥有确定宽度（SELF_SEAT_SHELL_WIDTH_PX），右吸附于牌桌右侧
+ *     （CSS `right: SELF_SEAT_SIDE_MARGIN`）；
  *   - SelfHandLane 宽度 = shell − meldLaneWidth − handMeldGap（可计算，非随暗手伸缩）；
  *   - 手牌与副露之间 gap 恒定 = handMeldGap；
- *   - SelfMeldLane 右吸附 → meldRight = sideMargin + shellWidth，对任意 0~4 副露不变。
+ *   - SelfMeldLane 右吸附 → meldRight = tableWidth − rightMargin（真实牌桌坐标），
+ *     对任意 0~4 副露不变。
  *
  * 手牌内容（left-aligned）恒小于 lane 宽度：手牌张数与副露数反比
- * （14 − 3×meldCount），因此 0~4 副露、13/14 张摸打都不裁切。
+ * （13 − 3×meldCount 暗手 + 摸牌），因此 0~4 副露、13/14 张摸打都不裁切。
  */
 export interface SelfSeatGeometry {
   shellWidth: number;
-  sideMargin: number;
+  tableWidth: number;
+  rightMargin: number;
   handMeldGap: number;
   handLaneWidth: number;
   meldLaneWidth: number;
@@ -204,19 +209,22 @@ export interface SelfSeatGeometry {
 
 export function computeSelfSeatGeometry(params: {
   shellWidth: number;
-  sideMargin: number;
+  tableWidth: number;
+  rightMargin: number;
   handMeldGap: number;
   meldLaneWidth: number;
 }): SelfSeatGeometry {
-  const { shellWidth, sideMargin, handMeldGap, meldLaneWidth } = params;
+  const { shellWidth, tableWidth, rightMargin, handMeldGap, meldLaneWidth } = params;
   const handLaneWidth = Math.max(shellWidth - meldLaneWidth - handMeldGap, 0);
-  const handLeft = sideMargin;
+  // 真实牌桌坐标：shell 右边缘 = tableWidth − rightMargin，shell 左边缘 = meldRight − shellWidth
+  const meldRight = tableWidth - rightMargin;
+  const handLeft = meldRight - shellWidth;
   const handRight = handLeft + handLaneWidth;
   const meldLeft = handRight + handMeldGap;
-  const meldRight = meldLeft + meldLaneWidth;
   return {
     shellWidth,
-    sideMargin,
+    tableWidth,
+    rightMargin,
     handMeldGap,
     handLaneWidth,
     meldLaneWidth,
@@ -225,4 +233,18 @@ export function computeSelfSeatGeometry(params: {
     meldLeft,
     meldRight,
   };
+}
+
+/**
+ * south 副露 lane 的保守宽度（用于几何校验）。
+ * south 使用 large tile；组内最宽为 daiminkan：1 张横置（box 宽 = tile 高）+ 3 张直立
+ * + 3 个组内 gap（MeldBlock south 为 4px）。0 组返回 0。
+ */
+export function computeSouthMeldLaneWidth(meldCount: number): number {
+  if (meldCount <= 0) return 0;
+  const tileWidth = TILE_SIZES.large.w;
+  const rotatedBoxWidth = TILE_SIZES.large.h; // 横置 90/270 后 box 宽 = 原高
+  const innerTileGap = 4; // MeldBlock 对 south 使用的组内 gap
+  const maxGroupWidth = rotatedBoxWidth + 3 * tileWidth + 3 * innerTileGap;
+  return meldCount * maxGroupWidth + (meldCount - 1) * MELD_GROUP_GAP;
 }

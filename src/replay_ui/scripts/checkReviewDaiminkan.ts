@@ -23,12 +23,15 @@ import {
   buildMeldDisplayTiles,
   computeSelfHandWidth,
   computeSelfSeatGeometry,
+  computeSouthMeldLaneWidth,
   getSeatModel,
   SELF_HAND_MELD_GAP,
   SELF_SEAT_SHELL_WIDTH_PX,
   SELF_SEAT_SIDE_MARGIN,
   validateMeldTiles,
 } from '../src/components/BattleBoard/seatLayout.ts';
+import { BASE_TABLE_WIDTH, HAND_TILE_GAP, HAND_DRAW_GAP } from '../src/components/BattleBoard/tableLayout.ts';
+import { TILE_SIZES } from '../src/components/BattleBoard/tileSizes.ts';
 import type { Action, DecisionLogEntry, MeldEntry } from '../src/types/replay.ts';
 
 let failures = 0;
@@ -448,23 +451,17 @@ assertKakanStackedOn(1, 2);
 
 // --- J：自家底部固定区域几何（Commit A 收口）---------------------------------
 // 手牌 lane 宽度 = shell − meldLane − 固定 gap（flex:1 可计算），
-// 副露 lane 右吸附 → meldRight 对 0~4 副露与 13/14 摸打恒定不变。
-const JW = 48, JG = 1, JDG = 4;
-// south large 副露组宽：最宽为 daiminkan（横置 66 + 3×48 + 3×4 = 222），
-// 其余 pon/chi/kakan 为 66 + 2×48 + 3×4 = 174、ankan 为 4×48 + 3×4 = 204。
-const MELD_GROUP_WIDTH_MAX = 222;
-const MELD_GROUP_GAP = 3;
-function meldLaneWidthMax(count: number): number {
-  return count <= 0 ? 0 : count * MELD_GROUP_WIDTH_MAX + (count - 1) * MELD_GROUP_GAP;
-}
+// 副露 lane 右吸附 → meldRight = tableWidth − rightMargin，对 0~4 副露与 13/14 摸打恒定。
+const JW = TILE_SIZES.large.w, JG = HAND_TILE_GAP, JDG = HAND_DRAW_GAP;
 
 const meldRights = new Set<number>();
 for (let m = 0; m <= 4; m++) {
   const geometry = computeSelfSeatGeometry({
     shellWidth: SELF_SEAT_SHELL_WIDTH_PX,
-    sideMargin: SELF_SEAT_SIDE_MARGIN,
+    tableWidth: BASE_TABLE_WIDTH,
+    rightMargin: SELF_SEAT_SIDE_MARGIN,
     handMeldGap: SELF_HAND_MELD_GAP,
-    meldLaneWidth: meldLaneWidthMax(m),
+    meldLaneWidth: computeSouthMeldLaneWidth(m),
   });
   meldRights.add(geometry.meldRight);
   check(
@@ -480,9 +477,13 @@ for (let m = 0; m <= 4; m++) {
   );
 }
 check(meldRights.size === 1, `meldRight 对 0~4 副露应保持不变（${[...meldRights].join(',')}）`);
+check(
+  [...meldRights][0] === BASE_TABLE_WIDTH - SELF_SEAT_SIDE_MARGIN,
+  `meldRight 应等于真实牌桌坐标 tableWidth − rightMargin`,
+);
 
 // 13→14→13 摸打（0 副��）：handLeft / meldRight 不变，仅手牌内容在 lane 内伸缩
-const g13 = computeSelfSeatGeometry({ shellWidth: SELF_SEAT_SHELL_WIDTH_PX, sideMargin: SELF_SEAT_SIDE_MARGIN, handMeldGap: SELF_HAND_MELD_GAP, meldLaneWidth: 0 });
+const g13 = computeSelfSeatGeometry({ shellWidth: SELF_SEAT_SHELL_WIDTH_PX, tableWidth: BASE_TABLE_WIDTH, rightMargin: SELF_SEAT_SIDE_MARGIN, handMeldGap: SELF_HAND_MELD_GAP, meldLaneWidth: 0 });
 check(
   computeSelfHandWidth(13, false, JW, JG, JDG) <= g13.handLaneWidth
   && computeSelfHandWidth(13, true, JW, JG, JDG) <= g13.handLaneWidth,
