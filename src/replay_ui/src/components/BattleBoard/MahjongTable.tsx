@@ -25,7 +25,7 @@ import type { BattleState, Action, DiscardEntry, MeldEntry } from "../../types/b
 import type { LogitTileData } from "../../utils/replayAdapter";
 import { BAKAZE_CN, JIKAZE_CN } from "../../utils/constants";
 import { sortHand } from "../../utils/tileUtils";
-import { buildMeldDisplayTiles, computeSelfHandWidth, getSeatModel, SELF_HAND_MELD_GAP, SELF_SEAT_SHELL_WIDTH_PX, SELF_SEAT_SIDE_MARGIN, type LayoutAxis, type SeatPosition } from "./seatLayout";
+import { buildMeldDisplayTiles, computeSelfHandWidth, getKakanStackOffset, getMeldTileOrientation, getSeatModel, SELF_HAND_MELD_GAP, SELF_SEAT_SHELL_WIDTH_PX, SELF_SEAT_SIDE_MARGIN, type LayoutAxis, type SeatPosition } from "./seatLayout";
 import { TABLECLOTH_OPTIONS } from "./tableclothOptions";
 import type { TableclothId } from "./tableclothOptions";
 
@@ -335,23 +335,10 @@ function getOpponentDiscardHole(
 
 function MeldBlock({ pid, meld, position }: { pid: number; meld: MeldEntry; position: SeatPosition }) {
   const model = getSeatModel(position);
-  const meldOrientation: 0 | 90 | 180 | 270 =
-    position === "east" ? 90
-    : position === "west" ? 270
-    : model.tileOrientation;
-  const rotatedOrientation: 0 | 90 | 180 | 270 =
-    position === "south" ? 90
-    : position === "north" ? 270
-    : position === "east" ? 0
-    : 180;
   const meldTileSize = position === "south" ? "large" : "normal";
   const displayTiles = buildMeldDisplayTiles(pid, meld);
   const flowDirection = getFlexDirection(model.meldAxis, false);
-  const stackOffset =
-    position === "south" ? "translate(-2px, -4px)"
-    : position === "north" ? "translate(2px, 4px)"
-    : position === "east" ? "translate(4px, 2px)"
-    : "translate(-4px, -2px)";
+  const stackOffset = getKakanStackOffset(position, meldTileSize);
   return (
     <div style={{
       display: "flex",
@@ -360,13 +347,13 @@ function MeldBlock({ pid, meld, position }: { pid: number; meld: MeldEntry; posi
       alignItems: position === "south" ? "flex-end" : "center",
     }}>
       {displayTiles.map((entry, idx) => {
-        const orientation = entry.rotated ? rotatedOrientation : meldOrientation;
+        const orientation = getMeldTileOrientation(position, entry.rotated);
         const stackedTile = displayTiles.find((candidate) => candidate.stackedOn === idx);
         const { width, height } = getTileBox(meldTileSize, orientation);
         return (
           <div key={`${entry.tile}-${idx}`} style={{ width, height, position: "relative", flexShrink: 0 }}>
             {entry.hidden ? (
-              <TileBack size={meldTileSize} orientation={meldOrientation} />
+              <TileBack size={meldTileSize} orientation={orientation} />
             ) : (
               <OrientedTile
                 tile={entry.tile}
@@ -375,18 +362,23 @@ function MeldBlock({ pid, meld, position }: { pid: number; meld: MeldEntry; posi
               />
             )}
             {stackedTile && (
-              // kakan 加杠牌锚定在基础 tile box（横置被鸣牌）内居中叠放，
-              // 不随整组居中、不悬空在组上缘。
+              // R2：kakan 第四张与被鸣牌同为横置，叠在基础 tile box 内，
+              // 向牌桌中心偏移半张牌，保持约一半重叠。
               <div style={{
                 position: "absolute",
                 inset: 0,
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                transform: stackOffset,
+                transform: `translate(${stackOffset.x}px, ${stackOffset.y}px)`,
                 pointerEvents: "none",
+                zIndex: 2,
               }}>
-                <OrientedTile tile={stackedTile.tile} size={meldTileSize} orientation={meldOrientation} />
+                <OrientedTile
+                  tile={stackedTile.tile}
+                  size={meldTileSize}
+                  orientation={getMeldTileOrientation(position, stackedTile.rotated)}
+                />
               </div>
             )}
           </div>

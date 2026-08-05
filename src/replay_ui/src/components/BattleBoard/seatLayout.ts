@@ -154,7 +154,8 @@ export function buildMeldDisplayTiles(actor: number, meld: MeldEntry): MeldDispl
     const addedTile = meld.consumed[3];
     const baseDisplayTiles = buildCalledMeldTiles(actor, meld.target, baseHandTiles, calledTile);
     const claimedIndex = baseDisplayTiles.findIndex(tile => tile.rotated);
-    return [...baseDisplayTiles, { tile: addedTile, rotated: false, stackedOn: claimedIndex }];
+    // R2：第四张加杠牌与被鸣牌同为横置（rotated:true），叠在被鸣牌正上方。
+    return [...baseDisplayTiles, { tile: addedTile, rotated: true, stackedOn: claimedIndex }];
   }
 
   if (meld.type === "ankan") {
@@ -167,6 +168,48 @@ export function buildMeldDisplayTiles(actor: number, meld: MeldEntry): MeldDispl
   }
 
   return buildCalledMeldTiles(actor, meld.target, [...meld.consumed], meld.pai);
+}
+
+/**
+ * 副露组内单张牌的渲染朝向（R2 统一 helper，供 MeldBlock 与 checker 共用）。
+ * 普通副露牌使用该座的 tileOrientation；横置被鸣牌与 kakan 第四张按四家矩阵：
+ *   south 90 / north 270 / east 0 / west 180。
+ */
+export function getMeldTileOrientation(
+  position: SeatPosition,
+  rotated: boolean,
+): 0 | 90 | 180 | 270 {
+  if (!rotated) {
+    if (position === "east") return 90;
+    if (position === "west") return 270;
+    return getSeatModel(position).tileOrientation;
+  }
+  if (position === "south") return 90;
+  if (position === "north") return 270;
+  if (position === "east") return 0;
+  return 180;
+}
+
+/**
+ * kakan 叠牌相对基础被鸣牌 tile box 的确定性偏移（R2）。
+ * 方向延续四家"朝牌桌中心叠放"语义，偏移量为半张牌（w/2）：
+ *   south 向上、north 向下、east 向右（朝中心）、west 向左（朝中心）。
+ */
+export function getKakanStackOffset(
+  position: SeatPosition,
+  size: "small" | "normal" | "large",
+): { x: number; y: number } {
+  const lift = Math.ceil(TILE_SIZES[size].w / 2);
+  switch (position) {
+    case "south":
+      return { x: 0, y: -lift };
+    case "north":
+      return { x: 0, y: lift };
+    case "east":
+      return { x: lift, y: 0 };
+    case "west":
+      return { x: -lift, y: 0 };
+  }
 }
 
 /** 自家手牌区实际渲染宽度（含摸牌）。与 MahjongTable 的 flex 布局保持一致。 */
