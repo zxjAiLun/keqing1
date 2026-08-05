@@ -56,6 +56,13 @@ const SELF_HAND_BAR_WIDTH = TILE_SIZES.large.w * 0.8;
 const SELF_HAND_BAR_MIN_VISIBLE_PCT = 1;
 const SELF_HAND_TEACHER_BAR_GAP = 2;
 
+// ── 主视角底部固定区域（Commit A）：固定手牌区 + 右吸附副露区 ──
+// 自家底部整体是一个右吸附的固定宽 shell：手牌 lane 左吸附（宽度随内容伸缩），
+// 副露 lane 右吸附。手牌张数变化只改变手牌 lane 内部宽度，不推动副露锚点。
+const SELF_SEAT_SHELL_WIDTH_PX = 960;
+const SELF_SEAT_SIDE_MARGIN = 40;
+const SELF_HAND_MELD_GAP = 24;
+
 function normalizeOrientation(orientation: number): 0 | 90 | 180 | 270 {
   const normalized = ((orientation % 360) + 360) % 360;
   if (normalized === 90 || normalized === 180 || normalized === 270) return normalized;
@@ -649,19 +656,27 @@ function PlayerZone({
     );
 
     return (
-      <div style={{ display: "flex", flexDirection: "row", alignItems: "flex-end", justifyContent: "center", gap: 12, width: "100%", maxWidth: "100%" }}>
-
-        {/* 手牌 + 副露：作为一组底部水平居中；手牌在左、副露在右，仅间隔 8px */}
-        <div style={{ display: "flex", flexDirection: "row", alignItems: "flex-end", gap: 8 }}>
-          {/* 手牌：按实际宽度，左对齐 */}
-          <div
-            onClick={hasLogitHints ? onSelfHandHintToggle : undefined}
-            style={{
-              position: "relative",
-              width: actualHandWidth,
-              cursor: hasLogitHints ? "pointer" : undefined,
-            }}
-          >
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "row",
+          alignItems: "flex-end",
+          justifyContent: "space-between",
+          columnGap: SELF_HAND_MELD_GAP,
+          width: `min(${SELF_SEAT_SHELL_WIDTH_PX}px, calc(100% - ${SELF_SEAT_SIDE_MARGIN * 2}px))`,
+          maxWidth: "100%",
+        }}
+      >
+        {/* selfHandLane：固定左吸附；手牌/摸牌变化只在区内伸缩，不推动副露锚点 */}
+        <div
+          onClick={hasLogitHints ? onSelfHandHintToggle : undefined}
+          style={{
+            position: "relative",
+            width: actualHandWidth,
+            cursor: hasLogitHints ? "pointer" : undefined,
+            flexShrink: 0,
+          }}
+        >
             {/* 柱状图层（回放模式，绝对定位在手牌上方） */}
             {showLogitHints && (
               <div style={{
@@ -771,14 +786,11 @@ function PlayerZone({
               )}
             </div>
           </div>
-          {/* Melds：手牌右下对齐 */}
-          <div style={{ paddingBottom: 0 }}>
+          {/* selfMeldLane：右吸附固定副露区，锚点不随手牌变化 */}
+          <div style={{ flexShrink: 0, paddingBottom: 0 }}>
             <MeldArea pid={pid} melds={melds} position={position} />
           </div>
         </div>
-
-        {/* 舍牌已移至中央弃牌堆 */}
-      </div>
     );
   }
 
@@ -1416,8 +1428,8 @@ export function MahjongTable({
             style={{ left: `calc(50% + ${CENTER_SIZE / 2 + 22}px)`, top: `calc(50% + ${CENTER_SIZE / 2 + 12}px)` }}
           />
 
-          {/* 南（自家） */}
-          <div style={{ position: "absolute", left: "50%", bottom: SOUTH_BOTTOM_OFFSET, transform: "translateX(-50%)" }}>
+          {/* 南（自家）：固定区域右吸附，手牌/副露 lane 锚点稳定 */}
+          <div style={{ position: "absolute", right: SELF_SEAT_SIDE_MARGIN, bottom: SOUTH_BOTTOM_OFFSET }}>
             <PlayerZone
               pid={humanId} position="south"
               hand={hand} tsumoPai={tsumo_pai}
