@@ -653,13 +653,22 @@ function PlayerZone({
     );
 
     // P1 修复：144px 目标偏移必须受 lane 可用宽度约束。
-    // hand lane 宽度 = shell − 副露 lane（保守按最宽 daiminkan 估算）− 固定 gap；
-    // 3+ 副露时 lane 变窄，偏移自动收缩，保证不压 24px 间隔、不重叠副露。
+    // hand lane 宽度 = shell − 副露 lane（保守按最宽 daiminkan 估算）− 固定 gap。
+    // P2 稳定化：偏移按该副露数下的"最大摸牌态"宽度预留，而不是当前实际宽度，
+    // 使 3~4 副露时 pre/post（摸/不摸）第一张牌起点保持一致、不跳动。
     const handLaneWidth = Math.max(
       0,
       SELF_SEAT_SHELL_WIDTH_PX - SELF_HAND_MELD_GAP - computeSouthMeldLaneWidth(melds.length),
     );
-    const effectiveHandOffset = computeSelfHandContentOffset(SELF_HAND_LEFT_OFFSET, handLaneWidth, actualHandWidth);
+    const maxConcealedCount = Math.max(13 - 3 * melds.length, 0);
+    const maxHandContentWidth = computeSelfHandWidth(
+      maxConcealedCount,
+      true,
+      TILE_SIZES.large.w,
+      SELF_HAND_GAP,
+      SELF_HAND_DRAW_GAP,
+    );
+    const effectiveHandOffset = computeSelfHandContentOffset(SELF_HAND_LEFT_OFFSET, handLaneWidth, maxHandContentWidth);
 
     return (
       <div

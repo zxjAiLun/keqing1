@@ -492,19 +492,26 @@ for (let m = 0; m <= 4; m++) {
     `meld=${m} hand=${handCount}: 手牌内容 ${handContent}px ≤ hand lane ${geometry.handLaneWidth}px（不裁切）`,
   );
   // P1：144px 目标偏移必须受 lane 约束（effectiveOffset + 内容 ≤ lane）
-  const effectiveOffset = computeSelfHandContentOffset(SELF_HAND_LEFT_OFFSET, geometry.handLaneWidth, handContent);
-  effectiveOffsets.add(effectiveOffset);
+  // P2：偏移按最大摸牌态宽度预留，pre/post（摸/不摸）起点一致
+  const drawContent = computeSelfHandWidth(handCount, true, JW, JG, JDG);
+  const noDrawContent = computeSelfHandWidth(handCount, false, JW, JG, JDG);
+  const stableOffset = computeSelfHandContentOffset(SELF_HAND_LEFT_OFFSET, geometry.handLaneWidth, drawContent);
+  effectiveOffsets.add(stableOffset);
   check(
-    effectiveOffset + handContent <= geometry.handLaneWidth,
-    `meld=${m}: effectiveOffset(${effectiveOffset}) + 手牌内容(${handContent}) ≤ hand lane(${geometry.handLaneWidth})`,
+    stableOffset + drawContent <= geometry.handLaneWidth,
+    `meld=${m}: 稳定偏移(${stableOffset}) + 摸牌态(${drawContent}) ≤ lane(${geometry.handLaneWidth})`,
+  );
+  check(
+    stableOffset + noDrawContent <= geometry.handLaneWidth,
+    `meld=${m}: 稳定偏移(${stableOffset}) + 无摸牌态(${noDrawContent}) ≤ lane(${geometry.handLaneWidth})`,
   );
   if (m <= 2) {
-    check(effectiveOffset === SELF_HAND_LEFT_OFFSET, `meld=${m}: 应保持完整 ${SELF_HAND_LEFT_OFFSET}px 偏移（得到 ${effectiveOffset}）`);
+    check(stableOffset === SELF_HAND_LEFT_OFFSET, `meld=${m}: 应保持完整 ${SELF_HAND_LEFT_OFFSET}px 偏移（得到 ${stableOffset}）`);
   } else {
-    check(effectiveOffset < SELF_HAND_LEFT_OFFSET, `meld=${m}: 偏移应自动收缩（得到 ${effectiveOffset}）`);
+    check(stableOffset < SELF_HAND_LEFT_OFFSET, `meld=${m}: 偏移应自动收缩（得到 ${stableOffset}）`);
   }
-  // 可见牌面起点 = lane 左边界 + effectiveOffset
-  const visibleTileStart = geometry.handLeft + effectiveOffset;
+  // 可见牌面起点 = lane 左边界 + 稳定偏移（摸/不摸一致）
+  const visibleTileStart = geometry.handLeft + stableOffset;
   check(visibleTileStart >= geometry.handLeft, `meld=${m}: 可见牌面起点 ${visibleTileStart} 应 ≥ lane 左边界`);
 }
 check(meldRights.size === 1, `meldRight 对 0~4 副露应保持不变（${[...meldRights].join(',')}）`);
