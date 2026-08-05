@@ -28,6 +28,7 @@ import {
   getKakanStackOffset,
   getMeldTileOrientation,
   getSeatModel,
+  orderMeldsForDisplay,
   SELF_HAND_LEFT_OFFSET,
   SELF_HAND_MELD_GAP,
   SELF_HAND_ORIGIN_X_PX,
@@ -561,6 +562,25 @@ check(
   getKakanStackOffset('west', 'normal').x === -liftNormal && getKakanStackOffset('west', 'normal').y === 0,
   `west kakan 应向左叠放（朝中心）`,
 );
+
+// --- L：south 副露显示顺序（最早副露在最右，右吸附）-------------------------
+const chronoMelds = [
+  meld('pon', 'P', ['P', 'P'], 2),
+  meld('chi', '1m', ['2m', '3m'], 3),
+  meld('pon', 'N', ['N', 'N'], 3),
+];
+const southOrder = orderMeldsForDisplay(chronoMelds, 'south');
+check(
+  southOrder[0].pai === 'N' && southOrder[1].pai === '1m' && southOrder[2].pai === 'P',
+  `south 副露应按时间逆序显示：最早 P 在最右、最新 N 在最左（得到 ${southOrder.map(m => m.pai).join('/')}）`,
+);
+for (const pos of (['north', 'east', 'west'] as const)) {
+  const kept = orderMeldsForDisplay(chronoMelds, pos);
+  check(
+    kept[0].pai === 'P' && kept[2].pai === 'N',
+    `${pos} 副露应保持时间顺序（最早 P 在前）`,
+  );
+}
 
 if (failures > 0) {
   console.error(`review daiminkan regression FAILED (${failures} issues)`);

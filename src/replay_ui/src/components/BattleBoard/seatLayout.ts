@@ -208,6 +208,20 @@ export function getMeldTileOrientation(
 }
 
 /**
+ * 副露显示顺序（south 右吸附规则）。
+ * melds 数组按时间顺序（最早在前）；south 副露 lane 右吸附于右侧边栏，
+ * 因此最早副露应位于最右、后附露依次向左排 → 反转。
+ * 其余座位保持时间顺序。
+ */
+export function orderMeldsForDisplay(
+  melds: MeldEntry[],
+  position: SeatPosition,
+): MeldEntry[] {
+  if (position === "south") return [...melds].reverse();
+  return melds;
+}
+
+/**
  * kakan 叠牌相对基础被鸣牌 tile box 的确定性偏移（R2）。
  * 方向延续四家"朝牌桌中心叠放"语义，偏移量为半张牌（w/2）：
  *   south 向上、north 向下、east 向右（朝中心）、west 向左（朝中心）。

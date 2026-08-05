@@ -25,7 +25,7 @@ import type { BattleState, Action, DiscardEntry, MeldEntry } from "../../types/b
 import type { LogitTileData } from "../../utils/replayAdapter";
 import { BAKAZE_CN, JIKAZE_CN } from "../../utils/constants";
 import { sortHand } from "../../utils/tileUtils";
-import { buildMeldDisplayTiles, computeSelfHandContentOffset, computeSelfHandWidth, computeSouthMeldLaneWidth, getKakanStackOffset, getMeldTileOrientation, getSeatModel, SELF_HAND_LEFT_OFFSET, SELF_HAND_MELD_GAP, SELF_SEAT_SHELL_WIDTH_PX, SELF_SEAT_SIDE_MARGIN, type LayoutAxis, type SeatPosition } from "./seatLayout";
+import { buildMeldDisplayTiles, computeSelfHandContentOffset, computeSelfHandWidth, computeSouthMeldLaneWidth, getKakanStackOffset, getMeldTileOrientation, getSeatModel, orderMeldsForDisplay, SELF_HAND_LEFT_OFFSET, SELF_HAND_MELD_GAP, SELF_SEAT_SHELL_WIDTH_PX, SELF_SEAT_SIDE_MARGIN, type LayoutAxis, type SeatPosition } from "./seatLayout";
 import { TABLECLOTH_OPTIONS } from "./tableclothOptions";
 import type { TableclothId } from "./tableclothOptions";
 
@@ -392,9 +392,11 @@ function MeldArea({ pid, melds, position }: { pid: number; melds: MeldEntry[]; p
   if (melds.length === 0) return null;
   const model = getSeatModel(position);
   const flowDirection = getFlexDirection(model.meldAxis, model.meldPlacement === "before");
+  // south 最早副露在最右（右吸附于边栏），后附露依次向左；其余保持时间顺序。
+  const orderedMelds = orderMeldsForDisplay(melds, position);
   return (
     <div style={{ display: "flex", flexDirection: flowDirection, gap: MELD_GROUP_GAP, flexShrink: 0 }}>
-      {melds.map((meld, idx) => (
+      {orderedMelds.map((meld, idx) => (
         <MeldBlock key={`${meld.type}-${meld.pai}-${idx}`} pid={pid} meld={meld} position={position} />
       ))}
     </div>
