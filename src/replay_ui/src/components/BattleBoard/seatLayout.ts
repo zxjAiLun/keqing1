@@ -1,13 +1,18 @@
 import type { MeldEntry } from "../../types/battle";
 import { TILE_SIZES } from "./tileSizes.ts";
-import { MELD_GROUP_GAP } from "./tableLayout.ts";
+import { BASE_TABLE_WIDTH, MELD_GROUP_GAP } from "./tableLayout.ts";
 
-// ── 自家底部固定区域常量（Commit A 收口）──────────────────────────────
+// ── 自家底部固定区域常量（Commit A 收口 + R2 手牌起点）───────────────────
+// 视觉合同：south 满手牌第一张从设计坐标 x=SELF_HAND_ORIGIN_X_PX 开始。
+// shell 右边缘保持 1240（right margin 40）不动，因此 shell 宽度由真实牌桌坐标推导，
+// 而不是手写一个魔法数：shell 左边缘 = meldRight − shellWidth = 160。
 // 最坏组合：4 组最宽副露（daiminkan，south large：66 + 3×48 + 3×4 = 222）≈ 897px，
-// 加暗手 1 张 + 摸牌 = 2 张可见（2×48 + 1 + 4 = 101px），再计固定 24px gap → 总 ≥ 1022。
-// shell 取 1120，保证 0~4 副露、13/14 摸打时 hand lane 恒 ≥ 手牌内容宽度（不裁切、不重叠）。
-export const SELF_SEAT_SHELL_WIDTH_PX = 1120;
+// 加暗手 1 张 + 摸牌 = 2 张可见（2×48 + 1 + 4 = 101px），再计固定 24px gap；
+// shell 1080 → 四副露 hand lane = 1080 − 897 − 24 = 159 ≥ 101，不裁切、不重叠。
+export const SELF_HAND_ORIGIN_X_PX = 160;
 export const SELF_SEAT_SIDE_MARGIN = 40;
+export const SELF_SEAT_SHELL_WIDTH_PX =
+  BASE_TABLE_WIDTH - SELF_SEAT_SIDE_MARGIN - SELF_HAND_ORIGIN_X_PX;
 export const SELF_HAND_MELD_GAP = 24;
 
 export type SeatPosition = "south" | "north" | "east" | "west";
