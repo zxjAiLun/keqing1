@@ -25,7 +25,7 @@ import type { BattleState, Action, DiscardEntry, MeldEntry } from "../../types/b
 import type { LogitTileData } from "../../utils/replayAdapter";
 import { BAKAZE_CN, JIKAZE_CN } from "../../utils/constants";
 import { sortHand } from "../../utils/tileUtils";
-import { buildMeldDisplayTiles, computeSelfHandWidth, getKakanStackOffset, getMeldTileOrientation, getSeatModel, SELF_HAND_MELD_GAP, SELF_SEAT_SHELL_WIDTH_PX, SELF_SEAT_SIDE_MARGIN, type LayoutAxis, type SeatPosition } from "./seatLayout";
+import { buildMeldDisplayTiles, computeSelfHandWidth, getKakanStackOffset, getMeldTileOrientation, getSeatModel, SELF_HAND_LEFT_OFFSET, SELF_HAND_MELD_GAP, SELF_SEAT_SHELL_WIDTH_PX, SELF_SEAT_SIDE_MARGIN, type LayoutAxis, type SeatPosition } from "./seatLayout";
 import { TABLECLOTH_OPTIONS } from "./tableclothOptions";
 import type { TableclothId } from "./tableclothOptions";
 
@@ -679,7 +679,7 @@ function PlayerZone({
           }}
         >
             {/* 手牌：左对齐 */}
-            <div style={{ display: "flex", gap: SELF_HAND_GAP, flexWrap: "nowrap", width: actualHandWidth, position: "relative" }}>
+            <div style={{ display: "flex", gap: SELF_HAND_GAP, flexWrap: "nowrap", width: actualHandWidth, position: "relative", marginLeft: SELF_HAND_LEFT_OFFSET }}>
             {/* 柱状图层（回放模式，绝对定位在手牌上方） */}
             {showLogitHints && (
               <div style={{

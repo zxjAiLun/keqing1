@@ -11,6 +11,8 @@ import { BASE_TABLE_WIDTH, MELD_GROUP_GAP } from "./tableLayout.ts";
 // 加暗手 1 张 + 摸牌 = 2 张可见（2×48 + 1 + 4 = 101px），再计固定 24px gap；
 // shell 1080 → 四副露 hand lane = 1080 − 897 − 24 = 159 ≥ 101，不裁切、不重叠。
 export const SELF_HAND_ORIGIN_X_PX = 160;
+/** 手牌内容（tile row + 柱状图）相对 lane 左边缘的整体左偏移：3 个牌的宽度。 */
+export const SELF_HAND_LEFT_OFFSET = 3 * TILE_SIZES.large.w;
 export const SELF_SEAT_SIDE_MARGIN = 40;
 export const SELF_SEAT_SHELL_WIDTH_PX =
   BASE_TABLE_WIDTH - SELF_SEAT_SIDE_MARGIN - SELF_HAND_ORIGIN_X_PX;
