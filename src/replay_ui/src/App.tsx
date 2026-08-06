@@ -14,6 +14,7 @@ import { MortalDecisionReviewPage } from './pages/MortalDecisionReviewPage';
 import { LadderPage } from './pages/LadderPage';
 import { LadderAccountPage } from './pages/LadderAccountPage';
 import { LadderModelPage } from './pages/LadderModelPage';
+import { ParticipantsPage } from './pages/ParticipantsPage';
 import { ThemeProvider } from './context/ThemeContext';
 import { LADDER_ACCOUNT_PATTERN, LADDER_MODEL_PATTERN, legacyRoutes, REVIEW_WORKSPACE_PATTERN, routes } from './routes';
 import './styles/globals.css';
@@ -60,6 +61,7 @@ export default function App() {
             <Route path={routes.ladder} element={<LadderPage />} />
             <Route path={LADDER_ACCOUNT_PATTERN} element={<LadderAccountPage />} />
             <Route path={LADDER_MODEL_PATTERN} element={<LadderModelPage />} />
+            <Route path={routes.participants} element={<ParticipantsPage />} />
 
             {/* 旧主入口兼容重定向 */}
             <Route path="/review" element={<PreserveSearchRedirect to={routes.reviewNew} />} />
