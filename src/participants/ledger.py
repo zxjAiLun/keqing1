@@ -83,6 +83,7 @@ def _read_revision_rows() -> list[dict]:
 def list_matches(
     *,
     source: str | None = None,
+    source_ref: str | None = None,
     status: str | None = None,
     account_id: str | None = None,
     from_at: str | None = None,
@@ -95,6 +96,8 @@ def list_matches(
     for raw in rows:
         match = Match.model_validate(raw)
         if source and match.source != source:
+            continue
+        if source_ref and match.source_ref != source_ref:
             continue
         if status and match.status != status:
             continue

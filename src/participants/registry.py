@@ -272,7 +272,11 @@ def identity_belongs_to_account(identity_id: str | None, account_id: str) -> boo
     if identity_id is None:
         return True
     identity = get_model_identity(identity_id)
-    return identity is not None and identity.account_id == account_id
+    if identity is None:
+        return False
+    # account_id=None 表示全局模型身份（如 70k@01..04 共用 "70k"），任意账号可绑定；
+    # 否则身份只允许绑定到指定账号。
+    return identity.account_id is None or identity.account_id == account_id
 
 
 def artifact_belongs_to_identity(identity_id: str | None, artifact_id: str | None) -> bool:
