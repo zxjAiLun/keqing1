@@ -2,8 +2,11 @@
 """Pydantic 模型 — participants（账号/模型/对局账本）API 请求与响应类型。"""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .paths import TZ_OFFSET
 
 AccountType = Literal["human", "managed_bot", "external_bot"]
 ControllerType = Literal["human_ui", "local_model", "external_agent", "manual_only"]
@@ -17,6 +20,14 @@ MODELS_SCHEMA = "keqing.participant.models.v1"
 MATCH_SCHEMA = "keqing.participant.match.v1"
 MATCH_REVISION_SCHEMA = "keqing.participant.match_revision.v1"
 MIGRATION_STATE_SCHEMA = "keqing.participant.migration_state.v1"
+
+
+def normalize_occurred_at(v: str) -> str:
+    """解析 ISO-8601 并统一到 +08:00 输出；naive 视为 +08:00。非法格式抛 ValueError。"""
+    dt = datetime.fromisoformat(v)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ_OFFSET)
+    return dt.astimezone(TZ_OFFSET).isoformat(timespec="seconds")
 
 
 class Account(BaseModel):
@@ -39,6 +50,7 @@ class AccountCreate(BaseModel):
     default_controller: ControllerType | None = None  # 缺省按 account_type 推导
     avatar: str | None = None
     note: str | None = None
+    migrated_from_replay: bool = False
 
 
 class AccountUpdate(BaseModel):
@@ -107,7 +119,7 @@ class MatchCreate(BaseModel):
     occurred_at: str
     game_length: GameLength
     rule_set: str = "standard-4p"
-    starting_points: int = 25000
+    starting_points: int = Field(25000, ge=1)
     initial_oya: int = 0
     source: SourceType = "manual"
     source_ref: str | None = None
@@ -119,12 +131,17 @@ class MatchCreate(BaseModel):
     force: bool = False
     reason: str | None = None
 
+    @field_validator("occurred_at")
+    @classmethod
+    def _norm_occurred_at(cls, v: str) -> str:
+        return normalize_occurred_at(v)
+
 
 class MatchRevise(BaseModel):
     occurred_at: str | None = None
     game_length: GameLength | None = None
     rule_set: str | None = None
-    starting_points: int | None = None
+    starting_points: int | None = Field(default=None, ge=1)
     initial_oya: int | None = None
     note: str | None = None
     data_completeness: DataCompleteness | None = None
@@ -132,6 +149,13 @@ class MatchRevise(BaseModel):
     final_scores: list[int] | None = None
     force: bool = False
     reason: str | None = None
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _norm_occurred_at(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        return normalize_occurred_at(v)
 
 
 class MatchVoid(BaseModel):

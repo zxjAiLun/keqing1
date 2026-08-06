@@ -108,6 +108,7 @@ def create_account(payload: AccountCreate) -> Account:
         default_controller=payload.default_controller or _default_controller_for(payload.account_type),
         avatar=payload.avatar,
         note=payload.note,
+        migrated_from_replay=payload.migrated_from_replay,
         created_at=now,
         updated_at=now,
     )
@@ -188,6 +189,8 @@ def get_model_identity(model_identity_id: str) -> ModelIdentity | None:
 
 
 def create_model_identity(payload: ModelIdentityCreate) -> ModelIdentity:
+    if payload.account_id is not None and not account_exists(payload.account_id):
+        raise ValueError(f"绑定的账号不存在: {payload.account_id}")
     identity_id = payload.model_identity_id or f"model:{_slugify(payload.label).replace('account:', '')}"
     now = now_iso()
     with _write_lock, data_lock():
@@ -255,6 +258,8 @@ def add_model_artifact(identity_id: str, payload: ModelArtifactCreate) -> ModelA
 
 
 def update_model_identity(identity_id: str, payload: ModelIdentityUpdate) -> ModelIdentity:
+    if payload.account_id is not None and not account_exists(payload.account_id):
+        raise ValueError(f"绑定的账号不存在: {payload.account_id}")
     with _write_lock, data_lock():
         store = _read_models()
         for idx, raw in enumerate(store["identities"]):
@@ -279,7 +284,15 @@ def identity_belongs_to_account(identity_id: str | None, account_id: str) -> boo
     return identity.account_id is None or identity.account_id == account_id
 
 
+def identity_references_account(account_id: str) -> bool:
+    """模型身份是否绑定到该账号（删除保护）。"""
+    return any(identity.account_id == account_id for identity in list_models())
+
+
 def artifact_belongs_to_identity(identity_id: str | None, artifact_id: str | None) -> bool:
+    # artifact 非空时必须指定 identity（不允许悬空 artifact）
+    if artifact_id is not None and identity_id is None:
+        return False
     if identity_id is None or artifact_id is None:
         return True
     identity = get_model_identity(identity_id)

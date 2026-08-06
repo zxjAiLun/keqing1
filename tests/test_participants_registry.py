@@ -80,6 +80,7 @@ def test_unknown_controller_type_rejected_by_pydantic():
 
 
 def test_model_identity_and_artifact_crud():
+    registry.create_account(AccountCreate(account_id="70k@01", display_name="70k", account_type="managed_bot"))
     identity = registry.create_model_identity(
         ModelIdentityCreate(label="70k", kind="local_model", account_id="70k@01", artifact_path="checkpoints/70k.pth")
     )
@@ -104,3 +105,52 @@ def test_identity_belongs_to_account_helpers():
     assert not registry.identity_belongs_to_account("model-70k", "other@01")
     assert registry.artifact_belongs_to_identity("model-70k", identity.artifacts[0].model_artifact_id)
     assert not registry.artifact_belongs_to_identity("model-70k", "nope")
+
+
+# ---------------------------------------------------------------------------
+# P1-2：stale lock 回收 / P1-4：引用完整性
+# ---------------------------------------------------------------------------
+
+def test_stale_lock_recovered(participants_root):
+    """预建 mtime 早于 stale_after 的锁 → 下一次写操作应回收并成功。"""
+    import os
+    import time
+
+    participants_root.mkdir(parents=True, exist_ok=True)
+    lock = participants_root / "participants.lock"
+    lock.write_text("9999", encoding="utf-8")
+    old = time.time() - 60  # 60 秒前 > stale_after(30s)
+    os.utime(lock, (old, old))
+    registry.create_account(AccountCreate(account_id="x@01", display_name="X", account_type="human"))
+    assert registry.get_account("x@01") is not None
+    assert not lock.exists(), "stale lock 应被回收"
+
+
+def test_identity_rejects_nonexistent_account():
+    with pytest.raises(ValueError, match="账号不存在"):
+        registry.create_model_identity(
+            ModelIdentityCreate(label="x", kind="local_model", account_id="ghost@01")
+        )
+
+
+def test_update_identity_rejects_nonexistent_account():
+    registry.create_account(AccountCreate(account_id="a@01", display_name="A", account_type="human"))
+    identity = registry.create_model_identity(ModelIdentityCreate(label="m", kind="local_model"))
+    from participants.schemas import ModelIdentityUpdate
+
+    with pytest.raises(ValueError, match="账号不存在"):
+        registry.update_model_identity(identity.model_identity_id, ModelIdentityUpdate(account_id="ghost@01"))
+
+
+def test_artifact_requires_identity():
+    # artifact 非空但 identity 为空 → 不允许悬空 artifact
+    assert registry.artifact_belongs_to_identity(None, "artifact-x") is False
+    assert registry.artifact_belongs_to_identity(None, None) is True
+
+
+def test_identity_reference_blocks_hard_delete():
+    registry.create_account(AccountCreate(account_id="a@02", display_name="A2", account_type="human"))
+    registry.create_model_identity(ModelIdentityCreate(model_identity_id="mid", label="m", kind="local_model", account_id="a@02"))
+    result = registry.delete_account("a@02", referenced=True)
+    assert result["disabled"] is True
+    assert registry.get_account("a@02").enabled is False

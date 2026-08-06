@@ -113,4 +113,77 @@ def test_force_save_bypasses_total_mismatch(four_accounts):
     revisions = ledger.list_revisions(match.match_id)
     assert revisions[-1]["force"] is True
     assert revisions[-1]["reason"] == "外部结算"
-    assert revisions[-1]["validation"]["passed"] is False
+    # force+reason 放行 score_total_mismatch：passed=True，但 issue 仍在审计中
+    assert revisions[-1]["validation"]["passed"] is True
+    assert "score_total_mismatch" in {i["code"] for i in revisions[-1]["validation"]["issues"]}
+
+
+# ---------------------------------------------------------------------------
+# P1-3：pending transaction 恢复（revision append / matches replace / 清理三处故障注入）
+# ---------------------------------------------------------------------------
+
+def _build_rev2_tx(match):
+    """构造 rev-2 修订状态 + revision 行。"""
+    rev2 = match.model_copy(deep=True, update={
+        "final_scores": [30000, 25000, 25000, 20000],
+        "revision": 2,
+        "latest_revision_id": f"rev_{match.match_id}_2",
+    })
+    revision_row = {
+        "schema": "keqing.participant.match_revision.v1",
+        "revision_id": rev2.latest_revision_id,
+        "match_id": match.match_id,
+        "revision": 2,
+        "action": "revise",
+        "created_at": rev2.updated_at,
+        "by": "manual-entry",
+        "force": False,
+        "reason": None,
+        "validation": {"passed": True, "issues": []},
+        "before": match.model_dump(by_alias=True),
+        "after": rev2.model_dump(by_alias=True),
+    }
+    return rev2, revision_row
+
+
+def test_recovery_appends_missing_revision(four_accounts):
+    """故障 1：pending 已写、revision 未落盘 → 下次写入恢复补 append + 更新 match。"""
+    match = ledger.create_match(_create_payload([25000] * 4, four_accounts), registry)
+    rev2, revision_row = _build_rev2_tx(match)
+    ledger._write_pending_transaction(rev2, revision_row)  # 模拟 append 前崩溃
+    ledger.void_match(match.match_id, MatchVoid(reason="测试"))
+    assert ledger.get_match(match.match_id).revision == 3  # 恢复 rev2 + void rev3
+    assert not ledger._pending_tx_path().exists()
+    revisions = ledger.list_revisions(match.match_id)
+    assert any(r["revision"] == 2 for r in revisions)
+
+
+def test_recovery_rewrites_match_when_revision_present(four_accounts):
+    """故障 2：revision 已 append、matches 未替换 → 恢复补替换并删 pending。"""
+    match = ledger.create_match(_create_payload([25000] * 4, four_accounts), registry)
+    rev2, revision_row = _build_rev2_tx(match)
+    ledger._write_pending_transaction(rev2, revision_row)
+    ledger._append_revision(revision_row)  # 模拟 matches replace 前崩溃
+    ledger.void_match(match.match_id, MatchVoid(reason="测试"))
+    assert ledger.get_match(match.match_id).revision == 3
+    assert not ledger._pending_tx_path().exists()
+    assert len(ledger.list_revisions(match.match_id)) == 3
+
+
+def test_recovery_cleanup_only_when_complete(four_accounts):
+    """故障 3：revision 与 match 都已落盘、仅删 pending 失败 → 恢复只清理。"""
+    match = ledger.create_match(_create_payload([25000] * 4, four_accounts), registry)
+    rev2, revision_row = _build_rev2_tx(match)
+    ledger._write_pending_transaction(rev2, revision_row)
+    ledger._append_revision(revision_row)
+    ledger._rewrite_match(rev2)
+    ledger.void_match(match.match_id, MatchVoid(reason="测试"))
+    assert ledger.get_match(match.match_id).revision == 3
+    assert not ledger._pending_tx_path().exists()
+    assert len(ledger.list_revisions(match.match_id)) == 3
+
+
+def test_match_references_account_includes_void(four_accounts):
+    match = ledger.create_match(_create_payload([25000] * 4, four_accounts), registry)
+    ledger.void_match(match.match_id, MatchVoid(reason="中途结束"))
+    assert ledger.match_references_account("nick@01") is True, "void 局仍应阻止硬删除账号"

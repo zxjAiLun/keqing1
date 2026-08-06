@@ -74,7 +74,7 @@ def _write_replay(replays: Path, replay_id: str, names, scores, kyoku_count=8) -
 
 def test_seed_registry_creates_accounts_and_models(participants_env):
     _write_registry(participants_env["configs"])
-    state = {"seeded_registries": [], "ingested_replays": {}}
+    state = {"seeded_registries": {}, "ingested_replays": {}}
     seed.seed_registries(state, dry_run=False)
 
     assert registry.get_account("nick@01").default_controller == "human_ui"
@@ -90,19 +90,21 @@ def test_seed_registry_creates_accounts_and_models(participants_env):
 
 def test_backfill_replays_creates_matches_and_placeholders(participants_env):
     _write_registry(participants_env["configs"])
-    seed.seed_registries({"seeded_registries": [], "ingested_replays": {}}, dry_run=False)
+    seed.seed_registries({"seeded_registries": {}, "ingested_replays": {}}, dry_run=False)
 
     _write_replay(participants_env["replays"], "replay_a", ["Nick", "70k-1", "Friend Alice", "Bot X"], [30000, 25000, 25000, 20000])
     _write_replay(participants_env["replays"], "replay_b", ["Nick", "70k-2", "Friend Alice", "Bot X"], [25000, 25000, 25000, 25000])
 
-    state = {"seeded_registries": ["official-ladder-v1.json"], "ingested_replays": {}}
+    state = {"seeded_registries": {}, "ingested_replays": {}}
     seed.backfill_replays(state, dry_run=False)
 
     assert ledger.list_matches().total == 2
-    # 未知名自动建占位账号
-    assert registry.get_account("imp_Friend-Alice") is not None
-    assert registry.get_account("imp_Bot-X") is not None
-    assert registry.get_account("imp_Friend-Alice").migrated_from_replay is False  # 显式创建默认
+    # 未知名自动建占位账号：稳定 hash 后缀 + migrated_from_replay=true
+    friend = next((a for a in registry.list_accounts() if a.display_name == "Friend Alice"), None)
+    bot_x = next((a for a in registry.list_accounts() if a.display_name == "Bot X"), None)
+    assert friend is not None and friend.account_id.startswith("imp_Friend-Alice-")
+    assert bot_x is not None and bot_x.account_id.startswith("imp_Bot-X-")
+    assert friend.migrated_from_replay is True
     # 幂等：再回填不重复
     seed.backfill_replays(state, dry_run=False)
     assert ledger.list_matches().total == 2
@@ -110,10 +112,10 @@ def test_backfill_replays_creates_matches_and_placeholders(participants_env):
 
 def test_backfill_skips_incomplete_and_placeholder_names(participants_env):
     _write_registry(participants_env["configs"])
-    seed.seed_registries({"seeded_registries": [], "ingested_replays": {}}, dry_run=False)
+    seed.seed_registries({"seeded_registries": {}, "ingested_replays": {}}, dry_run=False)
     _write_replay(participants_env["replays"], "replay_e", ["E", "S", "W", "N"], [25000] * 4)
     _write_replay(participants_env["replays"], "replay_f", ["Nick", "70k-1"], [30000, 25000])
-    state = {"seeded_registries": ["official-ladder-v1.json"], "ingested_replays": {}}
+    state = {"seeded_registries": {}, "ingested_replays": {}}
     seed.backfill_replays(state, dry_run=False)
     assert ledger.list_matches().total == 0
 
@@ -121,7 +123,7 @@ def test_backfill_skips_incomplete_and_placeholder_names(participants_env):
 def test_dry_run_writes_nothing(participants_env):
     _write_registry(participants_env["configs"])
     _write_replay(participants_env["replays"], "replay_a", ["Nick", "70k-1", "Friend Alice", "Bot X"], [30000, 25000, 25000, 20000])
-    state = {"seeded_registries": [], "ingested_replays": {}}
+    state = {"seeded_registries": {}, "ingested_replays": {}}
     seed.seed_registries(state, dry_run=True)
     seed.backfill_replays(state, dry_run=True)
     assert registry.list_accounts() == []

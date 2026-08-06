@@ -59,12 +59,20 @@ def _model_meta(model_id: str) -> tuple[str, str]:
     return "managed_bot", "local_model"
 
 
+def _content_sha256(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def seed_registries(state: dict, *, dry_run: bool) -> list[str]:
     created_accounts = 0
     created_models = 0
+    seeded = state.setdefault("seeded_registries", {})  # {str(path): content_sha256}
     for path in _resolve_registry_paths():
-        filename = path.name
-        if filename in state.get("seeded_registries", []):
+        key = str(path)
+        digest = _content_sha256(path)
+        if seeded.get(key) == digest:
             continue
         raw = json.loads(path.read_text(encoding="utf-8"))
         models = raw.get("models", [])
@@ -100,7 +108,7 @@ def seed_registries(state: dict, *, dry_run: bool) -> list[str]:
                     )
                 created_models += 1
         if not dry_run:
-            state.setdefault("seeded_registries", []).append(filename)
+            seeded[key] = digest
     return [f"registry {created_accounts} 账号 / {created_models} 模型"]
 
 
@@ -113,6 +121,13 @@ def _game_length(kyoku_count: int) -> str:
 def _slugify_name(name: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]+", "-", name).strip("-")
     return slug or "unknown"
+
+
+def _name_hash(name: str) -> str:
+    """稳定短 hash（sha256 前 6 位），避免不同原名撞出同一占位账号。"""
+    import hashlib
+
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()[:6]
 
 
 def _replays_dir() -> Path:
@@ -151,10 +166,19 @@ def backfill_replays(state: dict, *, dry_run: bool) -> list[str]:
             continue
         # 座位账号：按显示名匹配，未知名自动建占位账号
         seats: list[MatchSeat] = []
+        ambiguous = False
         for seat, name in enumerate(player_names):
-            account = next((a for a in registry.list_accounts() if a.display_name == name), None)
-            if account is None:
-                placeholder_id = f"imp_{_slugify_name(name)}"
+            account = None
+            matched = [a for a in registry.list_accounts() if a.display_name == name]
+            if len(matched) == 1:
+                account = matched[0]
+            elif len(matched) > 1:
+                report.append(f"{replay_id}: 显示名 '{name}' 命中多个账号，跳过（需要 alias map）")
+                seats = []
+                ambiguous = True
+                break
+            else:
+                placeholder_id = f"imp_{_slugify_name(name)}-{_name_hash(name)}"
                 account = registry.get_account(placeholder_id)
                 if account is None and not dry_run:
                     registry.create_account(
@@ -164,14 +188,14 @@ def backfill_replays(state: dict, *, dry_run: bool) -> list[str]:
                             account_type="external_bot",
                             default_controller="manual_only",
                             note=f"migrated_from_replay:{replay_id}",
+                            migrated_from_replay=True,
                         )
                     )
                 account = registry.get_account(placeholder_id)
-                if account is None:
-                    continue
-            seats.append(MatchSeat(seat=seat, account_id=account.account_id))
+            if account is not None:
+                seats.append(MatchSeat(seat=seat, account_id=account.account_id))
         if len(seats) != 4:
-            report.append(f"{replay_id}: 跳过（占位账号不足）")
+            report.append(f"{replay_id}: 跳过（占位账号不足 / 名字歧义）")
             ingested[replay_id] = fingerprint
             continue
         if not dry_run:

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import uuid
 from datetime import datetime
@@ -133,9 +134,10 @@ def list_revision_summaries(match_id: str) -> list[RevisionSummary]:
 
 
 def match_references_account(account_id: str) -> bool:
+    """账号是否被任何对局（active 或 void）引用。void 局与 revision 仍保留历史引用。"""
     for raw in _read_match_rows():
         match = Match.model_validate(raw)
-        if match.status == "active" and any(seat.account_id == account_id for seat in match.seats):
+        if any(seat.account_id == account_id for seat in match.seats):
             return True
     return False
 
@@ -143,6 +145,33 @@ def match_references_account(account_id: str) -> bool:
 # ---------------------------------------------------------------------------
 # 校验
 # ---------------------------------------------------------------------------
+
+# force 允许覆盖的 issue：其余一律不可绕过。
+FORCEABLE_ISSUE_CODES = {"score_total_mismatch", "account_disabled"}
+FATAL_ISSUE_CODES = {
+    "seat_count",
+    "seat_duplicate",
+    "account_duplicate",
+    "account_unknown",
+    "model_identity_mismatch",
+    "model_artifact_mismatch",
+    "score_count",
+    "score_type",
+    "initial_oya",
+    "force_reason_required",
+}
+
+
+def blocking_issues(issues: list[ValidationIssue], *, force: bool, reason: str | None) -> list[ValidationIssue]:
+    """返回实际阻塞的 issue：fatal 恒阻塞；forceable 仅在 force+reason 时放行。"""
+    has_force_reason = force and bool((reason or "").strip())
+    return [
+        issue
+        for issue in issues
+        if issue.code in FATAL_ISSUE_CODES
+        or (issue.code in FORCEABLE_ISSUE_CODES and not has_force_reason)
+    ]
+
 
 def validate_match(
     seats: Sequence[MatchSeat],
@@ -171,7 +200,7 @@ def validate_match(
         if account is None:
             issues.append(ValidationIssue(code="account_unknown", message=f"账号不存在: {seat.account_id}"))
             continue
-        if not account.enabled and not force:
+        if not account.enabled:
             issues.append(
                 ValidationIssue(code="account_disabled", message=f"账号已停用: {seat.account_id}（可强制保存）")
             )
@@ -221,12 +250,19 @@ def validate_match(
 
 
 # ---------------------------------------------------------------------------
-# 写入
+# 写入（可恢复事务）
 # ---------------------------------------------------------------------------
 
-def _append_revision(row: dict) -> None:
+def _pending_tx_path() -> Path:
+    return data_root() / "pending_transaction.json"
+
+
+def _append_revision(row: dict, *, fsync: bool = False) -> None:
     with open(_revisions_path(), "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if fsync:
+            fh.flush()
+            os.fsync(fh.fileno())
 
 
 def _rewrite_match(match: Match) -> None:
@@ -245,6 +281,48 @@ def _rewrite_match(match: Match) -> None:
     atomic_write_text(_matches_path(), text)
 
 
+def _write_pending_transaction(match: Match, revision_row: dict) -> None:
+    atomic_write_text(
+        _pending_tx_path(),
+        json.dumps({"match": match.model_dump(by_alias=True), "revision": revision_row}, ensure_ascii=False),
+    )
+
+
+def _recover_pending_transaction() -> None:
+    """启动或下次写入时恢复未完成事务（幂等）。
+
+    pending 记录 after-match 与 revision 行：
+    1. revision 未落盘 → 追加（fsync）；
+    2. matches.jsonl 未更新 → 原子替换/追加；
+    3. 删除 pending。
+    """
+    path = _pending_tx_path()
+    if not path.exists():
+        return
+    tx = json.loads(path.read_text(encoding="utf-8"))
+    after = Match.model_validate(tx["match"])
+    revision_row = tx["revision"]
+    if not any(row.get("revision_id") == revision_row["revision_id"] for row in _read_revision_rows()):
+        _append_revision(revision_row, fsync=True)
+    _rewrite_match(after)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _transactional_match_update(match: Match, revision_row: dict) -> None:
+    """write-ahead：pending → revision(fsync) → matches 原子替换 → 删 pending。"""
+    _write_pending_transaction(match, revision_row)
+    _append_revision(revision_row, fsync=True)
+    _rewrite_match(match)
+    try:
+        _pending_tx_path().unlink()
+    except FileNotFoundError:
+        pass
+
+
+
 def create_match(payload: MatchCreate, registry) -> Match:
     if not payload.occurred_at:
         raise ValueError("occurred_at 不能为空")
@@ -257,8 +335,8 @@ def create_match(payload: MatchCreate, registry) -> Match:
         reason=payload.reason,
         registry=registry,
     )
-    blocking = [issue for issue in issues if issue.code != "force_reason_required"]
-    if blocking and not (payload.force and (payload.reason or "").strip()):
+    blocking = blocking_issues(issues, force=payload.force, reason=payload.reason)
+    if blocking:
         raise ValidationError(issues, "score_total_mismatch" in {i.code for i in issues})
 
     now = now_iso()
@@ -286,8 +364,9 @@ def create_match(payload: MatchCreate, registry) -> Match:
     )
 
     with _write_lock, data_lock():
-        _rewrite_match(match)
-        _append_revision(
+        _recover_pending_transaction()
+        _transactional_match_update(
+            match,
             {
                 "schema": MATCH_REVISION_SCHEMA,
                 "revision_id": match.latest_revision_id,
@@ -301,13 +380,14 @@ def create_match(payload: MatchCreate, registry) -> Match:
                 "validation": {"passed": not blocking, "issues": [i.model_dump() for i in issues]},
                 "before": None,
                 "after": match.model_dump(by_alias=True),
-            }
+            },
         )
     return match
 
 
 def revise_match(match_id: str, payload: MatchRevise, registry) -> Match:
     with _write_lock, data_lock():
+        _recover_pending_transaction()
         current = get_match(match_id)
         if current is None:
             raise KeyError(f"match not found: {match_id}")
@@ -330,15 +410,15 @@ def revise_match(match_id: str, payload: MatchRevise, registry) -> Match:
             registry=registry,
         )
         next_match.ranks = ranks
-        blocking = [issue for issue in issues if issue.code != "force_reason_required"]
-        if blocking and not (payload.force and (payload.reason or "").strip()):
+        blocking = blocking_issues(issues, force=payload.force, reason=payload.reason)
+        if blocking:
             raise ValidationError(issues, "score_total_mismatch" in {i.code for i in issues})
 
         next_match.revision = current.revision + 1
         next_match.latest_revision_id = _generate_revision_id(match_id, next_match.revision)
         next_match.updated_at = now_iso()
-        _rewrite_match(next_match)
-        _append_revision(
+        _transactional_match_update(
+            next_match,
             {
                 "schema": MATCH_REVISION_SCHEMA,
                 "revision_id": next_match.latest_revision_id,
@@ -352,13 +432,14 @@ def revise_match(match_id: str, payload: MatchRevise, registry) -> Match:
                 "validation": {"passed": not blocking, "issues": [i.model_dump() for i in issues]},
                 "before": current.model_dump(by_alias=True),
                 "after": next_match.model_dump(by_alias=True),
-            }
+            },
         )
         return next_match
 
 
 def void_match(match_id: str, payload: MatchVoid) -> Match:
     with _write_lock, data_lock():
+        _recover_pending_transaction()
         current = get_match(match_id)
         if current is None:
             raise KeyError(f"match not found: {match_id}")
@@ -374,8 +455,8 @@ def void_match(match_id: str, payload: MatchVoid) -> Match:
                 "updated_at": now,
             }
         )
-        _rewrite_match(updated)
-        _append_revision(
+        _transactional_match_update(
+            updated,
             {
                 "schema": MATCH_REVISION_SCHEMA,
                 "revision_id": updated.latest_revision_id,
@@ -389,7 +470,7 @@ def void_match(match_id: str, payload: MatchVoid) -> Match:
                 "validation": {"passed": True, "issues": []},
                 "before": current.model_dump(by_alias=True),
                 "after": updated.model_dump(by_alias=True),
-            }
+            },
         )
         return updated
 

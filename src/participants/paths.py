@@ -84,11 +84,11 @@ def file_lock(lock_path: Path, timeout: float = 8.0, stale_after: float = 30.0):
             os.close(fd)
             acquired = True
         except FileExistsError:
-            now = time.monotonic()
-            if now > deadline:
+            if time.monotonic() > deadline:
                 raise TimeoutError(f"lock not acquired in {timeout}s: {lock_path}")
+            # stale 判定：st_mtime 是 epoch 时间戳，必须用 time.time()（而非 monotonic）比较
             try:
-                age = now - lock_path.stat().st_mtime
+                age = time.time() - lock_path.stat().st_mtime
             except FileNotFoundError:
                 continue
             if age > stale_after:

@@ -129,3 +129,17 @@ def test_model_endpoints(four_account_ids):
     with pytest.raises(HTTPException) as exc:
         api.api_add_artifact("model-ghost", ModelArtifactCreate(label="x", artifact_path="y"))
     assert exc.value.status_code == 404
+
+
+def test_list_matches_pagination_validation(four_account_ids):
+    from fastapi import HTTPException as HE
+
+    with pytest.raises(HE) as exc:
+        api.api_list_matches(limit=0)
+    assert exc.value.status_code == 422
+    with pytest.raises(HE) as exc2:
+        api.api_list_matches(offset=-1)
+    assert exc2.value.status_code == 422
+    # 合法分页
+    resp = api.api_list_matches(limit=10, offset=0)
+    assert resp.total == 0

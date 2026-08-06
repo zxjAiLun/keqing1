@@ -75,7 +75,7 @@ def api_update_account(account_id: str, payload: AccountUpdate) -> Account:
 @router.delete("/accounts/{account_id}", response_model=dict)
 def api_delete_account(account_id: str) -> dict:
     try:
-        referenced = ledger.match_references_account(account_id)
+        referenced = ledger.match_references_account(account_id) or registry.identity_references_account(account_id)
         return registry.delete_account(account_id, referenced=referenced)
     except KeyError as exc:
         raise _error(404, str(exc)) from exc
@@ -138,6 +138,10 @@ def api_list_matches(
     limit: int | None = None,
     offset: int = 0,
 ) -> MatchListResponse:
+    if limit is not None and not (1 <= limit <= 500):
+        raise _error(422, f"limit 必须在 [1, 500]，得到 {limit}")
+    if offset < 0:
+        raise _error(422, f"offset 必须非负，得到 {offset}")
     return ledger.list_matches(
         source=source,
         status=status,
