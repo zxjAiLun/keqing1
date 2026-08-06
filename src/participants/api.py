@@ -75,11 +75,13 @@ def api_update_account(account_id: str, payload: AccountUpdate) -> Account:
 @router.delete("/accounts/{account_id}", response_model=dict)
 def api_delete_account(account_id: str) -> dict:
     try:
-        # 引用检查与删除在同一 data_lock 临界区内（P1-2 防 TOCTOU）
-        return registry.delete_account_guarded(
-            account_id,
-            lambda: ledger.match_references_account(account_id) or registry.identity_references_account(account_id),
-        )
+        # 引用检查与删除在同一 data_lock 临界区内（P1-2 防 TOCTOU）；
+        # 先做锁内 pending 恢复，再查引用，避免"只有 pending"的写失败后硬删账号。
+        def _reference_checker() -> bool:
+            ledger.recover_pending_transaction_locked()
+            return ledger.match_references_account(account_id) or registry.identity_references_account(account_id)
+
+        return registry.delete_account_guarded(account_id, _reference_checker)
     except KeyError as exc:
         raise _error(404, str(exc)) from exc
 

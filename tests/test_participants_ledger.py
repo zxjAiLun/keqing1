@@ -226,3 +226,59 @@ def test_read_path_recovers_pending(four_accounts):
     fetched = ledger.get_match(match.match_id)
     assert fetched.revision == 2
     assert not ledger._pending_tx_path().exists()
+
+
+def test_guarded_delete_sees_only_pending_create(four_accounts):
+    """P1-2：只有 pending（尚无 match/revision 落盘）时，guarded delete 也必须软删账号，
+    恢复后不得出现悬空引用。"""
+    from participants import registry as _reg
+    from participants.schemas import AccountCreate as AC, MatchCreate as MC
+
+    # 构造一个"写 pending 后、revision append 前崩溃"的 create 事务
+    payload = MC(
+        occurred_at="2026-08-06T12:00:00+08:00",
+        game_length="hanchan",
+        seats=[MatchSeat(seat=i, account_id=four_accounts[i]) for i in range(4)],
+        final_scores=[25000] * 4,
+    )
+    _, pre_issues = ledger.validate_match(
+        payload.seats, payload.final_scores, starting_points=25000, initial_oya=0,
+        force=False, reason=None, registry=registry,
+    )
+    assert not ledger.blocking_issues(pre_issues, force=False, reason=None)
+    now = ledger.now_iso()
+    match_id = f"m_pending_{four_accounts[0].replace('@', '_')}"
+    match = ledger.Match(
+        match_id=match_id, occurred_at=payload.occurred_at, game_length="hanchan",
+        rule_set="standard-4p", starting_points=25000, initial_oya=0,
+        source="manual", data_completeness="result_only",
+        seats=payload.seats, final_scores=payload.final_scores, ranks=[0, 1, 2, 3],
+        revision=1, latest_revision_id=f"rev_{match_id}_1", created_at=now, updated_at=now,
+    )
+    revision_row = {
+        "schema": "keqing.participant.match_revision.v1",
+        "revision_id": match.latest_revision_id, "match_id": match_id, "revision": 1,
+        "action": "create", "created_at": now, "by": "manual-entry", "force": False,
+        "reason": None, "validation": {"passed": True, "issues": []},
+        "before": None, "after": match.model_dump(by_alias=True),
+    }
+    ledger._write_pending_transaction(match, revision_row)
+    assert not ledger._matches_path().exists()  # 尚无当前态
+    assert ledger._read_revision_rows() == []  # 尚无 revision 落盘（用原始读取，避免触发读路径恢复）
+
+    # guarded delete（与 API 相同的引用检查器：锁内先恢复 pending 再查引用）
+    result = registry.delete_account_guarded(
+        four_accounts[0],
+        lambda: (
+            ledger.recover_pending_transaction_locked(),
+            ledger.match_references_account(four_accounts[0]) or registry.identity_references_account(four_accounts[0]),
+        )[1],
+    )
+    assert result["disabled"] is True, "只有 pending 引用时必��软删"
+
+    # checker 已把 pending 恢复成真实 match；引用的账号必须仍存在（未被硬删）
+    assert not ledger._pending_tx_path().exists()
+    recovered = ledger.get_match(match_id)
+    assert recovered is not None
+    assert registry.get_account(four_accounts[0]) is not None
+    assert registry.get_account(four_accounts[0]).enabled is False

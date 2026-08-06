@@ -73,6 +73,12 @@ def _normalize_state(state: dict) -> dict:
     return state
 
 
+def _mark_ingested(state: dict, replay_id: str, fingerprint: dict) -> None:
+    """标记已摄入（或永久跳过），并清理同 replay 的历史 skipped 记录（P2）。"""
+    state.setdefault("ingested_replays", {})[replay_id] = fingerprint
+    state.setdefault("skipped_replays", {}).pop(replay_id, None)
+
+
 def seed_registries(state: dict, *, dry_run: bool) -> list[str]:
     created_accounts = 0
     created_models = 0
@@ -159,18 +165,18 @@ def backfill_replays(state: dict, *, dry_run: bool) -> list[str]:
         if ingested.get(replay_id) == fingerprint:
             continue
         if ledger.list_matches(source_ref=replay_id).total > 0:
-            ingested[replay_id] = fingerprint
+            _mark_ingested(state, replay_id, fingerprint)
             continue
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         player_names = meta.get("player_names") or []
         final_scores = meta.get("final_scores") or []
         if len(player_names) != 4 or len(final_scores) != 4:
             report.append(f"{replay_id}: 跳过（玩家/分数不完整）")
-            ingested[replay_id] = fingerprint
+            _mark_ingested(state, replay_id, fingerprint)
             continue
         if player_names == ["E", "S", "W", "N"]:
             report.append(f"{replay_id}: 跳过（无真实玩家名）")
-            ingested[replay_id] = fingerprint
+            _mark_ingested(state, replay_id, fingerprint)
             continue
         # 座位账号：按显示名匹配，未知名自动建占位账号
         seats: list[MatchSeat] = []
@@ -220,7 +226,7 @@ def backfill_replays(state: dict, *, dry_run: bool) -> list[str]:
                 ),
                 registry,
             )
-        ingested[replay_id] = fingerprint
+        _mark_ingested(state, replay_id, fingerprint)
         report.append(f"{replay_id}: 已回填")
     return report
 

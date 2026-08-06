@@ -145,10 +145,8 @@ def list_revision_summaries(match_id: str) -> list[RevisionSummary]:
 
 
 def match_references_account(account_id: str) -> bool:
-    """账号是否被引用：当前 match seats（active/void）+ 任意 revision 的 before/after seats。
-
-    账号可能被修订移出当前座位，但 revision 历史仍永久引用它，因此必须扫描 revisions。
-    """
+    """账号是否被引用：当前 match seats（active/void）+ 任意 revision before/after seats
+    + 未完成 pending transaction 的 match/revision seats（P1-2）。"""
     for raw in _read_match_rows():
         match = Match.model_validate(raw)
         if any(seat.account_id == account_id for seat in match.seats):
@@ -157,6 +155,21 @@ def match_references_account(account_id: str) -> bool:
         for key in ("before", "after"):
             snapshot = row.get(key) or {}
             for seat in snapshot.get("seats", []):
+                if seat.get("account_id") == account_id:
+                    return True
+    pending = _pending_tx_path()
+    if pending.exists():
+        try:
+            tx = json.loads(pending.read_text(encoding="utf-8"))
+        except ValueError:
+            tx = {}
+        match_snapshot = tx.get("match") or {}
+        for seat in match_snapshot.get("seats", []):
+            if seat.get("account_id") == account_id:
+                return True
+        revision_row = tx.get("revision") or {}
+        for key in ("before", "after"):
+            for seat in (revision_row.get(key) or {}).get("seats", []):
                 if seat.get("account_id") == account_id:
                     return True
     return False
@@ -362,6 +375,11 @@ def recover_pending_transaction() -> bool:
     return True
 
 
+def recover_pending_transaction_locked() -> None:
+    """锁内恢复入口：调用方已持有 data_lock 时使用（供 guarded delete 等路径）。"""
+    _recover_pending_transaction()
+
+
 def _transactional_match_update(match: Match, revision_row: dict) -> None:
     """write-ahead：pending → revision(fsync) → matches 原子替换 → 删 pending。"""
     _write_pending_transaction(match, revision_row)
@@ -377,7 +395,8 @@ def _transactional_match_update(match: Match, revision_row: dict) -> None:
 def create_match(payload: MatchCreate, registry) -> Match:
     if not payload.occurred_at:
         raise ValueError("occurred_at 不能为空")
-    ranks, issues = validate_match(
+    # 锁外预校验：快速失败（不构成最终写入依据）
+    _pre_ranks, pre_issues = validate_match(
         payload.seats,
         payload.final_scores,
         starting_points=payload.starting_points,
@@ -386,37 +405,49 @@ def create_match(payload: MatchCreate, registry) -> Match:
         reason=payload.reason,
         registry=registry,
     )
-    blocking = blocking_issues(issues, force=payload.force, reason=payload.reason)
-    if blocking:
-        raise ValidationError(issues, "score_total_mismatch" in {i.code for i in issues})
-
-    now = now_iso()
-    match_id = _generate_match_id()
-    match = Match(
-        match_id=match_id,
-        occurred_at=payload.occurred_at,
-        game_length=payload.game_length,
-        rule_set=payload.rule_set,
-        starting_points=payload.starting_points,
-        initial_oya=payload.initial_oya,
-        source=payload.source,
-        source_ref=payload.source_ref,
-        note=payload.note,
-        data_completeness=payload.data_completeness,
-        replay_id=payload.replay_id,
-        seats=payload.seats,
-        final_scores=payload.final_scores,
-        ranks=ranks,
-        revision=1,
-        latest_revision_id=_generate_revision_id(match_id, 1),
-        created_at=now,
-        updated_at=now,
-        created_by="migration" if payload.source == "imported" else "manual",
-    )
+    if blocking_issues(pre_issues, force=payload.force, reason=payload.reason):
+        raise ValidationError(pre_issues, "score_total_mismatch" in {i.code for i in pre_issues})
 
     with _write_lock, data_lock():
         _recover_pending_transaction()
-        _assert_seat_accounts_exist(match.seats, registry)
+        # P1-1：锁内完整复检——账号存在/enabled、model_identity/artifact 归属、
+        # controller 默认值全部以锁内结果为准，防止并发改动产生悬空引用
+        ranks, issues = validate_match(
+            payload.seats,
+            payload.final_scores,
+            starting_points=payload.starting_points,
+            initial_oya=payload.initial_oya,
+            force=payload.force,
+            reason=payload.reason,
+            registry=registry,
+        )
+        blocking = blocking_issues(issues, force=payload.force, reason=payload.reason)
+        if blocking:
+            raise ValidationError(issues, "score_total_mismatch" in {i.code for i in issues})
+
+        now = now_iso()
+        match_id = _generate_match_id()
+        match = Match(
+            match_id=match_id,
+            occurred_at=payload.occurred_at,
+            game_length=payload.game_length,
+            rule_set=payload.rule_set,
+            starting_points=payload.starting_points,
+            initial_oya=payload.initial_oya,
+            source=payload.source,
+            source_ref=payload.source_ref,
+            note=payload.note,
+            data_completeness=payload.data_completeness,
+            replay_id=payload.replay_id,
+            seats=payload.seats,
+            final_scores=payload.final_scores,
+            ranks=ranks,
+            revision=1,
+            latest_revision_id=_generate_revision_id(match_id, 1),
+            created_at=now,
+            updated_at=now,
+            created_by="migration" if payload.source == "imported" else "manual",
+        )
         _transactional_match_update(
             match,
             {
