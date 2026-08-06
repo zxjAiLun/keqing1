@@ -51,6 +51,15 @@ def _generate_revision_id(match_id: str, revision: int) -> str:
     return f"rev_{match_id}_{revision}"
 
 
+def generate_match_id() -> str:
+    """公开：intake 事务在锁内预生成 match_id（恢复幂等依赖确定性 revision id）。"""
+    return _generate_match_id()
+
+
+def generate_revision_id(match_id: str, revision: int) -> str:
+    return _generate_revision_id(match_id, revision)
+
+
 # ---------------------------------------------------------------------------
 # 读取
 # ---------------------------------------------------------------------------
@@ -320,6 +329,10 @@ def _pending_tx_path() -> Path:
     return data_root() / "pending_transaction.json"
 
 
+def pending_transaction_path() -> Path:
+    return _pending_tx_path()
+
+
 def _append_revision(row: dict, *, fsync: bool = False) -> None:
     with open(_revisions_path(), "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -354,15 +367,19 @@ def _write_pending_transaction(match: Match, revision_row: dict) -> None:
 def _recover_pending_transaction() -> None:
     """启动或下次写入时恢复未完成事务（幂等）。
 
-    pending 记录 after-match 与 revision 行：
-    1. revision 未落盘 → 追加（fsync）；
-    2. matches.jsonl 未更新 → 原子替换/追加；
-    3. 删除 pending。
+    - ledger 事务（默认）：pending 记录 after-match 与 revision 行；
+    - intake 事务（``intent=="intake"``）：额外包含账号/别名/artifact 暂存，
+      恢复逻辑委托给 participants.intake。
     """
     path = _pending_tx_path()
     if not path.exists():
         return
     tx = json.loads(path.read_text(encoding="utf-8"))
+    if tx.get("intent") == "intake":
+        from . import intake as _intake
+
+        _intake.recover_intake_transaction_locked(tx)
+        return
     after = Match.model_validate(tx["match"])
     revision_row = tx["revision"]
     if not any(row.get("revision_id") == revision_row["revision_id"] for row in _read_revision_rows()):
@@ -428,49 +445,9 @@ def create_match(payload: MatchCreate, registry) -> Match:
 
     with _write_lock, data_lock():
         _recover_pending_transaction()
-        # P1-1：锁内完整复检——从原始请求重新解析座位（deep-copy），
-        # controller_type 默认值、账号 enabled、identity/artifact 归属全部以锁内为准
-        resolved_seats = [seat.model_copy(deep=True) for seat in payload.seats]
-        ranks, issues = validate_match(
-            resolved_seats,
-            payload.final_scores,
-            starting_points=payload.starting_points,
-            initial_oya=payload.initial_oya,
-            force=payload.force,
-            reason=payload.reason,
-            registry=registry,
-        )
-        blocking = blocking_issues(issues, force=payload.force, reason=payload.reason)
-        if blocking:
-            raise ValidationError(issues, "score_total_mismatch" in {i.code for i in issues})
-
         now = now_iso()
         match_id = _generate_match_id()
-        match = Match(
-            match_id=match_id,
-            occurred_at=payload.occurred_at,
-            game_length=payload.game_length,
-            rule_set=payload.rule_set,
-            starting_points=payload.starting_points,
-            initial_oya=payload.initial_oya,
-            source=payload.source,
-            source_ref=payload.source_ref,
-            note=payload.note,
-            data_completeness=payload.data_completeness,
-            replay_id=payload.replay_id,
-            provider=payload.provider,
-            external_match_id=payload.external_match_id,
-            raw_player_names=payload.raw_player_names,
-            resolution=payload.resolution,
-            seats=resolved_seats,
-            final_scores=payload.final_scores,
-            ranks=ranks,
-            revision=1,
-            latest_revision_id=_generate_revision_id(match_id, 1),
-            created_at=now,
-            updated_at=now,
-            created_by="migration" if payload.source == "imported" else "manual",
-        )
+        match, issues, blocking = build_match(payload, registry, match_id, now)
         _transactional_match_update(
             match,
             {
@@ -489,6 +466,58 @@ def create_match(payload: MatchCreate, registry) -> Match:
             },
         )
     return match
+
+
+def build_match(
+    payload: MatchCreate,
+    registry,
+    match_id: str,
+    now: str,
+) -> tuple[Match, list[ValidationIssue], list[ValidationIssue]]:
+    """锁内/锁外通用：完整校验 + 构造 Match（调用方持有 data_lock）。
+
+    从原始请求 deep-copy 座位，controller 默认值/账号 enabled/identity/artifact
+    归属全部以本次校验的 registry 状态为准。返回 (match, issues, blocking)。
+    """
+    resolved_seats = [seat.model_copy(deep=True) for seat in payload.seats]
+    ranks, issues = validate_match(
+        resolved_seats,
+        payload.final_scores,
+        starting_points=payload.starting_points,
+        initial_oya=payload.initial_oya,
+        force=payload.force,
+        reason=payload.reason,
+        registry=registry,
+    )
+    blocking = blocking_issues(issues, force=payload.force, reason=payload.reason)
+    if blocking:
+        raise ValidationError(issues, "score_total_mismatch" in {i.code for i in issues})
+    match = Match(
+        match_id=match_id,
+        occurred_at=payload.occurred_at,
+        game_length=payload.game_length,
+        rule_set=payload.rule_set,
+        starting_points=payload.starting_points,
+        initial_oya=payload.initial_oya,
+        source=payload.source,
+        source_ref=payload.source_ref,
+        note=payload.note,
+        data_completeness=payload.data_completeness,
+        replay_id=payload.replay_id,
+        provider=payload.provider,
+        external_match_id=payload.external_match_id,
+        raw_player_names=payload.raw_player_names,
+        resolution=payload.resolution,
+        seats=resolved_seats,
+        final_scores=payload.final_scores,
+        ranks=ranks,
+        revision=1,
+        latest_revision_id=_generate_revision_id(match_id, 1),
+        created_at=now,
+        updated_at=now,
+        created_by="migration" if payload.source == "imported" else "manual",
+    )
+    return match, issues, blocking
 
 
 def revise_match(match_id: str, payload: MatchRevise, registry) -> Match:

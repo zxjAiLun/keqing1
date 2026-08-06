@@ -99,8 +99,17 @@ def account_exists(account_id: str) -> bool:
 
 
 def create_account(payload: AccountCreate) -> Account:
+    with _write_lock, data_lock():
+        return create_account_locked(payload)
+
+
+def create_account_locked(payload: AccountCreate) -> Account:
+    """锁内创建账号：调用方已持有 data_lock 时使用（intake 事务 / 恢复路径）。"""
     account_id = payload.account_id or _slugify(payload.display_name)
     now = now_iso()
+    store = _read_accounts()
+    if any(raw.get("account_id") == account_id for raw in store["accounts"]):
+        raise ValueError(f"account_id 已存在: {account_id}")
     account = Account(
         account_id=account_id,
         display_name=payload.display_name,
@@ -112,13 +121,18 @@ def create_account(payload: AccountCreate) -> Account:
         created_at=now,
         updated_at=now,
     )
-    with _write_lock, data_lock():
-        store = _read_accounts()
-        if any(raw.get("account_id") == account_id for raw in store["accounts"]):
-            raise ValueError(f"account_id 已存在: {account_id}")
-        store["accounts"].append(account.model_dump())
-        write_json(_accounts_path(), ACCOUNTS_SCHEMA, store)
+    store["accounts"].append(account.model_dump())
+    write_json(_accounts_path(), ACCOUNTS_SCHEMA, store)
     return account
+
+
+def create_account_if_missing_locked(payload: AccountCreate) -> Account:
+    """锁内幂等创建：已存在则直接返回现有账号（intake 事务恢复用）。"""
+    account_id = payload.account_id or _slugify(payload.display_name)
+    existing = get_account(account_id)
+    if existing is not None:
+        return existing
+    return create_account_locked(payload)
 
 
 def update_account(account_id: str, payload: AccountUpdate) -> Account:

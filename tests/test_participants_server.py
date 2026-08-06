@@ -217,7 +217,8 @@ def test_intake_confirm_endpoint(four_account_ids, monkeypatch):
             IntakeConfirmRequest(log_id="20260804gm-0009-2147-32af115e", resolutions=resolutions, session_id="s9")
         )
     assert exc.value.status_code == 409
-    # replay artifact 可查
+    # replay artifact 可查，match_id 一致（P2-2）
     replay = api.api_match_replay_artifact(resp.match.match_id)
     assert replay["replay_id"] == "20260804gm-0009-2147-32af115e"
     assert replay["has_events"] is True
+    assert replay["match_id"] == resp.match.match_id

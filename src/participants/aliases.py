@@ -70,50 +70,57 @@ def get_alias(alias_id: str) -> ExternalAlias | None:
 
 
 def register_alias(payload: ExternalAliasCreate) -> ExternalAlias:
-    """注册别名。同一 (provider, external_id, scope, session_id) 视为同一键，upsert。"""
-    now = now_iso()
+    """注册别名。同一 (provider, external_id, scope, session_id, external_match_id) 视为同一键，upsert。"""
     with _write_lock, data_lock():
-        store = _read_aliases()
-        raw_list = store.setdefault("aliases", [])
-        key = (payload.provider, payload.external_id, payload.scope, payload.session_id)
-        for idx, raw in enumerate(raw_list):
-            existing = ExternalAlias.model_validate(raw)
-            if (
-                existing.provider == key[0]
-                and existing.external_id == key[1]
-                and existing.scope == key[2]
-                and existing.session_id == key[3]
-            ):
-                updated = existing.model_copy(
-                    update={
-                        "display_name": payload.display_name,
-                        "account_id": payload.account_id,
-                        "model_identity_id": payload.model_identity_id,
-                        "model_artifact_id": payload.model_artifact_id,
-                        "confidence": payload.confidence,
-                        "updated_at": now,
-                    }
-                )
-                raw_list[idx] = updated.model_dump()
-                _write_aliases(store)
-                return updated
-        alias = ExternalAlias(
-            alias_id=f"alias_{uuid.uuid4().hex[:8]}",
-            provider=payload.provider,
-            external_id=payload.external_id,
-            display_name=payload.display_name,
-            account_id=payload.account_id,
-            model_identity_id=payload.model_identity_id,
-            model_artifact_id=payload.model_artifact_id,
-            scope=payload.scope,
-            session_id=payload.session_id,
-            confidence=payload.confidence,
-            created_at=now,
-            updated_at=now,
-        )
-        raw_list.append(alias.model_dump())
-        _write_aliases(store)
-        return alias
+        return register_alias_locked(payload)
+
+
+def register_alias_locked(payload: ExternalAliasCreate) -> ExternalAlias:
+    """锁内注册别名：调用方已持有 data_lock 时使用（intake 事务 / 恢复路径）。"""
+    now = now_iso()
+    store = _read_aliases()
+    raw_list = store.setdefault("aliases", [])
+    key = (payload.provider, payload.external_id, payload.scope, payload.session_id, payload.external_match_id)
+    for idx, raw in enumerate(raw_list):
+        existing = ExternalAlias.model_validate(raw)
+        if (
+            existing.provider == key[0]
+            and existing.external_id == key[1]
+            and existing.scope == key[2]
+            and existing.session_id == key[3]
+            and existing.external_match_id == key[4]
+        ):
+            updated = existing.model_copy(
+                update={
+                    "display_name": payload.display_name,
+                    "account_id": payload.account_id,
+                    "model_identity_id": payload.model_identity_id,
+                    "model_artifact_id": payload.model_artifact_id,
+                    "confidence": payload.confidence,
+                    "updated_at": now,
+                }
+            )
+            raw_list[idx] = updated.model_dump()
+            _write_aliases(store)
+            return updated
+    alias = ExternalAlias(
+        alias_id=f"alias_{uuid.uuid4().hex[:8]}",
+        provider=payload.provider,
+        external_id=payload.external_id,
+        display_name=payload.display_name,
+        account_id=payload.account_id,
+        model_identity_id=payload.model_identity_id,
+        model_artifact_id=payload.model_artifact_id,
+        scope=payload.scope,
+        session_id=payload.session_id,
+        external_match_id=payload.external_match_id,
+        confidence=payload.confidence,
+        created_at=now,
+        updated_at=now,
+    )
+    raw_list.append(alias.model_dump())
+    _write_aliases(store)
+    return alias
 
 
 def resolve_candidates(
@@ -121,8 +128,9 @@ def resolve_candidates(
     external_id: str,
     *,
     session_id: str | None = None,
+    external_match_id: str | None = None,
 ) -> list[ExternalAlias]:
-    """按优先级返回候选别名：session（须匹配本次会话）→ global → match。
+    """按优先级返回候选别名：session（须匹配本次会话）→ global → match（须同一 external_match_id）。
 
     调用方据此决定：唯一命中自动采用；多候选/只有 unresolved → 人工确认。
     """
@@ -135,7 +143,12 @@ def resolve_candidates(
             if session_id and a.session_id == session_id:
                 candidates.append(a)
             continue
-        if a.confidence == "confirmed" or a.scope == "match":
+        if a.scope == "match":
+            # match-scoped 解析只作用于同一 external_match_id，绝不影响其他牌谱
+            if external_match_id and a.external_match_id == external_match_id:
+                candidates.append(a)
+            continue
+        if a.scope == "global" and a.confidence == "confirmed":
             candidates.append(a)
 
     def _rank(a: ExternalAlias) -> tuple[int, str]:

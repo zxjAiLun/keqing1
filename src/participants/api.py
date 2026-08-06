@@ -272,13 +272,13 @@ def api_intake_confirm(payload: IntakeConfirmRequest) -> MatchResponse:
             session_id=payload.session_id,
             note=payload.note,
         )
-    except ValueError as exc:
-        raise _error(409, str(exc)) from exc
     except ValidationError as exc:
         raise HTTPException(
             status_code=422,
             detail={"error": "校验失败", "issues": [i.model_dump() for i in exc.issues], "score_mismatch": exc.score_mismatch},
         ) from exc
+    except ValueError as exc:
+        raise _error(409, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail={"error": f"落账失败: {exc}"}) from exc
     return MatchResponse(
@@ -297,4 +297,4 @@ def api_match_replay_artifact(match_id: str) -> dict:
     artifact = intake.read_replay_artifact(match.replay_id)
     if artifact is None:
         raise _error(404, f"对局 {match_id} 的 replay artifact 不存在")
-    return {"match_id": match_id, "replay_id": match.replay_id, **artifact}
+    return {**artifact, "match_id": match.match_id, "replay_id": match.replay_id}

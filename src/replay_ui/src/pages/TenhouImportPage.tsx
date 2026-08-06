@@ -13,6 +13,7 @@ type DraftResolution = {
   seat: SeatNo;
   action: 'assign' | 'create';
   account_id: string;
+  alias_id: string;
   display_name: string;
   account_type: 'human' | 'managed_bot' | 'external_bot';
   alias_scope: 'global' | 'session' | 'match' | 'none';
@@ -23,6 +24,7 @@ const EMPTY_DRAFT: DraftResolution = {
   seat: 0,
   action: 'assign',
   account_id: '',
+  alias_id: '',
   display_name: '',
   account_type: 'external_bot',
   alias_scope: 'match',
@@ -92,7 +94,7 @@ export function TenhouImportPage() {
       if (d.action === 'create') {
         return { ...base, display_name: d.display_name || preview.raw_player_names[d.seat], account_type: d.account_type };
       }
-      return { ...base, account_id: d.account_id };
+      return { ...base, account_id: d.account_id, alias_id: d.alias_id || undefined };
     });
     if (resolutions.some((r) => r.action === 'assign' && !r.account_id)) {
       setError('仍有座位未指派账号');
@@ -206,7 +208,11 @@ export function TenhouImportPage() {
                         {draft.action === 'assign' ? (
                           <select
                             value={draft.account_id}
-                            onChange={(e) => updateDraft(draft.seat, { account_id: e.target.value })}
+                            onChange={(e) => {
+                              const accountId = e.target.value;
+                              const candidate = seatInfo.candidates.find((c) => c.account_id === accountId);
+                              updateDraft(draft.seat, { account_id: accountId, alias_id: candidate?.alias_id ?? '' });
+                            }}
                             style={{ ...selectStyle, flex: 1 }}
                           >
                             <option value="">选择账号…</option>

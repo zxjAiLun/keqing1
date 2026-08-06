@@ -124,6 +124,7 @@ class ExternalAlias(BaseModel):
     model_artifact_id: str | None = None
     scope: ExternalAliasScope = "global"
     session_id: str | None = None
+    external_match_id: str | None = None  # scope=match 必填；scope=session/global 应为空
     confidence: Literal["confirmed", "unresolved"] = "confirmed"
     created_at: str
     updated_at: str
@@ -138,7 +139,26 @@ class ExternalAliasCreate(BaseModel):
     model_artifact_id: str | None = None
     scope: ExternalAliasScope = "global"
     session_id: str | None = None
+    external_match_id: str | None = None
     confidence: Literal["confirmed", "unresolved"] = "confirmed"
+
+    @field_validator("external_match_id")
+    @classmethod
+    def _scope_requires_foreign_key(cls, v: str | None, info) -> str | None:
+        scope = info.data.get("scope")
+        if scope == "match" and not v:
+            raise ValueError("scope=match 必须提供 external_match_id")
+        if scope in ("session", "global") and v:
+            raise ValueError("scope=session/global 不允许携带 external_match_id")
+        return v
+
+    @field_validator("session_id")
+    @classmethod
+    def _session_requires_session_id(cls, v: str | None, info) -> str | None:
+        scope = info.data.get("scope")
+        if scope == "session" and not v:
+            raise ValueError("scope=session 必须提供 session_id")
+        return v
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +177,9 @@ class SeatResolution(BaseModel):
     display_name: str | None = None
     account_type: AccountType | None = None
     default_controller: ControllerType | None = None
+    alias_id: str | None = None  # 候选别名 ID：服务端读取 account + model 信息
+    model_identity_id: str | None = None
+    model_artifact_id: str | None = None
     alias_scope: ExternalAliasScope | Literal["none"] = "match"
     confidence: Literal["confirmed", "unresolved"] = "confirmed"
 
