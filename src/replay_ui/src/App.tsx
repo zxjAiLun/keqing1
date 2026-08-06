@@ -17,8 +17,9 @@ import { LadderModelPage } from './pages/LadderModelPage';
 import { ParticipantsPage } from './pages/ParticipantsPage';
 import { MatchesPage } from './pages/MatchesPage';
 import { MatchEntryPage } from './pages/MatchEntryPage';
+import { MatchDetailPage } from './pages/MatchDetailPage';
 import { ThemeProvider } from './context/ThemeContext';
-import { LADDER_ACCOUNT_PATTERN, LADDER_MODEL_PATTERN, legacyRoutes, REVIEW_WORKSPACE_PATTERN, routes } from './routes';
+import { LADDER_ACCOUNT_PATTERN, LADDER_MODEL_PATTERN, legacyRoutes, MATCH_DETAIL_PATTERN, REVIEW_WORKSPACE_PATTERN, routes } from './routes';
 import './styles/globals.css';
 
 /** 兼容重定向：完整保留 query string（包括重复出现的 teacher_reports）。 */
@@ -66,6 +67,7 @@ export default function App() {
             <Route path={routes.participants} element={<ParticipantsPage />} />
             <Route path={routes.matches} element={<MatchesPage />} />
             <Route path={routes.matchEntry} element={<MatchEntryPage />} />
+            <Route path={MATCH_DETAIL_PATTERN} element={<MatchDetailPage />} />
 
             {/* 旧主入口兼容重定向 */}
             <Route path="/review" element={<PreserveSearchRedirect to={routes.reviewNew} />} />
