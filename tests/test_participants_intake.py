@@ -171,7 +171,16 @@ def test_match_alias_isolated_between_matches(fake_download, participants_root):
     assert all(c.get("external_match_id") != FAKE_LOG_ID or c["scope"] != "match" for c in no_name_candidates)
     assert preview_b["seats"][1]["auto_account_id"] is None
     # 导入 B：同名 NoName 指向另一账号，不覆盖 A 的别名 → 两条独立记录
-    intake.resolve_and_create_match(log_id=LOG_B, resolutions=_nick_resolutions(bot_a_name="Bot V4"))
+    # （座位 2/3 的确定性 ID 已在 A 中创建 → 用 assign 复用，座位 1 新建 Bot V4）
+    bot_v3 = next(a for a in registry.list_accounts() if a.display_name == "Bot V3")
+    friend = next(a for a in registry.list_accounts() if a.display_name == "Friend")
+    res_b = [
+        {"seat": 0, "action": "assign", "account_id": "nick@01", "alias_scope": "none"},
+        {"seat": 1, "action": "create", "display_name": "Bot V4", "account_type": "managed_bot", "alias_scope": "match"},
+        {"seat": 2, "action": "assign", "account_id": bot_v3.account_id, "alias_scope": "none"},
+        {"seat": 3, "action": "assign", "account_id": friend.account_id, "alias_scope": "none"},
+    ]
+    intake.resolve_and_create_match(log_id=LOG_B, resolutions=res_b)
     match_aliases = [a for a in aliases.list_aliases() if a.external_id == "NoName-1" and a.scope == "match"]
     assert {a.external_match_id for a in match_aliases} == {FAKE_LOG_ID, LOG_B}
     assert len(match_aliases) == 2
@@ -407,3 +416,72 @@ def test_validation_failure_leaves_no_staging(fake_download, participants_root):
     with pytest.raises(ValueError, match="同一账号"):
         intake.resolve_and_create_match(log_id=FAKE_LOG_ID, resolutions=res)
     assert not intake._staging_dir(FAKE_LOG_ID).exists()
+
+
+# ---------------------------------------------------------------------------
+# R10-D Repair 3：action=create 不得静默复用同 ID 账号
+# ---------------------------------------------------------------------------
+
+def _imp_id_for(raw_name, display_name):
+    import hashlib
+
+    slug = "".join(ch.lower() if (ch.isalnum() or ch in "-_") else ("-" if ch.isspace() else "") for ch in display_name.strip())
+    return f"imp_{slug.strip('-') or 'unknown'}-{hashlib.sha256(raw_name.encode('utf-8')).hexdigest()[:6]}"
+
+
+def _create_friend_resolutions(account_type="human"):
+    return [
+        {"seat": 0, "action": "assign", "account_id": "nick@01", "alias_scope": "none"},
+        {"seat": 1, "action": "create", "display_name": "Bot V3", "account_type": "managed_bot", "alias_scope": "none"},
+        {"seat": 2, "action": "create", "display_name": "Bot V4", "account_type": "managed_bot", "alias_scope": "none"},
+        {"seat": 3, "action": "create", "display_name": "Friend", "account_type": account_type, "alias_scope": "none"},
+    ]
+
+
+def test_create_rejects_existing_deterministic_id(fake_download, participants_root):
+    """P1：预先存在同 ID 不同类账号 → action=create 拒绝，且无任何残留。"""
+    registry.create_account(AccountCreate(account_id="nick@01", display_name="Nick", account_type="human"))
+    existing_id = _imp_id_for("FriendID", "Friend")
+    registry.create_account(
+        AccountCreate(account_id=existing_id, display_name="Friend", account_type="external_bot")
+    )
+    with pytest.raises(ValueError, match="已存在"):
+        intake.resolve_and_create_match(log_id=FAKE_LOG_ID, resolutions=_create_friend_resolutions(account_type="human"))
+    # 无 pending / staging / Match / revision / 新 alias
+    assert not ledger.pending_transaction_path().exists()
+    assert not intake._staging_dir(FAKE_LOG_ID).exists()
+    assert ledger.list_matches().total == 0
+    assert aliases.list_aliases() == []
+    assert registry.get_account(existing_id).account_type == "external_bot"
+
+
+def test_create_rejects_existing_disabled_id(fake_download, participants_root):
+    """P1：既有同 ID 账号已停用 → action=create 拒绝，不产生引用停用账号的 Match。"""
+    from participants.schemas import AccountUpdate
+
+    registry.create_account(AccountCreate(account_id="nick@01", display_name="Nick", account_type="human"))
+    existing_id = _imp_id_for("FriendID", "Friend")
+    registry.create_account(
+        AccountCreate(account_id=existing_id, display_name="Friend", account_type="external_bot")
+    )
+    registry.update_account(existing_id, AccountUpdate(enabled=False))
+    with pytest.raises(ValueError, match="已存在"):
+        intake.resolve_and_create_match(log_id=FAKE_LOG_ID, resolutions=_create_friend_resolutions(account_type="human"))
+    assert ledger.find_match_by_external("tenhou", FAKE_LOG_ID) is None
+
+
+def test_recovery_still_works_with_strict_create(fake_download, participants_root, monkeypatch):
+    """P1：严格初始创建不破坏 pending 恢复（既有故障恢复路径仍成立）。"""
+    registry.create_account(AccountCreate(account_id="nick@01", display_name="Nick", account_type="human"))
+    original_append = ledger._append_revision
+
+    def failing_append(row, *, fsync=False):
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr(ledger, "_append_revision", failing_append)
+    with pytest.raises(RuntimeError):
+        intake.resolve_and_create_match(log_id=FAKE_LOG_ID, resolutions=_nick_resolutions(), session_id="s1")
+    monkeypatch.setattr(ledger, "_append_revision", original_append)
+    assert ledger.recover_pending_transaction() is True
+    assert ledger.list_matches().total == 1
+    assert not ledger.pending_transaction_path().exists()

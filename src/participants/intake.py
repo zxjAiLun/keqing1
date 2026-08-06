@@ -350,6 +350,10 @@ def _resolve_seat(
         import hashlib
 
         account_id = f"imp_{slug}-{hashlib.sha256(name.encode('utf-8')).hexdigest()[:6]}"
+        # P1：新建账号 ≠ 静默复用既有账号——确定性 ID 已存在（含停用）即拒绝
+        existing = registry.get_account(account_id)
+        if existing is not None:
+            raise ValueError(f"导入账号 ID 已存在，请改为指派已有账号: {account_id}")
         account_to_create = AccountCreate(
             account_id=account_id,
             display_name=display_name,
@@ -566,8 +570,9 @@ def resolve_and_create_match(
         atomic_write_text(ledger.pending_transaction_path(), json.dumps(pending, ensure_ascii=False))
 
         # 提交：账号 → 别名 → revision → match → artifact promote
+        # 初始创建用严格版（_resolve_seat 已锁内确认 ID 不存在）
         for acc in accounts_to_create:
-            registry.create_account_if_missing_locked(acc)
+            registry.create_account_locked(acc)
         for alias in aliases_to_register:
             aliases.register_alias_locked(alias)
         ledger._append_revision(revision_row, fsync=True)

@@ -127,12 +127,22 @@ def create_account_locked(payload: AccountCreate) -> Account:
 
 
 def create_account_if_missing_locked(payload: AccountCreate) -> Account:
-    """锁内幂等创建：已存在则直接返回现有账号（intake 事务恢复用）。"""
+    """锁内幂等创建（pending 恢复用）：已存在则校验与冻结创建意图一致，不一致报冲突。"""
     account_id = payload.account_id or _slugify(payload.display_name)
     existing = get_account(account_id)
-    if existing is not None:
-        return existing
-    return create_account_locked(payload)
+    if existing is None:
+        return create_account_locked(payload)
+    expected_controller = payload.default_controller or _default_controller_for(payload.account_type)
+    if (
+        existing.display_name != payload.display_name
+        or existing.account_type != payload.account_type
+        or existing.default_controller != expected_controller
+        or not existing.enabled
+    ):
+        raise ValueError(
+            f"pending 恢复冲突：账号 {account_id} 与创建意图不一致（display_name/account_type/controller/enabled）"
+        )
+    return existing
 
 
 def update_account(account_id: str, payload: AccountUpdate) -> Account:

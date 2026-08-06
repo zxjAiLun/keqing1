@@ -249,7 +249,14 @@ export function TenhouImportPage() {
                         )}
                         <select
                           value={draft.alias_scope}
-                          onChange={(e) => updateDraft(draft.seat, { alias_scope: e.target.value as DraftResolution['alias_scope'] })}
+                          onChange={(e) => {
+                            const scope = e.target.value as DraftResolution['alias_scope'];
+                            // 用户显式要新建/提升 alias → 放弃消费已有候选，切换为基于当前账号新建
+                            updateDraft(draft.seat, {
+                              alias_scope: scope,
+                              alias_id: scope !== 'none' ? '' : draft.alias_id,
+                            });
+                          }}
                           style={selectStyle}
                         >
                           <option value="global">保存为全局别名</option>
