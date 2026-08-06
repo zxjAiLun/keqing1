@@ -59,6 +59,10 @@ app.include_router(battle_router)
 from gateway.api.playwithyou import router as playwithyou_router
 app.include_router(playwithyou_router)
 
+# ========== Participants（账号 / 模型 / 统一对局账本）==========
+from participants.api import router as participants_router
+app.include_router(participants_router)
+
 # ========== 静态资源 ==========
 
 _REPLAY_UI_DIR = BASE_DIR.parent / "replay_ui"
