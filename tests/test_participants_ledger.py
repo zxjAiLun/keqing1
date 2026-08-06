@@ -293,10 +293,11 @@ def test_create_match_controller_default_resolved_in_lock(four_accounts, monkeyp
 
     def racing_validate(*args, **kwargs):
         calls["n"] += 1
+        result = original_validate(*args, **kwargs)
         if calls["n"] == 1:
-            # 第一次（锁外）校验后、取得 data_lock 前，账号默认 controller 被并发修改
+            # 第一次（锁外）真实校验完成后、取得 data_lock 前，账号默认 controller 被并发修改
             registry.update_account(four_accounts[0], AU(default_controller="manual_only"))
-        return original_validate(*args, **kwargs)
+        return result
 
     monkeypatch.setattr(ledger, "validate_match", racing_validate)
 
@@ -306,4 +307,6 @@ def test_create_match_controller_default_resolved_in_lock(four_accounts, monkeyp
     assert match.seats[0].controller_type == "manual_only", (
         f"锁内复检应使用新默认值 manual_only（得到 {match.seats[0].controller_type}）"
     )
+    # 隔离合同：锁外/锁内解析都不得污染原始请求对象
+    assert payload.seats[0].controller_type is None
     assert calls["n"] >= 2, "validate_match 应在锁外与锁内各执行一次"
