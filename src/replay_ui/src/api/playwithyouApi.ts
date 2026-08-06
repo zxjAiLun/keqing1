@@ -79,6 +79,15 @@ export interface LadderCaptureEntry {
   tenhou_log_url?: string | null;
   observer_accounts?: string[];
   score_observers?: string[];
+  roster?: Array<{
+    account_id: string;
+    controller_type: string;
+    launcher_slot?: number | null;
+    expected_raw_name?: string | null;
+    model_identity_id?: string | null;
+    model_artifact_id?: string | null;
+  }>;
+  evidence_warning?: string | null;
 }
 
 export async function startPlayWithYou(req: StartPlayWithYouRequest): Promise<PlayWithYouStatus> {

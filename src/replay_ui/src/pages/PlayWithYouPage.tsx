@@ -774,6 +774,9 @@ export function PlayWithYouPage() {
                 {c.state === "accepted_publish_failed" && (
                   <span style={{ color: "var(--error)" }}> · 已确认但发布失败，可重试</span>
                 )}
+                {c.evidence_warning && (
+                  <span style={{ color: "#e67e22" }}> · 证据警告：{c.evidence_warning}</span>
+                )}
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                 {c.state === "pending_confirmation" && (

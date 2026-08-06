@@ -257,40 +257,110 @@ def _validate_roster_bindings(roster_bindings: List[dict], specs: List[str]) -> 
         raise ValueError(f"launcher 数量与启动配置不一致（{len(launched_slots)} vs {len(specs)}）")
 
 
+def _resolve_artifact_path(artifact, project_root: Path) -> Path:
+    """artifact 的规范化绝对路径（相对路径按 project_root 解析）。"""
+    path = Path(str(artifact.artifact_path or ""))
+    if not path.is_absolute():
+        path = project_root / path
+    return path.resolve()
+
+
 def _freeze_launcher_models(roster_bindings: List[dict], specs: List[str]) -> List[dict]:
-    """为 launcher 参与者冻结模型身份/产物（未显式提供时从 spec 唯一解析）。"""
+    """为 launcher 参与者冻结模型身份/产物（P1-2 checkpoint 精确匹配）。
+
+    每个 launcher 先以真实 ``resolve_bot_spec`` 得到实际 checkpoint 绝对路径，
+    再按 artifact.artifact_path 精确匹配（禁止凭 spec 名称或 artifacts[0] 猜测）：
+    - 未提供 identity/artifact：必须唯一匹配到一个合法 artifact；
+    - 已提供：必须与实际 resolved_path 精确一致；
+    - ``mortal`` 自动识别 V2 candidate / 70k fallback；
+    - custom 必须匹配已登记 artifact，否则启动前拒绝。
+
+    返回保持**输入 roster 顺序**的完整列表（仅回填模型字段），写回时按位置即可。
+    """
+    from inference.bot_registry import resolve_bot_spec
     from participants import registry as participant_registry
 
-    frozen: List[dict] = []
-    launched = sorted(
-        (entry for entry in roster_bindings if entry.get("launcher_slot") is not None),
-        key=lambda entry: int(entry["launcher_slot"]),
+    # launcher_slot → spec（specs 已按 launcher_slot 排序）
+    launched_slots = sorted(
+        int(entry["launcher_slot"])
+        for entry in roster_bindings
+        if entry.get("launcher_slot") is not None
     )
-    for entry, spec in zip(launched, specs, strict=True):
-        updated = dict(entry)
+    if len(launched_slots) != len(specs):
+        raise ValueError("launcher 数量与启动配置不一致")
+    slot_to_spec = dict(zip(launched_slots, specs))
+
+    frozen: List[dict] = []
+    for entry in roster_bindings:
+        slot = entry.get("launcher_slot")
+        if slot is None:
+            frozen.append(entry)
+            continue
+        spec = slot_to_spec[int(slot)]
         account_id = str(entry["account_id"])
-        identity_id = entry.get("model_identity_id")
-        artifact_id = entry.get("model_artifact_id")
-        if not identity_id:
-            model_id = _spec_to_model_id(spec, PROJECT_ROOT)
-            if model_id and participant_registry.identity_belongs_to_account(model_id, account_id):
-                identity = participant_registry.get_model_identity(model_id)
-                if identity is not None:
-                    identity_id = model_id
-                    if identity.artifacts:
-                        artifact_id = identity.artifacts[0].model_artifact_id
-        if not identity_id:
-            raise ValueError(
-                f"launcher 账号 {account_id} 未指定模型身份且无法从 spec 解析"
-            )
-        if not participant_registry.identity_belongs_to_account(identity_id, account_id):
-            raise ValueError(f"模型身份 {identity_id} 不属于账号 {account_id}")
-        if artifact_id and not participant_registry.artifact_belongs_to_identity(identity_id, artifact_id):
-            raise ValueError(f"模型产物 {artifact_id} 不属于身份 {identity_id}")
-        updated["model_identity_id"] = identity_id
-        updated["model_artifact_id"] = artifact_id
-        frozen.append(updated)
+        try:
+            _kind, resolved_path = resolve_bot_spec(spec, PROJECT_ROOT)
+        except (ValueError, FileNotFoundError) as exc:
+            raise ValueError(f"launcher 账号 {account_id} 的 spec {spec!r} 无法解析: {exc}") from exc
+        resolved_path = Path(str(resolved_path)).resolve()
+
+        # 候选：账号可绑定的 identity 中，artifact 绝对路径与真实 checkpoint 精确一致
+        candidates: List[tuple] = []
+        for identity in participant_registry.list_models():
+            if not participant_registry.identity_belongs_to_account(identity.model_identity_id, account_id):
+                continue
+            for artifact in identity.artifacts:
+                try:
+                    if _resolve_artifact_path(artifact, PROJECT_ROOT) == resolved_path:
+                        candidates.append((identity, artifact))
+                except (TypeError, ValueError):
+                    continue
+
+        req_identity = entry.get("model_identity_id")
+        req_artifact = entry.get("model_artifact_id")
+        if req_identity or req_artifact:
+            # 已提供：必须与实际 resolved_path 精确一致
+            matching = [
+                (identity, artifact) for (identity, artifact) in candidates
+                if identity.model_identity_id == req_identity and artifact.model_artifact_id == req_artifact
+            ]
+            if not matching:
+                raise ValueError(
+                    f"launcher 账号 {account_id} 的模型产物与实际 checkpoint 不一致（spec={spec}）"
+                )
+            identity, artifact = matching[0]
+        else:
+            if len(candidates) != 1:
+                raise ValueError(
+                    f"launcher 账号 {account_id} 的 checkpoint 无法唯一匹配模型产物"
+                    f"（{len(candidates)} 个候选，spec={spec}），请显式指定"
+                )
+            identity, artifact = candidates[0]
+        frozen.append(
+            {
+                **entry,
+                "model_identity_id": identity.model_identity_id,
+                "model_artifact_id": artifact.model_artifact_id,
+            }
+        )
     return frozen
+
+
+def _rollback_roster_start(capture_dir: Optional[Path], alias_ids: List[str]) -> None:
+    """回滚本次 roster 启动：删除 capture 目录与已注册 session aliases（P2-1）。"""
+    import shutil as _shutil
+
+    if capture_dir is not None:
+        _shutil.rmtree(capture_dir, ignore_errors=True)
+    if not alias_ids:
+        return
+    from participants import aliases as participant_aliases
+
+    for alias_id in alias_ids:
+        try:
+            participant_aliases.delete_alias(alias_id)
+        except Exception:
+            pass
 
 
 def _validate_ladder_capture(capture: LadderCaptureRequest, specs: List[str]) -> None:
@@ -662,70 +732,64 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
             )
         from gateway.playwithyou_capture import capture_dir_for_session
         from participants import aliases as participant_aliases
+        from participants.paths import data_lock as participants_data_lock
+        from participants import ledger as participants_ledger
         from participants.schemas import ExternalAliasCreate as ParticipantAliasCreate
 
-        try:
-            _validate_roster_bindings(roster_bindings, specs)
-            # 冻结 launcher 模型身份/产物（按 launcher_slot 顺序，与 specs 一致）
-            frozen_launched = _freeze_launcher_models(roster_bindings, specs)
-        except (ValueError, FileNotFoundError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        # 用冻结后的模型信息回填 roster_bindings（供 binding/别名使用）
-        launched_idx = [i for i, e in enumerate(roster_bindings) if e.get("launcher_slot") is not None]
-        for index, entry in zip(launched_idx, frozen_launched, strict=True):
-            roster_bindings[index] = entry
-
-        capture_dir = capture_dir_for_session(_ladder_data_root(), session_id)
-        (capture_dir / "pending").mkdir(parents=True, exist_ok=True)
-        (capture_dir / "ignored").mkdir(parents=True, exist_ok=True)
-        (capture_dir / "errors").mkdir(parents=True, exist_ok=True)
-        binding = {
-            "session_id": session_id,
-            "season_id": "",
-            "human_account_id": "",
-            "bot_account_ids": [],
-            "mode": "roster",
-            "roster": roster_bindings,
-            "frozen_at": time.time(),
-        }
-        tmp_binding = capture_dir / "binding.tmp"
-        tmp_binding.write_text(json.dumps(binding, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp_binding, capture_dir / "binding.json")
-
-        # R10-E：session-scoped 别名——NoName-{n} → 具体账号 + 模型版本。
-        # 按 launcher_slot 顺序（与真实 bot 顺序一致）；注册失败不 fail-open。
-        launched = sorted(
-            (entry for entry in roster_bindings if entry.get("launcher_slot") is not None),
-            key=lambda entry: int(entry["launcher_slot"]),
-        )
+        capture_dir = None
         registered_alias_ids: List[str] = []
         try:
-            for index, entry in enumerate(launched):
-                account_id = str(entry.get("account_id") or "").strip()
-                expected_name = str(entry.get("expected_raw_name") or names[index] or f"NoName-{index + 1}")
-                alias = participant_aliases.register_alias(
-                    ParticipantAliasCreate(
-                        provider="tenhou",
-                        external_id=expected_name,
-                        account_id=account_id,
-                        model_identity_id=entry.get("model_identity_id"),
-                        model_artifact_id=entry.get("model_artifact_id"),
-                        scope="session",
-                        session_id=session_id,
-                    )
-                )
-                registered_alias_ids.append(alias.alias_id)
-        except Exception:
-            # 启动失败清理：删除本次新建的 capture 目录与 session aliases，
-            # 避免 stale alias 长期阻止账号硬删除。
-            import shutil as _shutil
+            # P1-3：账号/模型校验 + 模型冻结 + 会话别名注册在同一个 participants
+            # data_lock 临界区内完成（防并发删除产生 stale alias）。
+            with participants_data_lock():
+                participants_ledger.recover_pending_transaction_locked()
+                _validate_roster_bindings(roster_bindings, specs)
+                # P1-1：冻结返回与原 roster 同序，仅回填模型字段
+                roster_bindings = _freeze_launcher_models(roster_bindings, specs)
 
-            _shutil.rmtree(capture_dir, ignore_errors=True)
-            for alias_id in registered_alias_ids:
-                try:
-                    participant_aliases.delete_alias(alias_id)
-                except Exception:
-                    pass
+                capture_dir = capture_dir_for_session(_ladder_data_root(), session_id)
+                (capture_dir / "pending").mkdir(parents=True, exist_ok=True)
+                (capture_dir / "ignored").mkdir(parents=True, exist_ok=True)
+                (capture_dir / "errors").mkdir(parents=True, exist_ok=True)
+                binding = {
+                    "session_id": session_id,
+                    "season_id": "",
+                    "human_account_id": "",
+                    "bot_account_ids": [],
+                    "mode": "roster",
+                    "roster": roster_bindings,
+                    "frozen_at": time.time(),
+                }
+                tmp_binding = capture_dir / "binding.tmp"
+                tmp_binding.write_text(json.dumps(binding, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                os.replace(tmp_binding, capture_dir / "binding.json")
+
+                # R10-E：session-scoped 别名——NoName-{n} → 具体账号 + 模型版本。
+                # 按 launcher_slot 顺序（与真实 bot 顺序一致）；注册失败不 fail-open。
+                launched = sorted(
+                    (entry for entry in roster_bindings if entry.get("launcher_slot") is not None),
+                    key=lambda entry: int(entry["launcher_slot"]),
+                )
+                for index, entry in enumerate(launched):
+                    account_id = str(entry.get("account_id") or "").strip()
+                    expected_name = str(entry.get("expected_raw_name") or names[index] or f"NoName-{index + 1}")
+                    alias = participant_aliases.register_alias_locked(
+                        ParticipantAliasCreate(
+                            provider="tenhou",
+                            external_id=expected_name,
+                            account_id=account_id,
+                            model_identity_id=entry.get("model_identity_id"),
+                            model_artifact_id=entry.get("model_artifact_id"),
+                            scope="session",
+                            session_id=session_id,
+                        )
+                    )
+                    registered_alias_ids.append(alias.alias_id)
+        except (ValueError, FileNotFoundError) as exc:
+            _rollback_roster_start(capture_dir, registered_alias_ids)
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception:
+            _rollback_roster_start(capture_dir, registered_alias_ids)
             raise HTTPException(status_code=400, detail="roster 会话别名注册失败，已回滚本次启动")
     elif req.ladder_capture is not None and req.ladder_capture.enabled:
         try:
@@ -798,6 +862,9 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
             **popen_kwargs,
         )
     except Exception as exc:  # noqa: BLE001
+        # P2-1：Popen 失败也要回滚 roster 启动（binding + session aliases）
+        if roster:
+            _rollback_roster_start(capture_dir, registered_alias_ids)
         raise HTTPException(status_code=500, detail=f"启动失败: {exc}")
 
     session = PWYSession(

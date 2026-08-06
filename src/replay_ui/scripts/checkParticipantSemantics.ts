@@ -106,6 +106,13 @@ const capture2 = read('../../src/gateway/playwithyou_capture.py');
 check(capture2.includes('log_captured'), 'roster 状态机：开局仅捕获 log 为 log_captured（非可导入）');
 check(capture2.includes('evidence_warning'), 'roster 分数不一致记录 evidence_warning 不阻塞');
 
+// 11) R10-E Repair 2：slot-stable 冻结 / checkpoint 精确匹配 / 单锁原子
+check(playwithyou.includes('_resolve_artifact_path'), '冻结按 artifact 绝对路径精确匹配 checkpoint');
+check(playwithyou.includes('resolve_bot_spec'), '冻结复用真实 bot_registry checkpoint 解析');
+check(playwithyou.includes('roster_bindings = _freeze_launcher_models(roster_bindings, specs)'), '冻结保持原 roster 顺序（slot-stable 写回）');
+check(playwithyou.includes('participants_data_lock'), 'roster 校验/冻结/别名注册在同一 data_lock');
+check(playwithyou.includes('_rollback_roster_start'), 'Popen 失败也回滚 roster 启动');
+
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);

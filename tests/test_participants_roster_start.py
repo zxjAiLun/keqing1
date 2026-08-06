@@ -40,6 +40,15 @@ def pw_env(tmp_path, monkeypatch):
         pw, "_resolve_spec",
         lambda network, custom_paths, slot: "70k" if network == "mortal" else None,
     )
+    # P1-2：冻结用真实 resolve_bot_spec 解析 checkpoint 路径，再按 artifact 精确匹配
+    checkpoint = tmp_path / "checkpoints" / "70k.pth"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_text("", encoding="utf-8")
+
+    def _fake_resolve_bot_spec(spec, root):
+        return ("checkpoint", str(checkpoint))
+
+    monkeypatch.setattr("inference.bot_registry.resolve_bot_spec", _fake_resolve_bot_spec)
     fake_subprocess = mock.Mock()
     fake_subprocess.Popen.return_value = FakeProc()
     monkeypatch.setattr(pw, "subprocess", fake_subprocess)
@@ -62,7 +71,7 @@ def pw_env(tmp_path, monkeypatch):
             AccountCreate(account_id=account_id, display_name=account_id, account_type=account_type)
         )
     registry.create_model_identity(
-        ModelIdentityCreate(model_identity_id="70k", label="70k", kind="local_model", artifact_path="ckpt.pth")
+        ModelIdentityCreate(model_identity_id="70k", label="70k", kind="local_model", artifact_path=str(checkpoint))
     )
     return tmp_path
 
@@ -310,3 +319,74 @@ def test_roster_rejects_disabled_account(pw_env):
         pw.start_playwithyou(req)
     assert exc.value.status_code == 400
     assert "停用" in str(exc.value.detail)
+
+
+def test_roster_freeze_preserves_original_order(pw_env):
+    """P1-1：roster 原始顺序与 launcher_slot 顺序不同时，binding 保持原四人顺序，别名正确。"""
+    from gateway.api.playwithyou import ParticipantBindingRequest, StartPlayWithYouRequest
+
+    req = StartPlayWithYouRequest(
+        networks=["mortal", "mortal", "none", "none"],
+        roster=[
+            ParticipantBindingRequest(account_id="nick@01", controller_type="human_ui"),
+            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_slot=1, expected_raw_name="NoName-2"),
+            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_slot=0, expected_raw_name="NoName-1"),
+            ParticipantBindingRequest(account_id="mortal@01", controller_type="external_agent"),
+        ],
+    )
+    status = pw.start_playwithyou(req)
+    capture_dir = pw_env / "ladder" / "captures" / "playwithyou" / status.session_id
+    binding = json.loads((capture_dir / "binding.json").read_text(encoding="utf-8"))
+    # 保持原四人顺序（不交换成员）
+    assert [e["account_id"] for e in binding["roster"]] == ["nick@01", "70k@02", "70k@01", "mortal@01"]
+    launched = {int(e["launcher_slot"]): e for e in binding["roster"] if e.get("launcher_slot") is not None}
+    assert launched[0]["account_id"] == "70k@01"
+    assert launched[1]["account_id"] == "70k@02"
+    # 会话别名：NoName-1 → 70k@01，NoName-2 → 70k@02（不串线）
+    from participants import aliases
+
+    by_name = {
+        a.external_id: a for a in aliases.list_aliases()
+        if a.scope == "session" and a.session_id == status.session_id
+    }
+    assert by_name["NoName-1"].account_id == "70k@01"
+    assert by_name["NoName-2"].account_id == "70k@02"
+    assert by_name["NoName-1"].model_identity_id == "70k"
+
+
+def test_roster_popen_failure_rolls_back(pw_env):
+    """P2-1：Popen 失败 → 500 且回滚 capture 目录与 session aliases。"""
+    from fastapi import HTTPException
+
+    pw.subprocess.Popen.side_effect = RuntimeError("boom")
+    with pytest.raises(HTTPException) as exc:
+        pw.start_playwithyou(_roster_request())
+    assert exc.value.status_code == 500
+    from participants import aliases
+
+    assert aliases.list_aliases() == []
+    captures_root = pw_env / "ladder" / "captures" / "playwithyou"
+    if captures_root.exists():
+        assert list(captures_root.glob("*")) == []
+
+
+def test_roster_validation_failure_no_subprocess(pw_env):
+    """P1-3：校验失败（账号缺失）→ 无 alias、无 capture、无 subprocess 启动。"""
+    from fastapi import HTTPException
+    from gateway.api.playwithyou import ParticipantBindingRequest, StartPlayWithYouRequest
+
+    req = StartPlayWithYouRequest(
+        networks=["mortal", "mortal", "none", "none"],
+        roster=[
+            ParticipantBindingRequest(account_id="ghost@01", controller_type="human_ui"),
+            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_slot=0),
+            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_slot=1),
+            ParticipantBindingRequest(account_id="mortal@01", controller_type="external_agent"),
+        ],
+    )
+    with pytest.raises(HTTPException):
+        pw.start_playwithyou(req)
+    pw.subprocess.Popen.assert_not_called()
+    from participants import aliases
+
+    assert aliases.list_aliases() == []

@@ -502,6 +502,8 @@ class PlayWithYouCaptureCollector:
             "tenhou_log_url": self._canonical_log_url(),
             "observer_accounts": sorted(self._seat_of),
             "roster": list(self.binding.roster),
+            "score_observers": sorted(self._global_scores_by_observer),
+            "evidence_warning": self._evidence_warning,
         }
         _atomic_write(target, payload)
 
