@@ -15,6 +15,8 @@ import { LadderPage } from './pages/LadderPage';
 import { LadderAccountPage } from './pages/LadderAccountPage';
 import { LadderModelPage } from './pages/LadderModelPage';
 import { ParticipantsPage } from './pages/ParticipantsPage';
+import { MatchesPage } from './pages/MatchesPage';
+import { MatchEntryPage } from './pages/MatchEntryPage';
 import { ThemeProvider } from './context/ThemeContext';
 import { LADDER_ACCOUNT_PATTERN, LADDER_MODEL_PATTERN, legacyRoutes, REVIEW_WORKSPACE_PATTERN, routes } from './routes';
 import './styles/globals.css';
@@ -62,6 +64,8 @@ export default function App() {
             <Route path={LADDER_ACCOUNT_PATTERN} element={<LadderAccountPage />} />
             <Route path={LADDER_MODEL_PATTERN} element={<LadderModelPage />} />
             <Route path={routes.participants} element={<ParticipantsPage />} />
+            <Route path={routes.matches} element={<MatchesPage />} />
+            <Route path={routes.matchEntry} element={<MatchEntryPage />} />
 
             {/* 旧主入口兼容重定向 */}
             <Route path="/review" element={<PreserveSearchRedirect to={routes.reviewNew} />} />
