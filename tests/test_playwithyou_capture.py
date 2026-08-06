@@ -1060,3 +1060,59 @@ def test_bad_match_metadata_rejected_no_source(tmp_path: Path, season_env) -> No
     }
     (pending_dir / "tenhou_badmeta.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     _assert_rejected_without_source(tmp_path, season_env, "abc123:tenhou:badmeta")
+
+
+# ---------------------------------------------------------------------------
+# R10-E：通用四人阵容（roster）宽松捕获
+# ---------------------------------------------------------------------------
+
+def _roster_binding(session_id: str = "roster1") -> CaptureBinding:
+    return CaptureBinding(
+        session_id=session_id,
+        season_id="",
+        human_account_id="",
+        bot_account_ids=(),
+        mode="roster",
+        roster=(
+            {"account_id": "nick@01", "controller_type": "human_ui", "launcher_slot": None, "expected_raw_name": "Nick"},
+            {"account_id": "70k@01", "controller_type": "local_model", "launcher_slot": 0, "expected_raw_name": "NoName-1"},
+            {"account_id": "70k@02", "controller_type": "local_model", "launcher_slot": 1, "expected_raw_name": "NoName-2"},
+            {"account_id": "mortal@01", "controller_type": "external_agent", "launcher_slot": None, "expected_raw_name": "Mortal-4.1b"},
+        ),
+    )
+
+
+def test_roster_mode_single_observer_awaiting_import(tmp_path):
+    """R10-E：roster 模式任一 observer 捕获到 log 即 awaiting_import，不要求 3 observer 共识。"""
+    capture_dir = capture_dir_for_session(tmp_path / "data", "roster1")
+    collector = PlayWithYouCaptureCollector(binding=_roster_binding(), capture_dir=capture_dir)
+    collector.observe("70k@01", _start_game(1, match_id="20260804gm-abc-xyz"))
+    assert collector._state == "awaiting_import"
+    state = json.loads((capture_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["match_id"] == "tenhou:20260804gm-abc-xyz"
+    assert len(state["roster"]) == 4
+    pending = json.loads(next((capture_dir / "pending").glob("*.json")).read_text(encoding="utf-8"))
+    assert pending["state"] == "awaiting_import"
+    assert pending["tenhou_log_url"].startswith("https://tenhou.net")
+    assert len(pending["roster"]) == 4
+
+
+def test_roster_mode_does_not_wait_for_score_consensus(tmp_path):
+    """roster 模式只有 1 个 observer 的分数也不阻塞（不再等三份共识才封口）。"""
+    capture_dir = capture_dir_for_session(tmp_path / "data", "roster2")
+    collector = PlayWithYouCaptureCollector(binding=_roster_binding("roster2"), capture_dir=capture_dir)
+    collector.observe("70k@01", _start_game(1))
+    collector.observe("70k@01", _end_game([25000, 25000, 25000, 25000], 1))
+    assert collector._state == "awaiting_import"
+    # 不会生成 players 封口
+    pending = json.loads(next((capture_dir / "pending").glob("*.json")).read_text(encoding="utf-8"))
+    assert pending["state"] == "awaiting_import"
+    assert pending["match"]["players"] == []
+
+
+def test_roster_mode_no_log_no_awaiting(tmp_path):
+    """roster 模式但尚未捕获到 log → 停留在原状态，不误判 awaiting_import。"""
+    capture_dir = capture_dir_for_session(tmp_path / "data", "roster3")
+    collector = PlayWithYouCaptureCollector(binding=_roster_binding("roster3"), capture_dir=capture_dir)
+    collector.observe("70k@01", {"type": "start_game", "id": 0})
+    assert collector._state != "awaiting_import"

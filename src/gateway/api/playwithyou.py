@@ -426,6 +426,19 @@ class StartPlayWithYouRequest(BaseModel):
     name_prefix: str = "NoName"
     tenhou_cookie: Optional[str] = None
     ladder_capture: Optional["LadderCaptureRequest"] = None
+    # R10-E：预期四人阵容（与 launcher 数量分离）。提供时采用通用捕获流程，
+    # 不要求恰好 1 人类 + 3 bot。
+    roster: List["ParticipantBindingRequest"] = []
+
+
+class ParticipantBindingRequest(BaseModel):
+    account_id: str = ""
+    controller_type: str = "manual_only"
+    model_identity_id: Optional[str] = None
+    model_artifact_id: Optional[str] = None
+    launcher_slot: Optional[int] = None  # 本系统实际呼出的 slot；None = 不启动
+    expected_raw_name: Optional[str] = None  # NoName-1 等
+    resolution_required: bool = False
 
 
 class LadderCaptureRequest(BaseModel):
@@ -500,16 +513,40 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
     while len(networks) < 4:
         networks.append("none")
 
-    # Resolve the first `quantity` slots into launcher specs.
-    specs: List[str] = []
+    # Resolve launcher specs. R10-E roster 模式：从预期四人阵容的 launcher_slot 推导，
+    # 与 quantity 解耦（Nick human_ui + 2 本地 bot + 外部 Mortal → quantity=2 合法）。
+    roster = list(req.roster)
+    roster_bindings: List[dict] = []
+    launcher_specs: List[str] = []
     try:
-        for slot in range(quantity):
-            spec = _resolve_spec(networks[slot], req.custom_paths, slot)
-            if spec is not None:
-                specs.append(spec)
+        if roster:
+            if len(roster) != 4:
+                raise ValueError("roster 必须恰好 4 位预期参与者")
+            slot_specs: List[tuple[int, str]] = []
+            for entry in roster:
+                slot = entry.launcher_slot
+                roster_bindings.append(entry.model_dump())
+                if slot is None:
+                    continue
+                if not (0 <= slot <= 3):
+                    raise ValueError(f"launcher_slot 必须在 [0,3]: {slot}")
+                spec = _resolve_spec(networks[slot], req.custom_paths, slot)
+                if spec is None:
+                    raise ValueError(f"roster slot {slot} 未配置有效模型")
+                slot_specs.append((slot, spec))
+            slot_specs.sort(key=lambda item: item[0])
+            launcher_specs = [spec for _, spec in slot_specs]
+            if not launcher_specs:
+                raise ValueError("roster 至少需要一个由本系统呼出的 launcher slot")
+        else:
+            for slot in range(quantity):
+                spec = _resolve_spec(networks[slot], req.custom_paths, slot)
+                if spec is not None:
+                    launcher_specs.append(spec)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    specs = launcher_specs
     if not specs:
         raise HTTPException(
             status_code=400,
@@ -526,9 +563,54 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
     # session_id 提前生成（R9-3）：binding 冻结必须在启动 launcher 之前。
     session_id = uuid.uuid4().hex[:12]
 
-    # R9-3 正式天梯捕获：启动前完成全部校验并冻结 binding。
+    # R9-3 正式天梯捕获 / R10-E 通用 roster 捕获：启动前完成校验并冻结 binding。
     capture_dir: Optional[Path] = None
-    if req.ladder_capture is not None and req.ladder_capture.enabled:
+    if roster:
+        from gateway.playwithyou_capture import capture_dir_for_session
+        from participants import aliases as participant_aliases
+        from participants.schemas import ExternalAliasCreate as ParticipantAliasCreate
+
+        capture_dir = capture_dir_for_session(_ladder_data_root(), session_id)
+        (capture_dir / "pending").mkdir(parents=True, exist_ok=True)
+        (capture_dir / "ignored").mkdir(parents=True, exist_ok=True)
+        (capture_dir / "errors").mkdir(parents=True, exist_ok=True)
+        binding = {
+            "session_id": session_id,
+            "season_id": "",
+            "human_account_id": "",
+            "bot_account_ids": [],
+            "mode": "roster",
+            "roster": roster_bindings,
+            "frozen_at": time.time(),
+        }
+        tmp_binding = capture_dir / "binding.tmp"
+        tmp_binding.write_text(json.dumps(binding, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp_binding, capture_dir / "binding.json")
+
+        # R10-E：session-scoped 别名——NoName-{n} → 具体账号 + 模型版本，
+        # 供赛后 intake（R10-D）用 session_id 精确解析，绝不提升为全局规则。
+        launched = [entry for entry in roster_bindings if entry.get("launcher_slot") is not None]
+        for index, entry in enumerate(launched):
+            account_id = str(entry.get("account_id") or "").strip()
+            if not account_id:
+                continue
+            expected_name = str(entry.get("expected_raw_name") or names[index] or f"NoName-{index + 1}")
+            try:
+                participant_aliases.register_alias(
+                    ParticipantAliasCreate(
+                        provider="tenhou",
+                        external_id=expected_name,
+                        account_id=account_id,
+                        model_identity_id=entry.get("model_identity_id"),
+                        model_artifact_id=entry.get("model_artifact_id"),
+                        scope="session",
+                        session_id=session_id,
+                    )
+                )
+            except Exception:
+                # 别名注册失败不阻止呼出（intake 时仍可人工解析）
+                pass
+    elif req.ladder_capture is not None and req.ladder_capture.enabled:
         try:
             _validate_ladder_capture(req.ladder_capture, specs)
         except (ValueError, FileNotFoundError) as exc:

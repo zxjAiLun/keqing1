@@ -46,6 +46,7 @@ STATE_BY_SUBDIR = {
     "pending": {
         "provisional_result",
         "pending_confirmation",
+        "awaiting_import",  # R10-E roster 模式
         "published",
         "accepted_publish_failed",
     },
@@ -67,6 +68,9 @@ class CaptureBinding:
     human_account_id: str
     bot_account_ids: tuple[str, ...]
     mode: str  # only "confirm" this round
+    # R10-E：通用四人阵容模式。非空时采用宽松捕获——任一 observer 捕获到
+    # log 即进入 awaiting_import，四座/分数由赛后正式天凤牌谱决定。
+    roster: tuple[dict, ...] = ()
 
 
 class PlayWithYouCaptureSink(Protocol):
@@ -335,12 +339,26 @@ class PlayWithYouCaptureCollector:
         - 完整且所有 observer 分数一致（len==3）-> seal 为 pending_confirmation；
         - 只有部分 observer 分数 -> 写 provisional_result（不可 confirm，C33）；
         - finalize 用单份有效分数 seal（C35）。
+        - R10-E roster 模式：任一 observer 捕获到 log_id 即进入 awaiting_import，
+          不再要求三个 observer 分数共识（赛后由正式天凤牌谱决定四座/分数）。
         """
         self.capture_dir.mkdir(parents=True, exist_ok=True)
 
         if self._state == "conflict":
             self._remove_pending()
             self._write_state()
+            return
+
+        # R10-E：通用四人阵容——宽松捕获，只记录 log，交由赛后 intake 解析。
+        if self.binding.roster:
+            log_id = self._canonical_log_id()
+            if log_id is None:
+                self._write_state()
+                return
+            if self._state != "awaiting_import":
+                self._state = "awaiting_import"
+                self._write_pending_roster(log_id)
+                self._write_state()
             return
 
         human_seat = self._human_seat()
@@ -440,6 +458,27 @@ class PlayWithYouCaptureCollector:
         }
         _atomic_write(target, payload)
 
+    def _write_pending_roster(self, log_id: str) -> None:
+        """R10-E roster 模式：只记录捕获到的 log 与预期 roster，不封口 players。"""
+        target = self.capture_dir / "pending" / f"{_safe_slug(log_id)}.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": CAPTURE_SCHEMA,
+            "capture_id": self._capture_id(),
+            "session_id": self.binding.session_id,
+            "state": "awaiting_import",
+            "season_id": self.binding.season_id,
+            "match": {
+                "match_id": log_id,
+                "game_length": self.game_length,
+                "players": [],  # 四座由赛后正式天凤牌谱决定
+            },
+            "tenhou_log_url": self._canonical_log_url(),
+            "observer_accounts": sorted(self._seat_of),
+            "roster": list(self.binding.roster),
+        }
+        _atomic_write(target, payload)
+
     def _write_error(self, state: str) -> None:
         errors_dir = self.capture_dir / "errors"
         errors_dir.mkdir(parents=True, exist_ok=True)
@@ -482,4 +521,6 @@ class PlayWithYouCaptureCollector:
             "score_observers": sorted(self._global_scores_by_observer),
             "conflict_reason": self._conflict_reason,
         }
+        if self.binding.roster:
+            state["roster"] = list(self.binding.roster)
         _atomic_write(self.capture_dir / "state.json", state)

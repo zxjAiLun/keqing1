@@ -86,6 +86,16 @@ for (const testFile of [
 const matchesPage = read('src/pages/MatchesPage.tsx');
 check(matchesPage.includes('status') && matchesPage.includes('void'), 'MatchesPage 支持状态筛选（active/void）');
 
+// 9) R10-E：通用四人阵容——roster 与 launcher 数量分离 + 宽松捕获
+const playwithyou = read('../../src/gateway/api/playwithyou.py');
+check(playwithyou.includes('ParticipantBindingRequest'), 'playwithyou 定义 ParticipantBindingRequest（预期四人阵容）');
+check(playwithyou.includes('roster: List[') && playwithyou.includes('ParticipantBindingRequest'), 'StartPlayWithYouRequest 含 roster 字段');
+check(playwithyou.includes('launcher_slot'), 'ParticipantBindingRequest 含 launcher_slot（与 launcher 数量分离）');
+check(playwithyou.includes('scope="session"') || playwithyou.includes("scope='session'"), 'start 注册 session-scoped 别名');
+const capture = read('../../src/gateway/playwithyou_capture.py');
+check(capture.includes('awaiting_import'), '捕获层支持 awaiting_import（任一 observer 捕获 log 即可）');
+check(capture.includes('roster'), 'CaptureBinding 支持 roster 模式');
+
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);
