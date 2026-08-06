@@ -1082,11 +1082,21 @@ def _roster_binding(session_id: str = "roster1") -> CaptureBinding:
     )
 
 
-def test_roster_mode_single_observer_awaiting_import(tmp_path):
-    """R10-E：roster 模式任一 observer 捕获到 log 即 awaiting_import，不要求 3 observer 共识。"""
+def test_roster_mode_start_game_alone_is_log_captured(tmp_path):
+    """R10-E（P1-4）：开局仅捕获 log → log_captured，绝不提前出现可导入的 awaiting_import。"""
     capture_dir = capture_dir_for_session(tmp_path / "data", "roster1")
     collector = PlayWithYouCaptureCollector(binding=_roster_binding(), capture_dir=capture_dir)
     collector.observe("70k@01", _start_game(1, match_id="20260804gm-abc-xyz"))
+    assert collector._state == "log_captured"
+    assert list((capture_dir / "pending").glob("*.json")) == [], "未结束不得生成 pending import"
+
+
+def test_roster_mode_awaiting_import_after_end_game(tmp_path):
+    """R10-E：任一合法 end_game 后才进入 awaiting_import（不要求 3 observer 共识）。"""
+    capture_dir = capture_dir_for_session(tmp_path / "data", "roster1")
+    collector = PlayWithYouCaptureCollector(binding=_roster_binding(), capture_dir=capture_dir)
+    collector.observe("70k@01", _start_game(1, match_id="20260804gm-abc-xyz"))
+    collector.observe("70k@01", _end_game([25000, 25000, 25000, 25000], 1))
     assert collector._state == "awaiting_import"
     state = json.loads((capture_dir / "state.json").read_text(encoding="utf-8"))
     assert state["match_id"] == "tenhou:20260804gm-abc-xyz"
@@ -1095,6 +1105,41 @@ def test_roster_mode_single_observer_awaiting_import(tmp_path):
     assert pending["state"] == "awaiting_import"
     assert pending["tenhou_log_url"].startswith("https://tenhou.net")
     assert len(pending["roster"]) == 4
+
+
+def test_roster_mode_finalize_without_end_game_incomplete(tmp_path):
+    """R10-E（P1-4）：无 end_game 时 finalize → incomplete 且不生成 pending import。"""
+    capture_dir = capture_dir_for_session(tmp_path / "data", "roster1")
+    collector = PlayWithYouCaptureCollector(binding=_roster_binding(), capture_dir=capture_dir)
+    collector.observe("70k@01", _start_game(1, match_id="20260804gm-abc-xyz"))
+    assert collector._state == "log_captured"
+    collector.finalize()
+    assert collector._state == "incomplete"
+    assert list((capture_dir / "pending").glob("*.json")) == []
+
+
+def test_roster_mode_score_conflict_is_warning_not_blocker(tmp_path):
+    """R10-E（P1-4）：observer 分数不一致 → evidence_warning，仍可导入。"""
+    capture_dir = capture_dir_for_session(tmp_path / "data", "roster1")
+    collector = PlayWithYouCaptureCollector(binding=_roster_binding(), capture_dir=capture_dir)
+    collector.observe("70k@01", _start_game(1, match_id="20260804gm-abc-xyz"))
+    collector.observe("70k@01", _end_game([25000, 25000, 25000, 25000], 1))
+    collector.observe("70k@02", _start_game(2, match_id="20260804gm-abc-xyz"))
+    collector.observe("70k@02", _end_game([26000, 24000, 25000, 25000], 2))
+    assert collector._state == "awaiting_import"
+    assert collector._evidence_warning is not None
+    state = json.loads((capture_dir / "state.json").read_text(encoding="utf-8"))
+    assert "evidence_warning" in state
+
+
+def test_roster_mode_log_id_conflict_blocks(tmp_path):
+    """R10-E（P1-4）：observer log_id 不一致 → conflict，无 pending。"""
+    capture_dir = capture_dir_for_session(tmp_path / "data", "roster1")
+    collector = PlayWithYouCaptureCollector(binding=_roster_binding(), capture_dir=capture_dir)
+    collector.observe("70k@01", _start_game(1, match_id="20260804gm-aaa-aaa"))
+    collector.observe("70k@02", _start_game(2, match_id="20260804gm-bbb-bbb"))
+    assert collector._state == "conflict"
+    assert list((capture_dir / "pending").glob("*.json")) == []
 
 
 def test_roster_mode_does_not_wait_for_score_consensus(tmp_path):

@@ -96,6 +96,16 @@ const capture = read('../../src/gateway/playwithyou_capture.py');
 check(capture.includes('awaiting_import'), '捕获层支持 awaiting_import（任一 observer 捕获 log 即可）');
 check(capture.includes('roster'), 'CaptureBinding 支持 roster 模式');
 
+// 10) R10-E Repair：真实 launcher 接线 / 赛后状态机 / 互斥
+const launcher = read('../../scripts/launch_tenhou_bots.py');
+check(launcher.includes('mode == "roster"') && launcher.includes('launcher_slot'), 'launcher 识别 roster 模式并按 slot 接线');
+check(launcher.includes('config.ladder_account_id = str(entry["account_id"])'), 'launcher 按 roster entry 绑定 ladder_account_id');
+check(playwithyou.includes('_validate_roster_bindings'), 'start 前校验 roster（账号存在/启用/模型归属）');
+check(playwithyou.includes('不能同时开启'), 'roster 与旧正式天梯绑定互斥');
+const capture2 = read('../../src/gateway/playwithyou_capture.py');
+check(capture2.includes('log_captured'), 'roster 状态机：开局仅捕获 log 为 log_captured（非可导入）');
+check(capture2.includes('evidence_warning'), 'roster 分数不一致记录 evidence_warning 不阻塞');
+
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);

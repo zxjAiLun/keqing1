@@ -32,6 +32,8 @@ CAPTURE_SCHEMA = "keqing.playwithyou.capture.v1"
 CAPTURE_STATES = (
     "waiting_start",
     "in_game",
+    "log_captured",  # R10-E roster：已捕获 log，尚未结束
+    "awaiting_import",  # R10-E roster：任一合法 end_game 后进入可导入
     "provisional_result",
     "pending_confirmation",
     "published",
@@ -155,6 +157,7 @@ class PlayWithYouCaptureCollector:
     _terminal: bool = False
     _state: str = "waiting_start"
     _conflict_reason: str | None = None
+    _evidence_warning: str | None = None
     _finalized: bool = False
     # 封口状态：一旦 seal，collector 不再重写 payload（confirm/ignore 后不得复活）。
     _sealed: bool = False
@@ -242,15 +245,26 @@ class PlayWithYouCaptureCollector:
         previous = self._global_scores_by_observer.get(observer)
         if previous is not None:
             if previous != global_scores:
-                self._set_conflict(
-                    f"observer {observer} 重复上报不同终局分数（规范化后），拒绝确认"
-                )
+                if self.binding.roster:
+                    # R10-E：分数不一致仅作证据警告，不阻止导入（最终分数以正式牌谱为准）
+                    self._evidence_warning = (
+                        f"observer {observer} 重复上报不同终局分数（规范化后）"
+                    )
+                else:
+                    self._set_conflict(
+                        f"observer {observer} 重复上报不同终局分数（规范化后），拒绝确认"
+                    )
             return  # 同 observer 重复相同结果：no-op
         for other, other_scores in self._global_scores_by_observer.items():
             if other_scores != global_scores:
-                self._set_conflict(
-                    f"observer {observer} 规范化后分数与 {other} 不一致，拒绝确认"
-                )
+                if self.binding.roster:
+                    self._evidence_warning = (
+                        f"observer {observer} 规范化后分数与 {other} 不一致（仅作证据）"
+                    )
+                else:
+                    self._set_conflict(
+                        f"observer {observer} 规范化后分数与 {other} 不一致，拒绝确认"
+                    )
                 return
         self._global_scores_by_observer[observer] = global_scores
 
@@ -349,15 +363,27 @@ class PlayWithYouCaptureCollector:
             self._write_state()
             return
 
-        # R10-E：通用四人阵容——宽松捕获，只记录 log，交由赛后 intake 解析。
+        # R10-E：通用四人阵容——宽松捕获，但只有收到合法 end_game 后才进入
+        # awaiting_import；仅捕获到 log 时保持 log_captured（未结束，不可导入）。
         if self.binding.roster:
+            if self._state == "conflict":
+                self._remove_pending()
+                self._write_state()
+                return
             log_id = self._canonical_log_id()
             if log_id is None:
                 self._write_state()
                 return
-            if self._state != "awaiting_import":
-                self._state = "awaiting_import"
-                self._write_pending_roster(log_id)
+            if self._global_scores_by_observer:
+                # 任一合法 end_game 分数出现 → 可导入（最终分数以正式天凤牌谱为准）
+                if self._state != "awaiting_import":
+                    self._state = "awaiting_import"
+                    self._write_pending_roster(log_id)
+                self._write_state()  # 总是重写，flush evidence_warning 等
+                return
+            # 开局但未结束：仅记录 log，不可点击导入
+            if self._state in ("waiting_start", "in_game"):
+                self._state = "log_captured"
                 self._write_state()
             return
 
@@ -407,7 +433,7 @@ class PlayWithYouCaptureCollector:
                 if players is not None:
                     self._seal(players)
                     return
-            if self._state in ("incomplete", "waiting_start", "in_game"):
+            if self._state in ("incomplete", "waiting_start", "in_game", "log_captured"):
                 # 没有完整结果：写 errors/ 详情，让 discovery/UI 可见（C22）。
                 self._state = "incomplete"
                 self._write_error("incomplete")
@@ -523,4 +549,6 @@ class PlayWithYouCaptureCollector:
         }
         if self.binding.roster:
             state["roster"] = list(self.binding.roster)
+        if self._evidence_warning:
+            state["evidence_warning"] = self._evidence_warning
         _atomic_write(self.capture_dir / "state.json", state)

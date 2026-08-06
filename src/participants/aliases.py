@@ -69,6 +69,19 @@ def get_alias(alias_id: str) -> ExternalAlias | None:
     return None
 
 
+def delete_alias(alias_id: str) -> bool:
+    """删除别名（启动失败回滚用）。返回是否删除。"""
+    with _write_lock, data_lock():
+        store = _read_aliases()
+        raw_list = store.setdefault("aliases", [])
+        remaining = [raw for raw in raw_list if raw.get("alias_id") != alias_id]
+        if len(remaining) == len(raw_list):
+            return False
+        store["aliases"] = remaining
+        _write_aliases(store)
+        return True
+
+
 def register_alias(payload: ExternalAliasCreate) -> ExternalAlias:
     """注册别名。同一 (provider, external_id, scope, session_id, external_match_id) 视为同一键，upsert。"""
     with _write_lock, data_lock():

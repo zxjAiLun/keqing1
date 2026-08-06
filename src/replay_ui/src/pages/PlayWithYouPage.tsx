@@ -31,6 +31,8 @@ const ACCENT = "#8e44ad";
 type RosterBinding = {
   account_id: string;
   controller_type: string;
+  model_identity_id: string;
+  model_artifact_id: string;
   launched: boolean;
   expected_raw_name: string;
 };
@@ -134,10 +136,10 @@ export function PlayWithYouPage() {
   // R10-E：通用四人阵容模式（预期四人阵容与 launcher 数量分离）
   const [rosterMode, setRosterMode] = useState(false);
   const [roster, setRoster] = useState<RosterBinding[]>([
-    { account_id: "nick@01", controller_type: "human_ui", launched: false, expected_raw_name: "" },
-    { account_id: "70k@01", controller_type: "local_model", launched: true, expected_raw_name: "NoName-1" },
-    { account_id: "70k@02", controller_type: "local_model", launched: true, expected_raw_name: "NoName-2" },
-    { account_id: "", controller_type: "external_agent", launched: false, expected_raw_name: "" },
+    { account_id: "nick@01", controller_type: "human_ui", model_identity_id: "", model_artifact_id: "", launched: false, expected_raw_name: "" },
+    { account_id: "70k@01", controller_type: "local_model", model_identity_id: "", model_artifact_id: "", launched: true, expected_raw_name: "NoName-1" },
+    { account_id: "70k@02", controller_type: "local_model", model_identity_id: "", model_artifact_id: "", launched: true, expected_raw_name: "NoName-2" },
+    { account_id: "", controller_type: "external_agent", model_identity_id: "", model_artifact_id: "", launched: false, expected_raw_name: "" },
   ]);
   const [accounts, setAccounts] = useState<ParticipantAccount[]>([]);
 
@@ -176,19 +178,23 @@ export function PlayWithYouPage() {
         ? roster.map((entry, index) => ({
             account_id: entry.account_id,
             controller_type: entry.controller_type,
+            model_identity_id: entry.model_identity_id || null,
+            model_artifact_id: entry.model_artifact_id || null,
             launcher_slot: entry.launched ? index : null,
             expected_raw_name: entry.expected_raw_name || null,
+            resolution_required: !entry.account_id,
           }))
         : undefined;
       const req = {
         lobby_id: lobbyId,
         speed,
-        quantity: launchedSlots.length,
+        // P1-3：rosterMode=false 时沿用旧 quantity 选择器，不得被 roster 草稿覆盖
+        quantity: rosterMode ? launchedSlots.length : quantity,
         networks: [...networks],
         custom_paths: customPaths,
         device,
         roster: rosterPayload,
-        ladder_capture: captureEnabled
+        ladder_capture: captureEnabled && !rosterMode
           ? {
               enabled: true,
               season_id: captureSeason,
@@ -457,7 +463,7 @@ export function PlayWithYouPage() {
             <input
               type="checkbox"
               checked={captureEnabled}
-              disabled={isRunning}
+              disabled={isRunning || rosterMode}
               onChange={(e) => setCaptureEnabled(e.target.checked)}
             />
             <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>
@@ -523,7 +529,7 @@ export function PlayWithYouPage() {
             <input
               type="checkbox"
               checked={rosterMode}
-              disabled={isRunning}
+              disabled={isRunning || captureEnabled}
               onChange={(e) => setRosterMode(e.target.checked)}
             />
             <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>

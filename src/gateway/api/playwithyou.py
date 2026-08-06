@@ -205,6 +205,94 @@ def _spec_to_model_id(spec: str, project_root: Path) -> Optional[str]:
     return None  # 自定义路径由调用方与 registry checkpoint 比对
 
 
+def _validate_roster_bindings(roster_bindings: List[dict], specs: List[str]) -> None:
+    """P1-2：呼出前可信冻结 roster。
+
+    - 已登记账号必须存在且启用、四账号不重复；
+    - launcher 参与者 controller_type=local_model、账号必填、launcher_slot 唯一、
+      expected_raw_name 唯一、模型身份/产物归属正确；
+    - 未识别外部参与者（无账号）必须 resolution_required=true。
+    """
+    from participants import registry as participant_registry
+
+    known_ids = [str(entry.get("account_id") or "").strip() for entry in roster_bindings if entry.get("account_id")]
+    if len(set(known_ids)) != len(known_ids):
+        raise ValueError("四个已知账号必须互不重复")
+    for account_id in known_ids:
+        account = participant_registry.get_account(account_id)
+        if account is None:
+            raise ValueError(f"账号不存在: {account_id}")
+        if not account.enabled:
+            raise ValueError(f"账号已停用: {account_id}")
+
+    launched_slots: List[int] = []
+    raw_names: List[str] = []
+    for entry in roster_bindings:
+        slot = entry.get("launcher_slot")
+        if slot is None:
+            if not entry.get("account_id") and not entry.get("resolution_required"):
+                raise ValueError("未识别的外部参与者必须设置 resolution_required=true")
+            continue
+        if slot in launched_slots:
+            raise ValueError(f"launcher_slot 重复: {slot}")
+        launched_slots.append(slot)
+        account_id = str(entry.get("account_id") or "").strip()
+        if not account_id:
+            raise ValueError(f"launcher 参与者必须填写账号（slot {slot}）")
+        if entry.get("controller_type") != "local_model":
+            raise ValueError(f"launcher 参与者 controller_type 必须为 local_model（slot {slot}）")
+        raw_name = str(entry.get("expected_raw_name") or "").strip()
+        if raw_name:
+            if raw_name in raw_names:
+                raise ValueError(f"expected_raw_name 重复: {raw_name}")
+            raw_names.append(raw_name)
+        identity_id = entry.get("model_identity_id")
+        artifact_id = entry.get("model_artifact_id")
+        if identity_id:
+            if not participant_registry.identity_belongs_to_account(identity_id, account_id):
+                raise ValueError(f"模型身份 {identity_id} 不属于账号 {account_id}")
+            if not participant_registry.artifact_belongs_to_identity(identity_id, artifact_id):
+                raise ValueError(f"模型产物 {artifact_id} 不属于身份 {identity_id}")
+    if len(launched_slots) != len(specs):
+        raise ValueError(f"launcher 数量与启动配置不一致（{len(launched_slots)} vs {len(specs)}）")
+
+
+def _freeze_launcher_models(roster_bindings: List[dict], specs: List[str]) -> List[dict]:
+    """为 launcher 参与者冻结模型身份/产物（未显式提供时从 spec 唯一解析）。"""
+    from participants import registry as participant_registry
+
+    frozen: List[dict] = []
+    launched = sorted(
+        (entry for entry in roster_bindings if entry.get("launcher_slot") is not None),
+        key=lambda entry: int(entry["launcher_slot"]),
+    )
+    for entry, spec in zip(launched, specs, strict=True):
+        updated = dict(entry)
+        account_id = str(entry["account_id"])
+        identity_id = entry.get("model_identity_id")
+        artifact_id = entry.get("model_artifact_id")
+        if not identity_id:
+            model_id = _spec_to_model_id(spec, PROJECT_ROOT)
+            if model_id and participant_registry.identity_belongs_to_account(model_id, account_id):
+                identity = participant_registry.get_model_identity(model_id)
+                if identity is not None:
+                    identity_id = model_id
+                    if identity.artifacts:
+                        artifact_id = identity.artifacts[0].model_artifact_id
+        if not identity_id:
+            raise ValueError(
+                f"launcher 账号 {account_id} 未指定模型身份且无法从 spec 解析"
+            )
+        if not participant_registry.identity_belongs_to_account(identity_id, account_id):
+            raise ValueError(f"模型身份 {identity_id} 不属于账号 {account_id}")
+        if artifact_id and not participant_registry.artifact_belongs_to_identity(identity_id, artifact_id):
+            raise ValueError(f"模型产物 {artifact_id} 不属于身份 {identity_id}")
+        updated["model_identity_id"] = identity_id
+        updated["model_artifact_id"] = artifact_id
+        frozen.append(updated)
+    return frozen
+
+
 def _validate_ladder_capture(capture: LadderCaptureRequest, specs: List[str]) -> None:
     """启动 subprocess 前的正式天梯绑定校验（C2 gate）。"""
     if not capture.enabled:
@@ -566,9 +654,26 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
     # R9-3 正式天梯捕获 / R10-E 通用 roster 捕获：启动前完成校验并冻结 binding。
     capture_dir: Optional[Path] = None
     if roster:
+        # P2：roster 与旧正式天梯绑定互斥，不能静默忽略 season。
+        if req.ladder_capture is not None and req.ladder_capture.enabled:
+            raise HTTPException(
+                status_code=400,
+                detail="通用四人阵容（roster）与「计入正式天梯」不能同时开启；正式计分将由 ledger projection 决定（R10-F）。",
+            )
         from gateway.playwithyou_capture import capture_dir_for_session
         from participants import aliases as participant_aliases
         from participants.schemas import ExternalAliasCreate as ParticipantAliasCreate
+
+        try:
+            _validate_roster_bindings(roster_bindings, specs)
+            # 冻结 launcher 模型身份/产物（按 launcher_slot 顺序，与 specs 一致）
+            frozen_launched = _freeze_launcher_models(roster_bindings, specs)
+        except (ValueError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        # 用冻结后的模型信息回填 roster_bindings（供 binding/别名使用）
+        launched_idx = [i for i, e in enumerate(roster_bindings) if e.get("launcher_slot") is not None]
+        for index, entry in zip(launched_idx, frozen_launched, strict=True):
+            roster_bindings[index] = entry
 
         capture_dir = capture_dir_for_session(_ladder_data_root(), session_id)
         (capture_dir / "pending").mkdir(parents=True, exist_ok=True)
@@ -587,16 +692,18 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
         tmp_binding.write_text(json.dumps(binding, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp_binding, capture_dir / "binding.json")
 
-        # R10-E：session-scoped 别名——NoName-{n} → 具体账号 + 模型版本，
-        # 供赛后 intake（R10-D）用 session_id 精确解析，绝不提升为全局规则。
-        launched = [entry for entry in roster_bindings if entry.get("launcher_slot") is not None]
-        for index, entry in enumerate(launched):
-            account_id = str(entry.get("account_id") or "").strip()
-            if not account_id:
-                continue
-            expected_name = str(entry.get("expected_raw_name") or names[index] or f"NoName-{index + 1}")
-            try:
-                participant_aliases.register_alias(
+        # R10-E：session-scoped 别名——NoName-{n} → 具体账号 + 模型版本。
+        # 按 launcher_slot 顺序（与真实 bot 顺序一致）；注册失败不 fail-open。
+        launched = sorted(
+            (entry for entry in roster_bindings if entry.get("launcher_slot") is not None),
+            key=lambda entry: int(entry["launcher_slot"]),
+        )
+        registered_alias_ids: List[str] = []
+        try:
+            for index, entry in enumerate(launched):
+                account_id = str(entry.get("account_id") or "").strip()
+                expected_name = str(entry.get("expected_raw_name") or names[index] or f"NoName-{index + 1}")
+                alias = participant_aliases.register_alias(
                     ParticipantAliasCreate(
                         provider="tenhou",
                         external_id=expected_name,
@@ -607,9 +714,19 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
                         session_id=session_id,
                     )
                 )
-            except Exception:
-                # 别名注册失败不阻止呼出（intake 时仍可人工解析）
-                pass
+                registered_alias_ids.append(alias.alias_id)
+        except Exception:
+            # 启动失败清理：删除本次新建的 capture 目录与 session aliases，
+            # 避免 stale alias 长期阻止账号硬删除。
+            import shutil as _shutil
+
+            _shutil.rmtree(capture_dir, ignore_errors=True)
+            for alias_id in registered_alias_ids:
+                try:
+                    participant_aliases.delete_alias(alias_id)
+                except Exception:
+                    pass
+            raise HTTPException(status_code=400, detail="roster 会话别名注册失败，已回滚本次启动")
     elif req.ladder_capture is not None and req.ladder_capture.enabled:
         try:
             _validate_ladder_capture(req.ladder_capture, specs)
