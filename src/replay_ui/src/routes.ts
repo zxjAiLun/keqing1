@@ -15,6 +15,10 @@ export const routes = {
   ladderModel: (modelId: string) => `/ladder/models/${encodeURIComponent(modelId)}`,
   tenhou: '/tenhou',
   diagnosticsCasebook: '/diagnostics/casebook',
+  participants: '/participants',
+  matches: '/matches',
+  matchEntry: '/matches/new',
+  matchDetail: (matchId: string) => `/matches/${encodeURIComponent(matchId)}`,
 } as const;
 
 /** App.tsx 注册 Review Workspace 路由时使用的 pattern。 */
@@ -23,6 +27,9 @@ export const REVIEW_WORKSPACE_PATTERN = '/reviews/:replayId';
 /** App.tsx 注册 Ladder 详情页路由时使用的 pattern。 */
 export const LADDER_ACCOUNT_PATTERN = '/ladder/accounts/:accountId';
 export const LADDER_MODEL_PATTERN = '/ladder/models/:modelId';
+
+/** App.tsx 注册 Match 详情页路由时使用的 pattern。 */
+export const MATCH_DETAIL_PATTERN = '/matches/:matchId';
 
 /** 给 Ladder 相关路径追加 ?season= 查询参数。 */
 export function withLadderSeason(path: string, seasonId: string | null | undefined): string {

@@ -1,0 +1,85 @@
+// src/replay_ui/src/api/participantsApi.ts
+import { ApiError } from './replayApi';
+import type {
+  Account,
+  AccountCreate,
+  AccountUpdate,
+  AccountsResponse,
+  MatchCreate,
+  MatchListResponse,
+  MatchResponse,
+  MatchRevise,
+  ModelsResponse,
+  ModelArtifact,
+  ModelArtifactCreate,
+  ModelIdentity,
+  ModelIdentityCreate,
+  RevisionSummary,
+} from '../types/participants';
+
+const API_BASE = '/api';
+
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    cache: 'no-store',
+    ...init,
+    headers: {
+      Accept: 'application/json',
+      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      ...init?.headers,
+    },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new ApiError(res.status, body);
+  }
+  return res.json();
+}
+
+export const participantsApi = {
+  // ---- 账号 ----
+  listAccounts: (signal?: AbortSignal): Promise<AccountsResponse> =>
+    api('/participants/accounts', { signal }),
+  createAccount: (payload: AccountCreate): Promise<Account> =>
+    api('/participants/accounts', { method: 'POST', body: JSON.stringify(payload) }),
+  getAccount: (accountId: string, signal?: AbortSignal): Promise<{ account: Account; identities: ModelIdentity[] }> =>
+    api(`/participants/accounts/${encodeURIComponent(accountId)}`, { signal }),
+  updateAccount: (accountId: string, payload: AccountUpdate): Promise<Account> =>
+    api(`/participants/accounts/${encodeURIComponent(accountId)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  deleteAccount: (accountId: string): Promise<{ deleted: boolean; disabled: boolean; account_id: string }> =>
+    api(`/participants/accounts/${encodeURIComponent(accountId)}`, { method: 'DELETE' }),
+  getAccountStats: (accountId: string, signal?: AbortSignal): Promise<{ implemented: boolean; account_id: string }> =>
+    api(`/participants/accounts/${encodeURIComponent(accountId)}/stats`, { signal }),
+
+  // ---- 模型 ----
+  listModels: (signal?: AbortSignal): Promise<ModelsResponse> =>
+    api('/participants/models', { signal }),
+  createModel: (payload: ModelIdentityCreate): Promise<ModelIdentity> =>
+    api('/participants/models', { method: 'POST', body: JSON.stringify(payload) }),
+  addModelArtifact: (modelIdentityId: string, payload: ModelArtifactCreate): Promise<ModelArtifact> =>
+    api(`/participants/models/${encodeURIComponent(modelIdentityId)}/artifacts`, { method: 'POST', body: JSON.stringify(payload) }),
+
+  // ---- 对局账本 ----
+  listMatches: (params: {
+    source?: string; status?: string; account_id?: string; from_at?: string; to_at?: string; limit?: number; offset?: number;
+  } = {}, signal?: AbortSignal): Promise<MatchListResponse> => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== '') qs.set(key, String(value));
+    }
+    const search = qs.toString();
+    return api(`/participants/matches${search ? `?${search}` : ''}`, { signal });
+  },
+  createMatch: (payload: MatchCreate): Promise<MatchResponse> =>
+    api('/participants/matches', { method: 'POST', body: JSON.stringify(payload) }),
+  getMatch: (matchId: string, signal?: AbortSignal): Promise<MatchResponse> =>
+    api(`/participants/matches/${encodeURIComponent(matchId)}`, { signal }),
+  getRevisions: (matchId: string, signal?: AbortSignal): Promise<{ match_id: string; revisions: RevisionSummary[] }> =>
+    api(`/participants/matches/${encodeURIComponent(matchId)}/revisions`, { signal }),
+  reviseMatch: (matchId: string, payload: MatchRevise): Promise<MatchResponse> =>
+    api(`/participants/matches/${encodeURIComponent(matchId)}/revise`, { method: 'POST', body: JSON.stringify(payload) }),
+  voidMatch: (matchId: string, payload: { reason: string }): Promise<MatchResponse> =>
+    api(`/participants/matches/${encodeURIComponent(matchId)}/void`, { method: 'POST', body: JSON.stringify(payload) }),
+};
+
+export { ApiError };
