@@ -64,6 +64,11 @@ python_files = [
     "test_progress_oracle_rust.py",
     "test_rust_hora_shape_parity.py",
     "test_rust_state_core_parity.py",
+    "test_participants_registry.py",
+    "test_participants_ledger.py",
+    "test_participants_validation.py",
+    "test_participants_server.py",
+    "test_participants_migration.py",
 ]
 [dependency-groups]
 dev = [
