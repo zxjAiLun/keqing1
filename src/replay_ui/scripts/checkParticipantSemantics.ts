@@ -1,0 +1,93 @@
+// src/replay_ui/scripts/checkParticipantSemantics.ts
+// R10 语义检查：4 座不变量、force-save 流程、无 player_id===0 硬编码、
+// 路由/导航注册、后端 router 挂载、pytest 白名单齐全。
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const ROOT = resolve(import.meta.dirname, '..');
+let failures = 0;
+function check(ok: boolean, message: string): void {
+  if (!ok) {
+    failures += 1;
+    console.error(`FAIL: ${message}`);
+  }
+}
+
+function read(p: string): string {
+  const full = resolve(ROOT, p);
+  return existsSync(full) ? readFileSync(full, 'utf-8') : '';
+}
+
+function inFile(p: string, needles: string[]): boolean {
+  const content = read(p);
+  return needles.every((needle) => content.includes(needle));
+}
+
+// 1) 4 座不变量：SEAT_WINDS 恰好 4 座
+const labels = read('src/components/Matches/labels.ts');
+check(/SEAT_WINDS\s*=\s*\[\s*'東'\s*,\s*'南'\s*,\s*'西'\s*,\s*'北'\s*\]/.test(labels), 'labels.ts 的 SEAT_WINDS 必须恰好 4 座');
+check(inFile('src/components/Matches/SeatPicker.tsx', ['SEAT_WINDS']), 'SeatPicker 使用 SEAT_WINDS');
+
+// 2) MatchEntryPage 走 createMatch + force-save 流程
+check(
+  inFile('src/pages/MatchEntryPage.tsx', ['createMatch', 'force', 'reason', 'ValidationNotice']),
+  'MatchEntryPage 含 createMatch + force-save 流程',
+);
+
+// 3) 新页面无 player_id===0 / seat0=human 硬编码
+for (const page of [
+  'src/pages/ParticipantsPage.tsx',
+  'src/pages/MatchesPage.tsx',
+  'src/pages/MatchEntryPage.tsx',
+  'src/pages/MatchDetailPage.tsx',
+]) {
+  const content = read(page);
+  check(
+    !/player_id\s*===\s*0/.test(content) && !/id\s*===\s*0\s*\?\s*'human'/.test(content),
+    `${page} 不应硬编码 player_id===0 / seat0=human`,
+  );
+}
+
+// 4) types 包含核心概念
+const types = read('src/types/participants.ts');
+for (const name of ['AccountType', 'ControllerType', 'MatchSeat', 'Match', 'RevisionSummary']) {
+  check(types.includes(name), `types/participants.ts 包含 ${name}`);
+}
+
+// 5) 路由与导航注册
+const routes = read('src/routes.ts');
+check(routes.includes("participants: '/participants'"), 'routes.ts 含 /participants');
+check(routes.includes("matches: '/matches'"), 'routes.ts 含 /matches');
+check(routes.includes("matchEntry: '/matches/new'"), 'routes.ts 含 /matches/new');
+check(routes.includes("MATCH_DETAIL_PATTERN = '/matches/:matchId'"), 'routes.ts 含 MATCH_DETAIL_PATTERN');
+check(inFile('src/App.tsx', ['ParticipantsPage', 'MatchesPage', 'MatchEntryPage', 'MatchDetailPage']), 'App.tsx 注册 4 个 R10 页面');
+check(inFile('src/components/Layout/Sidebar.tsx', ['routes.participants', 'routes.matches']), 'Sidebar 链接参赛者与对局记录');
+
+// 6) 后端 router 挂载
+check(
+  inFile('../../src/replay/server.py', ['from participants.api import router as participants_router', 'include_router(participants_router)']),
+  'server.py 挂载 participants router',
+);
+check(inFile('../../src/participants/api.py', ['prefix="/api/participants"']), 'participants api 前缀 /api/participants');
+
+// 7) pytest 白名单包含 5 个 R10 测试文件
+const pyproject = read('../../pyproject.toml');
+for (const testFile of [
+  'test_participants_registry.py',
+  'test_participants_ledger.py',
+  'test_participants_validation.py',
+  'test_participants_server.py',
+  'test_participants_migration.py',
+]) {
+  check(pyproject.includes(testFile), `pyproject python_files 白名单包含 ${testFile}`);
+}
+
+// 8) MatchesPage 渲染 status（active|void）
+const matchesPage = read('src/pages/MatchesPage.tsx');
+check(matchesPage.includes('status') && matchesPage.includes('void'), 'MatchesPage 支持状态筛选（active/void）');
+
+if (failures > 0) {
+  console.error(`participant semantics FAILED (${failures} issues)`);
+  process.exit(1);
+}
+console.log('participant semantics OK (4-seat roster, force-save, routes, server mount, pytest whitelist)');
