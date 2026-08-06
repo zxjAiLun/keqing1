@@ -224,7 +224,7 @@ def main() -> int:
     args = parser.parse_args()
 
     state_path = data_root() / "migration_state.json"
-    state = read_json(state_path, {"seeded_registries": [], "ingested_replays": {}})
+    state = read_json(state_path, {"seeded_registries": {}, "ingested_replays": {}})
 
     print("== 种子注册表 ==")
     for line in seed_registries(state, dry_run=args.dry_run):
