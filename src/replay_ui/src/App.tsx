@@ -18,6 +18,7 @@ import { ParticipantsPage } from './pages/ParticipantsPage';
 import { MatchesPage } from './pages/MatchesPage';
 import { MatchEntryPage } from './pages/MatchEntryPage';
 import { MatchDetailPage } from './pages/MatchDetailPage';
+import { TenhouImportPage } from './pages/TenhouImportPage';
 import { ThemeProvider } from './context/ThemeContext';
 import { LADDER_ACCOUNT_PATTERN, LADDER_MODEL_PATTERN, legacyRoutes, MATCH_DETAIL_PATTERN, REVIEW_WORKSPACE_PATTERN, routes } from './routes';
 import './styles/globals.css';
@@ -67,6 +68,7 @@ export default function App() {
             <Route path={routes.participants} element={<ParticipantsPage />} />
             <Route path={routes.matches} element={<MatchesPage />} />
             <Route path={routes.matchEntry} element={<MatchEntryPage />} />
+            <Route path={routes.matchImport} element={<TenhouImportPage />} />
             <Route path={MATCH_DETAIL_PATTERN} element={<MatchDetailPage />} />
 
             {/* 旧主入口兼容重定向 */}

@@ -5,8 +5,14 @@ import type {
   AccountCreate,
   AccountUpdate,
   AccountsResponse,
+  ExternalAlias,
+  ExternalAliasCreate,
+  IntakeConfirmRequest,
+  IntakePreview,
+  IntakePreviewRequest,
   MatchCreate,
   MatchListResponse,
+  MatchReplayArtifact,
   MatchResponse,
   MatchRevise,
   ModelsResponse,
@@ -80,6 +86,24 @@ export const participantsApi = {
     api(`/participants/matches/${encodeURIComponent(matchId)}/revise`, { method: 'POST', body: JSON.stringify(payload) }),
   voidMatch: (matchId: string, payload: { reason: string }): Promise<MatchResponse> =>
     api(`/participants/matches/${encodeURIComponent(matchId)}/void`, { method: 'POST', body: JSON.stringify(payload) }),
+  getMatchReplay: (matchId: string, signal?: AbortSignal): Promise<MatchReplayArtifact> =>
+    api(`/participants/matches/${encodeURIComponent(matchId)}/replay`, { signal }),
+
+  // ---- R10-D：外部别名 + 天凤摄入 ----
+  listAliases: (params: { provider?: string; account_id?: string; scope?: string } = {}, signal?: AbortSignal): Promise<{ schema: string; aliases: ExternalAlias[] }> => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== '') qs.set(key, String(value));
+    }
+    const search = qs.toString();
+    return api(`/participants/aliases${search ? `?${search}` : ''}`, { signal });
+  },
+  createAlias: (payload: ExternalAliasCreate): Promise<ExternalAlias> =>
+    api('/participants/aliases', { method: 'POST', body: JSON.stringify(payload) }),
+  intakePreview: (payload: IntakePreviewRequest): Promise<IntakePreview> =>
+    api('/participants/intake/preview', { method: 'POST', body: JSON.stringify(payload) }),
+  intakeConfirm: (payload: IntakeConfirmRequest): Promise<MatchResponse> =>
+    api('/participants/intake/confirm', { method: 'POST', body: JSON.stringify(payload) }),
 };
 
 export { ApiError };

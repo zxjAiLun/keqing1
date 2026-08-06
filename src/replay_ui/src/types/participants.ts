@@ -178,3 +178,105 @@ export interface ModelsResponse {
   schema: string;
   identities: ModelIdentity[];
 }
+
+// ---- R10-D：外部别名 + 天凤统一摄入 ----
+
+export type ExternalAliasScope = 'global' | 'session' | 'match';
+
+export interface ExternalAlias {
+  alias_id: string;
+  provider: string;
+  external_id: string;
+  display_name?: string | null;
+  account_id: string;
+  model_identity_id?: string | null;
+  model_artifact_id?: string | null;
+  scope: ExternalAliasScope;
+  session_id?: string | null;
+  confidence: 'confirmed' | 'unresolved';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ExternalAliasCreate {
+  provider?: string;
+  external_id: string;
+  display_name?: string | null;
+  account_id: string;
+  model_identity_id?: string | null;
+  model_artifact_id?: string | null;
+  scope?: ExternalAliasScope;
+  session_id?: string | null;
+  confidence?: 'confirmed' | 'unresolved';
+}
+
+export interface IntakePreviewRequest {
+  url: string;
+  session_id?: string | null;
+}
+
+export interface SeatResolution {
+  seat: SeatNo;
+  action: 'assign' | 'create';
+  account_id?: string | null;
+  display_name?: string | null;
+  account_type?: AccountType | null;
+  default_controller?: ControllerType | null;
+  alias_scope?: ExternalAliasScope | 'none';
+  confidence?: 'confirmed' | 'unresolved';
+}
+
+export interface IntakeConfirmRequest {
+  log_id: string;
+  resolutions: SeatResolution[];
+  session_id?: string | null;
+  note?: string | null;
+}
+
+export interface IntakePreviewSeat {
+  seat: SeatNo;
+  raw_name: string;
+  candidates: ExternalAlias[];
+  auto_account_id?: string | null;
+}
+
+export interface IntakePreview {
+  schema: string;
+  provider: string;
+  external_match_id: string;
+  log_id: string;
+  occurred_at: string;
+  game_length: GameLength;
+  starting_points: number;
+  raw_player_names: string[];
+  final_scores: number[];
+  ranks: number[];
+  data_completeness: DataCompleteness;
+  hand_count: number;
+  events_count: number;
+  seats: IntakePreviewSeat[];
+  duplicate_match_id?: string | null;
+}
+
+export interface MatchReplayArtifact {
+  match_id: string;
+  replay_id: string;
+  schema: string;
+  log_id: string;
+  names: string[];
+  final_scores: number[];
+  ranks: number[];
+  game_length: GameLength;
+  started_at: string;
+  hands: Array<{
+    bakaze: string;
+    kyoku: number;
+    honba: number;
+    oya: number;
+    scores_before: number[];
+    scores_after?: number[] | null;
+    winners: Array<{ actor: number; win_type: string; target?: number | null; deltas: number[] }>;
+    ryukyoku?: { reason?: string | null; deltas: number[] } | null;
+  }>;
+  has_events: boolean;
+}

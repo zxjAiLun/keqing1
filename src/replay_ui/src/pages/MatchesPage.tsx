@@ -47,15 +47,23 @@ export function MatchesPage() {
         title="对局记录"
         description="统一比赛账本：手动 / 导入 / 本地，可筛选"
         actions={(
-          <button
-            onClick={() => navigate(routes.matchEntry)}
-            style={{
-              border: '1px solid var(--accent)', background: 'var(--accent)', color: '#fff',
-              borderRadius: 6, fontSize: 13, fontWeight: 700, padding: '8px 16px', cursor: 'pointer',
-            }}
-          >
-            新建对局
-          </button>
+          <>
+            <button
+              onClick={() => navigate(routes.matchImport)}
+              style={ghostBtn}
+            >
+              天凤导入
+            </button>
+            <button
+              onClick={() => navigate(routes.matchEntry)}
+              style={{
+                border: '1px solid var(--accent)', background: 'var(--accent)', color: '#fff',
+                borderRadius: 6, fontSize: 13, fontWeight: 700, padding: '8px 16px', cursor: 'pointer',
+              }}
+            >
+              新建对局
+            </button>
+          </>
         )}
       />
 
@@ -85,3 +93,8 @@ export function MatchesPage() {
     </PageShell>
   );
 }
+
+const ghostBtn: React.CSSProperties = {
+  border: '1px solid var(--border)', background: 'var(--page-bg)', color: 'var(--text-primary)',
+  borderRadius: 6, fontSize: 13, padding: '8px 16px', cursor: 'pointer',
+};

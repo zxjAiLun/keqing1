@@ -18,6 +18,7 @@ export const routes = {
   participants: '/participants',
   matches: '/matches',
   matchEntry: '/matches/new',
+  matchImport: '/matches/import',
   matchDetail: (matchId: string) => `/matches/${encodeURIComponent(matchId)}`,
 } as const;
 
