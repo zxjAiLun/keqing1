@@ -17,6 +17,16 @@ export interface LadderCaptureRequest {
   mode: "confirm";
 }
 
+export interface ParticipantBindingRequest {
+  account_id: string;
+  controller_type: string;
+  model_identity_id?: string | null;
+  model_artifact_id?: string | null;
+  launcher_slot?: number | null; // 本系统实际呼出的 slot；null = 不启动
+  expected_raw_name?: string | null; // NoName-1 等
+  resolution_required?: boolean;
+}
+
 export interface StartPlayWithYouRequest {
   lobby_id: string;
   speed: SpeedId;
@@ -27,6 +37,7 @@ export interface StartPlayWithYouRequest {
   name_prefix?: string;
   tenhou_cookie?: string;
   ladder_capture?: LadderCaptureRequest;
+  roster?: ParticipantBindingRequest[]; // R10-E 通用四人阵容
 }
 
 export interface BotInfo {

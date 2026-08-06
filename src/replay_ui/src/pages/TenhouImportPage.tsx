@@ -1,7 +1,7 @@
 // src/replay_ui/src/pages/TenhouImportPage.tsx
 // R10-D：天凤链接 → preview → 逐座身份解析 → 确认落账。
-import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { PageHeader, PageShell } from '../components/Layout/PageScaffold';
 import { SEAT_WINDS } from '../components/Matches/labels';
 import { participantsApi } from '../api/participantsApi';
@@ -33,7 +33,11 @@ const EMPTY_DRAFT: DraftResolution = {
 
 export function TenhouImportPage() {
   const navigate = useNavigate();
-  const [url, setUrl] = useState('');
+  const [searchParams] = useSearchParams();
+  const prefilledUrl = searchParams.get('url') ?? '';
+  const prefilledSession = searchParams.get('session_id') ?? undefined;
+  const [url, setUrl] = useState(prefilledUrl);
+  const [sessionId, setSessionId] = useState<string | undefined>(prefilledSession);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [preview, setPreview] = useState<IntakePreview | null>(null);
   const [drafts, setDrafts] = useState<DraftResolution[]>([]);
@@ -56,12 +60,22 @@ export function TenhouImportPage() {
     return () => controller.abort();
   }, [load]);
 
+  // R10-E：从 play-with-you 会话跳转时自动解析预览
+  const autoRun = useRef(false);
+  useEffect(() => {
+    if (autoRun.current) return;
+    if (!prefilledUrl) return;
+    autoRun.current = true;
+    void runPreview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const runPreview = async () => {
     if (!url.trim()) return;
     setLoading(true);
     setError(null);
     try {
-      const result = await participantsApi.intakePreview({ url: url.trim() });
+      const result = await participantsApi.intakePreview({ url: url.trim(), session_id: sessionId });
       setPreview(result);
       setDrafts(
         result.seats.map((seat) => {
@@ -111,7 +125,7 @@ export function TenhouImportPage() {
     setConfirming(true);
     setError(null);
     try {
-      const resp = await participantsApi.intakeConfirm({ log_id: preview.log_id, resolutions });
+      const resp = await participantsApi.intakeConfirm({ log_id: preview.log_id, resolutions, session_id: sessionId });
       navigate(routes.matchDetail(resp.match.match_id));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409 && e.body && typeof e.body === 'object') {
@@ -155,6 +169,20 @@ export function TenhouImportPage() {
             >
               {loading ? '解析中…' : '解析预览'}
             </button>
+          </div>
+          <div style={{ marginTop: 8 }}>
+            <label style={{ display: 'grid', gap: 4, fontSize: 12, color: 'var(--text-secondary)' }}>
+              会话 ID（可选，来自 play-with-you 会话；用于解析 NoName-1/2 的模型绑定）
+              <input
+                value={sessionId ?? ''}
+                onChange={(e) => setSessionId(e.target.value || undefined)}
+                placeholder="session_id"
+                style={{
+                  border: '1px solid var(--border)', background: 'var(--page-bg)',
+                  color: 'var(--text-primary)', borderRadius: 4, padding: '6px 8px', fontSize: 13,
+                }}
+              />
+            </label>
           </div>
           {error && <div style={{ color: '#e74c3c', fontSize: 13, marginTop: 8 }}>{error}</div>}
         </section>

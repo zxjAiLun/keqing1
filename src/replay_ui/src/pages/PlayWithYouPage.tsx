@@ -19,9 +19,28 @@ import {
   type BotInfo,
   type PlayWithYouStatus,
   type LadderCaptureEntry,
+  type ParticipantBindingRequest,
 } from "../api/playwithyouApi";
+import { participantsApi } from "../api/participantsApi";
+import type { Account as ParticipantAccount } from "../types/participants";
+import { useNavigate } from "react-router-dom";
+import { routes } from "../routes";
 
 const ACCENT = "#8e44ad";
+
+type RosterBinding = {
+  account_id: string;
+  controller_type: string;
+  launched: boolean;
+  expected_raw_name: string;
+};
+
+const CONTROLLER_OPTIONS = [
+  { value: "human_ui", label: "真人" },
+  { value: "local_model", label: "本地模型" },
+  { value: "external_agent", label: "外部代理" },
+  { value: "manual_only", label: "仅登记" },
+];
 
 const NETWORK_OPTIONS: Array<{ value: NetworkId; label: string; hint: string }> = [
   { value: "none", label: "none", hint: "不呼出" },
@@ -92,6 +111,7 @@ function Segmented<T extends string>({
 }
 
 export function PlayWithYouPage() {
+  const navigate = useNavigate();
   const [lobbyId, setLobbyId] = useState<string>("2147");
   const [speed, setSpeed] = useState<SpeedId>("normal");
   const [device, setDevice] = useState<DeviceId>("cuda");
@@ -110,6 +130,16 @@ export function PlayWithYouPage() {
   const [captureBots, setCaptureBots] = useState(["70k@01", "70k@02", "70k@03"]);
   const [captures, setCaptures] = useState<LadderCaptureEntry[]>([]);
   const [captureBusy, setCaptureBusy] = useState<string | null>(null);
+
+  // R10-E：通用四人阵容模式（预期四人阵容与 launcher 数量分离）
+  const [rosterMode, setRosterMode] = useState(false);
+  const [roster, setRoster] = useState<RosterBinding[]>([
+    { account_id: "nick@01", controller_type: "human_ui", launched: false, expected_raw_name: "" },
+    { account_id: "70k@01", controller_type: "local_model", launched: true, expected_raw_name: "NoName-1" },
+    { account_id: "70k@02", controller_type: "local_model", launched: true, expected_raw_name: "NoName-2" },
+    { account_id: "", controller_type: "external_agent", launched: false, expected_raw_name: "" },
+  ]);
+  const [accounts, setAccounts] = useState<ParticipantAccount[]>([]);
 
   const logRef = useRef<HTMLDivElement | null>(null);
   const pollingRef = useRef<number | null>(null);
@@ -139,13 +169,25 @@ export function PlayWithYouPage() {
     setLoading(true);
     setError(null);
     try {
+      const launchedSlots = roster
+        .map((entry, index) => (entry.launched ? index : null))
+        .filter((slot): slot is number => slot !== null);
+      const rosterPayload: ParticipantBindingRequest[] | undefined = rosterMode
+        ? roster.map((entry, index) => ({
+            account_id: entry.account_id,
+            controller_type: entry.controller_type,
+            launcher_slot: entry.launched ? index : null,
+            expected_raw_name: entry.expected_raw_name || null,
+          }))
+        : undefined;
       const req = {
         lobby_id: lobbyId,
         speed,
-        quantity,
+        quantity: launchedSlots.length,
         networks: [...networks],
         custom_paths: customPaths,
         device,
+        roster: rosterPayload,
         ladder_capture: captureEnabled
           ? {
               enabled: true,
@@ -235,6 +277,16 @@ export function PlayWithYouPage() {
     const timer = window.setInterval(refreshCaptures, 5000);
     return () => window.clearInterval(timer);
   }, [refreshCaptures]);
+
+  // R10-E：加载 participants 账号（roster 账号选择用）
+  useEffect(() => {
+    const controller = new AbortController();
+    participantsApi
+      .listAccounts(controller.signal)
+      .then((resp) => setAccounts(resp.accounts))
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => stopPolling, [stopPolling]);
 
@@ -456,6 +508,99 @@ export function PlayWithYouPage() {
             </div>
           )}
         </div>
+
+        {/* R10-E 通用四人阵容（预期四人阵容与 launcher 数量分离） */}
+        <div
+          style={{
+            marginTop: 14,
+            padding: 12,
+            borderRadius: 8,
+            border: `1px solid ${rosterMode ? ACCENT : "var(--border)"}`,
+            background: rosterMode ? "rgba(142,68,173,0.04)" : "var(--surface-subtle)",
+          }}
+        >
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={rosterMode}
+              disabled={isRunning}
+              onChange={(e) => setRosterMode(e.target.checked)}
+            />
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>
+              通用四人阵容（可选：任意四人，非 1 人类 + 3 bot）
+            </span>
+          </label>
+          <div style={hintStyle}>
+            勾选「呼出」的座位由本系统启动（数量 = launcher 数，如 2 个本地 bot + 外部 Mortal 合法）；
+            赛后在天凤牌谱导入页按 session 自动解析 NoName 与会话绑定的模型版本。
+          </div>
+          {rosterMode && (
+            <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+              {roster.map((entry, index) => (
+                <div key={index} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <span style={{ width: 24, fontWeight: 800, color: "var(--text-muted)" }}>{["東", "南", "西", "北"][index]}</span>
+                  <select
+                    value={entry.account_id}
+                    disabled={isRunning}
+                    onChange={(e) => {
+                      const next = [...roster];
+                      next[index] = { ...next[index], account_id: e.target.value };
+                      setRoster(next);
+                    }}
+                    style={{ ...inputStyle, flex: 1 }}
+                  >
+                    <option value="">选择账号…</option>
+                    {accounts.map((a) => (
+                      <option key={a.account_id} value={a.account_id}>
+                        {a.display_name}（{a.account_id}）
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={entry.controller_type}
+                    disabled={isRunning}
+                    onChange={(e) => {
+                      const next = [...roster];
+                      next[index] = { ...next[index], controller_type: e.target.value };
+                      setRoster(next);
+                    }}
+                    style={inputStyle}
+                  >
+                    {CONTROLLER_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                  <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, whiteSpace: "nowrap" }}>
+                    <input
+                      type="checkbox"
+                      checked={entry.launched}
+                      disabled={isRunning}
+                      onChange={(e) => {
+                        const next = [...roster];
+                        next[index] = { ...next[index], launched: e.target.checked };
+                        setRoster(next);
+                      }}
+                    />
+                    呼出
+                  </label>
+                  {entry.launched && (
+                    <input
+                      value={entry.expected_raw_name}
+                      disabled={isRunning}
+                      onChange={(e) => {
+                        const next = [...roster];
+                        next[index] = { ...next[index], expected_raw_name: e.target.value };
+                        setRoster(next);
+                      }}
+                      placeholder={`NoName-${index + 1}`}
+                      style={{ ...inputStyle, width: 110 }}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Status / live log */}
@@ -644,6 +789,19 @@ export function PlayWithYouPage() {
                       忽略本局
                     </button>
                   </>
+                )}
+                {c.state === "awaiting_import" && c.tenhou_log_url && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const params = new URLSearchParams({ url: c.tenhou_log_url ?? "" });
+                      if (c.session_id) params.set("session_id", c.session_id);
+                      navigate(`${routes.matchImport}?${params.toString()}`);
+                    }}
+                    style={{ height: 30, padding: "0 12px", background: ACCENT, color: "#fff", borderRadius: 6, fontSize: 12, cursor: "pointer" }}
+                  >
+                    导入对局
+                  </button>
                 )}
                 {c.state === "accepted_publish_failed" && (
                   <button
