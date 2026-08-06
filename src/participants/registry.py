@@ -163,6 +163,29 @@ def delete_account(account_id: str, *, referenced: bool = False) -> dict:
         return {"deleted": True, "disabled": False, "account_id": account_id}
 
 
+def delete_account_guarded(account_id: str, reference_checker) -> dict:
+    """统一���锁删除（P1-2 防 TOCTOU）：锁内检查引用 → 决定软删/硬删 → 写入。
+
+    ``reference_checker`` 由调用方提供（覆盖当前 match + revision + identity 引用），
+    在同一个 ``data_lock`` 临界区内求值，避免"检查"与"写入"之间被并发插入引用。
+    """
+    with _write_lock, data_lock():
+        store = _read_accounts()
+        if not any(raw.get("account_id") == account_id for raw in store["accounts"]):
+            raise KeyError(f"account not found: {account_id}")
+        referenced = bool(reference_checker())
+        if referenced:
+            for raw in store["accounts"]:
+                if raw.get("account_id") == account_id:
+                    raw["enabled"] = False
+                    raw["updated_at"] = now_iso()
+            write_json(_accounts_path(), ACCOUNTS_SCHEMA, store)
+            return {"deleted": False, "disabled": True, "account_id": account_id}
+        store["accounts"] = [raw for raw in store["accounts"] if raw.get("account_id") != account_id]
+        write_json(_accounts_path(), ACCOUNTS_SCHEMA, store)
+        return {"deleted": True, "disabled": False, "account_id": account_id}
+
+
 # ---------------------------------------------------------------------------
 # 模型身份 / 产物
 # ---------------------------------------------------------------------------
@@ -189,11 +212,11 @@ def get_model_identity(model_identity_id: str) -> ModelIdentity | None:
 
 
 def create_model_identity(payload: ModelIdentityCreate) -> ModelIdentity:
-    if payload.account_id is not None and not account_exists(payload.account_id):
-        raise ValueError(f"绑定的账号不存在: {payload.account_id}")
     identity_id = payload.model_identity_id or f"model:{_slugify(payload.label).replace('account:', '')}"
     now = now_iso()
     with _write_lock, data_lock():
+        if payload.account_id is not None and not account_exists(payload.account_id):
+            raise ValueError(f"绑定的账号不存在: {payload.account_id}")
         store = _read_models()
         if any(raw.get("model_identity_id") == identity_id for raw in store["identities"]):
             raise ValueError(f"model_identity_id 已存在: {identity_id}")
@@ -258,9 +281,9 @@ def add_model_artifact(identity_id: str, payload: ModelArtifactCreate) -> ModelA
 
 
 def update_model_identity(identity_id: str, payload: ModelIdentityUpdate) -> ModelIdentity:
-    if payload.account_id is not None and not account_exists(payload.account_id):
-        raise ValueError(f"绑定的账号不存在: {payload.account_id}")
     with _write_lock, data_lock():
+        if payload.account_id is not None and not account_exists(payload.account_id):
+            raise ValueError(f"绑定的账号不存在: {payload.account_id}")
         store = _read_models()
         for idx, raw in enumerate(store["identities"]):
             if raw.get("model_identity_id") != identity_id:

@@ -46,10 +46,32 @@ def _json_safe(value):
         return value if math.isfinite(value) else None
     return value
 from fastapi.staticfiles import StaticFiles
+from contextlib import asynccontextmanager
 
 BASE_DIR = Path(__file__).parent
 
-app = FastAPI(title="Keqing Unified Server", description="立直麻将 Review + 对战服务")
+
+def _recover_participants_pending_transaction() -> None:
+    """启动时恢复未完成的 participants 账本事务（P2-1）。"""
+    try:
+        from participants import ledger as participants_ledger
+
+        participants_ledger.recover_pending_transaction()
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "participants pending transaction recovery failed", exc_info=True
+        )
+
+
+@asynccontextmanager
+async def _app_lifespan(_app):
+    _recover_participants_pending_transaction()
+    yield
+
+
+app = FastAPI(title="Keqing Unified Server", description="立直麻将 Review + 对战服务", lifespan=_app_lifespan)
 
 # ========== 合并 Battle Router ==========
 from gateway.api.battle import router as battle_router

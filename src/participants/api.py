@@ -75,8 +75,11 @@ def api_update_account(account_id: str, payload: AccountUpdate) -> Account:
 @router.delete("/accounts/{account_id}", response_model=dict)
 def api_delete_account(account_id: str) -> dict:
     try:
-        referenced = ledger.match_references_account(account_id) or registry.identity_references_account(account_id)
-        return registry.delete_account(account_id, referenced=referenced)
+        # 引用检查与删除在同一 data_lock 临界区内（P1-2 防 TOCTOU）
+        return registry.delete_account_guarded(
+            account_id,
+            lambda: ledger.match_references_account(account_id) or registry.identity_references_account(account_id),
+        )
     except KeyError as exc:
         raise _error(404, str(exc)) from exc
 

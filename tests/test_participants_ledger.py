@@ -187,3 +187,42 @@ def test_match_references_account_includes_void(four_accounts):
     match = ledger.create_match(_create_payload([25000] * 4, four_accounts), registry)
     ledger.void_match(match.match_id, MatchVoid(reason="中途结束"))
     assert ledger.match_references_account("nick@01") is True, "void 局仍应阻止硬删除账号"
+
+
+def test_revision_history_blocks_hard_delete(four_accounts):
+    """P1-1：账号被修订移出当前座位后，历史 revision 仍引用 → 只能软删。"""
+    from participants.schemas import AccountCreate as AC
+
+    registry.create_account(AC(account_id="new@01", display_name="New", account_type="human"))
+    match = ledger.create_match(_create_payload([25000] * 4, four_accounts), registry)
+    ledger.revise_match(
+        match.match_id,
+        MatchRevise(
+            seats=[
+                MatchSeat(seat=0, account_id="new@01"),
+                MatchSeat(seat=1, account_id=four_accounts[1]),
+                MatchSeat(seat=2, account_id=four_accounts[2]),
+                MatchSeat(seat=3, account_id=four_accounts[3]),
+            ]
+        ),
+        registry,
+    )
+    # nick@01 已不在当前座位，但 rev1 after / rev2 before 仍引用
+    assert ledger.match_references_account("nick@01") is True
+    # 统一删除（引用检查在锁内）：必须软删
+    result = registry.delete_account_guarded(
+        "nick@01", lambda: ledger.match_references_account("nick@01") or registry.identity_references_account("nick@01")
+    )
+    assert result["disabled"] is True
+    assert registry.get_account("nick@01").enabled is False
+
+
+def test_read_path_recovers_pending(four_accounts):
+    """P2-1：只读请求（模拟重启后首次 GET）应自动恢复未完成事务。"""
+    match = ledger.create_match(_create_payload([25000] * 4, four_accounts), registry)
+    rev2, revision_row = _build_rev2_tx(match)
+    ledger._write_pending_transaction(rev2, revision_row)
+    assert ledger._pending_tx_path().exists()
+    fetched = ledger.get_match(match.match_id)
+    assert fetched.revision == 2
+    assert not ledger._pending_tx_path().exists()

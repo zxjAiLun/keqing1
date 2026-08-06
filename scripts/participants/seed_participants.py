@@ -65,10 +65,18 @@ def _content_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _normalize_state(state: dict) -> dict:
+    """旧版 migration state 升级：seeded_registries 若为 list，则重置为 dict 重新处理。"""
+    seeded = state.get("seeded_registries")
+    if not isinstance(seeded, dict):
+        state["seeded_registries"] = {}
+    return state
+
+
 def seed_registries(state: dict, *, dry_run: bool) -> list[str]:
     created_accounts = 0
     created_models = 0
-    seeded = state.setdefault("seeded_registries", {})  # {str(path): content_sha256}
+    seeded = _normalize_state(state).setdefault("seeded_registries", {})  # {str(path): content_sha256}
     for path in _resolve_registry_paths():
         key = str(path)
         digest = _content_sha256(path)
@@ -166,7 +174,6 @@ def backfill_replays(state: dict, *, dry_run: bool) -> list[str]:
             continue
         # 座位账号：按显示名匹配，未知名自动建占位账号
         seats: list[MatchSeat] = []
-        ambiguous = False
         for seat, name in enumerate(player_names):
             account = None
             matched = [a for a in registry.list_accounts() if a.display_name == name]
@@ -175,7 +182,6 @@ def backfill_replays(state: dict, *, dry_run: bool) -> list[str]:
             elif len(matched) > 1:
                 report.append(f"{replay_id}: 显示名 '{name}' 命中多个账号，跳过（需要 alias map）")
                 seats = []
-                ambiguous = True
                 break
             else:
                 placeholder_id = f"imp_{_slugify_name(name)}-{_name_hash(name)}"
@@ -195,8 +201,10 @@ def backfill_replays(state: dict, *, dry_run: bool) -> list[str]:
             if account is not None:
                 seats.append(MatchSeat(seat=seat, account_id=account.account_id))
         if len(seats) != 4:
-            report.append(f"{replay_id}: 跳过（占位账号不足 / 名字歧义）")
-            ingested[replay_id] = fingerprint
+            # 可修复错误（歧义/占位失败）不得标记为已摄入，记 skipped_replays 允许重试
+            report.append(f"{replay_id}: 跳过（可重试：占位账号不足 / 名字歧义）")
+            skipped = state.setdefault("skipped_replays", {})
+            skipped[replay_id] = {"fingerprint": fingerprint, "reason": "unresolved_seats"}
             continue
         if not dry_run:
             ledger.create_match(
@@ -224,7 +232,7 @@ def main() -> int:
     args = parser.parse_args()
 
     state_path = data_root() / "migration_state.json"
-    state = read_json(state_path, {"seeded_registries": {}, "ingested_replays": {}})
+    state = _normalize_state(read_json(state_path, {"seeded_registries": {}, "ingested_replays": {}}))
 
     print("== 种子注册表 ==")
     for line in seed_registries(state, dry_run=args.dry_run):

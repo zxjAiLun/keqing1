@@ -129,3 +129,26 @@ def test_dry_run_writes_nothing(participants_env):
     assert registry.list_accounts() == []
     assert ledger.list_matches().total == 0
     assert not (participants_env["root"] / "migration_state.json").exists()
+
+
+def test_ambiguous_replay_not_marked_ingested(participants_env):
+    """P1-3：歧义跳过不得写 ingested_replays，记 skipped_replays 且允许重试。"""
+    _write_registry(participants_env["configs"])
+    seed.seed_registries({"seeded_registries": {}, "ingested_replays": {}}, dry_run=False)
+    # 制造同名账号
+    from participants import registry
+    from participants.schemas import AccountCreate
+
+    registry.create_account(AccountCreate(account_id="dup@01", display_name="Nick", account_type="human"))
+    _write_replay(participants_env["replays"], "replay_a", ["Nick", "70k-1", "Friend Alice", "Bot X"], [30000, 25000, 25000, 20000])
+
+    state = {"seeded_registries": {}, "ingested_replays": {}}
+    seed.backfill_replays(state, dry_run=False)
+    assert ledger.list_matches().total == 0
+    assert "replay_a" not in state["ingested_replays"], "歧义不得标记为已摄入"
+    assert "replay_a" in state.get("skipped_replays", {})
+
+    # 修复歧义（删除重复账号）后重试可摄入
+    registry.delete_account("dup@01", referenced=False)
+    seed.backfill_replays(state, dry_run=False)
+    assert ledger.list_matches().total == 1

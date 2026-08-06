@@ -92,6 +92,7 @@ def list_matches(
     limit: int | None = None,
     offset: int = 0,
 ) -> MatchListResponse:
+    _maybe_recover_pending()
     rows = _read_match_rows()
     matches: list[Match] = []
     for raw in rows:
@@ -119,6 +120,15 @@ def list_matches(
 
 
 def get_match(match_id: str) -> Match | None:
+    _maybe_recover_pending()
+    for raw in _read_match_rows():
+        if raw.get("match_id") == match_id:
+            return Match.model_validate(raw)
+    return None
+
+
+def _read_match(match_id: str) -> Match | None:
+    """锁内使用的原始读取（不触发 pending 恢复，避免文件锁重入）。"""
     for raw in _read_match_rows():
         if raw.get("match_id") == match_id:
             return Match.model_validate(raw)
@@ -126,6 +136,7 @@ def get_match(match_id: str) -> Match | None:
 
 
 def list_revisions(match_id: str) -> list[dict]:
+    _maybe_recover_pending()
     return [row for row in _read_revision_rows() if row.get("match_id") == match_id]
 
 
@@ -134,11 +145,20 @@ def list_revision_summaries(match_id: str) -> list[RevisionSummary]:
 
 
 def match_references_account(account_id: str) -> bool:
-    """账号是否被任何对局（active 或 void）引用。void 局与 revision 仍保留历史引用。"""
+    """账号是否被引用：当前 match seats（active/void）+ 任意 revision 的 before/after seats。
+
+    账号可能被修订移出当前座位，但 revision 历史仍永久引用它，因此必须扫描 revisions。
+    """
     for raw in _read_match_rows():
         match = Match.model_validate(raw)
         if any(seat.account_id == account_id for seat in match.seats):
             return True
+    for row in _read_revision_rows():
+        for key in ("before", "after"):
+            snapshot = row.get(key) or {}
+            for seat in snapshot.get("seats", []):
+                if seat.get("account_id") == account_id:
+                    return True
     return False
 
 
@@ -163,14 +183,28 @@ FATAL_ISSUE_CODES = {
 
 
 def blocking_issues(issues: list[ValidationIssue], *, force: bool, reason: str | None) -> list[ValidationIssue]:
-    """返回实际阻塞的 issue：fatal 恒阻塞；forceable 仅在 force+reason 时放行。"""
+    """返回实际阻塞的 issue：真 allowlist——只有明确可 force 的 code 能在 force+reason 下放行，
+    其余所有已知或未来新增的 code 一律默认阻塞。"""
     has_force_reason = force and bool((reason or "").strip())
     return [
         issue
         for issue in issues
-        if issue.code in FATAL_ISSUE_CODES
-        or (issue.code in FORCEABLE_ISSUE_CODES and not has_force_reason)
+        if issue.code not in FORCEABLE_ISSUE_CODES or not has_force_reason
     ]
+
+
+def _assert_seat_accounts_exist(seats, registry) -> None:
+    """锁内复检座位账号存在（防 TOCTOU：校验与写入必须同一临界区）。"""
+    missing = [
+        seat.account_id for seat in seats
+        if registry.get_account(seat.account_id) is None
+    ]
+    if missing:
+        issues = [
+            ValidationIssue(code="account_unknown", message=f"账号不存在: {aid}")
+            for aid in missing
+        ]
+        raise ValidationError(issues)
 
 
 def validate_match(
@@ -311,6 +345,23 @@ def _recover_pending_transaction() -> None:
         pass
 
 
+def _maybe_recover_pending() -> None:
+    """只读入口：存在未完成事务时加锁恢复，避免读侧持续看到旧当前态+新 revision。"""
+    if not _pending_tx_path().exists():
+        return
+    with _write_lock, data_lock():
+        _recover_pending_transaction()
+
+
+def recover_pending_transaction() -> bool:
+    """公开恢复入口（服务启动 / 运维）。返回是否实际发生了恢复。"""
+    if not _pending_tx_path().exists():
+        return False
+    with _write_lock, data_lock():
+        _recover_pending_transaction()
+    return True
+
+
 def _transactional_match_update(match: Match, revision_row: dict) -> None:
     """write-ahead：pending → revision(fsync) → matches 原子替换 → 删 pending。"""
     _write_pending_transaction(match, revision_row)
@@ -365,6 +416,7 @@ def create_match(payload: MatchCreate, registry) -> Match:
 
     with _write_lock, data_lock():
         _recover_pending_transaction()
+        _assert_seat_accounts_exist(match.seats, registry)
         _transactional_match_update(
             match,
             {
@@ -388,17 +440,32 @@ def create_match(payload: MatchCreate, registry) -> Match:
 def revise_match(match_id: str, payload: MatchRevise, registry) -> Match:
     with _write_lock, data_lock():
         _recover_pending_transaction()
-        current = get_match(match_id)
+        current = _read_match(match_id)
         if current is None:
             raise KeyError(f"match not found: {match_id}")
         if current.status == "void":
             raise ValueError("已作废的对局不能再修订")
 
         next_match = current.model_copy(deep=True)
-        dump = payload.model_dump(exclude_unset=True, exclude={"force", "reason"})
-        for key, value in dump.items():
-            if value is not None:
-                setattr(next_match, key, value)
+        # 直接应用 typed 字段（保留 MatchSeat 对象，避免 dict 污染）
+        if payload.occurred_at is not None:
+            next_match.occurred_at = payload.occurred_at
+        if payload.game_length is not None:
+            next_match.game_length = payload.game_length
+        if payload.rule_set is not None:
+            next_match.rule_set = payload.rule_set
+        if payload.starting_points is not None:
+            next_match.starting_points = payload.starting_points
+        if payload.initial_oya is not None:
+            next_match.initial_oya = payload.initial_oya
+        if payload.note is not None:
+            next_match.note = payload.note
+        if payload.data_completeness is not None:
+            next_match.data_completeness = payload.data_completeness
+        if payload.seats is not None:
+            next_match.seats = payload.seats
+        if payload.final_scores is not None:
+            next_match.final_scores = payload.final_scores
 
         ranks, issues = validate_match(
             next_match.seats,
@@ -417,6 +484,7 @@ def revise_match(match_id: str, payload: MatchRevise, registry) -> Match:
         next_match.revision = current.revision + 1
         next_match.latest_revision_id = _generate_revision_id(match_id, next_match.revision)
         next_match.updated_at = now_iso()
+        _assert_seat_accounts_exist(next_match.seats, registry)
         _transactional_match_update(
             next_match,
             {
@@ -440,7 +508,7 @@ def revise_match(match_id: str, payload: MatchRevise, registry) -> Match:
 def void_match(match_id: str, payload: MatchVoid) -> Match:
     with _write_lock, data_lock():
         _recover_pending_transaction()
-        current = get_match(match_id)
+        current = _read_match(match_id)
         if current is None:
             raise KeyError(f"match not found: {match_id}")
         if current.status == "void":
