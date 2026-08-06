@@ -395,9 +395,11 @@ def _transactional_match_update(match: Match, revision_row: dict) -> None:
 def create_match(payload: MatchCreate, registry) -> Match:
     if not payload.occurred_at:
         raise ValueError("occurred_at 不能为空")
-    # 锁外预校验：快速失败（不构成最终写入依据）
+    # 锁外预校验：快速失败。deep-copy 隔离副作用——validate_match 会原地填充
+    # controller_type，不能污染最终输入（P1：默认值必须以锁内结果为准）。
+    pre_seats = [seat.model_copy(deep=True) for seat in payload.seats]
     _pre_ranks, pre_issues = validate_match(
-        payload.seats,
+        pre_seats,
         payload.final_scores,
         starting_points=payload.starting_points,
         initial_oya=payload.initial_oya,
@@ -410,10 +412,11 @@ def create_match(payload: MatchCreate, registry) -> Match:
 
     with _write_lock, data_lock():
         _recover_pending_transaction()
-        # P1-1：锁内完整复检——账号存在/enabled、model_identity/artifact 归属、
-        # controller 默认值全部以锁内结果为准，防止并发改动产生悬空引用
+        # P1-1：锁内完整复检——从原始请求重新解析座位（deep-copy），
+        # controller_type 默认值、账号 enabled、identity/artifact 归属全部以锁内为准
+        resolved_seats = [seat.model_copy(deep=True) for seat in payload.seats]
         ranks, issues = validate_match(
-            payload.seats,
+            resolved_seats,
             payload.final_scores,
             starting_points=payload.starting_points,
             initial_oya=payload.initial_oya,
@@ -439,7 +442,7 @@ def create_match(payload: MatchCreate, registry) -> Match:
             note=payload.note,
             data_completeness=payload.data_completeness,
             replay_id=payload.replay_id,
-            seats=payload.seats,
+            seats=resolved_seats,
             final_scores=payload.final_scores,
             ranks=ranks,
             revision=1,

@@ -282,3 +282,28 @@ def test_guarded_delete_sees_only_pending_create(four_accounts):
     assert recovered is not None
     assert registry.get_account(four_accounts[0]) is not None
     assert registry.get_account(four_accounts[0]).enabled is False
+
+
+def test_create_match_controller_default_resolved_in_lock(four_accounts, monkeypatch):
+    """P1：锁外预校验不得固化 controller 默认值——锁内必须以新默认值重新解析。"""
+    from participants.schemas import AccountUpdate as AU
+
+    original_validate = ledger.validate_match
+    calls = {"n": 0}
+
+    def racing_validate(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # 第一次（锁外）校验后、取得 data_lock 前，账号默认 controller 被并发修改
+            registry.update_account(four_accounts[0], AU(default_controller="manual_only"))
+        return original_validate(*args, **kwargs)
+
+    monkeypatch.setattr(ledger, "validate_match", racing_validate)
+
+    payload = _create_payload([25000] * 4, four_accounts)  # controller_type 均未显式填写
+    assert payload.seats[0].controller_type is None
+    match = ledger.create_match(payload, registry)
+    assert match.seats[0].controller_type == "manual_only", (
+        f"锁内复检应使用新默认值 manual_only（得到 {match.seats[0].controller_type}）"
+    )
+    assert calls["n"] >= 2, "validate_match 应在锁外与锁内各执行一次"
