@@ -89,6 +89,8 @@ def list_matches(
     account_id: str | None = None,
     from_at: str | None = None,
     to_at: str | None = None,
+    provider: str | None = None,
+    external_match_id: str | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> MatchListResponse:
@@ -100,6 +102,10 @@ def list_matches(
         if source and match.source != source:
             continue
         if source_ref and match.source_ref != source_ref:
+            continue
+        if provider and match.provider != provider:
+            continue
+        if external_match_id and match.external_match_id != external_match_id:
             continue
         if status and match.status != status:
             continue
@@ -124,6 +130,16 @@ def get_match(match_id: str) -> Match | None:
     for raw in _read_match_rows():
         if raw.get("match_id") == match_id:
             return Match.model_validate(raw)
+    return None
+
+
+def find_match_by_external(provider: str, external_match_id: str) -> Match | None:
+    """按外部唯一键查找（幂等防重）：provider + external_match_id。"""
+    _maybe_recover_pending()
+    for raw in _read_match_rows():
+        match = Match.model_validate(raw)
+        if match.provider == provider and match.external_match_id == external_match_id:
+            return match
     return None
 
 
@@ -442,6 +458,10 @@ def create_match(payload: MatchCreate, registry) -> Match:
             note=payload.note,
             data_completeness=payload.data_completeness,
             replay_id=payload.replay_id,
+            provider=payload.provider,
+            external_match_id=payload.external_match_id,
+            raw_player_names=payload.raw_player_names,
+            resolution=payload.resolution,
             seats=resolved_seats,
             final_scores=payload.final_scores,
             ranks=ranks,

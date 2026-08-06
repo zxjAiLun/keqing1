@@ -14,12 +14,15 @@ SourceType = Literal["native", "imported", "manual"]
 DataCompleteness = Literal["result_only", "hand_summary", "full_replay"]
 GameLength = Literal["tonpu", "hanchan"]
 SeatNo = Literal[0, 1, 2, 3]
+ExternalAliasScope = Literal["global", "session", "match"]
 
 ACCOUNTS_SCHEMA = "keqing.participant.accounts.v1"
 MODELS_SCHEMA = "keqing.participant.models.v1"
 MATCH_SCHEMA = "keqing.participant.match.v1"
 MATCH_REVISION_SCHEMA = "keqing.participant.match_revision.v1"
 MIGRATION_STATE_SCHEMA = "keqing.participant.migration_state.v1"
+ALIASES_SCHEMA = "keqing.participant.aliases.v1"
+REPLAY_ARTIFACT_SCHEMA = "keqing.participant.replay_artifact.v1"
 
 
 def normalize_occurred_at(v: str) -> str:
@@ -107,6 +110,64 @@ class ModelArtifactCreate(BaseModel):
     artifact_path: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# 外部账号别名（身份解析）
+# ---------------------------------------------------------------------------
+
+class ExternalAlias(BaseModel):
+    alias_id: str
+    provider: str = "tenhou"
+    external_id: str
+    display_name: str | None = None
+    account_id: str
+    model_identity_id: str | None = None
+    model_artifact_id: str | None = None
+    scope: ExternalAliasScope = "global"
+    session_id: str | None = None
+    confidence: Literal["confirmed", "unresolved"] = "confirmed"
+    created_at: str
+    updated_at: str
+
+
+class ExternalAliasCreate(BaseModel):
+    provider: str = "tenhou"
+    external_id: str = Field(min_length=1)
+    display_name: str | None = None
+    account_id: str = Field(min_length=1)
+    model_identity_id: str | None = None
+    model_artifact_id: str | None = None
+    scope: ExternalAliasScope = "global"
+    session_id: str | None = None
+    confidence: Literal["confirmed", "unresolved"] = "confirmed"
+
+
+# ---------------------------------------------------------------------------
+# 天凤 intake（preview / confirm）
+# ---------------------------------------------------------------------------
+
+class IntakePreviewRequest(BaseModel):
+    url: str = Field(min_length=1)
+    session_id: str | None = None
+
+
+class SeatResolution(BaseModel):
+    seat: SeatNo
+    action: Literal["assign", "create"] = "assign"
+    account_id: str | None = None
+    display_name: str | None = None
+    account_type: AccountType | None = None
+    default_controller: ControllerType | None = None
+    alias_scope: ExternalAliasScope | Literal["none"] = "match"
+    confidence: Literal["confirmed", "unresolved"] = "confirmed"
+
+
+class IntakeConfirmRequest(BaseModel):
+    log_id: str = Field(min_length=1)
+    resolutions: list[SeatResolution]
+    session_id: str | None = None
+    note: str | None = None
+
+
 class MatchSeat(BaseModel):
     seat: SeatNo
     account_id: str
@@ -126,6 +187,10 @@ class MatchCreate(BaseModel):
     note: str | None = None
     data_completeness: DataCompleteness = "result_only"
     replay_id: str | None = None
+    provider: str | None = None  # 外部来源，如 "tenhou"
+    external_match_id: str | None = None  # 外部比赛唯一键，如 tenhou log_id
+    raw_player_names: list[str] | None = None  # 四个原始外部名称
+    resolution: dict | None = None  # 逐座身份解析审计
     seats: list[MatchSeat]
     final_scores: list[int]
     force: bool = False
@@ -177,6 +242,10 @@ class Match(BaseModel):  # matches.jsonl 行（当前态）
     note: str | None = None
     data_completeness: DataCompleteness
     replay_id: str | None = None
+    provider: str | None = None
+    external_match_id: str | None = None
+    raw_player_names: list[str] | None = None
+    resolution: dict | None = None
     seats: list[MatchSeat]
     final_scores: list[int]
     ranks: list[int]

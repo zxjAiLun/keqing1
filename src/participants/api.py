@@ -10,11 +10,14 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from . import ledger, registry, stats
+from . import ledger, registry, stats, aliases, intake
 from .schemas import (
     Account,
     AccountCreate,
     AccountUpdate,
+    ExternalAliasCreate,
+    IntakeConfirmRequest,
+    IntakePreviewRequest,
     Match,
     MatchCreate,
     MatchListResponse,
@@ -79,7 +82,11 @@ def api_delete_account(account_id: str) -> dict:
         # 先做锁内 pending 恢复，再查引用，避免"只有 pending"的写失败后硬删账号。
         def _reference_checker() -> bool:
             ledger.recover_pending_transaction_locked()
-            return ledger.match_references_account(account_id) or registry.identity_references_account(account_id)
+            return (
+                ledger.match_references_account(account_id)
+                or registry.identity_references_account(account_id)
+                or aliases.alias_references_account(account_id)
+            )
 
         return registry.delete_account_guarded(account_id, _reference_checker)
     except KeyError as exc:
@@ -140,6 +147,8 @@ def api_list_matches(
     account_id: str | None = None,
     from_at: str | None = None,
     to_at: str | None = None,
+    provider: str | None = None,
+    external_match_id: str | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> MatchListResponse:
@@ -153,6 +162,8 @@ def api_list_matches(
         account_id=account_id,
         from_at=from_at,
         to_at=to_at,
+        provider=provider,
+        external_match_id=external_match_id,
         limit=limit,
         offset=offset,
     )
@@ -212,3 +223,78 @@ def api_void_match(match_id: str, payload: MatchVoid) -> MatchResponse:
     except ValueError as exc:
         raise _error(409, str(exc)) from exc
     return MatchResponse(match=match, revisions=ledger.list_revision_summaries(match_id))
+
+
+# ---------------------------------------------------------------------------
+# 外部别名（身份解析）
+# ---------------------------------------------------------------------------
+
+@router.get("/aliases", response_model=dict)
+def api_list_aliases(
+    provider: str | None = None,
+    account_id: str | None = None,
+    scope: str | None = None,
+) -> dict:
+    return {
+        "schema": "keqing.participant.aliases.v1",
+        "aliases": [a.model_dump() for a in aliases.list_aliases(provider=provider, account_id=account_id, scope=scope)],
+    }
+
+
+@router.post("/aliases", response_model=dict)
+def api_create_alias(payload: ExternalAliasCreate) -> dict:
+    if registry.get_account(payload.account_id) is None:
+        raise _error(422, f"账号不存在: {payload.account_id}")
+    alias = aliases.register_alias(payload)
+    return alias.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# 天凤统一摄入（R10-D）
+# ---------------------------------------------------------------------------
+
+@router.post("/intake/preview", response_model=dict)
+def api_intake_preview(payload: IntakePreviewRequest) -> dict:
+    try:
+        return intake.build_preview(payload.url, session_id=payload.session_id)
+    except ValueError as exc:
+        raise _error(422, str(exc)) from exc
+    except Exception as exc:  # 网络/解析错误统一 502
+        raise HTTPException(status_code=502, detail={"error": f"牌谱获取失败: {exc}"}) from exc
+
+
+@router.post("/intake/confirm", response_model=MatchResponse)
+def api_intake_confirm(payload: IntakeConfirmRequest) -> MatchResponse:
+    try:
+        result = intake.resolve_and_create_match(
+            log_id=payload.log_id,
+            resolutions=[r.model_dump() for r in payload.resolutions],
+            session_id=payload.session_id,
+            note=payload.note,
+        )
+    except ValueError as exc:
+        raise _error(409, str(exc)) from exc
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "校验失败", "issues": [i.model_dump() for i in exc.issues], "score_mismatch": exc.score_mismatch},
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail={"error": f"落账失败: {exc}"}) from exc
+    return MatchResponse(
+        match=ledger.get_match(result["match_id"]),
+        revisions=ledger.list_revision_summaries(result["match_id"]),
+    )
+
+
+@router.get("/matches/{match_id}/replay", response_model=dict)
+def api_match_replay_artifact(match_id: str) -> dict:
+    match = ledger.get_match(match_id)
+    if match is None:
+        raise _error(404, f"match not found: {match_id}")
+    if not match.replay_id:
+        raise _error(404, f"对局 {match_id} 无 replay artifact")
+    artifact = intake.read_replay_artifact(match.replay_id)
+    if artifact is None:
+        raise _error(404, f"对局 {match_id} 的 replay artifact 不存在")
+    return {"match_id": match_id, "replay_id": match.replay_id, **artifact}

@@ -143,3 +143,81 @@ def test_list_matches_pagination_validation(four_account_ids):
     # 合法分页
     resp = api.api_list_matches(limit=10, offset=0)
     assert resp.total == 0
+
+
+def test_alias_api_endpoints(four_account_ids):
+    from participants.schemas import ExternalAliasCreate
+
+    created = api.api_create_alias(
+        ExternalAliasCreate(provider="tenhou", external_id="keqing1", account_id="nick@01", scope="global")
+    )
+    assert created["account_id"] == "nick@01"
+    listed = api.api_list_aliases(provider="tenhou")
+    assert len(listed["aliases"]) == 1
+    from fastapi import HTTPException as HE
+
+    with pytest.raises(HE) as exc:
+        api.api_create_alias(
+            ExternalAliasCreate(provider="tenhou", external_id="x", account_id="ghost@01", scope="global")
+        )
+    assert exc.value.status_code == 422
+
+
+def test_intake_preview_endpoint(four_account_ids, monkeypatch):
+    from participants import intake
+
+    monkeypatch.setattr(
+        intake, "download_tenhou6",
+        lambda log_id: {
+            "name": ["Nick", "NoName-1", "NoName-2", "FriendID"],
+            "rule": {"aka": True},
+            "log": [
+                [[0, 0, 0], [25000, 25000, 25000, 25000], [], [], [], [], [], [], [], [], [], [], [], [], [], [], ["和了", [5000, -5000, 0, 0], [0, 1]]],
+            ],
+        },
+    )
+    from participants.schemas import IntakePreviewRequest
+
+    preview = api.api_intake_preview(IntakePreviewRequest(url="https://tenhou.net/3/?log=20260804gm-0009-2147-32af115e"))
+    assert preview["raw_player_names"][0] == "Nick"
+    assert preview["duplicate_match_id"] is None
+    assert preview["game_length"] == "tonpu"
+
+
+def test_intake_confirm_endpoint(four_account_ids, monkeypatch):
+    from participants import intake
+    from participants.schemas import IntakeConfirmRequest, SeatResolution
+
+    monkeypatch.setattr(
+        intake, "download_tenhou6",
+        lambda log_id: {
+            "name": ["Nick", "NoName-1", "NoName-2", "FriendID"],
+            "rule": {"aka": True},
+            "log": [
+                [[0, 0, 0], [25000, 25000, 25000, 25000], [], [], [], [], [], [], [], [], [], [], [], [], [], [], ["和了", [5000, -5000, 0, 0], [0, 1]]],
+            ],
+        },
+    )
+    resolutions = [
+        SeatResolution(seat=0, action="assign", account_id="nick@01", alias_scope="global"),
+        SeatResolution(seat=1, action="create", display_name="Bot A", account_type="managed_bot", alias_scope="session"),
+        SeatResolution(seat=2, action="create", display_name="Bot B", account_type="managed_bot", alias_scope="session"),
+        SeatResolution(seat=3, action="create", display_name="Friend", account_type="human", alias_scope="global"),
+    ]
+    resp = api.api_intake_confirm(
+        IntakeConfirmRequest(log_id="20260804gm-0009-2147-32af115e", resolutions=resolutions, session_id="s9")
+    )
+    assert resp.match.provider == "tenhou"
+    assert resp.match.data_completeness == "full_replay"
+    # 重复确认 → 409
+    from fastapi import HTTPException as HE
+
+    with pytest.raises(HE) as exc:
+        api.api_intake_confirm(
+            IntakeConfirmRequest(log_id="20260804gm-0009-2147-32af115e", resolutions=resolutions, session_id="s9")
+        )
+    assert exc.value.status_code == 409
+    # replay artifact 可查
+    replay = api.api_match_replay_artifact(resp.match.match_id)
+    assert replay["replay_id"] == "20260804gm-0009-2147-32af115e"
+    assert replay["has_events"] is True
