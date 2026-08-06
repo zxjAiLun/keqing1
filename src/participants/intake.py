@@ -300,8 +300,9 @@ def _resolve_seat(
 ) -> tuple[AccountCreate | None, ExternalAliasCreate | None, MatchSeat, dict]:
     """锁内解析单个座位。返回 (account_to_create, alias_to_register, seat, audit)。
 
-    优先级：alias_id（服务端读取候选别名）> 显式 account_id/model 字段。
+    优先级：alias_id（服务端重新校验候选别名，alias 为权威）> 显式 account_id/model 字段。
     """
+    seat_no = int(raw_res["seat"])
     action = raw_res.get("action", "assign")
     alias_scope = raw_res.get("alias_scope") or "match"
     confidence = raw_res.get("confidence") or "confirmed"
@@ -309,20 +310,41 @@ def _resolve_seat(
         alias_scope = "match"
 
     account_id: str | None = None
-    model_identity_id: str | None = raw_res.get("model_identity_id")
-    model_artifact_id: str | None = raw_res.get("model_artifact_id")
+    model_identity_id: str | None = None
+    model_artifact_id: str | None = None
     account_to_create: AccountCreate | None = None
 
     alias_id = raw_res.get("alias_id")
     if alias_id:
-        alias = aliases.get_alias(alias_id)
+        # P1-1：alias_id 必须属于当前 provider/raw_name/session/external_match_id 的合法候选
+        candidates = aliases.resolve_candidates(
+            "tenhou", name, session_id=session_id, external_match_id=external_match_id
+        )
+        alias = next((c for c in candidates if c.alias_id == alias_id), None)
         if alias is None:
-            raise ValueError(f"座位 {raw_res['seat']} 引用了不存在的别名: {alias_id}")
+            raise ValueError(f"座位 {seat_no} 的别名不适用于当前牌谱/会话/玩家: {alias_id}")
+        # alias 为权威；请求携带冲突字段 → 拒绝而不是覆盖
+        if raw_res.get("account_id") and raw_res.get("account_id") != alias.account_id:
+            raise ValueError(f"座位 {seat_no} 的 account_id 与别名绑定冲突")
+        req_identity = raw_res.get("model_identity_id")
+        req_artifact = raw_res.get("model_artifact_id")
+        if req_identity is not None and req_identity != alias.model_identity_id:
+            raise ValueError(f"座位 {seat_no} 的模型身份与别名冻结值冲突")
+        if req_artifact is not None and req_artifact != alias.model_artifact_id:
+            raise ValueError(f"座位 {seat_no} 的模型产物与别名冻结值冲突")
         account_id = alias.account_id
-        model_identity_id = model_identity_id or alias.model_identity_id
-        model_artifact_id = model_artifact_id or alias.model_artifact_id
+        model_identity_id = alias.model_identity_id
+        model_artifact_id = alias.model_artifact_id
+        # 别名指向的账号必须存在且启用（P1-3 stale alias）
+        account = registry.get_account(account_id)
+        if account is None:
+            raise ValueError(f"别名绑定的账号已不存在: {account_id}")
+        if not account.enabled:
+            raise ValueError(f"别名绑定的账号已停用: {account_id}")
+        controller_type = raw_res.get("default_controller") or account.default_controller
+        alias_to_register = None  # 消费已有 alias 时不再创建新别名
     elif action == "create":
-        display_name = raw_res.get("display_name") or name or f"seat{raw_res['seat'] + 1}"
+        display_name = raw_res.get("display_name") or name or f"seat{seat_no + 1}"
         slug = "".join(ch.lower() if (ch.isalnum() or ch in "-_") else ("-" if ch.isspace() else "") for ch in display_name.strip())
         slug = slug.strip("-") or "unknown"
         import hashlib
@@ -335,35 +357,72 @@ def _resolve_seat(
             default_controller=raw_res.get("default_controller"),
             note=f"tenhou_intake:{external_match_id}",
         )
+        controller_type = (
+            raw_res.get("default_controller")
+            or account_to_create.default_controller
+            or _DEFAULT_CTRL_BY_TYPE.get(raw_res.get("account_type") or "external_bot")
+        )
+        alias_to_register = _build_alias(
+            name=name, account_id=account_id, seat_no=seat_no,
+            model_identity_id=model_identity_id, model_artifact_id=model_artifact_id,
+            alias_scope=alias_scope, confidence=confidence,
+            session_id=session_id, external_match_id=external_match_id,
+        )
     else:
         account_id = raw_res.get("account_id")
-        if not account_id or registry.get_account(account_id) is None:
-            raise ValueError(f"座位 {raw_res['seat']} 指派了不存在的账号: {account_id}")
-
-    account = registry.get_account(account_id)
-    if account is None:
-        # 新建账号尚未落盘：controller 用请求默认值或按类型推导
-        ctrl_from_req = raw_res.get("default_controller") or (account_to_create.default_controller if account_to_create else None)
-        controller_type = ctrl_from_req or _DEFAULT_CTRL_BY_TYPE.get(raw_res.get("account_type") or "external_bot")
-    else:
+        account = registry.get_account(account_id) if account_id else None
+        if account is None:
+            raise ValueError(f"座位 {seat_no} 指派了不存在的账号: {account_id}")
         if not account.enabled:
             raise ValueError(f"账号已停用: {account_id}")
+        model_identity_id = raw_res.get("model_identity_id")
+        model_artifact_id = raw_res.get("model_artifact_id")
         controller_type = raw_res.get("default_controller") or account.default_controller
+        alias_to_register = _build_alias(
+            name=name, account_id=account_id, seat_no=seat_no,
+            model_identity_id=model_identity_id, model_artifact_id=model_artifact_id,
+            alias_scope=alias_scope, confidence=confidence,
+            session_id=session_id, external_match_id=external_match_id,
+        )
+
     if model_identity_id and not registry.identity_belongs_to_account(model_identity_id, account_id):
         raise ValueError(f"模型身份 {model_identity_id} 不属于账号 {account_id}")
     if not registry.artifact_belongs_to_identity(model_identity_id, model_artifact_id):
         raise ValueError(f"模型产物 {model_artifact_id} 不属于身份 {model_identity_id}")
 
     seat = MatchSeat(
-        seat=int(raw_res["seat"]),
+        seat=seat_no,
         account_id=account_id,
         controller_type=controller_type,
         model_identity_id=model_identity_id,
         model_artifact_id=model_artifact_id,
     )
-    alias_to_register = None
+    audit = {
+        "raw_name": name,
+        "action": action,
+        "account_id": account_id,
+        "model_identity_id": model_identity_id,
+        "model_artifact_id": model_artifact_id,
+        "alias_scope": alias_scope,
+        "confidence": confidence,
+    }
+    return account_to_create, alias_to_register, seat, audit
+
+
+def _build_alias(
+    *,
+    name: str,
+    account_id: str,
+    seat_no: int,
+    model_identity_id: str | None,
+    model_artifact_id: str | None,
+    alias_scope: str,
+    confidence: str,
+    session_id: str | None,
+    external_match_id: str,
+) -> ExternalAliasCreate | None:
     if alias_scope and alias_scope != "none":
-        alias_to_register = ExternalAliasCreate(
+        return ExternalAliasCreate(
             provider="tenhou",
             external_id=name,
             display_name=name,
@@ -375,16 +434,7 @@ def _resolve_seat(
             external_match_id=external_match_id if alias_scope == "match" else None,
             confidence=confidence,
         )
-    audit = {
-        "raw_name": name,
-        "action": action,
-        "account_id": account_id,
-        "model_identity_id": model_identity_id,
-        "model_artifact_id": model_artifact_id,
-        "alias_scope": alias_scope,
-        "confidence": confidence,
-    }
-    return account_to_create, alias_to_register, seat, audit
+    return None
 
 
 def resolve_and_create_match(
@@ -431,17 +481,7 @@ def resolve_and_create_match(
         if ledger.find_match_by_external("tenhou", log_id) is not None:
             raise ValueError(f"该天凤牌谱已导入")
 
-        # artifact staging（锁内、防重之后写入，避免并发文件竞争）
-        staging = _staging_dir(log_id)
-        _write_artifact_files(
-            staging,
-            tenhou6=tenhou6,
-            events=events,
-            hands=hands,
-            summary=dict(summary_base),
-        )
-
-        # 锁内解析：账号/别名/seat/audit 全部在内存中构造
+        # 锁内解析：账号/别名/seat/audit 全部在内存中构造（校验失败时无任何副作用）
         accounts_to_create: list[AccountCreate] = []
         aliases_to_register: list[ExternalAliasCreate] = []
         seats: list[MatchSeat] = []
@@ -461,6 +501,16 @@ def resolve_and_create_match(
             resolution_audit[str(seat.seat)] = audit
         if len({s.account_id for s in seats}) != 4:
             raise ValueError("四个座位不能指向同一账号")
+
+        # 全部校验通过后才写 staging（P2-2：校验失败不残留 staging）
+        staging = _staging_dir(log_id)
+        _write_artifact_files(
+            staging,
+            tenhou6=tenhou6,
+            events=events,
+            hands=hands,
+            summary=dict(summary_base),
+        )
 
         now = now_iso()
         match_id = ledger.generate_match_id()

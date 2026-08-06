@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .paths import TZ_OFFSET
 
@@ -142,23 +142,22 @@ class ExternalAliasCreate(BaseModel):
     external_match_id: str | None = None
     confidence: Literal["confirmed", "unresolved"] = "confirmed"
 
-    @field_validator("external_match_id")
-    @classmethod
-    def _scope_requires_foreign_key(cls, v: str | None, info) -> str | None:
-        scope = info.data.get("scope")
-        if scope == "match" and not v:
-            raise ValueError("scope=match 必须提供 external_match_id")
-        if scope in ("session", "global") and v:
-            raise ValueError("scope=session/global 不允许携带 external_match_id")
-        return v
-
-    @field_validator("session_id")
-    @classmethod
-    def _session_requires_session_id(cls, v: str | None, info) -> str | None:
-        scope = info.data.get("scope")
-        if scope == "session" and not v:
-            raise ValueError("scope=session 必须提供 session_id")
-        return v
+    @model_validator(mode="after")
+    def _scope_consistency(self) -> "ExternalAliasCreate":
+        if self.scope == "global":
+            if self.session_id is not None or self.external_match_id is not None:
+                raise ValueError("scope=global 不允许携带 session_id / external_match_id")
+        elif self.scope == "session":
+            if not self.session_id:
+                raise ValueError("scope=session 必须提供 session_id")
+            if self.external_match_id is not None:
+                raise ValueError("scope=session 不允许携带 external_match_id")
+        elif self.scope == "match":
+            if not self.external_match_id:
+                raise ValueError("scope=match 必须提供 external_match_id")
+            if self.session_id is not None:
+                raise ValueError("scope=match 不允许携带 session_id")
+        return self
 
 
 # ---------------------------------------------------------------------------

@@ -64,12 +64,20 @@ export function TenhouImportPage() {
       const result = await participantsApi.intakePreview({ url: url.trim() });
       setPreview(result);
       setDrafts(
-        result.seats.map((seat) => ({
-          ...EMPTY_DRAFT,
-          seat: seat.seat,
-          account_id: seat.auto_account_id ?? '',
-          alias_scope: seat.auto_account_id ? 'global' : 'match',
-        })),
+        result.seats.map((seat) => {
+          const autoCandidate =
+            seat.candidates.length === 1 && seat.candidates[0].confidence === 'confirmed'
+              ? seat.candidates[0]
+              : undefined;
+          return {
+            ...EMPTY_DRAFT,
+            seat: seat.seat,
+            account_id: autoCandidate?.account_id ?? '',
+            alias_id: autoCandidate?.alias_id ?? '',
+            // 消费已有候选别名时不再创建新 alias（提升为 global 需用户显式操作）
+            alias_scope: autoCandidate ? 'none' : 'match',
+          };
+        }),
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

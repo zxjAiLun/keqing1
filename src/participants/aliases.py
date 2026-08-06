@@ -165,8 +165,9 @@ def resolve_candidates(
 
 
 def alias_references_account(account_id: str) -> bool:
-    """账号是否被 alias 引用（删除保护：global alias 绑定的账号不能硬删）。"""
-    return any(a.account_id == account_id and a.scope == "global" for a in list_aliases())
+    """账号是否被 alias 引用（删除保护）。所有 scope 都算——stale session/match
+    alias 若指向已删除账号，会导致摄入时产生悬空引用。"""
+    return any(a.account_id == account_id for a in list_aliases())
 
 
 __all__ = [

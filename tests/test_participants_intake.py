@@ -274,12 +274,12 @@ def test_session_alias_model_info_enters_match(fake_download, participants_root)
     # replay summary 含 resolution
     replay = intake.read_replay_artifact(FAKE_LOG_ID)
     assert replay["resolution"]["1"]["model_identity_id"] == "70k"
-    # 身份/产物归属校验：错误产物被拒（不落账）
+    # 身份/产物归属校验：错误产物被拒（不落账）——使用独立 session 避免与好 alias 键冲突
     alias_bad = aliases.register_alias(
         ExternalAliasCreate(
-            provider="tenhou", external_id="NoName-2", account_id="70k@01",
+            provider="tenhou", external_id="NoName-1", account_id="70k@01",
             model_identity_id="70k", model_artifact_id="art_does_not_exist",
-            scope="session", session_id="s1",
+            scope="session", session_id="s_bad",
         )
     )
     bad_resolutions = [
@@ -289,7 +289,7 @@ def test_session_alias_model_info_enters_match(fake_download, participants_root)
         {"seat": 3, "action": "create", "display_name": "Friend", "account_type": "human", "alias_scope": "none"},
     ]
     with pytest.raises(ValueError, match="不属于"):
-        intake.resolve_and_create_match(log_id=LOG_B, resolutions=bad_resolutions, session_id="s1")
+        intake.resolve_and_create_match(log_id=LOG_B, resolutions=bad_resolutions, session_id="s_bad")
 
 
 def test_occurred_at_keeps_hour():
@@ -306,3 +306,104 @@ def test_game_length_prefers_rule_metadata(fake_download):
     events = intake.tenhou6_events(FAKE_TENHOU6)
     hands = intake.hand_summaries(events)
     assert intake._game_length_from_hands(hands) == "tonpu"
+
+
+# ---------------------------------------------------------------------------
+# R10-D Repair 2：alias_id 上下文锁 / stale alias / scope schema / staging 残留
+# ---------------------------------------------------------------------------
+
+def _resolutions_with_alias(alias_id, seat=1):
+    return [
+        {"seat": 0, "action": "assign", "account_id": "nick@01", "alias_scope": "none"},
+        {"seat": 1, "action": "assign", "alias_id": alias_id, "alias_scope": "none"},
+        {"seat": 2, "action": "create", "display_name": "Bot V3", "account_type": "managed_bot", "alias_scope": "none"},
+        {"seat": 3, "action": "create", "display_name": "Friend", "account_type": "human", "alias_scope": "none"},
+    ]
+
+
+def test_alias_id_scope_isolated_on_confirm(fake_download, participants_root):
+    """P1-1：session s1 的 alias 用于 s2 / 名字不匹配 / 覆盖冻结 artifact / match A 用于 match B → 拒绝。"""
+    registry.create_account(AccountCreate(account_id="nick@01", display_name="Nick", account_type="human"))
+    registry.create_account(AccountCreate(account_id="70k@01", display_name="70k", account_type="managed_bot"))
+    s1_alias = aliases.register_alias(
+        ExternalAliasCreate(provider="tenhou", external_id="NoName-1", account_id="70k@01", scope="session", session_id="s1")
+    )
+    # s1 alias 用于 s2 → 拒绝
+    with pytest.raises(ValueError, match="不适用于"):
+        intake.resolve_and_create_match(log_id=FAKE_LOG_ID, resolutions=_resolutions_with_alias(s1_alias.alias_id), session_id="s2")
+    # 名字不匹配：NoName-1 的 alias 用在 FriendID 座位 → 拒绝
+    res_friend = [
+        {"seat": 0, "action": "assign", "account_id": "nick@01", "alias_scope": "none"},
+        {"seat": 1, "action": "create", "display_name": "Bot V3", "account_type": "managed_bot", "alias_scope": "none"},
+        {"seat": 2, "action": "create", "display_name": "Bot V4", "account_type": "managed_bot", "alias_scope": "none"},
+        {"seat": 3, "action": "assign", "alias_id": s1_alias.alias_id, "alias_scope": "none"},
+    ]
+    with pytest.raises(ValueError, match="不适用于"):
+        intake.resolve_and_create_match(log_id=FAKE_LOG_ID, resolutions=res_friend, session_id="s1")
+    # 覆盖 alias 冻结的 artifact → 拒绝（请求字段与 alias 冲突）
+    res_override = [
+        {"seat": 0, "action": "assign", "account_id": "nick@01", "alias_scope": "none"},
+        {"seat": 1, "action": "assign", "alias_id": s1_alias.alias_id, "model_artifact_id": "hack", "alias_scope": "none"},
+        {"seat": 2, "action": "create", "display_name": "Bot V3", "account_type": "managed_bot", "alias_scope": "none"},
+        {"seat": 3, "action": "create", "display_name": "Friend", "account_type": "human", "alias_scope": "none"},
+    ]
+    with pytest.raises(ValueError, match="冲突"):
+        intake.resolve_and_create_match(log_id=FAKE_LOG_ID, resolutions=res_override, session_id="s1")
+    # match A 的别名用于 match B → 拒绝
+    match_a_alias = aliases.register_alias(
+        ExternalAliasCreate(provider="tenhou", external_id="NoName-1", account_id="70k@01", scope="match", external_match_id=FAKE_LOG_ID)
+    )
+    with pytest.raises(ValueError, match="不适用于"):
+        intake.resolve_and_create_match(log_id=LOG_B, resolutions=_resolutions_with_alias(match_a_alias.alias_id))
+    # 全程不产生 Match
+    assert ledger.list_matches().total == 0
+
+
+def test_stale_alias_account_cannot_be_hard_deleted(fake_download, participants_root):
+    """P1-3：session alias 阻止硬删；软删后 confirm 拒绝且不产生 Match。"""
+    registry.create_account(AccountCreate(account_id="nick@01", display_name="Nick", account_type="human"))
+    registry.create_account(AccountCreate(account_id="70k@01", display_name="70k", account_type="managed_bot"))
+    alias = aliases.register_alias(
+        ExternalAliasCreate(provider="tenhou", external_id="NoName-1", account_id="70k@01", scope="session", session_id="s1")
+    )
+    # 所有 scope 的 alias 都参与删除保护 → 只能软删
+    result = registry.delete_account_guarded("70k@01", lambda: aliases.alias_references_account("70k@01"))
+    assert result["disabled"] is True
+    assert registry.get_account("70k@01").enabled is False
+    # confirm 使用该 alias → 拒绝（停用），不产生 Match
+    with pytest.raises(ValueError, match="停用"):
+        intake.resolve_and_create_match(log_id=FAKE_LOG_ID, resolutions=_resolutions_with_alias(alias.alias_id), session_id="s1")
+    assert ledger.find_match_by_external("tenhou", FAKE_LOG_ID) is None
+    assert ledger.list_matches().total == 0
+
+
+def test_alias_scope_schema_validation():
+    """P2-1：scope 一致性一次性校验（model_validator 覆盖默认值场景）。"""
+    from participants.schemas import ExternalAliasCreate as EAC
+
+    with pytest.raises(Exception, match="session_id"):
+        EAC(provider="tenhou", external_id="x", account_id="a", scope="session")
+    with pytest.raises(Exception, match="external_match_id"):
+        EAC(provider="tenhou", external_id="x", account_id="a", scope="match")
+    with pytest.raises(Exception, match="global"):
+        EAC(provider="tenhou", external_id="x", account_id="a", scope="global", session_id="s1")
+    with pytest.raises(Exception):
+        EAC(provider="tenhou", external_id="x", account_id="a", scope="session", session_id="s1", external_match_id="m")
+    # 合法
+    EAC(provider="tenhou", external_id="x", account_id="a", scope="global")
+    EAC(provider="tenhou", external_id="x", account_id="a", scope="session", session_id="s1")
+    EAC(provider="tenhou", external_id="x", account_id="a", scope="match", external_match_id="m")
+
+
+def test_validation_failure_leaves_no_staging(fake_download, participants_root):
+    """P2-2：四座重复校验失败 → 不残留 staging 目录。"""
+    registry.create_account(AccountCreate(account_id="nick@01", display_name="Nick", account_type="human"))
+    res = [
+        {"seat": 0, "action": "assign", "account_id": "nick@01", "alias_scope": "none"},
+        {"seat": 1, "action": "assign", "account_id": "nick@01", "alias_scope": "none"},
+        {"seat": 2, "action": "create", "display_name": "Bot V3", "account_type": "managed_bot", "alias_scope": "none"},
+        {"seat": 3, "action": "create", "display_name": "Friend", "account_type": "human", "alias_scope": "none"},
+    ]
+    with pytest.raises(ValueError, match="同一账号"):
+        intake.resolve_and_create_match(log_id=FAKE_LOG_ID, resolutions=res)
+    assert not intake._staging_dir(FAKE_LOG_ID).exists()
