@@ -78,9 +78,14 @@ class LegacyFixedProfile:
             target_pt=int(self.target_pt),
         )
 
-    def match_context(self, players: Sequence[PlayerRankState]) -> MatchContext:
+    def match_context(
+        self,
+        players: Sequence[PlayerRankState],
+        *,
+        game_length: str | None = None,
+    ) -> MatchContext:
         raw_avg = sum(player.rating for player in players) / 4
-        return MatchContext(game_length=self.game_length, avg_rating=raw_avg)
+        return MatchContext(game_length=game_length or self.game_length, avg_rating=raw_avg)
 
     def apply_result(
         self,

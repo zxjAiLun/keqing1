@@ -24,6 +24,11 @@ _SRC_DIR = Path(__file__).parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
+# 确保仓库根在 path 中（顶层 scripts/ 包，publisher/ingest 依赖它）
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from gateway import settings as gateway_settings
 
 

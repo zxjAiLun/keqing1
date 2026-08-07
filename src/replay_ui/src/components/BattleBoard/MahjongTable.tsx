@@ -25,7 +25,7 @@ import type { BattleState, Action, DiscardEntry, MeldEntry } from "../../types/b
 import type { LogitTileData } from "../../utils/replayAdapter";
 import { BAKAZE_CN, JIKAZE_CN } from "../../utils/constants";
 import { sortHand } from "../../utils/tileUtils";
-import { buildMeldDisplayTiles, getSeatModel, type LayoutAxis, type SeatPosition } from "./seatLayout";
+import { buildMeldDisplayTiles, computeSelfHandContentOffset, computeSelfHandWidth, computeSouthMeldLaneWidth, getKakanStackOffset, getMeldTileOrientation, getSeatModel, orderMeldsForDisplay, SELF_HAND_LEFT_OFFSET, SELF_HAND_MELD_GAP, SELF_SEAT_SHELL_WIDTH_PX, SELF_SEAT_SIDE_MARGIN, type LayoutAxis, type SeatPosition } from "./seatLayout";
 import { TABLECLOTH_OPTIONS } from "./tableclothOptions";
 import type { TableclothId } from "./tableclothOptions";
 
@@ -51,7 +51,6 @@ function chunkDiscards(discards: DiscardEntry[], cols: number): DiscardEntry[][]
 // ---------------------------------------------------------------------------
 const SELF_HAND_GAP = HAND_TILE_GAP;
 const SELF_HAND_DRAW_GAP = HAND_DRAW_GAP;
-const SELF_HAND_RESERVED_WIDTH = TILE_SIZES.large.w * 14 + SELF_HAND_GAP * 12 + SELF_HAND_DRAW_GAP;
 const SELF_HAND_BAR_MAX_HEIGHT = Math.round(TILE_SIZES.large.h * 1.05);
 const SELF_HAND_BAR_WIDTH = TILE_SIZES.large.w * 0.8;
 const SELF_HAND_BAR_MIN_VISIBLE_PCT = 1;
@@ -336,23 +335,10 @@ function getOpponentDiscardHole(
 
 function MeldBlock({ pid, meld, position }: { pid: number; meld: MeldEntry; position: SeatPosition }) {
   const model = getSeatModel(position);
-  const meldOrientation: 0 | 90 | 180 | 270 =
-    position === "east" ? 90
-    : position === "west" ? 270
-    : model.tileOrientation;
-  const rotatedOrientation: 0 | 90 | 180 | 270 =
-    position === "south" ? 90
-    : position === "north" ? 270
-    : position === "east" ? 0
-    : 180;
   const meldTileSize = position === "south" ? "large" : "normal";
   const displayTiles = buildMeldDisplayTiles(pid, meld);
   const flowDirection = getFlexDirection(model.meldAxis, false);
-  const stackOffset =
-    position === "south" ? "translate(-2px, -4px)"
-    : position === "north" ? "translate(2px, 4px)"
-    : position === "east" ? "translate(4px, 2px)"
-    : "translate(-4px, -2px)";
+  const stackOffset = getKakanStackOffset(position, meldTileSize);
   return (
     <div style={{
       display: "flex",
@@ -361,13 +347,13 @@ function MeldBlock({ pid, meld, position }: { pid: number; meld: MeldEntry; posi
       alignItems: position === "south" ? "flex-end" : "center",
     }}>
       {displayTiles.map((entry, idx) => {
-        const orientation = entry.rotated ? rotatedOrientation : meldOrientation;
+        const orientation = getMeldTileOrientation(position, entry.rotated);
         const stackedTile = displayTiles.find((candidate) => candidate.stackedOn === idx);
         const { width, height } = getTileBox(meldTileSize, orientation);
         return (
           <div key={`${entry.tile}-${idx}`} style={{ width, height, position: "relative", flexShrink: 0 }}>
             {entry.hidden ? (
-              <TileBack size={meldTileSize} orientation={meldOrientation} />
+              <TileBack size={meldTileSize} orientation={orientation} />
             ) : (
               <OrientedTile
                 tile={entry.tile}
@@ -376,8 +362,23 @@ function MeldBlock({ pid, meld, position }: { pid: number; meld: MeldEntry; posi
               />
             )}
             {stackedTile && (
-              <div style={{ position: "absolute", inset: 0, transform: stackOffset, pointerEvents: "none" }}>
-                <OrientedTile tile={stackedTile.tile} size={meldTileSize} orientation={meldOrientation} />
+              // R2：kakan 第四张与被鸣牌同为横置，叠在基础 tile box 内，
+              // 向牌桌中心偏移半张牌，保持约一半重叠。
+              <div style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                transform: `translate(${stackOffset.x}px, ${stackOffset.y}px)`,
+                pointerEvents: "none",
+                zIndex: 2,
+              }}>
+                <OrientedTile
+                  tile={stackedTile.tile}
+                  size={meldTileSize}
+                  orientation={getMeldTileOrientation(position, stackedTile.rotated)}
+                />
               </div>
             )}
           </div>
@@ -391,9 +392,11 @@ function MeldArea({ pid, melds, position }: { pid: number; melds: MeldEntry[]; p
   if (melds.length === 0) return null;
   const model = getSeatModel(position);
   const flowDirection = getFlexDirection(model.meldAxis, model.meldPlacement === "before");
+  // south 最早副露在最右（右吸附于边栏），后附露依次向左；其余保持时间顺序。
+  const orderedMelds = orderMeldsForDisplay(melds, position);
   return (
     <div style={{ display: "flex", flexDirection: flowDirection, gap: MELD_GROUP_GAP, flexShrink: 0 }}>
-      {melds.map((meld, idx) => (
+      {orderedMelds.map((meld, idx) => (
         <MeldBlock key={`${meld.type}-${meld.pai}-${idx}`} pid={pid} meld={meld} position={position} />
       ))}
     </div>
@@ -638,27 +641,72 @@ function PlayerZone({
     const hasLogitHints = Boolean(logitData?.length);
     const showLogitHints = hasLogitHints && !hideLogitHints;
 
-    return (
-      <div style={{ display: "flex", flexDirection: "row", alignItems: "flex-end", gap: 12 }}>
+    // 手牌宽度按实际数量计算：门清 13/14 张、1/2/3 副露时自然收缩到 10/11、7/8、4/5 张，
+    // 四副露只剩 1/2 张——不再固定预留 14 张宽度（避免大吊车时手牌与副露之间出现巨大空白）。
+    // 有摸牌时 flex 内含 n+1 个子元素（n 个普通 gap + drawGap margin），宽度必须与实际 flex 一致。
+    const actualHandWidth = computeSelfHandWidth(
+      sortedHand.length,
+      Boolean(tsumoPai),
+      TILE_SIZES.large.w,
+      SELF_HAND_GAP,
+      SELF_HAND_DRAW_GAP,
+    );
 
-        {/* 手牌区：固定宽度，左对齐。Melds在手牌右下方 */}
-        <div style={{ display: "flex", flexDirection: "row", alignItems: "flex-end", gap: 8 }}>
-          {/* 手牌：固定宽度区域，左对齐 */}
-          <div
-            onClick={hasLogitHints ? onSelfHandHintToggle : undefined}
-            style={{
-              position: "relative",
-              width: SELF_HAND_RESERVED_WIDTH,
-              cursor: hasLogitHints ? "pointer" : undefined,
-            }}
-          >
+    // P1 修复：144px 目标偏移必须受 lane 可用宽度约束。
+    // hand lane 宽度 = shell − 副露 lane（保守按最宽 daiminkan 估算）− 固定 gap。
+    // P2 稳定化：偏移按该副露数下的"最大摸牌态"宽度预留，而不是当前实际宽度，
+    // 使 3~4 副露时 pre/post（摸/不摸）第一张牌起点保持一致、不跳动。
+    const handLaneWidth = Math.max(
+      0,
+      SELF_SEAT_SHELL_WIDTH_PX - SELF_HAND_MELD_GAP - computeSouthMeldLaneWidth(melds.length),
+    );
+    const maxConcealedCount = Math.max(13 - 3 * melds.length, 0);
+    const maxHandContentWidth = computeSelfHandWidth(
+      maxConcealedCount,
+      true,
+      TILE_SIZES.large.w,
+      SELF_HAND_GAP,
+      SELF_HAND_DRAW_GAP,
+    );
+    const effectiveHandOffset = computeSelfHandContentOffset(SELF_HAND_LEFT_OFFSET, handLaneWidth, maxHandContentWidth);
+
+    return (
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "row",
+          alignItems: "flex-end",
+          gap: SELF_HAND_MELD_GAP,
+          width: SELF_SEAT_SHELL_WIDTH_PX,
+          maxWidth: "100%",
+        }}
+      >
+        {/* selfHandLane：flex:1 占据 shell 剩余宽度（shell − meldLane − 固定 gap），
+            手牌内容左吸附（tile row 从 lane 左边缘开始，x = SELF_HAND_ORIGIN_X_PX）；
+            柱状图在 tile row 容器内绝对定位、跟随牌面；
+            手牌张数变化只在 lane 内伸缩，不推动副露锚点。 */}
+        <div
+          onClick={hasLogitHints ? onSelfHandHintToggle : undefined}
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            justifyContent: "flex-start",
+            alignItems: "flex-end",
+            position: "relative",
+            flex: "1 1 auto",
+            minWidth: 0,
+            cursor: hasLogitHints ? "pointer" : undefined,
+          }}
+        >
+            {/* 手牌：左对齐 + 可收缩左偏移（3+ 副露自动收窄） */}
+            <div style={{ display: "flex", gap: SELF_HAND_GAP, flexWrap: "nowrap", width: actualHandWidth, position: "relative", marginLeft: effectiveHandOffset }}>
             {/* 柱状图层（回放模式，绝对定位在手牌上方） */}
             {showLogitHints && (
               <div style={{
                 position: "absolute", bottom: "100%", left: 0,
                 display: "flex", gap: SELF_HAND_GAP, paddingBottom: 3,
                 pointerEvents: "none", alignItems: "flex-end",
-                width: SELF_HAND_RESERVED_WIDTH,
+                width: "100%",
               }}>
                 {(() => {
                   const visibleLogitData = logitData ?? [];
@@ -728,8 +776,7 @@ function PlayerZone({
                 })()}
               </div>
             )}
-            {/* 手牌：左对齐 */}
-            <div style={{ display: "flex", gap: SELF_HAND_GAP, flexWrap: "nowrap", width: SELF_HAND_RESERVED_WIDTH }}>
+
               {sortedHand.map((tile, i) => {
                 const d = logitData?.find(x => x.pai === tile && !x.isTsumo) ?? logitData?.find(x => x.pai === tile);
                 const showDecisionFrames = showLogitHints;
@@ -761,14 +808,11 @@ function PlayerZone({
               )}
             </div>
           </div>
-          {/* Melds：手牌右下对齐 */}
-          <div style={{ paddingBottom: 0 }}>
+          {/* selfMeldLane：flex:0 右吸附，锚点 = shell 右侧，不随手牌变化 */}
+          <div style={{ flexShrink: 0, paddingBottom: 0 }}>
             <MeldArea pid={pid} melds={melds} position={position} />
           </div>
         </div>
-
-        {/* 舍牌已移至中央弃牌堆 */}
-      </div>
     );
   }
 
@@ -1406,8 +1450,8 @@ export function MahjongTable({
             style={{ left: `calc(50% + ${CENTER_SIZE / 2 + 22}px)`, top: `calc(50% + ${CENTER_SIZE / 2 + 12}px)` }}
           />
 
-          {/* 南（自家） */}
-          <div style={{ position: "absolute", left: "50%", bottom: SOUTH_BOTTOM_OFFSET, transform: "translateX(-50%)" }}>
+          {/* 南（自家）：固定区域右吸附，手牌/副露 lane 锚点稳定 */}
+          <div style={{ position: "absolute", right: SELF_SEAT_SIDE_MARGIN, bottom: SOUTH_BOTTOM_OFFSET }}>
             <PlayerZone
               pid={humanId} position="south"
               hand={hand} tsumoPai={tsumo_pai}

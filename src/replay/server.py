@@ -15,7 +15,7 @@ from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from replay.normalize import normalize_replay_decisions
 from replay import ladder as ladder_data
-from replay.external_reports import write_external_teacher_reports
+from replay.external_reports import write_external_teacher_reports, _action_actor, _decision_kind
 
 
 class _NumpyEncoder(json.JSONEncoder):
@@ -46,10 +46,38 @@ def _json_safe(value):
         return value if math.isfinite(value) else None
     return value
 from fastapi.staticfiles import StaticFiles
+from contextlib import asynccontextmanager
 
 BASE_DIR = Path(__file__).parent
 
-app = FastAPI(title="Keqing Unified Server", description="立直麻将 Review + 对战服务")
+
+def _recover_participants_pending_transaction() -> None:
+    """启动时恢复未完成的 participants 账本事务（P2-1）。"""
+    try:
+        from participants import ledger as participants_ledger
+
+        participants_ledger.recover_pending_transaction()
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "participants pending transaction recovery failed", exc_info=True
+        )
+
+
+@asynccontextmanager
+async def _app_lifespan(_app):
+    _recover_participants_pending_transaction()
+    from participants import projection as participants_projection
+
+    participants_projection.start_worker()
+    try:
+        yield
+    finally:
+        participants_projection.stop_worker()
+
+
+app = FastAPI(title="Keqing Unified Server", description="立直麻将 Review + 对战服务", lifespan=_app_lifespan)
 
 # ========== 合并 Battle Router ==========
 from gateway.api.battle import router as battle_router
@@ -58,6 +86,11 @@ app.include_router(battle_router)
 # ========== Play with you (Tenhou 在线呼出 Mortal 账号) ==========
 from gateway.api.playwithyou import router as playwithyou_router
 app.include_router(playwithyou_router)
+
+# ========== Participants（账号 / 模型 / 统一对局账本）==========
+from participants.api import router as participants_router
+
+app.include_router(participants_router)
 
 # ========== 静态资源 ==========
 
@@ -320,6 +353,9 @@ def _load_teacher_report_entries(report_path: Path, decisions: dict) -> tuple[st
                     "report_path": str(report_path),
                     "report_player_id": report_player_id,
                     "step": entry.get("step"),
+                    "source_event_index": entry.get("source_event_index"),
+                    "actor": entry.get("actor"),
+                    "decision_kind": entry.get("decision_kind"),
                     "kyoku_index": kyoku_index,
                     "entry_index": entry_index,
                     "junme": entry.get("junme"),
@@ -359,12 +395,73 @@ def _teacher_same_action(local_action, teacher_action) -> bool:
 def _attach_teacher_report_overlay(decisions: dict, report_path: Path | None) -> dict:
     if report_path is None or not isinstance(decisions, dict):
         return decisions
-    return _attach_teacher_report_overlays(decisions, [report_path])
+    return _attach_teacher_report_overlays(decisions, [report_path], expected_replay_id=decisions.get("replay_id"))
 
 
-def _attach_teacher_report_overlays(decisions: dict, report_paths: list[Path]) -> dict:
+def _entry_identity(entry: dict) -> tuple[int, int, str] | None:
+    """本地决策 entry 的事件身份：(source_event_index, actor, decision_kind)。"""
+    sei = entry.get("source_event_index")
+    if not isinstance(sei, int):
+        return None
+    actual = _actual_action_for_review(entry)
+    actor = _action_actor(actual)
+    kind = _decision_kind(actual)
+    if actor is None or kind is None:
+        return None
+    return (sei, actor, kind)
+
+
+def _teacher_identity_key(teacher_entry: dict) -> tuple[int, int, str] | None:
+    """teacher 报告 entry 的事件身份主键（replay 已由 expected_replay_id 校验）。"""
+    sei = teacher_entry.get("source_event_index")
+    actor = teacher_entry.get("actor")
+    kind = teacher_entry.get("decision_kind")
+    if not isinstance(sei, int) or not isinstance(actor, int) or not kind:
+        return None
+    return (sei, actor, str(kind))
+
+
+def _alignment_label(
+    *,
+    exact: int,
+    legacy_step: int,
+    legacy_action_order: int,
+    ambiguous: int,
+    unmatched: int,
+    duplicate: int,
+    replay_mismatch: bool,
+) -> str:
+    """顶层 alignment 语义：mixed 不会被 exact 掩盖。"""
+    if replay_mismatch:
+        return "replay_mismatch"
+    if exact > 0:
+        if (
+            legacy_step > 0
+            or legacy_action_order > 0
+            or ambiguous > 0
+            or unmatched > 0
+            or duplicate > 0
+        ):
+            return "mixed"
+        return "exact_event_identity"
+    if legacy_step > 0:
+        return "legacy_step"
+    if legacy_action_order > 0:
+        return "legacy_action_order"
+    return "unmatched"
+
+
+def _attach_teacher_report_overlays(
+    decisions: dict,
+    report_paths: list[Path],
+    expected_replay_id: str | None = None,
+) -> dict:
     if not report_paths or not isinstance(decisions, dict):
         return decisions
+
+    # decisions 若自带 replay_id（submit 路径写入），作为 expected 兜底
+    if expected_replay_id is None and decisions.get("replay_id"):
+        expected_replay_id = str(decisions["replay_id"])
 
     own_entries = [
         entry
@@ -376,6 +473,11 @@ def _attach_teacher_report_overlays(decisions: dict, report_paths: list[Path]) -
         for entry in own_entries
         if isinstance(entry.get("step"), int)
     }
+    own_entries_by_identity: dict[tuple[int, int, str], list[dict]] = {}
+    for entry in own_entries:
+        identity = _entry_identity(entry)
+        if identity is not None:
+            own_entries_by_identity.setdefault(identity, []).append(entry)
     overlays: list[dict] = []
 
     def _attach_to_entry(entry: dict, teacher_entry: dict) -> None:
@@ -452,44 +554,145 @@ def _attach_teacher_report_overlays(decisions: dict, report_paths: list[Path]) -
 
     for report_path in report_paths:
         try:
-            model_tag, report_player_id, teacher_entries = _load_teacher_report_entries(report_path, decisions)
-            attached = 0
-            own_index = 0
-            for teacher_entry in teacher_entries:
-                teacher_step = teacher_entry.get("step")
-                if isinstance(teacher_step, int):
-                    entry = own_entries_by_step.get(teacher_step)
-                    if entry is not None:
-                        _attach_to_entry(entry, teacher_entry)
-                        attached += 1
-                    continue
-
-                # Backward compatibility for older reports without a global step.
-                actual_action = teacher_entry.get("actual_action")
-                expected_action = teacher_entry.get("expected_action")
-                while own_index < len(own_entries):
-                    entry = own_entries[own_index]
-                    own_index += 1
-                    if _teacher_same_action(entry.get("gt_action"), actual_action) or _teacher_same_action(entry.get("chosen"), actual_action):
-                        _attach_to_entry(entry, teacher_entry)
-                        attached += 1
-                        break
-                    if actual_action is None and _teacher_same_action(entry.get("gt_action"), expected_action):
-                        _attach_to_entry(entry, teacher_entry)
-                        attached += 1
-                        break
-            overlays.append(
-                {
-                    "model": model_tag,
-                    "report_path": str(report_path),
-                    "report_player_id": report_player_id,
-                    "teacher_decision_count": len(teacher_entries),
-                    "attached_decision_count": attached,
-                    "alignment": "step_then_actual_action_order",
-                }
-            )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
         except Exception as e:
             overlays.append({"error": str(e), "report_path": str(report_path)})
+            continue
+
+        report_replay_id = report.get("replay_id") if isinstance(report, dict) else None
+        # replay_verified 只在 expected 与报告 JSON replay_id 都已知且完全一致时为 True。
+        # expected 缺失或报告缺 replay_id 时不允许"报告自证"或依赖文件名，一律不视为 exact。
+        replay_verified = bool(
+            expected_replay_id is not None
+            and report_replay_id is not None
+            and str(report_replay_id) == str(expected_replay_id)
+        )
+        if expected_replay_id is not None and report_replay_id is not None:
+            if str(report_replay_id) != str(expected_replay_id):
+                # 跨 replay 报告：明确拒绝，不做任何挂载（P1：身份域闭合）
+                overlays.append(
+                    {
+                        "model": _infer_teacher_model_tag(report, report_path) if isinstance(report, dict) else None,
+                        "report_path": str(report_path),
+                        "teacher_decision_count": 0,
+                        "attached_decision_count": 0,
+                        "alignment": "replay_mismatch",
+                        "expected_replay_id": str(expected_replay_id),
+                        "actual_replay_id": str(report_replay_id),
+                    }
+                )
+                continue
+
+        try:
+            model_tag, report_player_id, teacher_entries = _load_teacher_report_entries(report_path, decisions)
+        except Exception as e:
+            overlays.append({"error": str(e), "report_path": str(report_path)})
+            continue
+
+        attached = 0
+        exact_event_identity = 0
+        legacy_step = 0
+        legacy_action_order = 0
+        ambiguous = 0
+        unmatched = 0
+        duplicate_teacher_identity = 0
+        identity_carrying_entries = 0
+        own_index = 0
+        attached_entry_ids: set[int] = set()
+        seen_teacher_identities: set[tuple[int, int, str]] = set()
+
+        def _attach_once(entry: dict, teacher_entry: dict) -> bool:
+            nonlocal attached
+            if id(entry) in attached_entry_ids:
+                return False
+            _attach_to_entry(entry, teacher_entry)
+            attached += 1
+            attached_entry_ids.add(id(entry))
+            return True
+
+        for teacher_entry in teacher_entries:
+            raw_identity = _teacher_identity_key(teacher_entry)
+            if raw_identity is not None:
+                identity_carrying_entries += 1
+            # replay_verified=false 时即使 entry 携带身份三元组，
+            # 也只能走 step/action-order legacy，绝不 exact（P1）。
+            identity = raw_identity if replay_verified else None
+            if identity is not None:
+                if identity in seen_teacher_identities:
+                    # 报告内重复身份：拒绝第二条，不静默消失（P3）
+                    duplicate_teacher_identity += 1
+                    continue
+                seen_teacher_identities.add(identity)
+                matches = own_entries_by_identity.get(identity, [])
+                if len(matches) == 1:
+                    if _attach_once(matches[0], teacher_entry):
+                        exact_event_identity += 1
+                    else:
+                        duplicate_teacher_identity += 1
+                elif len(matches) > 1:
+                    # 多候选：拒绝静默选择，标记 ambiguous
+                    ambiguous += 1
+                else:
+                    unmatched += 1
+                continue
+
+            # legacy fallback：step 主，其次 action-order 正向扫描
+            teacher_step = teacher_entry.get("step")
+            if isinstance(teacher_step, int):
+                entry = own_entries_by_step.get(teacher_step)
+                if entry is not None and _attach_once(entry, teacher_entry):
+                    legacy_step += 1
+                else:
+                    unmatched += 1
+                continue
+
+            actual_action = teacher_entry.get("actual_action")
+            expected_action = teacher_entry.get("expected_action")
+            matched_legacy = False
+            while own_index < len(own_entries):
+                entry = own_entries[own_index]
+                own_index += 1
+                if _teacher_same_action(entry.get("gt_action"), actual_action) or _teacher_same_action(entry.get("chosen"), actual_action):
+                    if _attach_once(entry, teacher_entry):
+                        legacy_action_order += 1
+                    matched_legacy = True
+                    break
+                if actual_action is None and _teacher_same_action(entry.get("gt_action"), expected_action):
+                    if _attach_once(entry, teacher_entry):
+                        legacy_action_order += 1
+                    matched_legacy = True
+                    break
+            if not matched_legacy:
+                unmatched += 1
+
+        overlays.append(
+            {
+                "model": model_tag,
+                "report_path": str(report_path),
+                "report_player_id": report_player_id,
+                "teacher_decision_count": len(teacher_entries),
+                "attached_decision_count": attached,
+                "alignment": _alignment_label(
+                    exact=exact_event_identity,
+                    legacy_step=legacy_step,
+                    legacy_action_order=legacy_action_order,
+                    ambiguous=ambiguous,
+                    unmatched=unmatched,
+                    duplicate=duplicate_teacher_identity,
+                    replay_mismatch=False,
+                ),
+                "replay_verified": replay_verified,
+                "alignment_stats": {
+                    "exact_event_identity": exact_event_identity,
+                    "legacy_step": legacy_step,
+                    "legacy_action_order": legacy_action_order,
+                    "ambiguous": ambiguous,
+                    "unmatched": unmatched,
+                    "duplicate_teacher_identity": duplicate_teacher_identity,
+                    "identity_carrying_entries": identity_carrying_entries,
+                },
+            }
+        )
 
     decisions["teacher_review_overlays"] = overlays
     if overlays:
@@ -642,6 +845,11 @@ def _build_runtime_teacher_report(
     for entry in decisions.get("log", []):
         if not isinstance(entry, dict) or entry.get("is_obs"):
             continue
+        actual_action = _actual_action_for_review(entry)
+        if _decision_kind(actual_action) not in ("draw_discard", "reach", "call"):
+            # pass/none 及 hora/ryukyoku 等终局动作无事件身份、无候选权重，
+            # 不作为 teacher 决策挂载
+            continue
         key = (
             entry.get("bakaze", ""),
             int(entry.get("kyoku", 0)),
@@ -667,10 +875,12 @@ def _build_runtime_teacher_report(
                     "prob": _float_or_none(candidate.get("prob")),
                 }
             )
-        actual_action = _actual_action_for_review(entry)
         kyoku["entries"].append(
             {
                 "step": entry.get("step"),
+                "source_event_index": entry.get("source_event_index"),
+                "actor": _action_actor(actual_action),
+                "decision_kind": _decision_kind(actual_action),
                 "junme": entry.get("junme"),
                 "tiles_left": entry.get("tiles_left"),
                 "shanten": entry.get("shanten"),
@@ -1133,7 +1343,7 @@ async def replay_multi_teacher(
                 )
             )
 
-        attached = _attach_teacher_report_overlays(base_decisions, report_paths)
+        attached = _attach_teacher_report_overlays(base_decisions, report_paths, expected_replay_id=replay_id)
         project_root = BASE_DIR.parent.parent.resolve()
         attached["teacher_report_paths"] = [
             path.resolve().relative_to(project_root).as_posix()
@@ -1236,7 +1446,7 @@ async def get_replay(
         decisions = render_replay_json(bot)
         decisions["bot_type"] = bot_type
     if isinstance(decisions, dict):
-        decisions = normalize_replay_decisions(decisions, meta=meta)
+        decisions = normalize_replay_decisions(decisions, meta=meta, events=events)
         decisions = _merge_terminal_event_details(decisions, events)
         raw_teacher_reports = list(teacher_reports or [])
         if teacher_report:
@@ -1255,7 +1465,7 @@ async def get_replay(
                 except Exception as e:
                     report_errors.append({"error": str(e), "report_path": item})
         if report_paths:
-            decisions = _attach_teacher_report_overlays(decisions, report_paths)
+            decisions = _attach_teacher_report_overlays(decisions, report_paths, expected_replay_id=replay_id)
         if report_errors:
             overlays = list(decisions.get("teacher_review_overlays", [])) + report_errors
             decisions["teacher_review_overlays"] = overlays

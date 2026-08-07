@@ -79,6 +79,20 @@ def test_taikyoku_start_game_carries_four_names():
     assert start_game["names"] == ["NoName-0", "NoName-1", "NoName-2", "NoName-3"]
 
 
+def test_taikyoku_start_game_exposes_tenhou_log_seat():
+    """C44：bridge start_game 显式携带 tenhou_log_seat（与 URL tw 一致）。"""
+    state = State(name="NoName-0", room="L2147_9")
+    state.names = ["NoName-0", "NoName-1", "NoName-2", "NoName-3"]
+    state.seat = 0
+    # oya=2（本地视角庄家） -> 全局 seat = (4 - 2) % 4 = 2
+    msg = {"tag": "TAIKYOKU", "oya": "2", "log": "12345678"}
+
+    sent = _run(responder.Taikyoku().process, state, msg)
+    start_game = sent[0]
+    assert start_game["tenhou_log_seat"] == 2
+    assert "&tw=2" in start_game["log"]
+
+
 def test_taikyoku_start_game_falls_back_when_names_missing():
     state = State(name="NoName-0", room="L2147_9")
     # No names resolved yet (e.g. UN race); must still be length 4, not [].

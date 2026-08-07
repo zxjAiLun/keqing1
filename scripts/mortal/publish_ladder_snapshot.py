@@ -70,8 +70,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", type=Path, required=True,
                         help="动态赛季注册表 JSON 路径（如 keqing-data/ladder/registries/dev-live.json）")
-    parser.add_argument("--log-dir", action="append", type=Path, required=True,
-                        help="输入 mjai 日志目录，可重复")
+    parser.add_argument("--log-dir", action="append", type=Path, default=[],
+                        help="输入 mjai 日志目录，可重复；ingest 赛季不需要（使用 season.ingest.sources_root）")
     parser.add_argument("--snapshot-root", type=Path, default=None,
                         help="快照根目录；默认 <KEQING_LADDER_DATA_ROOT>/seasons/<season_id>/snapshots")
     parser.add_argument("--mortal-root", type=Path, default=Path("third_party/Mortal"))
@@ -110,23 +110,38 @@ def build_snapshot(
     preserve_log_dir_order: bool,
     interleave_log_dirs: bool,
     scoring_config: dict[str, Any] | None = None,
+    season: dict[str, Any] | None = None,
+    ingest_root: Path | None = None,
     build_report: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """在全新快照目录构建完整 report（staging）。"""
-    from scripts.mortal import build_platform_account_report as account_report
+    """在全新快照目录构建完整 report（staging）。
 
-    builder = build_report or account_report.build_report
-    report = builder(
-        log_dirs=log_dirs,
-        output_dir=snapshot_dir,
-        mortal_root=mortal_root,
-        platform_model_label=platform_model_label,
-        # 复用仓库严格解析：恰好四个顺位值，错误立即拒绝
-        rank_points=account_report.parse_rank_points(rank_points),
-        preserve_log_dir_order=preserve_log_dir_order,
-        interleave_log_dirs=interleave_log_dirs,
-        scoring_config=scoring_config,
-    )
+    - ingest 赛季（season 带 ingest 配置）：走多来源 LadderMatch 合并 + 全量重放；
+    - 否则：走原有 mjai 日志 report builder。
+    """
+    if ingest_root is not None and season is not None:
+        from replay import ladder_ingest
+
+        report = ladder_ingest.build_ingest_report(
+            season=season,
+            sources_root=ingest_root,
+            output_dir=snapshot_dir,
+        )
+    else:
+        from scripts.mortal import build_platform_account_report as account_report
+
+        builder = build_report or account_report.build_report
+        report = builder(
+            log_dirs=log_dirs,
+            output_dir=snapshot_dir,
+            mortal_root=mortal_root,
+            platform_model_label=platform_model_label,
+            # 复用仓库严格解析：恰好四个顺位值，错误立即拒绝
+            rank_points=account_report.parse_rank_points(rank_points),
+            preserve_log_dir_order=preserve_log_dir_order,
+            interleave_log_dirs=interleave_log_dirs,
+            scoring_config=scoring_config,
+        )
     if not isinstance(report, dict):
         raise PublishError("构建脚本未返回 report 字典")
     return report
@@ -390,26 +405,57 @@ def _ordered_log_stats(
     return stats
 
 
+def _ordered_source_stats(ingest_root: Path) -> list[tuple[str, int, int]]:
+    """ingest 赛季：递归收集 sources_root 下全部 source 文件（路径/大小/mtime）。"""
+    stats: list[tuple[str, int, int]] = []
+    if not ingest_root.is_dir():
+        return stats
+    for path in sorted(ingest_root.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        stats.append((str(path.resolve()), st.st_size, st.st_mtime_ns))
+    return stats
+
+
 def compute_source_fingerprint(
     log_dirs: list[Path],
     *,
     preserve_log_dir_order: bool = False,
     interleave_log_dirs: bool = False,
+    ingest_root: Path | None = None,
+    extra_fingerprint: str | None = None,
 ) -> str:
     """源日志输入指纹：覆盖 builder 实际处理顺序的路径、大小、mtime_ns。
 
     相同的日志文件集合（含 ordering/interleave 参数）产生相同指纹；
     用于避免人工重复执行、resume 无新增日志、调度器重复触发时的重复重建。
+
+    ingest 赛季使用 sources_root 全量文件；否则使用 mjai 日志目录。
+    ``extra_fingerprint`` 追加合并（R10-F：participants ledger 投影指纹——
+    sources_root 不动但 ledger 变化时也必须触发重建）。
     """
-    stats = _ordered_log_stats(
-        log_dirs,
-        preserve_log_dir_order=preserve_log_dir_order,
-        interleave_log_dirs=interleave_log_dirs,
-    )
-    hasher = hashlib.sha256()
-    hasher.update(("preserve=%s;interleave=%s;" % (preserve_log_dir_order, interleave_log_dirs)).encode("ascii"))
-    for path, size, mtime_ns in stats:
-        hasher.update(f"{path}\0{size}\0{mtime_ns}\n".encode("utf-8"))
+    if ingest_root is not None:
+        stats = _ordered_source_stats(ingest_root)
+        hasher = hashlib.sha256()
+        hasher.update(b"ingest=1;")
+        for path, size, mtime_ns in stats:
+            hasher.update(f"{path}\0{size}\0{mtime_ns}\n".encode("utf-8"))
+    else:
+        stats = _ordered_log_stats(
+            log_dirs,
+            preserve_log_dir_order=preserve_log_dir_order,
+            interleave_log_dirs=interleave_log_dirs,
+        )
+        hasher = hashlib.sha256()
+        hasher.update(("preserve=%s;interleave=%s;" % (preserve_log_dir_order, interleave_log_dirs)).encode("ascii"))
+        for path, size, mtime_ns in stats:
+            hasher.update(f"{path}\0{size}\0{mtime_ns}\n".encode("utf-8"))
+    if extra_fingerprint:
+        hasher.update(b"extra=" + extra_fingerprint.encode("ascii"))
     return hasher.hexdigest()
 
 
@@ -540,6 +586,23 @@ def _staging_root_for(snapshot_root: Path, snapshot_name: str) -> Path:
     return snapshot_root / f".{snapshot_name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.staging"
 
 
+def _participants_extra_fingerprint(season: dict[str, Any]) -> str | None:
+    """participants ledger 语义投影指纹（P1-1）。
+
+    赛季 ingest 配置 ``participants.enabled`` 时，把 ledger 的 eligible 比赛
+    纳入 publisher fingerprint——否则 sources_root 不变但 matches.jsonl 变化
+    时会被 unchanged-skip，新比赛永远进不了榜单。
+    """
+    ingest_cfg = season.get("ingest") if isinstance(season.get("ingest"), dict) else None
+    participants_cfg = ingest_cfg.get("participants") if ingest_cfg else None
+    if not isinstance(participants_cfg, dict) or not participants_cfg.get("enabled"):
+        return None
+    from replay import ladder_ingest
+
+    season_id = str(season.get("season_id") or "")
+    return ladder_ingest.participants_projection_fingerprint(season_id)
+
+
 def publish_snapshot(
     *,
     registry_path: Path,
@@ -585,6 +648,16 @@ def publish_snapshot(
     expected_rank_points = manifest_rank_points(resolved_block)
 
     data_root = os.environ.get("KEQING_LADDER_DATA_ROOT", "").strip()
+
+    # ingest 赛季：sources_root 解析与 API 共用同一实现（相对路径基于
+    # KEQING_LADDER_DATA_ROOT，未设置时基于仓库根）。
+    ingest_root: Path | None = None
+    ingest_cfg = season.get("ingest") if isinstance(season.get("ingest"), dict) else None
+    if ingest_cfg:
+        from replay import ladder_ingest
+
+        ingest_root = ladder_ingest.resolve_ingest_sources_root(_REPO_ROOT, season)
+
     root = snapshot_root or default_snapshot_root(Path(data_root) if data_root else None, season_id)
 
     previous_report_dir = season.get("report_dir")
@@ -600,7 +673,13 @@ def publish_snapshot(
         log_dirs,
         preserve_log_dir_order=preserve_log_dir_order,
         interleave_log_dirs=interleave_log_dirs,
+        ingest_root=ingest_root,
+        # R10-F：participants ledger 投影指纹——sources_root 不动但 ledger 变化也要重建
+        extra_fingerprint=_participants_extra_fingerprint(season),
     )
+    # 非 ingest 赛季必须有 mjai 日志输入；ingest 赛季不需要 --log-dir。
+    if ingest_root is None and not log_dirs:
+        raise PublishError("非 ingest 赛季至少需要一个 --log-dir")
     # dry-run 始终真正构建与校验；skip 前必须确认当前快照三件套仍完整可读。
     if not dry_run and previous_snapshot is not None and previous_snapshot.is_dir():
         prev_manifest = _read_manifest(previous_snapshot)
@@ -657,6 +736,8 @@ def publish_snapshot(
             preserve_log_dir_order=preserve_log_dir_order,
             interleave_log_dirs=interleave_log_dirs,
             scoring_config=scoring_config,
+            season=season,
+            ingest_root=ingest_root,
             build_report=build_report,
         )
         build_duration = time.monotonic() - build_started
@@ -670,11 +751,14 @@ def publish_snapshot(
         ladder.validate_snapshot(season, snapshot_stage)
         materialize_duration = time.monotonic() - materialize_started
 
-        source_stats = _ordered_log_stats(
-            log_dirs,
-            preserve_log_dir_order=preserve_log_dir_order,
-            interleave_log_dirs=interleave_log_dirs,
-        )
+        if ingest_root is not None:
+            source_stats = _ordered_source_stats(ingest_root)
+        else:
+            source_stats = _ordered_log_stats(
+                log_dirs,
+                preserve_log_dir_order=preserve_log_dir_order,
+                interleave_log_dirs=interleave_log_dirs,
+            )
         write_manifest(
             snapshot_stage,
             season_id=season_id,
@@ -685,7 +769,7 @@ def publish_snapshot(
             keep_account_logs=keep_account_logs,
             source_fingerprint=source_fingerprint,
             registry_contract=_registry_contract(season),
-            source_log_dirs=log_dirs,
+            source_log_dirs=[ingest_root] if ingest_root is not None else log_dirs,
             source_file_count=len(source_stats),
             source_total_bytes=sum(int(size) for _path, size, _mtime in source_stats),
             build_duration_seconds=round(build_duration, 4),

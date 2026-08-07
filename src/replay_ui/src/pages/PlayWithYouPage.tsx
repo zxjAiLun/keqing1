@@ -9,14 +9,40 @@ import {
   startPlayWithYou,
   stopPlayWithYou,
   getPlayWithYouStatus,
+  listLadderCaptures,
+  confirmLadderCapture,
+  ignoreLadderCapture,
+  retryPublishLadderCapture,
   type NetworkId,
   type SpeedId,
   type DeviceId,
   type BotInfo,
   type PlayWithYouStatus,
+  type LadderCaptureEntry,
+  type ParticipantBindingRequest,
 } from "../api/playwithyouApi";
+import { participantsApi } from "../api/participantsApi";
+import type { Account as ParticipantAccount } from "../types/participants";
+import { useNavigate } from "react-router-dom";
+import { routes } from "../routes";
 
 const ACCENT = "#8e44ad";
+
+type RosterBinding = {
+  account_id: string;
+  controller_type: string;
+  model_identity_id: string;
+  model_artifact_id: string;
+  launched: boolean;
+  expected_raw_name: string;
+};
+
+const CONTROLLER_OPTIONS = [
+  { value: "human_ui", label: "真人" },
+  { value: "local_model", label: "本地模型" },
+  { value: "external_agent", label: "外部代理" },
+  { value: "manual_only", label: "仅登记" },
+];
 
 const NETWORK_OPTIONS: Array<{ value: NetworkId; label: string; hint: string }> = [
   { value: "none", label: "none", hint: "不呼出" },
@@ -87,6 +113,7 @@ function Segmented<T extends string>({
 }
 
 export function PlayWithYouPage() {
+  const navigate = useNavigate();
   const [lobbyId, setLobbyId] = useState<string>("2147");
   const [speed, setSpeed] = useState<SpeedId>("normal");
   const [device, setDevice] = useState<DeviceId>("cuda");
@@ -97,6 +124,24 @@ export function PlayWithYouPage() {
   const [status, setStatus] = useState<PlayWithYouStatus | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // R9-3 正式天梯捕获绑定（呼出前选择；开局后冻结）
+  const [captureEnabled, setCaptureEnabled] = useState(false);
+  const [captureSeason, setCaptureSeason] = useState("official-ladder-v1");
+  const [captureHuman, setCaptureHuman] = useState("nick@01");
+  const [captureBots, setCaptureBots] = useState(["70k@01", "70k@02", "70k@03"]);
+  const [captures, setCaptures] = useState<LadderCaptureEntry[]>([]);
+  const [captureBusy, setCaptureBusy] = useState<string | null>(null);
+
+  // R10-E：通用四人阵容模式（预期四人阵容与 launcher 数量分离）
+  const [rosterMode, setRosterMode] = useState(false);
+  const [roster, setRoster] = useState<RosterBinding[]>([
+    { account_id: "nick@01", controller_type: "human_ui", model_identity_id: "", model_artifact_id: "", launched: false, expected_raw_name: "" },
+    { account_id: "70k@01", controller_type: "local_model", model_identity_id: "", model_artifact_id: "", launched: true, expected_raw_name: "NoName-1" },
+    { account_id: "70k@02", controller_type: "local_model", model_identity_id: "", model_artifact_id: "", launched: true, expected_raw_name: "NoName-2" },
+    { account_id: "", controller_type: "external_agent", model_identity_id: "", model_artifact_id: "", launched: false, expected_raw_name: "" },
+  ]);
+  const [accounts, setAccounts] = useState<ParticipantAccount[]>([]);
 
   const logRef = useRef<HTMLDivElement | null>(null);
   const pollingRef = useRef<number | null>(null);
@@ -126,13 +171,38 @@ export function PlayWithYouPage() {
     setLoading(true);
     setError(null);
     try {
+      const launchedSlots = roster
+        .map((entry, index) => (entry.launched ? index : null))
+        .filter((slot): slot is number => slot !== null);
+      const rosterPayload: ParticipantBindingRequest[] | undefined = rosterMode
+        ? roster.map((entry, index) => ({
+            account_id: entry.account_id,
+            controller_type: entry.controller_type,
+            model_identity_id: entry.model_identity_id || null,
+            model_artifact_id: entry.model_artifact_id || null,
+            launcher_slot: entry.launched ? index : null,
+            expected_raw_name: entry.expected_raw_name || null,
+            resolution_required: !entry.account_id,
+          }))
+        : undefined;
       const req = {
         lobby_id: lobbyId,
         speed,
-        quantity,
+        // P1-3：rosterMode=false 时沿用旧 quantity 选择器，不得被 roster 草稿覆盖
+        quantity: rosterMode ? launchedSlots.length : quantity,
         networks: [...networks],
         custom_paths: customPaths,
         device,
+        roster: rosterPayload,
+        ladder_capture: captureEnabled && !rosterMode
+          ? {
+              enabled: true,
+              season_id: captureSeason,
+              human_account_id: captureHuman,
+              bot_account_ids: [...captureBots],
+              mode: "confirm" as const,
+            }
+          : undefined,
       };
       const s = await startPlayWithYou(req);
       setStatus(s);
@@ -159,6 +229,70 @@ export function PlayWithYouPage() {
       setLoading(false);
     }
   };
+
+  const refreshCaptures = useCallback(async () => {
+    try {
+      const data = await listLadderCaptures();
+      setCaptures(data.captures);
+    } catch {
+      /* transient */
+    }
+  }, []);
+
+  const confirmCapture = async (captureId: string) => {
+    setCaptureBusy(captureId);
+    setError(null);
+    try {
+      await confirmLadderCapture(captureId);
+      await refreshCaptures();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "确认失败");
+    } finally {
+      setCaptureBusy(null);
+    }
+  };
+
+  const ignoreCapture = async (captureId: string) => {
+    setCaptureBusy(captureId);
+    setError(null);
+    try {
+      await ignoreLadderCapture(captureId);
+      await refreshCaptures();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "忽略失败");
+    } finally {
+      setCaptureBusy(null);
+    }
+  };
+
+  const retryPublish = async (captureId: string) => {
+    setCaptureBusy(captureId);
+    setError(null);
+    try {
+      await retryPublishLadderCapture(captureId);
+      await refreshCaptures();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "重试失败");
+    } finally {
+      setCaptureBusy(null);
+    }
+  };
+
+  useEffect(() => {
+    refreshCaptures();
+    const timer = window.setInterval(refreshCaptures, 5000);
+    return () => window.clearInterval(timer);
+  }, [refreshCaptures]);
+
+  // R10-E：加载 participants 账号（roster 账号选择用）
+  useEffect(() => {
+    const controller = new AbortController();
+    participantsApi
+      .listAccounts(controller.signal)
+      .then((resp) => setAccounts(resp.accounts))
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => stopPolling, [stopPolling]);
 
@@ -314,6 +448,165 @@ export function PlayWithYouPage() {
             );
           })}
         </div>
+
+        {/* R9-3 正式天梯捕获绑定 */}
+        <div
+          style={{
+            marginTop: 14,
+            padding: 12,
+            borderRadius: 8,
+            border: `1px solid ${captureEnabled ? ACCENT : "var(--border)"}`,
+            background: captureEnabled ? "rgba(142,68,173,0.04)" : "var(--surface-subtle)",
+          }}
+        >
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={captureEnabled}
+              disabled={isRunning || rosterMode}
+              onChange={(e) => setCaptureEnabled(e.target.checked)}
+            />
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>
+              ☑ 计入正式天梯（tenhou_rank_progression）
+            </span>
+          </label>
+          <div style={hintStyle}>
+            开启后对局结束后确认录入 official-ladder-v1 赛季；开局后绑定冻结，不可中途修改。
+          </div>
+          {captureEnabled && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 10 }}>
+              <div>
+                <label style={labelStyle}>赛季</label>
+                <input
+                  value={captureSeason}
+                  disabled={isRunning}
+                  onChange={(e) => setCaptureSeason(e.target.value)}
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <label style={labelStyle}>人类账号</label>
+                <input
+                  value={captureHuman}
+                  disabled={isRunning}
+                  onChange={(e) => setCaptureHuman(e.target.value)}
+                  style={inputStyle}
+                />
+              </div>
+              <div style={{ gridColumn: "1 / -1" }}>
+                <label style={labelStyle}>Bot 账号（3 个，顺序对应 AI 槽位）</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {captureBots.map((bot, index) => (
+                    <input
+                      key={index}
+                      value={bot}
+                      disabled={isRunning}
+                      onChange={(e) => {
+                        const next = [...captureBots];
+                        next[index] = e.target.value;
+                        setCaptureBots(next);
+                      }}
+                      style={{ ...inputStyle, flex: 1 }}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* R10-E 通用四人阵容（预期四人阵容与 launcher 数量分离） */}
+        <div
+          style={{
+            marginTop: 14,
+            padding: 12,
+            borderRadius: 8,
+            border: `1px solid ${rosterMode ? ACCENT : "var(--border)"}`,
+            background: rosterMode ? "rgba(142,68,173,0.04)" : "var(--surface-subtle)",
+          }}
+        >
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={rosterMode}
+              disabled={isRunning || captureEnabled}
+              onChange={(e) => setRosterMode(e.target.checked)}
+            />
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)" }}>
+              通用四人阵容（可选：任意四人，非 1 人类 + 3 bot）
+            </span>
+          </label>
+          <div style={hintStyle}>
+            勾选「呼出」的座位由本系统启动（数量 = launcher 数，如 2 个本地 bot + 外部 Mortal 合法）；
+            赛后在天凤牌谱导入页按 session 自动解析 NoName 与会话绑定的模型版本。
+          </div>
+          {rosterMode && (
+            <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+              {roster.map((entry, index) => (
+                <div key={index} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <span style={{ width: 24, fontWeight: 800, color: "var(--text-muted)" }}>{["東", "南", "西", "北"][index]}</span>
+                  <select
+                    value={entry.account_id}
+                    disabled={isRunning}
+                    onChange={(e) => {
+                      const next = [...roster];
+                      next[index] = { ...next[index], account_id: e.target.value };
+                      setRoster(next);
+                    }}
+                    style={{ ...inputStyle, flex: 1 }}
+                  >
+                    <option value="">选择账号…</option>
+                    {accounts.map((a) => (
+                      <option key={a.account_id} value={a.account_id}>
+                        {a.display_name}（{a.account_id}）
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={entry.controller_type}
+                    disabled={isRunning}
+                    onChange={(e) => {
+                      const next = [...roster];
+                      next[index] = { ...next[index], controller_type: e.target.value };
+                      setRoster(next);
+                    }}
+                    style={inputStyle}
+                  >
+                    {CONTROLLER_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                  <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, whiteSpace: "nowrap" }}>
+                    <input
+                      type="checkbox"
+                      checked={entry.launched}
+                      disabled={isRunning}
+                      onChange={(e) => {
+                        const next = [...roster];
+                        next[index] = { ...next[index], launched: e.target.checked };
+                        setRoster(next);
+                      }}
+                    />
+                    呼出
+                  </label>
+                  {entry.launched && (
+                    <input
+                      value={entry.expected_raw_name}
+                      disabled={isRunning}
+                      onChange={(e) => {
+                        const next = [...roster];
+                        next[index] = { ...next[index], expected_raw_name: e.target.value };
+                        setRoster(next);
+                      }}
+                      placeholder={`NoName-${index + 1}`}
+                      style={{ ...inputStyle, width: 110 }}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Status / live log */}
@@ -387,6 +680,151 @@ export function PlayWithYouPage() {
               ? status.log_tail.join("\n")
               : "（暂无日志，呼出后这里会实时滚动显示 bot / gateway 输出）"}
           </div>
+
+          {/* 冻结的正式天梯绑定（开局后不可修改） */}
+          {status.ladder_capture?.enabled && (
+            <div
+              style={{
+                marginTop: 10,
+                fontSize: 12,
+                padding: "8px 10px",
+                borderRadius: 6,
+                border: "1px solid rgba(142,68,173,0.4)",
+                background: "rgba(142,68,173,0.06)",
+                color: "var(--text-secondary)",
+              }}
+            >
+              ☑ 正式天梯（已冻结）：
+              <b style={{ color: ACCENT }}>{status.ladder_capture.season_id}</b> ·
+              人类 <b>{status.ladder_capture.human_account_id}</b> ·
+              Bot {status.ladder_capture.bot_account_ids.join(" / ")} ·
+              模式 {status.ladder_capture.mode}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* R9-3 已捕获正式天梯对局（等待确认） */}
+      {captures.length > 0 && (
+        <div className="card" style={{ padding: 14, marginTop: 12 }}>
+          <SectionTitle
+            title="已捕获正式天梯对局"
+            description="对局结束后确认录入 official-ladder-v1；状态：waiting_start / in_game / pending_confirmation / published / ignored / incomplete / conflict / accepted_publish_failed"
+          />
+          {captures.map((c) => (
+            <div
+              key={c.capture_id}
+              style={{
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                padding: 12,
+                marginBottom: 10,
+                background: "var(--surface-subtle)",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                  <b style={{ color: "var(--text-primary)" }}>{c.match?.match_id || c.capture_id}</b>
+                  <span style={{ color: "var(--text-muted)" }}> · {c.season_id}</span>
+                  {c.tenhou_log_url && (
+                    <a
+                      href={c.tenhou_log_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ marginLeft: 8, color: ACCENT, fontWeight: 700 }}
+                    >
+                      打开天凤牌谱 ↗
+                    </a>
+                  )}
+                </div>
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    padding: "3px 8px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border)",
+                    color: c.state === "pending_confirmation" ? "#27ae60" : "var(--text-muted)",
+                  }}
+                >
+                  {c.state}
+                </span>
+              </div>
+              {c.match?.players && c.match.players.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  {[...c.match.players]
+                    .sort((a, b) => b.final_score - a.final_score || a.seat - b.seat)
+                    .map((p, index) => (
+                      <div key={p.account_id} style={{ fontSize: 12, padding: "2px 0" }}>
+                        <span style={{ display: "inline-block", width: 120, color: "var(--text-primary)", fontWeight: 700 }}>
+                          {p.account_id}
+                        </span>
+                        <span style={{ display: "inline-block", width: 80, color: "var(--text-muted)" }}>
+                          {p.final_score}
+                        </span>
+                        <span style={{ color: "var(--text-secondary)" }}>
+                          {index + 1} 位（seat {p.seat}）
+                        </span>
+                      </div>
+                    ))}
+                </div>
+              )}
+              <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
+                验证 observer：{(c.score_observers ?? []).join(" / ") || "—"}
+                {c.state === "accepted_publish_failed" && (
+                  <span style={{ color: "var(--error)" }}> · 已确认但发布失败，可重试</span>
+                )}
+                {c.evidence_warning && (
+                  <span style={{ color: "#e67e22" }}> · 证据警告：{c.evidence_warning}</span>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                {c.state === "pending_confirmation" && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => confirmCapture(c.capture_id)}
+                      disabled={captureBusy === c.capture_id}
+                      style={{ height: 30, padding: "0 12px", background: "#27ae60", color: "#fff", borderRadius: 6, fontSize: 12, cursor: "pointer" }}
+                    >
+                      确认录入并发布
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => ignoreCapture(c.capture_id)}
+                      disabled={captureBusy === c.capture_id}
+                      style={{ height: 30, padding: "0 12px", background: "transparent", color: "var(--text-muted)", border: "1px solid var(--border)", borderRadius: 6, fontSize: 12, cursor: "pointer" }}
+                    >
+                      忽略本局
+                    </button>
+                  </>
+                )}
+                {c.state === "awaiting_import" && c.tenhou_log_url && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const params = new URLSearchParams({ url: c.tenhou_log_url ?? "" });
+                      if (c.session_id) params.set("session_id", c.session_id);
+                      navigate(`${routes.matchImport}?${params.toString()}`);
+                    }}
+                    style={{ height: 30, padding: "0 12px", background: ACCENT, color: "#fff", borderRadius: 6, fontSize: 12, cursor: "pointer" }}
+                  >
+                    导入对局
+                  </button>
+                )}
+                {c.state === "accepted_publish_failed" && (
+                  <button
+                    type="button"
+                    onClick={() => retryPublish(c.capture_id)}
+                    disabled={captureBusy === c.capture_id}
+                    style={{ height: 30, padding: "0 12px", background: ACCENT, color: "#fff", borderRadius: 6, fontSize: 12, cursor: "pointer" }}
+                  >
+                    重新发布
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </PageShell>

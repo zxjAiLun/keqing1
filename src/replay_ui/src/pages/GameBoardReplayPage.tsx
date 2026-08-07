@@ -7,7 +7,8 @@ import { Tile } from '../components/BattleBoard/Tile';
 import { ReplayDecisionPanel } from '../components/DecisionPanel/ReplayDecisionPanel';
 import { ReplayStatsDialog } from '../components/ReviewWorkspace/ReplayStatsDialog';
 import { ReplayWorkspaceNavigation } from '../components/ReviewWorkspace/ReplayWorkspaceNavigation';
-import { entryToBattleState, buildLogitData, hasReplayPostAction, hasReplayReachPhase, isCollapsibleResponsePassStep, type ReplayBoardPhase } from '../utils/replayAdapter';
+import { entryToBattleState, buildLogitData, getActualReplayAction, hasReplayPostAction, hasReplayReachPhase, isCollapsibleResponsePassStep, type ReplayBoardPhase } from '../utils/replayAdapter';
+import { buildReplayHandsForBoard, removeTileOnce, type ReplayEvent } from '../utils/replayHands';
 import { useReplayPlayer } from '../hooks/useReplayPlayer';
 import { replayApi } from '../api/replayApi';
 import { routes } from '../routes';
@@ -30,7 +31,7 @@ const REPLAY_BOARD_PHASE_LABELS: Record<ReplayBoardPhase, string> = {
 };
 
 function isForcedRiichiTsumogiriEntry(entry: ReplayData['log'][number] | null | undefined): boolean {
-  const action = entry?.gt_action ?? entry?.chosen;
+  const action = getActualReplayAction(entry);
   return Boolean(
     entry
     && !entry.is_obs
@@ -82,7 +83,7 @@ export function GameBoardReplayPage() {
   const [noMeld, setNoMeld] = useState(false);
   const [autoTsumogiri, setAutoTsumogiri] = useState(false);
   const [showStats, setShowStats] = useState(false);
-  const [activeDrawer, setActiveDrawer] = useState<'left' | 'right' | null>(null);
+  const [activeDrawer, setActiveDrawer] = useState<'right' | null>(null);
   const [boardPhase, setBoardPhase] = useState<ReplayBoardPhase>('pre');
   const boardViewportRef = useRef<HTMLDivElement>(null);
   const workspaceShellRef = useRef<HTMLDivElement>(null);
@@ -323,7 +324,7 @@ export function GameBoardReplayPage() {
 
   const isOwnDiscardStep = useCallback((step: number) => {
     if (!data || step < 0 || step >= data.log.length) return false;
-    const action = data.log[step]?.gt_action ?? data.log[step]?.chosen;
+    const action = getActualReplayAction(data.log[step]);
     return action?.type === 'dahai' && action.actor === viewPlayerId;
   }, [data, viewPlayerId]);
 
@@ -411,16 +412,6 @@ export function GameBoardReplayPage() {
   // 优先使用后端返回的真实玩家名，fallback 到 P0/P1/P2/P3
   const playerNames = normalizeReplayPlayerNames(data);
 
-  const switchPerspective = (nextPid: number) => {
-    if (!replayIdFromRoute) return;
-    const nextParams = new URLSearchParams(location.search);
-    nextParams.delete('id');
-    nextParams.set('player_id', String(nextPid));
-    nextParams.set('step', String(currentStep));
-    nextParams.set('phase', boardPhase);
-    navigate(`${routes.reviewWorkspace(replayIdFromRoute)}?${nextParams.toString()}`);
-  };
-
   const isForcedRiichiTsumogiri = isForcedRiichiTsumogiriEntry(currentEntry);
 
   // 适配数据
@@ -483,8 +474,8 @@ export function GameBoardReplayPage() {
     [events, currentEntry, playerNames],
   );
   const replayHands = useMemo(
-    () => buildReplayHandsForBoard(events as ReplayEvent[] | null, data, currentStep, currentEntry ?? null, boardPhase),
-    [events, data, currentStep, currentEntry, boardPhase],
+    () => buildReplayHandsForBoard(events as ReplayEvent[] | null, data, currentEntry ?? null, boardPhase),
+    [events, data, currentEntry, boardPhase],
   );
   const replayHandsForTable = useMemo(() => {
     if (!resultSummary || resultSummary.type !== 'hora' || resultSummary.winner == null) {
@@ -496,33 +487,14 @@ export function GameBoardReplayPage() {
     return baseHands.map((tiles, pid) => (pid === resultSummary.winner ? tiles : null));
   }, [replayHands, resultSummary, showOpponentHands]);
 
-  const effectiveReplayEntry = useMemo(() => {
-    if (!currentEntry || !replayHands?.[viewPlayerId]) return currentEntry;
-    const hand = replayHands[viewPlayerId];
-    const handCount = new Set(hand);
-    const candidates = currentEntry.candidates?.filter((candidate) => {
-      const action = candidate.action;
-      if (action.type !== 'dahai' && action.type !== 'kakan') return true;
-      return Boolean(action.pai && handCount.has(action.pai));
-    });
-    return { ...currentEntry, hand, candidates };
-  }, [currentEntry, replayHands, viewPlayerId]);
-  const effectiveBattleState = useMemo(() => {
-    if (!battleState || !replayHands?.[viewPlayerId]) return battleState;
-    let hand = replayHands[viewPlayerId];
-    // pre 阶段 replayHands 含刚摸到的那张牌（14 张），而 MahjongTable 约定主手牌为 13 张、
-    // 摸牌单独走 tsumo_pai。若不去掉这张，摸到的牌会在手牌中间和最右侧各出现一次。
-    const drawn = battleState.tsumo_pai;
-    if (boardPhase === 'pre' && drawn) {
-      const drawIndex = hand.indexOf(drawn);
-      if (drawIndex >= 0) {
-        hand = [...hand.slice(0, drawIndex), ...hand.slice(drawIndex + 1)];
-      }
-    }
-    return { ...battleState, hand };
-  }, [battleState, replayHands, viewPlayerId, boardPhase]);
-  const logitData = effectiveReplayEntry && !effectiveReplayEntry.is_obs && boardPhase === 'pre' && !isForcedRiichiTsumogiri
-    ? buildLogitData(effectiveReplayEntry)
+  // R2：决策 entry 的动作前快照是唯一权威状态源。
+  // 自家手牌/摸牌/候选一律来自 currentEntry（经 replayAdapter 处理），
+  // 不再用 raw-event 重放的 replayHands 覆盖，也不再据此过滤候选。
+  // replayHands 仅用于对手 Oracle reveal / 终局牌姿 / 调试对照。
+  const effectiveReplayEntry = currentEntry;
+  const effectiveBattleState = battleState;
+  const logitData = currentEntry && !currentEntry.is_obs && boardPhase === 'pre' && !isForcedRiichiTsumogiri
+    ? buildLogitData(currentEntry)
     : baseLogitData;
 
   if (loading) {
@@ -546,7 +518,6 @@ export function GameBoardReplayPage() {
   }
 
   const phaseLabel = REPLAY_BOARD_PHASE_LABELS[boardPhase];
-  const leftPanelId = 'review-workspace-left-panel';
   const rightPanelId = 'review-workspace-right-panel';
 
   return (
@@ -554,70 +525,18 @@ export function GameBoardReplayPage() {
       {showStats && data && <ReplayStatsDialog data={data} onClose={() => setShowStats(false)} />}
 
       <div className="review-workspace-grid">
-        <aside
-          className="review-workspace-left"
-          id={leftPanelId}
-          data-open={activeDrawer === 'left'}
-          aria-label="回放导航"
-        >
-          <div className="review-workspace-panel-header review-workspace-drawer-only">
-            <span>回放导航</span>
-            <button
-              type="button"
-              className="review-workspace-panel-header__close"
-              onClick={() => setActiveDrawer(null)}
-              aria-label="关闭回放导航"
-            >×</button>
-          </div>
-          <div className="review-workspace-panel-body">
-            <ReplayWorkspaceNavigation
-              onBack={() => navigate(routes.home)}
-              onShowStats={() => setShowStats(true)}
-              kyokuOrder={data.kyoku_order}
-              currentKyoku={currentKyoku}
-              onGoToKyoku={handleGoToKyoku}
-              kyokuLabel={kyokuLabel}
-              currentStep={currentStep}
-              totalSteps={totalSteps}
-              boardPhase={boardPhase}
-              onGoToStep={handleGoToStep}
-              onPrevKyoku={() => handleGoToKyoku(Math.max(0, currentKyoku - 1))}
-              onNextKyoku={() => handleGoToKyoku(Math.min(totalKyoku - 1, currentKyoku + 1))}
-              prevKyokuDisabled={currentKyoku === 0}
-              nextKyokuDisabled={currentKyoku === totalKyoku - 1}
-              onPrevStep={handleStepBackward}
-              onNextStep={handleStepForward}
-              prevStepDisabled={currentStep === 0 && boardPhase === 'pre'}
-              nextStepDisabled={currentStep === totalSteps - 1 && !currentHasPostPhase && !currentHasReachPhase}
-              onPrevOwnDiscard={jumpToPrevOwnDiscard}
-              onNextOwnDiscard={jumpToNextOwnDiscard}
-              onPrevDiff={jumpToPrevDiff}
-              onNextDiff={jumpToNextDiff}
-              playerNames={playerNames}
-              viewPlayerId={viewPlayerId}
-              perspectiveDisabled={!replayIdFromRoute}
-              onSwitchPerspective={switchPerspective}
-            />
-          </div>
-        </aside>
+
 
         <div className="review-workspace-center">
           <div className="review-workspace-compact-toolbar">
             <button
               type="button"
               className="review-workspace-compact-toolbar__button"
-              aria-expanded={activeDrawer === 'left'}
-              aria-controls={leftPanelId}
-              onClick={() => setActiveDrawer((current) => (current === 'left' ? null : 'left'))}
-            >回放导航</button>
-            <span>{kyokuLabel || '回放'} · {currentStep + 1}/{totalSteps}</span>
-            <button
-              type="button"
-              className="review-workspace-compact-toolbar__button"
               aria-expanded={activeDrawer === 'right'}
               aria-controls={rightPanelId}
               onClick={() => setActiveDrawer((current) => (current === 'right' ? null : 'right'))}
-            >决策分析</button>
+            >回放导航 · 决策分析</button>
+            <span>{kyokuLabel || '回放'} · {currentStep + 1}/{totalSteps}</span>
           </div>
           <div className="review-workspace-board" ref={boardViewportRef}>
             {effectiveBattleState ? (
@@ -675,13 +594,38 @@ export function GameBoardReplayPage() {
           aria-label="决策分析"
         >
           <div className="review-workspace-panel-header">
-            <span>决策分析</span>
+            <span>回放导航 · 决策分析</span>
             <button
               type="button"
               className="review-workspace-panel-header__close review-workspace-drawer-only"
               onClick={() => setActiveDrawer(null)}
               aria-label="关闭决策分析"
             >×</button>
+          </div>
+          <div className="review-workspace-nav-section">
+                        <ReplayWorkspaceNavigation
+              onShowStats={() => setShowStats(true)}
+              kyokuOrder={data.kyoku_order}
+              currentKyoku={currentKyoku}
+              onGoToKyoku={handleGoToKyoku}
+              kyokuLabel={kyokuLabel}
+              currentStep={currentStep}
+              totalSteps={totalSteps}
+              boardPhase={boardPhase}
+              onGoToStep={handleGoToStep}
+              onPrevKyoku={() => handleGoToKyoku(Math.max(0, currentKyoku - 1))}
+              onNextKyoku={() => handleGoToKyoku(Math.min(totalKyoku - 1, currentKyoku + 1))}
+              prevKyokuDisabled={currentKyoku === 0}
+              nextKyokuDisabled={currentKyoku === totalKyoku - 1}
+              onPrevStep={handleStepBackward}
+              onNextStep={handleStepForward}
+              prevStepDisabled={currentStep === 0 && boardPhase === 'pre'}
+              nextStepDisabled={currentStep === totalSteps - 1 && !currentHasPostPhase && !currentHasReachPhase}
+              onPrevOwnDiscard={jumpToPrevOwnDiscard}
+              onNextOwnDiscard={jumpToNextOwnDiscard}
+              onPrevDiff={jumpToPrevDiff}
+              onNextDiff={jumpToNextDiff}
+            />
           </div>
           <div className="review-workspace-right-meta">
             当前视角：P{viewPlayerId} {replayPlayerDisplayName(playerNames, viewPlayerId)} · {phaseLabel}
@@ -718,8 +662,6 @@ export function GameBoardReplayPage() {
 
 
 
-
-type ReplayEvent = Record<string, unknown>;
 
 function displayReviewerModelLabel(raw: string | undefined): string {
   const label = (raw || '主视角模型').trim();
@@ -789,19 +731,6 @@ const RESULT_LEVEL_LABELS: Record<string, string> = {
 function getSeatLabel(oya: number, pid: number): string {
   const order = ['东', '南', '西', '北'];
   return order[(pid - oya + 4) % 4];
-}
-
-function removeTileOnce(hand: string[], tile?: string) {
-  if (!tile) return hand;
-  const idx = hand.indexOf(tile);
-  if (idx >= 0) {
-    hand.splice(idx, 1);
-    return hand;
-  }
-  const norm = tile.endsWith('r') ? tile.slice(0, 2) : tile;
-  const normIdx = hand.findIndex((h) => h === norm || (h.endsWith('r') ? h.slice(0, 2) : h) === norm);
-  if (normIdx >= 0) hand.splice(normIdx, 1);
-  return hand;
 }
 
 function normalizeTileForDora(tile: string): string {
@@ -890,189 +819,13 @@ function sortTilesForResult(tiles: string[], winTile?: string | null): string[] 
   return sorted;
 }
 
-function sameConsumed(a: string[] = [], b: string[] = []): boolean {
-  if (a.length !== b.length) return false;
-  return [...a].sort().join(',') === [...b].sort().join(',');
-}
-
-function eventMatchesAction(ev: ReplayEvent, action: Action): boolean {
-  const type = String(ev.type ?? '');
-  if (type !== action.type) return false;
-  if (Number(ev.actor ?? -1) !== Number(action.actor ?? -1)) return false;
-  if (action.pai !== undefined && String(ev.pai ?? '') !== String(action.pai ?? '')) return false;
-  if (action.target !== undefined && Number(ev.target ?? -1) !== Number(action.target ?? -1)) return false;
-  if (action.consumed && !sameConsumed(((ev.consumed as string[] | undefined) ?? []).map(String), action.consumed)) return false;
-  return true;
-}
-
-function applyReplayEventToHands(hands: string[][], ev: ReplayEvent) {
-  const type = String(ev.type ?? '');
-  const actor = Number(ev.actor ?? -1);
-  if (actor < 0) return;
-  if (type === 'tsumo') {
-    hands[actor].push(String(ev.pai ?? ''));
-    return;
-  }
-  if (type === 'dahai') {
-    removeTileOnce(hands[actor], String(ev.pai ?? ''));
-    return;
-  }
-  if (['chi', 'pon', 'daiminkan', 'ankan'].includes(type)) {
-    const consumed = ((ev.consumed as string[] | undefined) ?? []).map(String);
-    for (const tile of consumed) removeTileOnce(hands[actor], tile);
-    return;
-  }
-  // kakan is the declaration window. The added tile leaves the hand only
-  // once kakan_accepted is emitted.
-  if (type === 'kakan_accepted') {
-    removeTileOnce(hands[actor], String(ev.pai ?? ''));
-  }
-}
-
-function findKyokuEventRange(events: ReplayEvent[], entry: ReplayData['log'][number]) {
-  const kyokuKey = entry.kyoku_key;
-  let startIdx = -1;
-  let endIdx = events.length;
-  for (let i = 0; i < events.length; i++) {
-    const ev = events[i];
-    if (
-      ev.type === 'start_kyoku' &&
-      ev.bakaze === kyokuKey.bakaze &&
-      ev.kyoku === kyokuKey.kyoku &&
-      ev.honba === kyokuKey.honba
-    ) {
-      startIdx = i;
-      continue;
-    }
-    if (startIdx >= 0 && i > startIdx && ev.type === 'start_kyoku') {
-      endIdx = i;
-      break;
-    }
-  }
-  return startIdx >= 0 ? { startIdx, endIdx } : null;
-}
-
-function applyEntryEventsToHands(
-  kyokuEvents: ReplayEvent[],
-  startCursor: number,
-  hands: string[][],
-  action: Action | null | undefined,
-  phase: ReplayBoardPhase,
-): number {
-  if (!action || ['none', 'hora', 'ryukyoku'].includes(action.type)) {
-    return startCursor;
-  }
-
-  let cursor = startCursor;
-  while (cursor < kyokuEvents.length) {
-    const ev = kyokuEvents[cursor];
-    const type = String(ev.type ?? '');
-
-    if (type === 'dora' || type === 'reach_accepted') {
-      cursor += 1;
-      continue;
-    }
-
-    if (type === 'tsumo') {
-      const tsumoActor = Number(ev.actor ?? -1);
-      if (action.type === 'kakan' && tsumoActor === action.actor) {
-        applyReplayEventToHands(hands, ev);
-        cursor += 1;
-        if (phase !== 'post') return cursor;
-        continue;
-      }
-      if ((action.type === 'dahai' || action.type === 'reach') && tsumoActor === action.actor) {
-        applyReplayEventToHands(hands, ev);
-        cursor += 1;
-        if (action.type === 'reach') {
-          if (phase !== 'post') return cursor;
-          continue;
-        }
-        if (phase !== 'post') return cursor;
-        continue;
-      }
-      return cursor;
-    }
-
-    if (action.type === 'kakan') {
-      // A decision entry is created at the added tile's tsumo. Pre-phase stops
-      // after that draw; post-phase consumes the declaration and acceptance.
-      if (type === 'kakan' && eventMatchesAction(ev, action)) {
-        cursor += 1;
-        continue;
-      }
-      if (type === 'kakan_accepted' && Number(ev.actor ?? -1) === action.actor) {
-        applyReplayEventToHands(hands, ev);
-        cursor += 1;
-        return cursor;
-      }
-      return cursor;
-    }
-
-    if (eventMatchesAction(ev, action)) {
-      if (phase === 'post') {
-        applyReplayEventToHands(hands, ev);
-        cursor += 1;
-      }
-      return cursor;
-    }
-
-    return cursor;
-  }
-
-  return cursor;
-}
-
-function buildReplayHandsForBoard(
-  events: ReplayEvent[] | null,
-  data: ReplayData | null,
-  currentStep: number,
-  currentEntry: ReplayData['log'][number] | null,
-  boardPhase: ReplayBoardPhase,
-): string[][] | null {
-  if (!events || !data || !currentEntry) return null;
-  const range = findKyokuEventRange(events, currentEntry);
-  if (!range) return null;
-
-  const kyokuEvents = events.slice(range.startIdx, range.endIdx);
-  const startEv = kyokuEvents[0];
-  const hands = ((startEv.tehais as string[][] | undefined) ?? [[], [], [], []]).map((tiles) => [...tiles]);
-  let eventCursor = 1;
-
-  const currentKyokuEntries = data.log.filter((entry) =>
-    entry.kyoku_key.bakaze === currentEntry.kyoku_key.bakaze &&
-    entry.kyoku_key.kyoku === currentEntry.kyoku_key.kyoku &&
-    entry.kyoku_key.honba === currentEntry.kyoku_key.honba,
-  );
-
-  for (const entry of currentKyokuEntries) {
-    const action = (entry.gt_action ?? entry.chosen) as Action | null | undefined;
-    if (entry.step < currentStep) {
-      eventCursor = applyEntryEventsToHands(kyokuEvents, eventCursor, hands, action, 'post');
-      continue;
-    }
-    if (entry.step === currentStep) {
-      eventCursor = applyEntryEventsToHands(
-        kyokuEvents,
-        eventCursor,
-        hands,
-        action,
-        boardPhase === 'post' ? 'post' : 'pre',
-      );
-      break;
-    }
-  }
-
-  return hands.map((tiles) => [...tiles]);
-}
-
 function buildReplayResultSummary(
   events: ReplayEvent[] | null,
   entry: ReplayData['log'][number] | undefined,
   playerNames: string[],
 ): ResultSummary | null {
   if (!events || !entry) return null;
-  const action = (entry.gt_action ?? entry.chosen) as Action | undefined;
+  const action = getActualReplayAction(entry) as Action | null;
   if (!action || (action.type !== 'hora' && action.type !== 'ryukyoku')) return null;
   const kyokuKey = entry.kyoku_key;
   if (!kyokuKey) return null;

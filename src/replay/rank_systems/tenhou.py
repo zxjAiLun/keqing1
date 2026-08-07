@@ -259,12 +259,24 @@ class TenhouRankProgression:
         tier = self.progression_tier(state)
         return POSITIVE_PT[self.game_length][tier]
 
-    def match_context(self, players: Sequence[PlayerRankState]) -> MatchContext:
-        """共享上下文只负责 game_length 与赛前桌均 Rating。"""
+    def match_context(
+        self,
+        players: Sequence[PlayerRankState],
+        *,
+        game_length: str | None = None,
+    ) -> MatchContext:
+        """共享上下文只负责 game_length 与赛前桌均 Rating。
+
+        R10 merge repair：允许按局指定 game_length（tonpuu/hanchan）——
+        否则 tonpu 局会被按 season 级 hanchan PT 表计分。
+        """
         if len(players) != 4:
             raise ValueError(f"expected four players, got {len(players)}")
+        length = game_length or self.game_length
+        if length not in POSITIVE_PT:
+            raise ValueError(f"unknown game_length: {length!r}")
         raw_avg = sum(player.rating for player in players) / 4
-        return MatchContext(game_length=self.game_length, avg_rating=raw_avg)
+        return MatchContext(game_length=length, avg_rating=raw_avg)
 
     def _fourth_pt(self, rank_id: str, game_length: str) -> int:
         if rank_id == "tenhou":

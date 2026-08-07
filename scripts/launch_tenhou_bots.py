@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import signal
 import sys
@@ -78,7 +79,74 @@ def _build_configs(args: argparse.Namespace) -> list[BotClientConfig]:
                 think_delay=args.think_delay,
             )
         )
-    return configs
+
+    # R9-3 ladder capture / R10-E roster capture: load the frozen binding and
+    # attach a shared collector.
+    collector = None
+    if args.ladder_capture_dir:
+        from gateway.playwithyou_capture import (
+            CaptureBinding,
+            PlayWithYouCaptureCollector,
+        )
+
+        binding_path = Path(args.ladder_capture_dir) / "binding.json"
+        if not binding_path.is_file():
+            sys.exit(f"error: missing ladder capture binding: {binding_path}")
+        binding_raw = json.loads(binding_path.read_text(encoding="utf-8"))
+        mode = str(binding_raw.get("mode") or "confirm")
+
+        if mode == "roster":
+            # R10-E 通用四人阵容：launcher 数 = 带 launcher_slot 的 entry 数。
+            roster = [dict(entry) for entry in binding_raw.get("roster") or []]
+            launched = sorted(
+                (entry for entry in roster if entry.get("launcher_slot") is not None),
+                key=lambda entry: int(entry["launcher_slot"]),
+            )
+            if len(launched) != len(configs):
+                sys.exit(
+                    "error: roster launcher slot count mismatch "
+                    f"({len(launched)} vs {len(configs)} bots)"
+                )
+            binding = CaptureBinding(
+                session_id=str(binding_raw["session_id"]),
+                season_id=str(binding_raw.get("season_id") or ""),
+                human_account_id="",
+                bot_account_ids=(),
+                mode=mode,
+                roster=tuple(roster),
+            )
+            collector = PlayWithYouCaptureCollector(
+                binding=binding,
+                capture_dir=Path(args.ladder_capture_dir),
+            )
+            for config, entry in zip(configs, launched, strict=True):
+                config.ladder_account_id = str(entry["account_id"])
+                config.capture_sink = collector
+                # P1：runtime 必须加载父进程冻结的同一 checkpoint 路径，
+                # 不再按 bot_name（动态 spec）重新解析。bot_name 保持绝对路径 spec。
+                frozen_path = str(entry.get("resolved_checkpoint_path") or config.bot_name)
+                config.model_path = Path(frozen_path)
+        else:
+            binding = CaptureBinding(
+                session_id=str(binding_raw["session_id"]),
+                season_id=str(binding_raw["season_id"]),
+                human_account_id=str(binding_raw["human_account_id"]),
+                bot_account_ids=tuple(str(item) for item in binding_raw["bot_account_ids"]),
+                mode=mode,
+            )
+            if len(binding.bot_account_ids) != len(configs):
+                sys.exit(
+                    "error: ladder binding bot accounts count mismatch "
+                    f"({len(binding.bot_account_ids)} vs {len(configs)} bots)"
+                )
+            collector = PlayWithYouCaptureCollector(
+                binding=binding,
+                capture_dir=Path(args.ladder_capture_dir),
+            )
+            for config, account_id in zip(configs, binding.bot_account_ids, strict=True):
+                config.ladder_account_id = account_id
+                config.capture_sink = collector
+    return configs, collector
 
 
 def main() -> None:
@@ -153,10 +221,15 @@ def main() -> None:
         default=0.0,
         help="Seconds to pause on the bot's own turn before acting (Speed control). 0 = instant.",
     )
+    parser.add_argument(
+        "--ladder-capture-dir",
+        default=None,
+        help="Capture directory with a frozen binding.json; enables R9-3 ladder capture",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
-    configs = _build_configs(args)
+    configs, collector = _build_configs(args)
 
     stop_event = threading.Event()
     gateway_proc = None
@@ -229,6 +302,12 @@ def main() -> None:
             time.sleep(0.5)
     finally:
         stop_event.set()
+        if collector is not None:
+            # R9-3: 无论正常结束还是被中断，都按已积累消息最终化 pending/state。
+            try:
+                collector.finalize()
+            except Exception:
+                logging.exception("ladder capture finalize failed")
         if gateway_proc is not None and gateway_proc.poll() is None:
             gateway_proc.terminate()
             try:

@@ -1,12 +1,11 @@
 // src/replay_ui/src/components/ReviewWorkspace/ReplayWorkspaceNavigation.tsx
 //
-// Review Workspace 左栏：回放导航。
+// Review Workspace 右栏导航（与 Q/P 分析共用竖栏）。
 // 纯展示 + callback 转发组件，不实现任何回放跳转算法（算法在 GameBoardReplayPage）。
-import type { CSSProperties } from 'react';
+import { useState, type CSSProperties } from 'react';
 import type { ReplayData } from '../../types/replay';
 import type { ReplayBoardPhase } from '../../utils/replayAdapter';
 import { CN_BAKAZE } from '../../utils/constants';
-import { replayPlayerDisplayName } from '../../utils/replayNames';
 
 const PHASE_LABELS: Record<ReplayBoardPhase, string> = {
   pre: '动作前',
@@ -15,7 +14,6 @@ const PHASE_LABELS: Record<ReplayBoardPhase, string> = {
 };
 
 interface ReplayWorkspaceNavigationProps {
-  onBack: () => void;
   onShowStats: () => void;
   kyokuOrder: ReplayData['kyoku_order'];
   currentKyoku: number;
@@ -37,14 +35,9 @@ interface ReplayWorkspaceNavigationProps {
   onNextOwnDiscard: () => void;
   onPrevDiff: () => void;
   onNextDiff: () => void;
-  playerNames: string[];
-  viewPlayerId: number;
-  perspectiveDisabled: boolean;
-  onSwitchPerspective: (playerId: number) => void;
 }
 
 export function ReplayWorkspaceNavigation({
-  onBack,
   onShowStats,
   kyokuOrder,
   currentKyoku,
@@ -66,38 +59,45 @@ export function ReplayWorkspaceNavigation({
   onNextOwnDiscard,
   onPrevDiff,
   onNextDiff,
-  playerNames,
-  viewPlayerId,
-  perspectiveDisabled,
-  onSwitchPerspective,
 }: ReplayWorkspaceNavigationProps) {
+  const [kyokuListOpen, setKyokuListOpen] = useState(false);
   return (
     <div style={controlsStyle}>
-      {/* 顶部工具区 */}
+      {/* 顶部工具区：返回位置替换为「对局列表」展开按钮 */}
       <div style={utilityGridStyle}>
-        <button type="button" onClick={onBack} style={utilityButtonStyle}>返回</button>
+        <button
+          type="button"
+          onClick={() => setKyokuListOpen(v => !v)}
+          style={utilityButtonStyle}
+          aria-expanded={kyokuListOpen}
+          title="展开/收起全部小局"
+        >
+          {kyokuListOpen ? '收起' : '对局列表'}
+        </button>
         <button type="button" onClick={onShowStats} style={utilityButtonStyle} title="统计">统计</button>
       </div>
 
-      {/* 对局列表：完整 kyoku_order，点击跳局 */}
-      <div>
-        <div style={sectionTitleStyle}>对局列表</div>
-        <div style={{ display: 'grid', gap: 3 }}>
-          {kyokuOrder.map((kyoku, idx) => {
-            const active = idx === currentKyoku;
-            return (
-              <button
-                key={`${kyoku.bakaze}-${kyoku.kyoku}-${kyoku.honba}-${idx}`}
-                type="button"
-                onClick={() => onGoToKyoku(idx)}
-                style={kyokuItemStyle(active)}
-              >
-                {CN_BAKAZE[kyoku.bakaze] ?? kyoku.bakaze}{kyoku.kyoku}局 · {kyoku.honba}本场
-              </button>
-            );
-          })}
+      {/* 对局列表：默认收起，展开后完整 kyoku_order 点击跳局 */}
+      {kyokuListOpen && (
+        <div>
+          <div style={sectionTitleStyle}>全部小局</div>
+          <div style={{ display: 'grid', gap: 3 }}>
+            {kyokuOrder.map((kyoku, idx) => {
+              const active = idx === currentKyoku;
+              return (
+                <button
+                  key={`${kyoku.bakaze}-${kyoku.kyoku}-${kyoku.honba}-${idx}`}
+                  type="button"
+                  onClick={() => { onGoToKyoku(idx); setKyokuListOpen(false); }}
+                  style={kyokuItemStyle(active)}
+                >
+                  {CN_BAKAZE[kyoku.bakaze] ?? kyoku.bakaze}{kyoku.kyoku}局 · {kyoku.honba}本场
+                </button>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* 当前回放位置 */}
       <div>
@@ -144,29 +144,6 @@ export function ReplayWorkspaceNavigation({
           <button type="button" onClick={onNextDiff} style={sideButtonStyle(false)} title="下一处与 Bot 不同的决策">
             下一差异 &gt;
           </button>
-        </div>
-      </div>
-
-      {/* 玩家视角：无持久化 replayId 时禁用（由 perspectiveDisabled 控制） */}
-      <div>
-        <div style={sectionTitleStyle}>玩家视角</div>
-        <div style={perspectiveGridStyle}>
-          {playerNames.map((name, idx) => {
-            const active = idx === viewPlayerId;
-            const disabled = perspectiveDisabled || active;
-            return (
-              <button
-                key={idx}
-                type="button"
-                onClick={() => onSwitchPerspective(idx)}
-                disabled={disabled}
-                style={perspectiveButtonStyle(active, disabled)}
-                title={`切换到 ${name}`}
-              >
-                P{idx} {replayPlayerDisplayName(playerNames, idx)}
-              </button>
-            );
-          })}
         </div>
       </div>
     </div>
@@ -217,12 +194,6 @@ const buttonGridStyle: CSSProperties = {
   gap: 6,
 };
 
-const perspectiveGridStyle: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: '1fr 1fr',
-  gap: 5,
-};
-
 const utilityButtonStyle: CSSProperties = {
   minHeight: 28,
   border: '1px solid var(--border)',
@@ -243,22 +214,6 @@ function sideButtonStyle(disabled: boolean): CSSProperties {
     borderRadius: 3,
     fontSize: 13,
     fontWeight: 800,
-    cursor: disabled ? 'default' : 'pointer',
-  };
-}
-
-function perspectiveButtonStyle(active: boolean, disabled: boolean): CSSProperties {
-  return {
-    minHeight: 26,
-    border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
-    background: active ? 'rgba(52, 152, 219, 0.12)' : 'var(--page-bg)',
-    color: active ? 'var(--accent)' : 'var(--text-secondary)',
-    borderRadius: 3,
-    fontSize: 11,
-    fontWeight: active ? 800 : 650,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
     cursor: disabled ? 'default' : 'pointer',
   };
 }

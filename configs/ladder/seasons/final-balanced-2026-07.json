@@ -76,5 +76,5 @@
     }
   ],
   "notes": "V3 1,000-hanchan balanced model-pool league: five 200-hanchan lineups (L1-L5), each model family received exactly 1,000 seat-hanchans. Rank points [90,45,0,-135]. Accounts are declared explicitly; reports consume these stable ids instead of deriving identities from seats.",
-  "default": true
+  "default": false
 }

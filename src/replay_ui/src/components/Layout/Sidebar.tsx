@@ -12,6 +12,7 @@ import {
   PanelLeftOpen,
   Settings,
   Table2,
+  Users,
   X,
 } from 'lucide-react';
 import { ThemeToggle } from './ThemeToggle';
@@ -45,6 +46,13 @@ const NAV_SECTIONS: Array<{ label: string; items: NavItem[] }> = [
   {
     label: '在线',
     items: [{ path: routes.tenhou, icon: Bot, label: '天凤呼出' }],
+  },
+  {
+    label: '对战记录',
+    items: [
+      { path: routes.participants, icon: Users, label: '参赛者' },
+      { path: routes.matches, icon: Table2, label: '对局记录', exact: true },
+    ],
   },
   {
     label: '诊断',

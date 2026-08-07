@@ -86,7 +86,12 @@ class RankSystem(Protocol):
     version: str
 
     def initial_state(self) -> PlayerRankState: ...
-    def match_context(self, players: Sequence[PlayerRankState]) -> MatchContext: ...
+    def match_context(
+        self,
+        players: Sequence[PlayerRankState],
+        *,
+        game_length: str | None = None,
+    ) -> MatchContext: ...
     def apply_result(
         self,
         state: PlayerRankState,
