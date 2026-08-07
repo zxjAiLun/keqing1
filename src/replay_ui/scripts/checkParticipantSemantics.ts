@@ -218,6 +218,12 @@ check(intakeG3.includes('_needs_hand_upgrade'), 'hand upgrade 判定（含缺 al
 check(intakeG3.includes('优先原始 Tenhou6'), '重建优先 tenhou6.json（恢复历史 tenpai）');
 check(intakeG3.includes('HANDS_CONTRACT_VERSION'), 'hand summary contract version');
 
+// 22) R10 最终纵向 smoke
+check(ladderIngest.includes('_ladder_game_length'), 'participants tonpu → ladder tonpuu 归一（smoke 抓到的集成 bug）');
+const smoke = read('../../tests/test_participants_vertical_smoke.py');
+check(smoke.includes('test_r10_vertical_smoke'), '纵向 smoke：roster→intake→ledger→ladder→stats');
+check(smoke.includes('source_log') && smoke.includes('external_match_id'), '三方一致性核验（tenhou log ↔ snapshot ↔ stats）');
+
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);

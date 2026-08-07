@@ -337,7 +337,7 @@ class ParticipantLedgerAdapter:
             yield LadderMatch(
                 match_id=match.match_id,
                 occurred_at=_parse_iso(match.occurred_at),
-                game_length=match.game_length,
+                game_length=_ladder_game_length(match.game_length),
                 players=tuple(
                     LadderMatchPlayer(
                         account_id=seat.account_id,
@@ -349,6 +349,11 @@ class ParticipantLedgerAdapter:
                 source_type=self.source_type,
                 source_ref=match.external_match_id,
             )
+
+
+def _ladder_game_length(game_length: str) -> str:
+    """participants 的 tonpu → ladder 的 tonpuu（跨系统术语归一）。"""
+    return "tonpuu" if game_length == "tonpu" else game_length
 
 
 def participants_projection_fingerprint(season_id: str) -> str:
