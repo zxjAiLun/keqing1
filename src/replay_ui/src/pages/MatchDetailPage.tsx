@@ -33,11 +33,14 @@ export function MatchDetailPage() {
   const [startingPoints, setStartingPoints] = useState(25000);
   const [gameLength, setGameLength] = useState<GameLength>('hanchan');
   const [note, setNote] = useState('');
+  const [seasonId, setSeasonId] = useState('');
+  const [ratingEligible, setRatingEligible] = useState(false);
   const [force, setForce] = useState(false);
   const [reason, setReason] = useState('');
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [projecting, setProjecting] = useState(false);
 
   const load = useCallback(async (signal: AbortSignal) => {
     setLoading(true);
@@ -71,6 +74,8 @@ export function MatchDetailPage() {
     setStartingPoints(data.match.starting_points);
     setGameLength(data.match.game_length);
     setNote(data.match.note ?? '');
+    setSeasonId(data.match.season_id ?? '');
+    setRatingEligible(data.match.rating_eligible ?? false);
     setForce(false);
     setReason('');
     setIssues([]);
@@ -88,6 +93,8 @@ export function MatchDetailPage() {
         starting_points: startingPoints,
         game_length: gameLength,
         note: note || null,
+        season_id: seasonId || null,
+        rating_eligible: ratingEligible,
         force,
         reason: force ? reason : null,
       });
@@ -116,6 +123,21 @@ export function MatchDetailPage() {
   };
 
   const match: Match | null = data?.match ?? null;
+
+  // R10-F：触发天梯投影（ledger → 全量重放 → 快照发布）
+  const projectSeason = async () => {
+    if (!match?.season_id) return;
+    setProjecting(true);
+    setError(null);
+    try {
+      await participantsApi.projectLadder(match.season_id);
+      await load(new AbortController().signal);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProjecting(false);
+    }
+  };
 
   return (
     <PageShell maxWidth={860}>
@@ -184,8 +206,82 @@ export function MatchDetailPage() {
           <RevisionTimeline revisions={data.revisions} />
         </section>
       )}
+
+      {match && match.status !== 'void' && (
+        <section style={cardStyle}>
+          <div style={{ fontWeight: 800, marginBottom: 8 }}>正式天梯计分</div>
+          {editing ? (
+            <div style={{ display: 'grid', gap: 10 }}>
+              <div style={{ display: 'grid', gap: 4 }}>
+                <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>赛季（season_id，空 = 仅账号统计）</label>
+                <input
+                  value={seasonId}
+                  onChange={(e) => setSeasonId(e.target.value)}
+                  placeholder="official-ladder-v1"
+                  style={{
+                    border: '1px solid var(--border)', background: 'var(--page-bg)',
+                    color: 'var(--text-primary)', borderRadius: 4, padding: '6px 8px', fontSize: 13,
+                  }}
+                />
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                <input type="checkbox" checked={ratingEligible} onChange={(e) => setRatingEligible(e.target.checked)} />
+                纳入正式天梯计分（rating_eligible）
+              </label>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                保存修订后：若已设赛季，账本会标记 dirty 并等待投影重算。
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gap: 8, fontSize: 13 }}>
+              <div>
+                赛季：<b>{match.season_id || '—'}</b>
+                {match.season_id && match.rating_eligible ? ' · 纳入正式计分' : ''}
+              </div>
+              <div>
+                投影状态：
+                <b style={{ color: projectionColor(match.ladder_projection_state) }}>
+                  {projectionLabel(match.ladder_projection_state)}
+                </b>
+              </div>
+              {match.season_id && (
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <button
+                    style={{ ...primaryBtn, background: '#16a085' }}
+                    onClick={projectSeason}
+                    disabled={projecting}
+                  >
+                    {projecting ? '天梯重算中…' : '触发天梯投影'}
+                  </button>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    从 ledger 全量确定性重放并发布快照
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      )}
     </PageShell>
   );
+}
+
+function projectionLabel(state?: string): string {
+  switch (state) {
+    case 'pending': return '天梯重算中…';
+    case 'ready': return '已更新';
+    case 'error': return '投影失败';
+    default: return '未纳入';
+  }
+}
+
+function projectionColor(state?: string): string {
+  switch (state) {
+    case 'pending': return '#e67e22';
+    case 'ready': return '#27ae60';
+    case 'error': return '#e74c3c';
+    default: return 'var(--text-muted)';
+  }
 }
 
 const cardStyle: React.CSSProperties = {

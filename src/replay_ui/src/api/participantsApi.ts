@@ -21,6 +21,8 @@ import type {
   ModelIdentity,
   ModelIdentityCreate,
   RevisionSummary,
+  LadderProjectionStatus,
+  LadderProjectResult,
 } from '../types/participants';
 
 const API_BASE = '/api';
@@ -104,6 +106,12 @@ export const participantsApi = {
     api('/participants/intake/preview', { method: 'POST', body: JSON.stringify(payload) }),
   intakeConfirm: (payload: IntakeConfirmRequest): Promise<MatchResponse> =>
     api('/participants/intake/confirm', { method: 'POST', body: JSON.stringify(payload) }),
+
+  // ---- R10-F：天梯投影 ----
+  getLadderProjectionStatus: (seasonId: string, signal?: AbortSignal): Promise<LadderProjectionStatus> =>
+    api(`/participants/ladder/${encodeURIComponent(seasonId)}/status`, { signal }),
+  projectLadder: (seasonId: string): Promise<LadderProjectResult> =>
+    api(`/participants/ladder/${encodeURIComponent(seasonId)}/project`, { method: 'POST' }),
 };
 
 export { ApiError };

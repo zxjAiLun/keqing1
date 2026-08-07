@@ -71,6 +71,9 @@ export interface Match {
   ranks: number[];
   status: 'active' | 'void';
   void_reason?: string | null;
+  season_id?: string | null;
+  rating_eligible?: boolean;
+  ladder_projection_state?: 'not_applicable' | 'pending' | 'ready' | 'error';
   revision: number;
   latest_revision_id: string;
   created_at: string;
@@ -140,6 +143,8 @@ export interface MatchCreate {
   replay_id?: string | null;
   seats: MatchSeat[];
   final_scores: number[];
+  season_id?: string | null;
+  rating_eligible?: boolean;
   force?: boolean;
   reason?: string | null;
 }
@@ -154,6 +159,8 @@ export interface MatchRevise {
   data_completeness?: DataCompleteness | null;
   seats?: MatchSeat[] | null;
   final_scores?: number[] | null;
+  season_id?: string | null;
+  rating_eligible?: boolean | null;
   force?: boolean;
   reason?: string | null;
 }
@@ -231,6 +238,20 @@ export interface IntakeConfirmRequest {
   resolutions: SeatResolution[];
   session_id?: string | null;
   note?: string | null;
+}
+
+export interface LadderProjectionStatus {
+  season_id: string;
+  dirty: boolean;
+  states: Record<string, number>;
+  eligible_count: number;
+}
+
+export interface LadderProjectResult {
+  season_id: string;
+  state: 'ready' | 'error';
+  snapshot_dir?: string | null;
+  games?: number | null;
 }
 
 export interface IntakePreviewSeat {
