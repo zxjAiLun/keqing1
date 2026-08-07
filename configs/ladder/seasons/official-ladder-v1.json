@@ -1,21 +1,22 @@
 {
   "schema": "keqing.ladder.season.v1",
-  "season_id": "final-balanced-2026-07",
-  "title": "Final Balanced League 2026-07",
-  "status": "completed",
-  "report_dir": "artifacts/experiments/model_pool_2026_07/V3_final_rank_mc_warmstart_2026_07/league_1000h_balanced/platform_accounts",
-  "league_summary": "artifacts/experiments/model_pool_2026_07/V3_final_rank_mc_warmstart_2026_07/league_1000h_balanced/league_summary.json",
-  "games_expected": 1000,
+  "season_id": "official-ladder-v1",
+  "title": "Official Ladder v1 (participants ledger-driven)",
+  "status": "running",
+  "report_dir": "artifacts/ladder/reports/official-ladder-v1",
   "scoring": {
-    "system": "tenhou_houou_7dan_fixed",
-    "version": "2026-07-01",
+    "system": "tenhou_rank_progression",
+    "version": "2026-08-01",
     "game_length": "hanchan",
-    "room": "houou",
-    "initial_rank": "7dan",
-    "initial_pt": 1400,
-    "initial_rating": 1500,
-    "rank_points": [90, 45, 0, -135],
-    "target_pt": 2800
+    "initial_rank": "newcomer",
+    "initial_rating": 1500
+  },
+  "ingest": {
+    "sources_root": "artifacts/ladder/sources",
+    "participants": {
+      "enabled": true,
+      "exclusive": true
+    }
   },
   "models": [
     {
@@ -75,6 +76,6 @@
       ]
     }
   ],
-  "notes": "V3 1,000-hanchan balanced model-pool league: five 200-hanchan lineups (L1-L5), each model family received exactly 1,000 seat-hanchans. Rank points [90,45,0,-135]. Accounts are declared explicitly; reports consume these stable ids instead of deriving identities from seats.",
-  "default": false
+  "default": true,
+  "notes": "R10 official ladder: Participants Match Ledger 作为唯一计分事实来源 （ingest.participants.exclusive=true，legacy result sources 不参与正式计分）。账号/模型注册表沿用 final-balanced-2026-07。段位从新人/R1500 全量重放。"
 }
