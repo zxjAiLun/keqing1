@@ -265,7 +265,7 @@ def _resolve_artifact_path(artifact, project_root: Path) -> Path:
     return path.resolve()
 
 
-def _freeze_launcher_models(roster_bindings: List[dict], specs: List[str]) -> List[dict]:
+def _freeze_launcher_models(roster_bindings: List[dict], specs: List[str]) -> tuple[List[dict], List[str]]:
     """为 launcher 参与者冻结模型身份/产物（P1-2 checkpoint 精确匹配）。
 
     每个 launcher 先以真实 ``resolve_bot_spec`` 得到实际 checkpoint 绝对路径，
@@ -275,7 +275,10 @@ def _freeze_launcher_models(roster_bindings: List[dict], specs: List[str]) -> Li
     - ``mortal`` 自动识别 V2 candidate / 70k fallback；
     - custom 必须匹配已登记 artifact，否则启动前拒绝。
 
-    返回保持**输入 roster 顺序**的完整列表（仅回填模型字段），写回时按位置即可。
+    返回 ``(frozen_roster, frozen_launcher_specs)``：
+    - ``frozen_roster`` 保持**输入 roster 顺序**（仅回填模型字段 + resolved_checkpoint_path）；
+    - ``frozen_launcher_specs`` 为按 launcher_slot 排序的**绝对 checkpoint 路径**，
+      直接传给 launcher（child/runtime 不再按动态名字重新解析）。
     """
     from inference.bot_registry import resolve_bot_spec
     from participants import registry as participant_registry
@@ -341,9 +344,17 @@ def _freeze_launcher_models(roster_bindings: List[dict], specs: List[str]) -> Li
                 **entry,
                 "model_identity_id": identity.model_identity_id,
                 "model_artifact_id": artifact.model_artifact_id,
+                "resolved_checkpoint_path": str(resolved_path),
             }
         )
-    return frozen
+    frozen_launcher_specs = [
+        str(entry["resolved_checkpoint_path"])
+        for entry in sorted(
+            (entry for entry in frozen if entry.get("launcher_slot") is not None),
+            key=lambda entry: int(entry["launcher_slot"]),
+        )
+    ]
+    return frozen, frozen_launcher_specs
 
 
 def _rollback_roster_start(capture_dir: Optional[Path], alias_ids: List[str]) -> None:
@@ -705,6 +716,8 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
         raise HTTPException(status_code=400, detail=str(exc))
 
     specs = launcher_specs
+    # 传给 launcher 的 --bots：默认原始 spec；roster 模式在冻结后替换为绝对 checkpoint 路径。
+    launcher_command_specs = specs
     if not specs:
         raise HTTPException(
             status_code=400,
@@ -745,7 +758,10 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
                 participants_ledger.recover_pending_transaction_locked()
                 _validate_roster_bindings(roster_bindings, specs)
                 # P1-1：冻结返回与原 roster 同序，仅回填模型字段
-                roster_bindings = _freeze_launcher_models(roster_bindings, specs)
+                roster_bindings, frozen_launcher_specs = _freeze_launcher_models(roster_bindings, specs)
+                # P1：child/runtime 必须加载与 artifact 匹配的同一绝对 checkpoint 路径，
+                # 不再让子进程按动态名字（mortal/70k）重新解析。
+                launcher_command_specs = frozen_launcher_specs
 
                 capture_dir = capture_dir_for_session(_ladder_data_root(), session_id)
                 (capture_dir / "pending").mkdir(parents=True, exist_ok=True)
@@ -821,7 +837,7 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
         "--room",
         f"L{lobby_id}",
         "--bots",
-        *specs,
+        *launcher_command_specs,
         "--device",
         device,
         "--start-gateway",
@@ -1019,6 +1035,8 @@ def _discover_captures() -> List[dict]:
                         "tenhou_log_url": payload.get("tenhou_log_url"),
                         "observer_accounts": payload.get("observer_accounts") or [],
                         "score_observers": payload.get("score_observers") or [],
+                        "roster": payload.get("roster") or [],
+                        "evidence_warning": payload.get("evidence_warning"),
                         "conflict_reason": payload.get("conflict_reason"),
                         "publish_error": payload.get("publish_error"),
                         "_path": str(path),

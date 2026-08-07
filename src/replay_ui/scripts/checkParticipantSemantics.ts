@@ -109,9 +109,18 @@ check(capture2.includes('evidence_warning'), 'roster 分数不一致记录 evide
 // 11) R10-E Repair 2：slot-stable 冻结 / checkpoint 精确匹配 / 单锁原子
 check(playwithyou.includes('_resolve_artifact_path'), '冻结按 artifact 绝对路径精确匹配 checkpoint');
 check(playwithyou.includes('resolve_bot_spec'), '冻结复用真实 bot_registry checkpoint 解析');
-check(playwithyou.includes('roster_bindings = _freeze_launcher_models(roster_bindings, specs)'), '冻结保持原 roster 顺序（slot-stable 写回）');
+check(playwithyou.includes('roster_bindings, frozen_launcher_specs = _freeze_launcher_models(roster_bindings, specs)'), '冻结保持原 roster 顺序（slot-stable 写回）');
 check(playwithyou.includes('participants_data_lock'), 'roster 校验/冻结/别名注册在同一 data_lock');
 check(playwithyou.includes('_rollback_roster_start'), 'Popen 失败也回滚 roster 启动');
+
+// 12) R10-E Repair 3：冻结 checkpoint 传给 runtime / evidence 透出 API
+const launcher2 = read('../../scripts/launch_tenhou_bots.py');
+check(launcher2.includes('resolved_checkpoint_path'), 'launcher 从 binding 冻结路径设 model_path');
+check(launcher2.includes('config.model_path = Path(frozen_path)'), 'runtime 加载冻结路径而非动态 spec');
+check(playwithyou.includes('launcher_command_specs'), '父进程用冻结绝对路径作为 --bots');
+check(playwithyou.includes('"resolved_checkpoint_path": str(resolved_path)'), 'binding 冻结 resolved_checkpoint_path');
+check(playwithyou.includes('"roster": payload.get("roster") or []'), '_discover_captures 透出 roster');
+check(playwithyou.includes('"evidence_warning": payload.get("evidence_warning")'), '_discover_captures 透出 evidence_warning');
 
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);

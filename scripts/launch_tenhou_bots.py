@@ -122,6 +122,10 @@ def _build_configs(args: argparse.Namespace) -> list[BotClientConfig]:
             for config, entry in zip(configs, launched, strict=True):
                 config.ladder_account_id = str(entry["account_id"])
                 config.capture_sink = collector
+                # P1：runtime 必须加载父进程冻结的同一 checkpoint 路径，
+                # 不再按 bot_name（动态 spec）重新解析。bot_name 保持绝对路径 spec。
+                frozen_path = str(entry.get("resolved_checkpoint_path") or config.bot_name)
+                config.model_path = Path(frozen_path)
         else:
             binding = CaptureBinding(
                 session_id=str(binding_raw["session_id"]),

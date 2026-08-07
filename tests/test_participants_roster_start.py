@@ -390,3 +390,118 @@ def test_roster_validation_failure_no_subprocess(pw_env):
     from participants import aliases
 
     assert aliases.list_aliases() == []
+
+
+def test_frozen_checkpoint_does_not_drift(tmp_path, monkeypatch):
+    """P1：父进程冻结 checkpoint A 后 resolver 状态变 B——子进程/runtime 仍加载 A，
+    binding 与别名记录 A 对应 artifact，绝不允许「冻结的是 A、实际加载的是 B」。"""
+    import argparse
+
+    from scripts import launch_tenhou_bots as launcher
+    from participants import registry
+    from participants.schemas import AccountCreate, ModelIdentityCreate
+
+    checkpoint_a = tmp_path / "checkpoints" / "a.pth"
+    checkpoint_b = tmp_path / "checkpoints" / "b.pth"
+    checkpoint_a.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_a.write_text("")
+    checkpoint_b.write_text("")
+
+    monkeypatch.setattr(pw, "LAUNCHER", tmp_path / "launch_tenhou_bots.py")
+    (tmp_path / "launch_tenhou_bots.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(pw, "_find_owned_pids", lambda: [])
+    monkeypatch.setattr(
+        pw, "_resolve_spec",
+        lambda network, custom_paths, slot: "mortal" if network == "mortal" else None,
+    )
+    monkeypatch.setenv("KEQING_PARTICIPANT_DATA_ROOT", str(tmp_path / "participants"))
+    monkeypatch.setattr(pw, "_ladder_data_root", lambda: tmp_path / "ladder")
+    monkeypatch.setattr(pw, "_ladder_config_dir", lambda: tmp_path / "configs")
+    fake_subprocess = mock.Mock()
+    fake_subprocess.Popen.return_value = FakeProc()
+    monkeypatch.setattr(pw, "subprocess", fake_subprocess)
+    pw.SESSIONS.clear()
+    pw._HISTORY.clear()
+
+    for aid, atype in (
+        ("nick@01", "human"), ("70k@01", "managed_bot"),
+        ("70k@02", "managed_bot"), ("mortal@01", "external_bot"),
+    ):
+        registry.create_account(AccountCreate(account_id=aid, display_name=aid, account_type=atype))
+    registry.create_model_identity(
+        ModelIdentityCreate(model_identity_id="70k", label="70k", kind="local_model", artifact_path=str(checkpoint_a))
+    )
+
+    # 冻结期间（2 次 launcher 解析）返回 A；之后（子进程重新解析时）变 B，模拟漂移
+    calls = {"n": 0}
+
+    def _resolver(spec, root):
+        calls["n"] += 1
+        return ("mortal", checkpoint_a if calls["n"] <= 2 else checkpoint_b)
+
+    monkeypatch.setattr("inference.bot_registry.resolve_bot_spec", _resolver)
+
+    from gateway.api.playwithyou import ParticipantBindingRequest, StartPlayWithYouRequest
+
+    req = StartPlayWithYouRequest(
+        networks=["mortal", "mortal", "none", "none"],
+        roster=[
+            ParticipantBindingRequest(account_id="nick@01", controller_type="human_ui"),
+            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_slot=0, expected_raw_name="NoName-1"),
+            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_slot=1, expected_raw_name="NoName-2"),
+            ParticipantBindingRequest(account_id="mortal@01", controller_type="external_agent"),
+        ],
+    )
+    status = pw.start_playwithyou(req)
+
+    # 父进程冻结在 A：binding 与 session 别名记录 A 对应 artifact
+    capture_dir = pw_env_root = tmp_path / "ladder" / "captures" / "playwithyou" / status.session_id
+    binding = json.loads((capture_dir / "binding.json").read_text(encoding="utf-8"))
+    launched = [e for e in binding["roster"] if e.get("resolved_checkpoint_path")]
+    assert len(launched) == 2
+    assert all(e["resolved_checkpoint_path"] == str(checkpoint_a) for e in launched)
+
+    # --bots 传 A 的绝对路径，绝不再传动态 spec 名
+    command = pw.subprocess.Popen.call_args[0][0]
+    bots_start = command.index("--bots") + 1
+    bots_end = command.index("--device")
+    bots_arg = command[bots_start:bots_end]
+    assert bots_arg == [str(checkpoint_a), str(checkpoint_a)]
+    assert "mortal" not in bots_arg
+
+    # 子进程此时 resolver 已返回 B，但必须加载 A（从 binding 冻结路径）
+    monkeypatch.setattr(launcher, "normalize_tenhou_room", lambda room, **kw: "L2147_9")
+    monkeypatch.setattr(launcher, "_pick_device", lambda device: "cpu")
+    child_args = argparse.Namespace(
+        bots=bots_arg, name_prefix="NoName", room="2147", device="cuda",
+        game_type="hanchan", gateway_host="127.0.0.1", gateway_port=12101,
+        bot_verbose=False, think_delay=0.0, ladder_capture_dir=str(capture_dir),
+    )
+    configs, collector = launcher._build_configs(child_args)
+    assert str(configs[0].model_path) == str(checkpoint_a)
+    assert str(configs[1].model_path) == str(checkpoint_a)
+    assert configs[0].resolved_model_path() == checkpoint_a
+    assert collector.binding.roster
+
+
+def test_discover_captures_exposes_roster_and_evidence(tmp_path, monkeypatch):
+    """P2：_discover_captures 的 API 返回必须包含 roster 与 evidence_warning。"""
+    monkeypatch.setattr(pw, "_ladder_data_root", lambda: tmp_path / "ladder")
+    capture_dir = tmp_path / "ladder" / "captures" / "playwithyou" / "s1" / "pending"
+    capture_dir.mkdir(parents=True)
+    payload = {
+        "capture_id": "s1:tenhou:abc",
+        "session_id": "s1",
+        "state": "awaiting_import",
+        "match": {"match_id": "tenhou:abc"},
+        "tenhou_log_url": "https://tenhou.net/3/?log=abc",
+        "roster": [{"account_id": "70k@01", "controller_type": "local_model", "launcher_slot": 0}],
+        "evidence_warning": "observer 70k@01 规范化后分数不一致",
+        "score_observers": ["70k@01"],
+    }
+    (capture_dir / "abc.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    captures = pw.list_ladder_captures()["captures"]
+    assert len(captures) == 1
+    assert captures[0]["roster"] == payload["roster"]
+    assert captures[0]["evidence_warning"] == payload["evidence_warning"]
+    assert captures[0]["score_observers"] == ["70k@01"]
