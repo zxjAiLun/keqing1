@@ -245,3 +245,133 @@ def test_projection_gate_requires_participants_enabled(participants_root, monkey
     assert "未启用 participants 投影" in result.get("reason", "")
     # dirty 保留、不误清
     assert ledger.ladder_dirty_path(SEASON).exists()
+
+
+# ---------------------------------------------------------------------------
+# R10-F Repair 2：begin barrier / single-flight / failure CAS / wake
+# ---------------------------------------------------------------------------
+
+def test_begin_barrier_blocks_mid_mutation(participants_root, monkeypatch):
+    """P1-1：dirty 已写但 Match 事务未完成时，投影 begin barrier 必须阻塞到提交完成。"""
+    import threading
+    import time
+
+    _accounts()
+    started = threading.Event()
+    release = threading.Event()
+    original = ledger.mark_ladder_dirty
+
+    def _slow_mark(season_id):
+        original(season_id)
+        started.set()
+        release.wait(5)  # 模拟 dirty 后、pending/match 提交前被挂起
+
+    monkeypatch.setattr(ledger, "mark_ladder_dirty", _slow_mark)
+
+    def _mutation():
+        ledger.create_match(_match_create(), registry)
+
+    t = threading.Thread(target=_mutation)
+    t.start()
+    assert started.wait(5), "mutation 未开始"
+
+    begin_gen: dict = {}
+
+    def _begin():
+        begin_gen["gen"] = ledger.begin_ladder_projection(SEASON)
+
+    b = threading.Thread(target=_begin)
+    b.start()
+    time.sleep(0.3)
+    assert "gen" not in begin_gen, "begin barrier 未阻塞在未提交事务上"
+    release.set()
+    t.join()
+    b.join()
+    assert "gen" in begin_gen
+    assert begin_gen["gen"] == ledger.read_ladder_generation(SEASON)
+    # 投影此时读到的是已提交的 11 局
+    assert len(ledger.list_matches(status="active").matches) == 1
+
+
+def test_single_flight_prevents_concurrent_publishers(participants_root, monkeypatch, tmp_path):
+    """P1-2：worker + manual 同时 project 同一 generation → 只有一个进入 publisher。"""
+    import threading
+
+    from scripts.mortal import publish_ladder_snapshot
+
+    _accounts()
+    ledger.create_match(_match_create(), registry)
+    _write_season_config(tmp_path, monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    publish_calls = {"n": 0}
+
+    def _slow_publish(**kw):
+        publish_calls["n"] += 1
+        entered.set()
+        release.wait(5)
+        return {"snapshot_dir": str(tmp_path / "snap"), "games": 1}
+
+    monkeypatch.setattr(publish_ladder_snapshot, "publish_snapshot", _slow_publish)
+
+    first: dict = {}
+
+    def _run_first():
+        first["r"] = projection.project_season(SEASON)
+
+    t = threading.Thread(target=_run_first)
+    t.start()
+    assert entered.wait(5), "第一个 publisher 未进入"
+
+    # 第二个调用不进入 publisher → already_running
+    r2 = projection.project_season(SEASON)
+    assert r2["state"] == "already_running"
+    assert publish_calls["n"] == 1
+
+    release.set()
+    t.join()
+    assert first["r"]["state"] == "ready"
+    assert not ledger.ladder_dirty_path(SEASON).exists()
+    assert all(m.ladder_projection_state == "ready" for m in ledger.list_matches(status="active").matches if m.season_id == SEASON)
+
+
+def test_stale_failure_does_not_overwrite_ready(participants_root, monkeypatch, tmp_path):
+    """P1-2：过期失败回写（旧 generation）不能覆盖已成功的 ready。"""
+    _accounts()
+    ledger.create_match(_match_create(), registry)
+    _write_season_config(tmp_path, monkeypatch)
+    _mock_publish(monkeypatch, tmp_path)
+
+    result = projection.project_season(SEASON)
+    assert result["state"] == "ready"
+    assert not ledger.ladder_dirty_path(SEASON).exists()
+
+    # 用旧 generation 回写 error → CAS 拒绝，状态保持 ready
+    assert ledger.mark_season_projection_error(SEASON, "stale-generation") is False
+    matches = ledger.list_matches(status="active").matches
+    assert all(m.ladder_projection_state == "ready" for m in matches if m.season_id == SEASON)
+
+
+def test_gate_requires_exclusive(participants_root, monkeypatch, tmp_path):
+    """配置建议：projection 门禁要求 enabled + exclusive（缺 exclusive 拒绝）。"""
+    _accounts()
+    ledger.create_match(_match_create(), registry)
+    season_cfg = _season_config(tmp_path, exclusive=True)
+    season_cfg["ingest"]["participants"] = {"enabled": True, "exclusive": False}
+    configs = tmp_path / "configs"
+    configs.mkdir(exist_ok=True)
+    (configs / f"{SEASON}.json").write_text(json.dumps(season_cfg, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("KEQING_LADDER_CONFIG_DIR", str(configs))
+    _mock_publish(monkeypatch, tmp_path)
+
+    result = projection.project_season(SEASON)
+    assert result["state"] == "error"
+    assert "exclusive" in result.get("reason", "")
+    assert ledger.ladder_dirty_path(SEASON).exists()
+
+
+def test_request_projection_none_wakes(participants_root):
+    """P2-2：A→null 后 request_projection(None) 也唤醒 worker（扫描全部 dirty marker）。"""
+    projection._wake.clear()
+    projection.request_projection(None)
+    assert projection._wake.is_set()

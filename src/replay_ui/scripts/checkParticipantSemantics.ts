@@ -149,6 +149,19 @@ const proj = read('../../src/participants/projection.py');
 check(proj.includes('run_dirty_projection'), '自动 dirty consumer');
 check(proj.includes('start_worker'), '后台 worker 启动');
 
+// 15) R10-F Repair 2：begin barrier / single-flight / lifespan
+const ledgerF3 = read('../../src/participants/ledger.py');
+check(ledgerF3.includes('begin_ladder_projection'), '投影 begin barrier（锁内恢复 pending 后冻结 generation）');
+check(ledgerF3.includes('mark_season_projection_error'), '失败回写带 generation CAS');
+const paths = read('../../src/participants/paths.py');
+check(paths.includes('try_file_lock'), '非阻塞跨进程锁（per-season single-flight）');
+const proj2 = read('../../src/participants/projection.py');
+check(proj2.includes('projection_locks'), 'per-season 单飞锁');
+check(proj2.includes('already_running'), 'second caller 返回 already_running 不进 publisher');
+check(proj2.includes('stop_worker'), 'worker 可停止（lifespan）');
+const server2 = read('../../src/replay/server.py');
+check(server2.includes('participants_projection.start_worker()') && server2.includes('participants_projection.stop_worker()'), 'worker 放入 FastAPI lifespan');
+
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);

@@ -112,3 +112,39 @@ def data_lock():
     lock_path = ensure_data_root() / "participants.lock"
     with file_lock(lock_path):
         yield
+
+
+@contextlib.contextmanager
+def try_file_lock(lock_path: Path, stale_after: float = 30.0):
+    """非阻塞跨进程锁（single-flight）：已占用立即 yield False，不会等待。
+
+    - 成功获取：yield True，退出时删除锁文件；
+    - 已被占用：yield False；锁文件过期则清除并重试一次。
+    """
+    lock_path = Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    acquired = False
+    for _attempt in range(2):
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("ascii"))
+            os.close(fd)
+            acquired = True
+            break
+        except FileExistsError:
+            try:
+                if time.time() - lock_path.stat().st_mtime <= stale_after:
+                    break  # 被活跃持有者占用
+                lock_path.unlink()  # stale：清除后重试
+            except FileNotFoundError:
+                break
+    if not acquired:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass

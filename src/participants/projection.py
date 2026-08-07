@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
-"""R10-F：天梯投影自动消费 worker（P1-6）与 generation CAS（P1-2）。
+"""R10-F：天梯投影自动消费 worker（P1-6）与并发一致性。
 
-- ``project_season``：P2-1 门禁（season 必须启用 ingest.participants.enabled）→
-  冻结 dirty generation → 全量重建/发布 → CAS（generation 未变才清 dirty + ready，
-  变了保持 dirty + pending 返回 needs_rebuild）。
+- ``project_season``：
+  - P2 门禁：赛季必须 ``ingest.participants.enabled + exclusive``（正式合同）；
+  - P1-2 跨进程 per-season single-flight（``try_file_lock``）；
+  - P1-1 begin barrier（``ledger.begin_ladder_projection``：锁内恢复 pending 后
+    冻结 generation）；
+  - 完成后 CAS（generation 未变才清 dirty + ready）；失败回写也带 CAS
+    （``ledger.mark_season_projection_error``）。
 - ``run_dirty_projection``：扫描全部 dirty marker，逐赛季投影（coalesce 多次 dirty）。
-- worker：服务启动时扫描 dirty + Match mutation 后唤醒 + 定时兜底。
+- worker：启动扫描 + mutation 唤醒 + 定时兜底；lifespan 管理（start/stop）。
 """
 from __future__ import annotations
 
@@ -13,13 +17,14 @@ import threading
 from pathlib import Path
 
 from . import ledger
-from .paths import data_root
+from .paths import data_root, try_file_lock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 _wake = threading.Event()
 _thread: threading.Thread | None = None
 _thread_lock = threading.Lock()
+_stop = threading.Event()
 
 
 def _dirty_markers() -> list[Path]:
@@ -29,42 +34,63 @@ def _dirty_markers() -> list[Path]:
     return sorted(root.glob("ladder_dirty_*.json"))
 
 
+def _projection_lock_path(season_id: str) -> Path:
+    return data_root() / "projection_locks" / f"{season_id}.lock"
+
+
 def project_season(season_id: str) -> dict:
-    """投影单个赛季。返回 {season_id, state: ready|error|needs_rebuild, ...}。"""
+    """投影单个赛季（per-season single-flight）。返回 {season_id, state, ...}。"""
+    with try_file_lock(_projection_lock_path(season_id)) as acquired:
+        if not acquired:
+            # 另一个 worker/手动请求正在投影同一赛季：不重复进入 publisher
+            return {
+                "season_id": season_id,
+                "state": "already_running",
+                "reason": "该赛季投影正在进行中",
+            }
+        return _project_season_locked(season_id)
+
+
+def _project_season_locked(season_id: str) -> dict:
     from replay import ladder as ladder_data
 
     configs_dir = ladder_data.resolve_config_dir(PROJECT_ROOT)
     registry_path = configs_dir / f"{season_id}.json"
     if not registry_path.is_file():
-        ledger.set_season_projection_state(season_id, "error")
+        ledger.mark_season_projection_error(season_id, ledger.read_ladder_generation(season_id))
         return {"season_id": season_id, "state": "error", "reason": f"赛季配置不存在: {season_id}"}
     try:
         season = ladder_data.get_season_config(configs_dir, season_id)
     except ladder_data.SeasonNotFoundError as exc:
-        ledger.set_season_projection_state(season_id, "error")
+        ledger.mark_season_projection_error(season_id, ledger.read_ladder_generation(season_id))
         return {"season_id": season_id, "state": "error", "reason": str(exc)}
     ingest = season.get("ingest") if isinstance(season.get("ingest"), dict) else {}
     participants_cfg = ingest.get("participants")
-    # P2-1：fail-fast 门禁——普通 ingest season 不允许清 dirty/标 ready
-    if not (isinstance(participants_cfg, dict) and participants_cfg.get("enabled")):
-        ledger.set_season_projection_state(season_id, "error")
+    # P2-1 gate：正式合同要求 enabled + exclusive（缺 exclusive 会重新打开双计窗口）
+    if not (
+        isinstance(participants_cfg, dict)
+        and participants_cfg.get("enabled")
+        and participants_cfg.get("exclusive")
+    ):
+        ledger.mark_season_projection_error(season_id, ledger.read_ladder_generation(season_id))
         return {
             "season_id": season_id,
             "state": "error",
-            "reason": "赛季未启用 participants 投影（ingest.participants.enabled）",
+            "reason": "赛季未启用 participants 投影（需 ingest.participants.enabled + exclusive）",
         }
 
-    # P1-2：发布前冻结 generation
-    start_generation = ledger.read_ladder_generation(season_id)
+    # P1-1：begin barrier——锁内恢复 pending 后冻结 generation
+    start_generation = ledger.begin_ladder_projection(season_id)
     try:
         from scripts.mortal.publish_ladder_snapshot import publish_snapshot
 
         result = publish_snapshot(registry_path=registry_path, log_dirs=[])
     except Exception as exc:  # noqa: BLE001
-        ledger.set_season_projection_state(season_id, "error")
+        # P1-2：失败回写带 generation CAS，防止过期失败覆盖更新的 ready/pending
+        ledger.mark_season_projection_error(season_id, start_generation)
         return {"season_id": season_id, "state": "error", "reason": str(exc)}
 
-    # P1-2 CAS：发布期间有新写入（generation 变）→ 保留 dirty + pending
+    # P1-1/P1-2：完成 CAS（发布期间新写入 → 保留 dirty + pending）
     if ledger.complete_ladder_projection(season_id, start_generation):
         return {
             "season_id": season_id,
@@ -89,9 +115,10 @@ def run_dirty_projection() -> list[dict]:
 
 
 def request_projection(season_id: str | None) -> None:
-    """Match mutation 后唤醒 worker（dirty 已由 ledger 写入）。"""
-    if not season_id:
-        return
+    """Match mutation 后唤醒 worker（dirty 已由 ledger 写入）。
+
+    不依赖 season 参数——worker 会扫描全部 dirty marker（P2-2：A→null 也唤醒）。
+    """
     _wake.set()
 
 
@@ -103,7 +130,7 @@ def start_worker() -> None:
             return
 
         def _loop() -> None:
-            while True:
+            while not _stop.is_set():
                 try:
                     run_dirty_projection()
                 except Exception:  # noqa: BLE001
@@ -115,9 +142,23 @@ def start_worker() -> None:
         _thread.start()
 
 
+def stop_worker() -> None:
+    """停止后台 worker（lifespan shutdown）。"""
+    global _thread
+    with _thread_lock:
+        if _thread is None:
+            return
+        _stop.set()
+        _wake.set()
+        if _thread.is_alive():
+            _thread.join(timeout=2.0)
+        _thread = None
+
+
 __all__ = [
     "project_season",
     "run_dirty_projection",
     "request_projection",
     "start_worker",
+    "stop_worker",
 ]

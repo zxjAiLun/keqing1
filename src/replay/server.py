@@ -68,7 +68,13 @@ def _recover_participants_pending_transaction() -> None:
 @asynccontextmanager
 async def _app_lifespan(_app):
     _recover_participants_pending_transaction()
-    yield
+    from participants import projection as participants_projection
+
+    participants_projection.start_worker()
+    try:
+        yield
+    finally:
+        participants_projection.stop_worker()
 
 
 app = FastAPI(title="Keqing Unified Server", description="立直麻将 Review + 对战服务", lifespan=_app_lifespan)
@@ -83,11 +89,8 @@ app.include_router(playwithyou_router)
 
 # ========== Participants（账号 / 模型 / 统一对局账本）==========
 from participants.api import router as participants_router
-from participants import projection as participants_projection
 
 app.include_router(participants_router)
-# R10-F：启动时扫描 dirty markers 并自动投影（dirty consumer worker）。
-participants_projection.start_worker()
 
 # ========== 静态资源 ==========
 

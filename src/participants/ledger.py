@@ -366,6 +366,17 @@ def read_ladder_generation(season_id: str) -> str | None:
     return payload.get("generation")
 
 
+def begin_ladder_projection(season_id: str) -> str | None:
+    """投影起点 barrier（P1-1）：锁内恢复 pending 后返回当前 dirty generation。
+
+    防止投影在「dirty generation 已可见、但对应 Match 事务尚未提交」时读到旧
+    ledger 并清掉该 generation。
+    """
+    with _write_lock, data_lock():
+        _recover_pending_transaction()
+        return read_ladder_generation(season_id)
+
+
 def clear_ladder_dirty(season_id: str) -> bool:
     with _write_lock, data_lock():
         try:
@@ -391,6 +402,19 @@ def complete_ladder_projection(season_id: str, expected_generation: str | None) 
         except FileNotFoundError:
             pass
         _set_season_projection_state_locked(season_id, "ready")
+        return True
+
+
+def mark_season_projection_error(season_id: str, expected_generation: str | None) -> bool:
+    """发布失败后的 CAS 回写：仅当 dirty generation 仍为 expected 才置 error。
+
+    防止过期失败覆盖更新后的 ready/pending（P1-2 single-flight 补充防护）。
+    """
+    with _write_lock, data_lock():
+        _recover_pending_transaction()
+        if read_ladder_generation(season_id) != expected_generation:
+            return False
+        _set_season_projection_state_locked(season_id, "error")
         return True
 
 
