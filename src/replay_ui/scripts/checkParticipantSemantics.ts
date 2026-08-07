@@ -188,6 +188,18 @@ const proj5 = read('../../src/participants/projection.py');
 check(proj5.includes('_restart_pending'), 'deferred worker restart 登记');
 check(proj5.includes('_maybe_restart'), '旧 worker 退出后自动重启');
 
+// 19) R10-G：账号详细统计
+const statsP = read('../../src/participants/stats.py');
+check(statsP.includes('STATS_CONTRACT_VERSION'), '统计带 stats_contract_version');
+check(statsP.includes('_rate(') && statsP.includes('hands_with_detail'), 'completeness-aware 分母（缺 replay 不计入）');
+check(statsP.includes('result_only') && statsP.includes('matches_with_full_replay'), 'result_only 只进顺位/分数指标');
+const tenhouUtils = read('../../src/convert/tenhou6_utils.py');
+check(tenhouUtils.includes('tenpai'), '流局提取四家听牌标记');
+const intakeP = read('../../src/participants/intake.py');
+check(intakeP.includes('"riichi": []') && intakeP.includes('"calls": [0, 0, 0, 0]'), '逐局摘要含立直/副露');
+const tstypesG = read('src/types/participants.ts');
+check(tstypesG.includes('AccountStatsResponse'), 'TS 账号统计类型');
+
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);

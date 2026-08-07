@@ -6,7 +6,7 @@ import { AccountTable } from '../components/Participants/AccountTable';
 import { AccountFormModal } from '../components/Participants/AccountFormModal';
 import { ModelFormModal } from '../components/Participants/ModelFormModal';
 import { participantsApi } from '../api/participantsApi';
-import type { Account, AccountCreate, ModelIdentity } from '../types/participants';
+import type { Account, AccountCreate, AccountStatsResponse, ModelIdentity } from '../types/participants';
 
 export function ParticipantsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -16,6 +16,22 @@ export function ParticipantsPage() {
   const [editing, setEditing] = useState<Account | null>(null);
   const [creating, setCreating] = useState(false);
   const [creatingModel, setCreatingModel] = useState(false);
+  // R10-G：账号详细统计
+  const [statsAccount, setStatsAccount] = useState('');
+  const [stats, setStats] = useState<AccountStatsResponse | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+
+  const loadStats = useCallback(async (accountId: string) => {
+    if (!accountId) return;
+    setStatsLoading(true);
+    try {
+      setStats(await participantsApi.getAccountStats(accountId));
+    } catch {
+      setStats(null);
+    } finally {
+      setStatsLoading(false);
+    }
+  }, []);
 
   const load = useCallback(async (signal: AbortSignal) => {
     setLoading(true);
@@ -92,6 +108,55 @@ export function ParticipantsPage() {
           )}
         </section>
 
+        {/* R10-G：账号详细统计（completeness-aware） */}
+        <section style={cardStyle}>
+          <div style={cardHeaderStyle}>
+            <span style={{ fontWeight: 800 }}>账号统计</span>
+            <select
+              value={statsAccount}
+              onChange={(e) => {
+                setStatsAccount(e.target.value);
+                void loadStats(e.target.value);
+              }}
+              style={{
+                border: '1px solid var(--border)', background: 'var(--page-bg)',
+                color: 'var(--text-primary)', borderRadius: 4, padding: '4px 8px', fontSize: 12,
+              }}
+            >
+              <option value="">选择账号…</option>
+              {accounts.map((a) => (
+                <option key={a.account_id} value={a.account_id}>{a.display_name}（{a.account_id}）</option>
+              ))}
+            </select>
+          </div>
+          {statsLoading && <div style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>统计中…</div>}
+          {!statsLoading && stats && (
+            <div style={{ display: 'grid', gap: 8, fontSize: 12 }}>
+              <div style={{ color: 'var(--text-muted)' }}>
+                覆盖：{stats.coverage.total_matches} 场有结果 · {stats.coverage.matches_with_hands} 场逐局 ·
+                {stats.coverage.matches_with_full_replay} 场完整牌谱（{stats.coverage.hands_used} 局）
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 6 }}>
+                <div>一位率 <b>{fmt(stats.placement.first_rate, true)}</b></div>
+                <div>二位率 <b>{fmt(stats.placement.second_rate, true)}</b></div>
+                <div>三位率 <b>{fmt(stats.placement.third_rate, true)}</b></div>
+                <div>四位率 <b>{fmt(stats.placement.fourth_rate, true)}</b></div>
+                <div>平均顺位 <b>{fmt(stats.placement.avg_rank)}</b></div>
+                <div>平均最终点 <b>{fmt(stats.placement.avg_final_score)}</b></div>
+                <div>和牌率 <b>{fmt(stats.detailed.win_rate, true)}</b></div>
+                <div>放铳率 <b>{fmt(stats.detailed.dealin_rate, true)}</b></div>
+                <div>立直率 <b>{fmt(stats.detailed.riichi_rate, true)}</b></div>
+                <div>副露率 <b>{fmt(stats.detailed.call_rate, true)}</b></div>
+                <div>流局听牌率 <b>{fmt(stats.detailed.tenpai_rate, true)}</b></div>
+                <div>平均和牌点 <b>{fmt(stats.detailed.avg_win_points)}</b></div>
+                <div>平均放铳点 <b>{fmt(stats.detailed.avg_dealin_points)}</b></div>
+                <div>亲番胜率 <b>{fmt(stats.detailed.oya_win_rate, true)}</b></div>
+                <div>子番胜率 <b>{fmt(stats.detailed.koshu_win_rate, true)}</b></div>
+              </div>
+            </div>
+          )}
+        </section>
+
         <section style={cardStyle}>
           <div style={cardHeaderStyle}>
             <span style={{ fontWeight: 800 }}>模型身份（{identities.length}）</span>
@@ -161,3 +226,9 @@ const modelRowStyle: React.CSSProperties = {
   display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
   border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px',
 };
+
+function fmt(value: number | null | undefined, percent = false): string {
+  if (value === null || value === undefined) return '—';
+  if (percent) return `${(value * 100).toFixed(1)}%`;
+  return String(value);
+}

@@ -23,6 +23,7 @@ import type {
   RevisionSummary,
   LadderProjectionStatus,
   LadderProjectResult,
+  AccountStatsResponse,
 } from '../types/participants';
 
 const API_BASE = '/api';
@@ -56,8 +57,6 @@ export const participantsApi = {
     api(`/participants/accounts/${encodeURIComponent(accountId)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteAccount: (accountId: string): Promise<{ deleted: boolean; disabled: boolean; account_id: string }> =>
     api(`/participants/accounts/${encodeURIComponent(accountId)}`, { method: 'DELETE' }),
-  getAccountStats: (accountId: string, signal?: AbortSignal): Promise<{ implemented: boolean; account_id: string }> =>
-    api(`/participants/accounts/${encodeURIComponent(accountId)}/stats`, { signal }),
 
   // ---- 模型 ----
   listModels: (signal?: AbortSignal): Promise<ModelsResponse> =>
@@ -112,6 +111,8 @@ export const participantsApi = {
     api(`/participants/ladder/${encodeURIComponent(seasonId)}/status`, { signal }),
   projectLadder: (seasonId: string): Promise<LadderProjectResult> =>
     api(`/participants/ladder/${encodeURIComponent(seasonId)}/project`, { method: 'POST' }),
+  getAccountStats: (accountId: string, signal?: AbortSignal): Promise<AccountStatsResponse> =>
+    api(`/participants/accounts/${encodeURIComponent(accountId)}/stats`, { signal }),
 };
 
 export { ApiError };

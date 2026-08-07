@@ -126,7 +126,13 @@ def _result_events(result: list[Any]) -> list[dict[str, Any]]:
     kind = result[0]
     if kind == "流局":
         deltas = [int(delta) for delta in (result[1] if len(result) > 1 and isinstance(result[1], list) else [0, 0, 0, 0])]
-        return [{"type": "ryukyoku", "reason": "ryukyoku", "deltas": deltas}]
+        event: dict[str, Any] = {"type": "ryukyoku", "reason": "ryukyoku", "deltas": deltas}
+        # tenhou6 流局 detail（第 3 段）携带四家听牌标记：[1,0,1,0]
+        if len(result) > 2 and isinstance(result[2], list) and len(result[2]) == 4:
+            tenpai = [int(v) == 1 for v in result[2]]
+            if any(tenpai):
+                event["tenpai"] = tenpai
+        return [event]
     if kind != "和了":
         return []
 

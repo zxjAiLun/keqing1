@@ -110,8 +110,9 @@ def test_missing_match_404(four_account_ids):
 
 def test_account_stats_stub(four_account_ids):
     resp = api.api_account_stats("nick@01")
-    assert resp["implemented"] is False
+    assert resp["schema"] == "keqing.participant.stats.v1"
     assert resp["account_id"] == "nick@01"
+    assert resp["placement"]["match_count"] == 0
     with pytest.raises(HTTPException) as exc:
         api.api_account_stats("ghost@01")
     assert exc.value.status_code == 404

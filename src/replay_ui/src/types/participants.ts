@@ -255,6 +255,46 @@ export interface LadderProjectResult {
   reason?: string | null;
 }
 
+// ---- R10-G：账号详细统计 ----
+export interface AccountStatsResponse {
+  schema: string;
+  account_id: string;
+  coverage: {
+    total_matches: number;
+    matches_with_results: number;
+    matches_with_hands: number;
+    matches_with_full_replay: number;
+    hands_used: number;
+    hands_with_riichi_field: number;
+    hands_with_call_field: number;
+    ryukyoku_with_tenpai: number;
+  };
+  placement: {
+    match_count: number;
+    first_rate?: number | null;
+    second_rate?: number | null;
+    third_rate?: number | null;
+    fourth_rate?: number | null;
+    avg_rank?: number | null;
+    avg_final_score?: number | null;
+  };
+  detailed: {
+    hands_played: number;
+    wins: number;
+    dealins: number;
+    win_rate?: number | null;
+    dealin_rate?: number | null;
+    tsumo_share?: number | null;
+    riichi_rate?: number | null;
+    call_rate?: number | null;
+    tenpai_rate?: number | null;
+    avg_win_points?: number | null;
+    avg_dealin_points?: number | null;
+    oya_win_rate?: number | null;
+    koshu_win_rate?: number | null;
+  };
+}
+
 export interface IntakePreviewSeat {
   seat: SeatNo;
   raw_name: string;

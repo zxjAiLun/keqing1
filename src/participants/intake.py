@@ -98,7 +98,7 @@ def player_names(events: list[dict]) -> list[str]:
 
 
 def hand_summaries(events: list[dict]) -> list[dict]:
-    """从 mjai 事件流提取逐局摘要（R10-D 第一版：分数变化/和了/流局）。"""
+    """从 mjai 事件流提取逐局摘要（R10-G：含立直/副露/流局听牌）。"""
     hands: list[dict] = []
     current: dict | None = None
     for event in events:
@@ -115,7 +115,17 @@ def hand_summaries(events: list[dict]) -> list[dict]:
                 "scores_before": event.get("scores"),
                 "winners": [],
                 "ryukyoku": None,
+                "riichi": [],  # 本局立直玩家 seat 列表
+                "calls": [0, 0, 0, 0],  # 各家副露（吃/碰/杠）次数
             }
+        elif etype == "reach" and current is not None:
+            actor = int(event.get("actor", -1))
+            if 0 <= actor <= 3 and actor not in current["riichi"]:
+                current["riichi"].append(actor)
+        elif etype in ("chi", "pon", "daiminkan", "ankan", "kakan") and current is not None:
+            actor = int(event.get("actor", -1))
+            if 0 <= actor <= 3:
+                current["calls"][actor] += 1
         elif etype == "hora" and current is not None:
             actor = int(event.get("actor", -1))
             target = int(event.get("target", -1))
@@ -131,6 +141,7 @@ def hand_summaries(events: list[dict]) -> list[dict]:
             current["ryukyoku"] = {
                 "reason": event.get("reason"),
                 "deltas": list(event.get("deltas") or [0, 0, 0, 0]),
+                "tenpai": event.get("tenpai"),
             }
     if current is not None:
         hands.append(current)
