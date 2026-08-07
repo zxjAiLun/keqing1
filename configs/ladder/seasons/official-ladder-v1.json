@@ -20,6 +20,15 @@
   },
   "models": [
     {
+      "model_id": "human",
+      "accounts": [
+        {
+          "account_id": "nick@01",
+          "display_name": "Nick"
+        }
+      ]
+    },
+    {
       "model_id": "70k",
       "checkpoint": "artifacts/mortal_training/checkpoints/mortal_default_70k_promoted_candidate.pth",
       "accounts": [
@@ -77,5 +86,5 @@
     }
   ],
   "default": true,
-  "notes": "R10 official ladder: Participants Match Ledger 作为唯一计分事实来源 （ingest.participants.exclusive=true，legacy result sources 不参与正式计分）。账号/模型注册表沿用 final-balanced-2026-07。段位从新人/R1500 全量重放。"
+  "notes": "R10 official ladder: Participants Match Ledger 作为唯一计分事实来源 （ingest.participants.exclusive=true，legacy result sources 不参与正式计分）。账号/模型注册表沿用 final-balanced-2026-07，并新增 model_id=human（C23 契约：人类账号必须属于 human 模型）——nick@01 为默认人类账号，其他人类/朋友账号须在 models.accounts 注册后才能 rating_eligible=true。段位从新人/R1500 全量重放；每局 PT 按该局 game_length 选择（tonpuu 20/10/0 vs hanchan 30/15/0）。"
 }

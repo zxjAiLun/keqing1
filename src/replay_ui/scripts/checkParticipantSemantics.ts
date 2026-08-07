@@ -224,6 +224,16 @@ const smoke = read('../../tests/test_participants_vertical_smoke.py');
 check(smoke.includes('test_r10_vertical_smoke'), '纵向 smoke：roster→intake→ledger→ladder→stats');
 check(smoke.includes('source_log') && smoke.includes('external_match_id'), '三方一致性核验（tenhou log ↔ snapshot ↔ stats）');
 
+// 23) R10 merge repair：赛季成员（human）+ 每局 game_length 计分
+const officialCfg = read('../../configs/ladder/seasons/official-ladder-v1.json');
+check(officialCfg.includes('"model_id": "human"'), '正式赛季含 human 模型（C23 契约）');
+check(officialCfg.includes('"exclusive": true'), '正式赛季 participants exclusive');
+const tenhouRS = read('../../src/replay/rank_systems/tenhou.py');
+check(tenhouRS.includes('game_length: str | None = None'), 'match_context 支持按局 game_length');
+check(tenhouRS.includes('length = game_length or self.game_length'), '按局选 PT 表');
+const li = read('../../src/replay/ladder_ingest.py');
+check(li.includes('game_length=match.game_length'), 'replay 传每局 game_length 进 match_context');
+
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);

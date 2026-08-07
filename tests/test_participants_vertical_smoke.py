@@ -99,14 +99,17 @@ def env(tmp_path, monkeypatch):
         },
         "models": [
             {
+                "model_id": "human",
+                "accounts": [{"account_id": "nick@01", "display_name": "Nick"}],
+            },
+            {
                 "model_id": "70k",
                 "accounts": [
-                    {"account_id": "nick@01"},
                     {"account_id": "70k@01"},
                     {"account_id": "70k@02"},
                     {"account_id": "friend@01"},
                 ],
-            }
+            },
         ],
     }
     (configs / f"{SEASON}.json").write_text(json.dumps(season_cfg, ensure_ascii=False), encoding="utf-8")
@@ -217,6 +220,9 @@ def test_r10_vertical_smoke(env):
     assert len(nick_ledger) == 1
     # 三方一致性：participants external_match_id（tenhou log）↔ snapshot game source_log
     assert nick_ledger[0]["source_log"] == match.external_match_id == LOG_ID
+    # P1-2：每局 game_length 决定 PT——本场为东风（tonpuu）1st → positive_pt [20,10,0]（非半庄 30/15/0）
+    assert nick_ledger[0]["game_length"] == "tonpuu"
+    assert nick_ledger[0]["positive_pt"] == [20, 10, 0]
 
     # 7. account stats 已包含该局，详细指标非伪 0
     stat = stats.compute_account_stats("nick@01", registry, ledger)

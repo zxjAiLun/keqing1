@@ -499,3 +499,34 @@ def test_build_ingest_report_rejects_unregistered_account(tmp_path: Path) -> Non
     season = _season({"sources_root": str(sources)})
     with pytest.raises(LadderIngestError, match="未在正式赛季注册"):
         build_ingest_report(season=season, sources_root=sources, output_dir=tmp_path / "out")
+
+
+def test_replay_per_match_game_length_pt(tmp_path: Path) -> None:
+    """R10 merge repair：每局 game_length 决定该局 PT 表（tonpuu 20/10/0 vs hanchan 30/15/0）。
+
+    season 级 scoring.game_length=hanchan 不得覆盖东风局的 PT。
+    """
+    from replay.ladder_ingest import replay_ladder_matches, write_ingest_outputs
+
+    matches = [
+        _match("m-tonpuu", game_length="tonpuu"),
+        _match("m-hanchan", game_length="hanchan", occurred="2026-08-04T08:00:00Z"),
+    ]
+    result = replay_ladder_matches(
+        matches,
+        scoring_config={
+            "system": "tenhou_rank_progression",
+            "version": "v1",
+            "game_length": "hanchan",  # season 级默认 hanchan——必须被每局覆盖
+        },
+    )
+    write_ingest_outputs(tmp_path / "out", result)
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "out" / "account_ledger.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    nick_tonpuu = next(row for row in rows if row["account_id"] == "nick@01" and row["game_length"] == "tonpuu")
+    nick_hanchan = next(row for row in rows if row["account_id"] == "nick@01" and row["game_length"] == "hanchan")
+    assert nick_tonpuu["positive_pt"] == [20, 10, 0]
+    assert nick_hanchan["positive_pt"] == [30, 15, 0]

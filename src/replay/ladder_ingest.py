@@ -508,7 +508,8 @@ def replay_ladder_matches(
         pre_states = [
             _player_state(rank_system, states[player.account_id]) for player in canonical
         ]
-        ctx = rank_system.match_context(pre_states)
+        # R10 merge repair：每局 game_length 决定该局 PT 表（tonpuu 20/10/0 vs hanchan 30/15/0）
+        ctx = rank_system.match_context(pre_states, game_length=match.game_length)
 
         placements = _placements(canonical)
         updates: list[dict[str, Any]] = []
