@@ -122,7 +122,8 @@ def hand_summaries(events: list[dict]) -> list[dict]:
             actor = int(event.get("actor", -1))
             if 0 <= actor <= 3 and actor not in current["riichi"]:
                 current["riichi"].append(actor)
-        elif etype in ("chi", "pon", "daiminkan", "ankan", "kakan") and current is not None:
+        elif etype in ("chi", "pon", "daiminkan", "kakan") and current is not None:
+            # P1-3（R10-G Repair1）：暗杠（ankan）不破坏门清，不计入副露
             actor = int(event.get("actor", -1))
             if 0 <= actor <= 3:
                 current["calls"][actor] += 1
@@ -296,6 +297,39 @@ def read_replay_artifact(log_id: str) -> dict | None:
     summary["hands"] = hands
     summary["has_events"] = (directory / "events.jsonl").exists()
     return summary
+
+
+def rich_hands_for_artifact(log_id: str) -> list[dict] | None:
+    """读取 artifact 的逐局摘要；若缺 R10-G 字段（旧 artifact），
+    则从 events.jsonl / tenhou6.json **内存重算**（不回写 artifact）。"""
+    directory = artifact_dir(log_id)
+    if not (directory / "hands.jsonl").exists():
+        return None
+    hands = [
+        json.loads(line)
+        for line in (directory / "hands.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if hands and all("riichi" in hand and "calls" in hand for hand in hands):
+        return hands
+    events: list[dict] | None = None
+    if (directory / "events.jsonl").exists():
+        events = [
+            json.loads(line)
+            for line in (directory / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    elif (directory / "tenhou6.json").exists():
+        try:
+            tenhou6 = json.loads((directory / "tenhou6.json").read_text(encoding="utf-8"))
+            events = tenhou6_events(tenhou6)
+        except (OSError, ValueError, json.JSONDecodeError):
+            events = None
+    if events:
+        rebuilt = hand_summaries(events)
+        if rebuilt:
+            return rebuilt
+    return hands
 
 
 # ---------------------------------------------------------------------------
@@ -641,5 +675,6 @@ __all__ = [
     "resolve_and_create_match",
     "recover_intake_transaction_locked",
     "read_replay_artifact",
+    "rich_hands_for_artifact",
     "artifact_dir",
 ]

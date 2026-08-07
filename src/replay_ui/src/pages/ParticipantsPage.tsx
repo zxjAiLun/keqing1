@@ -145,6 +145,7 @@ export function ParticipantsPage() {
                 <div>平均最终点 <b>{fmt(stats.placement.avg_final_score)}</b></div>
                 <div>和牌率 <b>{fmt(stats.detailed.win_rate, true)}</b></div>
                 <div>放铳率 <b>{fmt(stats.detailed.dealin_rate, true)}</b></div>
+                <div>自摸率 <b>{fmt(stats.detailed.tsumo_share, true)}</b></div>
                 <div>立直率 <b>{fmt(stats.detailed.riichi_rate, true)}</b></div>
                 <div>副露率 <b>{fmt(stats.detailed.call_rate, true)}</b></div>
                 <div>流局听牌率 <b>{fmt(stats.detailed.tenpai_rate, true)}</b></div>

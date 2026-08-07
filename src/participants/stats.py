@@ -80,7 +80,8 @@ def compute_account_stats(account_id: str, registry, ledger) -> dict[str, Any]:
         artifact = intake.read_replay_artifact(match.replay_id)
         if artifact is None:
             continue
-        for hand in artifact.get("hands", []):
+        hands = intake.rich_hands_for_artifact(match.replay_id)
+        for hand in hands:
             hands_with_detail += 1
             is_oya = hand.get("oya") == seat
             if is_oya:
@@ -88,8 +89,7 @@ def compute_account_stats(account_id: str, registry, ledger) -> dict[str, Any]:
             else:
                 koshu_hands += 1
             for winner in hand.get("winners", []):
-                actor = winner.get("actor")
-                if actor == seat:
+                if winner.get("actor") == seat:
                     wins += 1
                     if winner.get("win_type") == "tsumo":
                         tsumo += 1
@@ -98,9 +98,16 @@ def compute_account_stats(account_id: str, registry, ledger) -> dict[str, Any]:
                         oya_wins += 1
                     else:
                         koshu_wins += 1
-                elif winner.get("target") == seat:
-                    dealins += 1
-                    dealin_points += -int(winner["deltas"][seat])
+            # P1-2（R10-G Repair1）：放铳按局聚合——双响点炮两家只算一次放铳，
+            # 平均放铳点取该局对放铳方的总损失。
+            ron_targets = [
+                winner
+                for winner in hand.get("winners", [])
+                if winner.get("target") == seat
+            ]
+            if ron_targets:
+                dealins += 1
+                dealin_points += sum(-int(w["deltas"][seat]) for w in ron_targets)
             if "riichi" in hand:
                 hands_with_riichi += 1
                 riichi_declared += hand["riichi"].count(seat)

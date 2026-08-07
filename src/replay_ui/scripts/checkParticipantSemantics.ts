@@ -200,6 +200,18 @@ check(intakeP.includes('"riichi": []') && intakeP.includes('"calls": [0, 0, 0, 0
 const tstypesG = read('src/types/participants.ts');
 check(tstypesG.includes('AccountStatsResponse'), 'TS 账号统计类型');
 
+// 20) R10-G Repair 1：手牌级语义 / legacy 重建
+const tenhouUtils2 = read('../../src/convert/tenhou6_utils.py');
+check(!tenhouUtils2.includes('if any(tenpai)'), '全不听流局也保留 tenpai 标记');
+const intakeG2 = read('../../src/participants/intake.py');
+check(intakeG2.includes('rich_hands_for_artifact'), '旧 artifact 懒重建（缺 G 字段内存重算）');
+check(intakeG2.includes('"chi", "pon", "daiminkan", "kakan"'), '暗杠 ankan 不计入副露');
+const statsG2 = read('../../src/participants/stats.py');
+check(statsG2.includes('ron_targets') && statsG2.includes('dealins += 1'), '双响放铳按局聚合为一次');
+check(statsG2.includes('rich_hands_for_artifact'), 'stats 使用 lazy 重建的逐局摘要');
+const pageG2 = read('src/pages/ParticipantsPage.tsx');
+check(pageG2.includes('自摸率'), '前端展示自摸率');
+
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);
