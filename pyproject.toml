@@ -71,6 +71,7 @@ python_files = [
     "test_participants_migration.py",
     "test_participants_intake.py",
     "test_participants_roster_start.py",
+    "test_participants_ladder_projection.py",
 ]
 [dependency-groups]
 dev = [

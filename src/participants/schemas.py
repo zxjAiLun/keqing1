@@ -15,6 +15,7 @@ DataCompleteness = Literal["result_only", "hand_summary", "full_replay"]
 GameLength = Literal["tonpu", "hanchan"]
 SeatNo = Literal[0, 1, 2, 3]
 ExternalAliasScope = Literal["global", "session", "match"]
+LadderProjectionState = Literal["not_applicable", "pending", "ready", "error"]
 
 ACCOUNTS_SCHEMA = "keqing.participant.accounts.v1"
 MODELS_SCHEMA = "keqing.participant.models.v1"
@@ -213,6 +214,8 @@ class MatchCreate(BaseModel):
     external_match_id: str | None = None  # 外部比赛唯一键，如 tenhou log_id
     raw_player_names: list[str] | None = None  # 四个原始外部名称
     resolution: dict | None = None  # 逐座身份解析审计
+    season_id: str | None = None  # 正式计分赛季（null = 仅账号统计）
+    rating_eligible: bool = False  # 是否纳入正式天梯计分
     seats: list[MatchSeat]
     final_scores: list[int]
     force: bool = False
@@ -234,6 +237,8 @@ class MatchRevise(BaseModel):
     data_completeness: DataCompleteness | None = None
     seats: list[MatchSeat] | None = None
     final_scores: list[int] | None = None
+    season_id: str | None = None
+    rating_eligible: bool | None = None
     force: bool = False
     reason: str | None = None
 
@@ -268,6 +273,9 @@ class Match(BaseModel):  # matches.jsonl 行（当前态）
     external_match_id: str | None = None
     raw_player_names: list[str] | None = None
     resolution: dict | None = None
+    season_id: str | None = None
+    rating_eligible: bool = False
+    ladder_projection_state: LadderProjectionState = "not_applicable"
     seats: list[MatchSeat]
     final_scores: list[int]
     ranks: list[int]

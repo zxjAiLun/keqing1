@@ -305,6 +305,51 @@ class ManualTenhouAdapter(_JsonlMatchAdapter):
     source_type = "manual_tenhou"
 
 
+class ParticipantLedgerAdapter:
+    """R10-F：从 participants Match Ledger 直接读取正式计分比赛。
+
+    只有满足以下条件才进入天梯：
+    - ``status == active``（未作废）；
+    - ``rating_eligible == True``；
+    - ``season_id`` 与目标赛季一致；
+    - 恰好 4 个座位（身份全部解决）。
+
+    ``source_dir`` 为 participants 数据根目录（含 matches.jsonl）。
+    """
+
+    source_type = "participants"
+
+    def __init__(self, season_id: str):
+        self.season_id = season_id
+
+    def iter_matches(self, source_dir: Path) -> Iterator[LadderMatch]:
+        from participants import ledger as participants_ledger
+
+        response = participants_ledger.list_matches(status="active")
+        for match in response.matches:
+            if match.season_id != self.season_id:
+                continue
+            if not match.rating_eligible:
+                continue
+            if len(match.seats) != 4:
+                continue
+            yield LadderMatch(
+                match_id=match.match_id,
+                occurred_at=_parse_iso(match.occurred_at),
+                game_length=match.game_length,
+                players=tuple(
+                    LadderMatchPlayer(
+                        account_id=seat.account_id,
+                        seat=seat.seat,
+                        final_score=match.final_scores[seat.seat],
+                    )
+                    for seat in match.seats
+                ),
+                source_type=self.source_type,
+                source_ref=match.external_match_id,
+            )
+
+
 # ---------------------------------------------------------------------------
 # Deterministic merge
 # ---------------------------------------------------------------------------
@@ -659,6 +704,18 @@ def build_ingest_report(
         source_dir = sources_root / subdir
         if source_dir.is_dir():
             source_entries.append((adapter_cls(), source_dir))
+
+    # R10-F：participants Match Ledger 作为正式计分的事实来源。
+    # 赛季 ingest 配置 ``{"participants": {"enabled": true}}`` 时，直接从
+    # participants 账本读取 rating_eligible 的比赛（不再复制 manual_tenhou）。
+    participants_cfg = ingest.get("participants")
+    if isinstance(participants_cfg, dict) and participants_cfg.get("enabled"):
+        from participants.paths import data_root as participants_data_root
+
+        participants_dir = participants_data_root()
+        if participants_dir.is_dir():
+            season_id = str(season.get("season_id") or "")
+            source_entries.append((ParticipantLedgerAdapter(season_id=season_id), participants_dir))
 
     matches = merge_ladder_matches(source_entries, allowed_accounts=allowed_accounts)
     result = replay_ladder_matches(matches, scoring_config=season.get("scoring"))

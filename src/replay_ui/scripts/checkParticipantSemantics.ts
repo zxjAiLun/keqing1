@@ -122,6 +122,18 @@ check(playwithyou.includes('"resolved_checkpoint_path": str(resolved_path)'), 'b
 check(playwithyou.includes('"roster": payload.get("roster") or []'), '_discover_captures 透出 roster');
 check(playwithyou.includes('"evidence_warning": payload.get("evidence_warning")'), '_discover_captures 透出 evidence_warning');
 
+// 13) R10-F：Ledger-driven Ladder Projection
+const ladderIngest = read('../../src/replay/ladder_ingest.py');
+check(ladderIngest.includes('class ParticipantLedgerAdapter'), 'ladder_ingest 新增 participants ledger adapter');
+check(ladderIngest.includes('participants_cfg') && ladderIngest.includes('participants_dir.is_dir()'), '赛季 ingest 配置启用 participants source');
+const ledgerF = read('../../src/participants/ledger.py');
+check(ledgerF.includes('ladder_dirty_path') && ledgerF.includes('mark_ladder_dirty'), 'ledger 有 dirty marker');
+check(ledgerF.includes('set_season_projection_state'), 'ledger 支持批量投影状态');
+check(ledgerF.includes('ladder_projection_state="pending"') || ledgerF.includes("ladder_projection_state='pending'"), 'create 置 pending 投影状态');
+const participantsApi = read('../../src/participants/api.py');
+check(participantsApi.includes('/ladder/{season_id}/project'), '投影触发 API');
+check(participantsApi.includes('/ladder/{season_id}/status'), '投影状态 API');
+
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);

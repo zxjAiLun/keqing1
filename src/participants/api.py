@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
 
 from . import ledger, registry, stats, aliases, intake
@@ -298,3 +300,61 @@ def api_match_replay_artifact(match_id: str) -> dict:
     if artifact is None:
         raise _error(404, f"对局 {match_id} 的 replay artifact 不存在")
     return {**artifact, "match_id": match.match_id, "replay_id": match.replay_id}
+
+
+# ---------------------------------------------------------------------------
+# R10-F：Ledger-driven Ladder Projection
+# ---------------------------------------------------------------------------
+
+_PARTICIPANTS_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+@router.get("/ladder/{season_id}/status", response_model=dict)
+def api_ladder_projection_status(season_id: str) -> dict:
+    """天梯投影状态：dirty 标记 + 赛季内 match 的投影状态汇总。"""
+    dirty = ledger.ladder_dirty_path(season_id).exists()
+    season_matches = [
+        m for m in ledger.list_matches(status="active").matches if m.season_id == season_id
+    ]
+    states: dict[str, int] = {}
+    for match in season_matches:
+        states[match.ladder_projection_state] = states.get(match.ladder_projection_state, 0) + 1
+    return {
+        "season_id": season_id,
+        "dirty": dirty,
+        "states": states,
+        "eligible_count": sum(1 for m in season_matches if m.rating_eligible),
+    }
+
+
+@router.post("/ladder/{season_id}/project", response_model=dict)
+def api_project_ladder_season(season_id: str) -> dict:
+    """从 participants ledger 确定性重建并发布赛季天梯快照（R10-F）。
+
+    始终从完整 ledger 重建（幂等）；成功后清 dirty 并批量置 ready，
+    失败则置 error（dirty 保留，可重试）。
+    """
+    from replay import ladder as ladder_data
+
+    configs_dir = ladder_data.resolve_config_dir(_PARTICIPANTS_PROJECT_ROOT)
+    registry_path = configs_dir / f"{season_id}.json"
+    if not registry_path.is_file():
+        raise _error(404, f"赛季配置不存在: {season_id}")
+    try:
+        from scripts.mortal.publish_ladder_snapshot import publish_snapshot
+
+        result = publish_snapshot(registry_path=registry_path, log_dirs=[])
+    except Exception as exc:  # noqa: BLE001
+        ledger.set_season_projection_state(season_id, "error")
+        raise HTTPException(
+            status_code=502,
+            detail={"error": f"天梯投影失败", "reason": str(exc)},
+        ) from exc
+    ledger.clear_ladder_dirty(season_id)
+    ledger.set_season_projection_state(season_id, "ready")
+    return {
+        "season_id": season_id,
+        "state": "ready",
+        "snapshot_dir": result.get("snapshot_dir"),
+        "games": result.get("games"),
+    }
