@@ -25,6 +25,7 @@ _wake = threading.Event()
 _thread: threading.Thread | None = None
 _thread_lock = threading.Lock()
 _stop = threading.Event()
+_restart_pending = False
 
 
 def _dirty_markers() -> list[Path]:
@@ -123,25 +124,49 @@ def request_projection(season_id: str | None) -> None:
 
 
 def start_worker() -> None:
-    """启动后台 worker（幂等，可 start→stop→start 重入）。"""
-    global _thread
+    """启动后台 worker（幂等，可 start→stop→start 重入）。
+
+    P2（Repair5）：若旧 worker 仍在长 publisher 中且已置 stop，则登记
+    deferred restart——旧线程退出后由 ``_maybe_restart`` 自动启动新 worker，
+    不会出现"同进程重启后 worker 归零"。
+    """
+    global _thread, _restart_pending
     with _thread_lock:
-        if _thread is not None:
-            if _thread.is_alive():
-                return  # 仍存活（可能还在长 publisher 中）→ 不重入
-            _thread = None
+        if _thread is not None and _thread.is_alive():
+            if _stop.is_set():
+                _restart_pending = True  # 等旧线程退出后重启
+            return
+        _thread = None
+        _restart_pending = False
         _stop.clear()  # P2-1：重入时必须清掉上次的 stop 标记
         _wake.clear()
+        _thread = threading.Thread(target=_loop, name="ladder-projection", daemon=True)
+        _thread.start()
 
-        def _loop() -> None:
-            while not _stop.is_set():
-                try:
-                    run_dirty_projection()
-                except Exception:  # noqa: BLE001
-                    pass
-                _wake.wait(timeout=10)
-                _wake.clear()
 
+def _loop() -> None:
+    while not _stop.is_set():
+        try:
+            run_dirty_projection()
+        except Exception:  # noqa: BLE001
+            pass
+        _wake.wait(timeout=10)
+        _wake.clear()
+    _maybe_restart()
+
+
+def _maybe_restart() -> None:
+    """旧 worker 退出后处理 deferred restart（P2/Repair5）。"""
+    global _thread, _restart_pending
+    with _thread_lock:
+        if _thread is not threading.current_thread():
+            return  # 已被 stop_worker 清理或已被新线程替换，不重复启动
+        if not _restart_pending:
+            _thread = None
+            return
+        _restart_pending = False
+        _stop.clear()
+        _wake.clear()
         _thread = threading.Thread(target=_loop, name="ladder-projection", daemon=True)
         _thread.start()
 
@@ -149,8 +174,9 @@ def start_worker() -> None:
 def stop_worker() -> None:
     """停止后台 worker（lifespan shutdown）。
 
-    P2：若原线程仍在长 publisher 中，join 超时后**保留 _thread 引用与 stop 标记**——
-    之后的 start_worker 看到存活线程不会重入（避免同进程双 worker）。
+    P2（Repair5）：若原线程仍在长 publisher 中，join 超时后**保留 _thread 引用
+    与 stop 标记**——之后的 start_worker 看到存活线程登记 deferred restart。
+    join 期间释放 _thread_lock，避免旧线程退出路径（_maybe_restart）被锁阻塞。
     """
     global _thread
     with _thread_lock:
@@ -158,11 +184,14 @@ def stop_worker() -> None:
             return
         _stop.set()
         _wake.set()
-        if _thread.is_alive():
-            _thread.join(timeout=2.0)
-        if _thread.is_alive():
+        target = _thread
+    if target.is_alive():
+        target.join(timeout=2.0)
+    with _thread_lock:
+        if target.is_alive():
             return  # 长任务仍在运行：保留引用，stop 标记保持设置
-        _thread = None
+        if _thread is target:
+            _thread = None
 
 
 __all__ = [

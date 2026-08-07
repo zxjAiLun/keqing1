@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -482,7 +483,8 @@ def test_two_reclaimers_single_winner(participants_root):
 
 
 def test_worker_shutdown_keeps_reference_during_long_publish(participants_root, monkeypatch):
-    """P2：长 publisher 运行时 stop → 保留 _thread 引用，start 不重入。"""
+    """P2：长 publisher 时 stop → 保留 _thread 引用；start 登记 deferred restart，
+    旧线程退出后恢复恰好一个新 worker（Repair 5 语义）。"""
     import threading
     import time
 
@@ -496,15 +498,107 @@ def test_worker_shutdown_keeps_reference_during_long_publish(participants_root, 
     monkeypatch.setattr(projection, "run_dirty_projection", _slow_projection)
     projection.start_worker()
     assert entered.wait(5), "worker 未进入长任务"
+    old_thread = projection._thread
     projection.stop_worker()
     # join 超时：线程仍在长 publisher 中 → 保留引用 + stop 标记
-    assert projection._thread is not None and projection._thread.is_alive()
-    # start 不重入（不产生第二个 worker）
+    assert projection._thread is old_thread and projection._thread.is_alive()
+    # start 不产生第二个 worker，只登记 deferred restart
     projection.start_worker()
-    assert projection._thread is not None
-    # 放行后原线程退出
+    assert projection._thread is old_thread
+    assert projection._thread.is_alive()
+    # 放行后旧线程退出 → deferred restart 启动新 worker
     release.set()
-    time.sleep(0.3)
-    assert not projection._thread.is_alive()
+    deadline = time.time() + 5
+    while projection._thread is old_thread and time.time() < deadline:
+        time.sleep(0.05)
+    assert projection._thread is not old_thread
+    assert projection._thread is not None and projection._thread.is_alive()
     projection.stop_worker()
     assert projection._thread is None
+
+
+# ---------------------------------------------------------------------------
+# R10-F Repair 5：crash-safe reclaim mutex / deferred worker restart
+# ---------------------------------------------------------------------------
+
+_RECLAIM_HELPER = """
+import sys, time
+from pathlib import Path
+from participants.paths import try_lease_lock
+
+lock_path = Path(sys.argv[1])
+go = Path(sys.argv[2])
+while not go.exists():
+    time.sleep(0.005)
+with try_lease_lock(lock_path, lease_seconds=5, heartbeat_interval=0) as ok:
+    print("ACQUIRED" if ok else "NOT_ACQUIRED", flush=True)
+    if ok:
+        time.sleep(0.3)
+"""
+
+
+def test_two_process_reclaimers_single_winner_with_stale_reclaim(participants_root, tmp_path):
+    """P1：预置 expired+dead 主锁 + orphan reclaim 文件 → 两独立进程 reclaim → 恰好一个 winner。"""
+    import os as _os
+    import subprocess
+    import sys as _sys
+    import time as _time
+
+    lock_path = participants_root / "projection_locks" / "s5.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(json.dumps({"pid": 99999999, "token": "dead-a"}), encoding="utf-8")
+    _os.utime(lock_path, (_time.time() - 60, _time.time() - 60))
+    # orphan reclaim 文件：文件存在但无人持有 advisory lock（模拟 reclaimer 崩溃遗留）
+    reclaim_path = lock_path.with_name(lock_path.name + ".reclaim")
+    reclaim_path.write_text("orphan", encoding="utf-8")
+
+    helper = tmp_path / "reclaim_helper.py"
+    helper.write_text(_RECLAIM_HELPER, encoding="utf-8")
+    go = tmp_path / "go"
+
+    root = Path(__file__).resolve().parents[1]
+    env = {
+        **_os.environ,
+        "PYTHONPATH": str(root / "src"),
+        "KEQING_PARTICIPANT_DATA_ROOT": str(participants_root),
+    }
+    procs = [
+        subprocess.Popen(
+            [_sys.executable, str(helper), str(lock_path), str(go)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        )
+        for _ in range(2)
+    ]
+    go.write_text("go", encoding="utf-8")
+    outputs = [p.communicate(timeout=15)[0].strip() for p in procs]
+    assert outputs.count("ACQUIRED") == 1, f"应恰好一个 winner，得到 {outputs}"
+    assert outputs.count("NOT_ACQUIRED") == 1
+
+
+def test_worker_deferred_restart(participants_root, monkeypatch):
+    """P2：长 publisher 时 stop→start 登记 deferred restart，旧线程退出后恢复新 worker。"""
+    import threading
+    import time
+
+    entered = threading.Event()
+    release = threading.Event()
+    calls = {"n": 0}
+
+    def _blocking_projection():
+        calls["n"] += 1
+        entered.set()
+        release.wait(5)
+
+    monkeypatch.setattr(projection, "run_dirty_projection", _blocking_projection)
+    projection.start_worker()
+    assert entered.wait(5), "旧 worker 未进入长任务"
+    projection.stop_worker()  # join 2s 超时：旧线程仍在长任务
+    assert projection._thread is not None and projection._thread.is_alive()
+    projection.start_worker()  # 登记 deferred restart
+    release.set()  # 放行旧线程 → 退出 → _maybe_restart 启动新 worker
+    deadline = time.time() + 5
+    while calls["n"] < 2 and time.time() < deadline:
+        time.sleep(0.05)
+    assert calls["n"] >= 2, "旧线程退出后应自动启动新 worker 并再次进入投影"
+    assert projection._thread is not None and projection._thread.is_alive()
+    projection.stop_worker()

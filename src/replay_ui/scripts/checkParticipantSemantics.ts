@@ -177,7 +177,16 @@ const paths4 = read('../../src/participants/paths.py');
 check(paths4.includes('.reclaim'), 'dead-lease reclaim 用 reclaim 互斥串行化');
 check(paths4.includes('在 reclaim 临界区内重新读取/重新判定'), 'reclaim 临界区内重新判定 dead-owner 后才删除');
 const proj4 = read('../../src/participants/projection.py');
-check(proj4.includes('if _thread.is_alive():') && proj4.includes('不重入'), '长 publisher 时 start 不重入');
+check(proj4.includes('if _thread is not None and _thread.is_alive():') && proj4.includes('_restart_pending'), '长 publisher 时 start 登记 deferred restart 不重入');
+
+// 18) R10-F Repair 5：crash-safe reclaim mutex / deferred restart
+const paths5 = read('../../src/participants/paths.py');
+check(paths5.includes('_try_advisory_lock'), 'reclaim 互斥用 OS advisory lock（进程退出自动释放）');
+check(paths5.includes('msvcrt.locking') && paths5.includes('fcntl.flock'), 'reclaim 锁跨平台（Windows/POSIX）');
+check(!paths5.includes('reclaim_path.unlink'), 'reclaim 锁不再手动删除（无 stale 删除协议）');
+const proj5 = read('../../src/participants/projection.py');
+check(proj5.includes('_restart_pending'), 'deferred worker restart 登记');
+check(proj5.includes('_maybe_restart'), '旧 worker 退出后自动重启');
 
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);

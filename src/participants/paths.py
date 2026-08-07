@@ -176,6 +176,34 @@ def _pid_is_alive(pid: int) -> bool:
         return True
 
 
+def _try_advisory_lock(lock_path: Path):
+    """OS 自动释放的 advisory lock（reclaim 互斥用，Repair 5）。
+
+    进程退出时内核自动释放锁——不需要 stale 删除协议，也就不存在
+    "两个 reclaimer 互删对方刚创建的 reclaim 锁" 的竞态。
+    返回持有锁的 fd（调用方负责 close 释放）；获取失败返回 None。
+    """
+    lock_path = Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except (OSError, IOError):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return None
+
+
 @contextlib.contextmanager
 def try_lease_lock(
     lock_path: Path,
@@ -189,8 +217,9 @@ def try_lease_lock(
     - 竞争者：锁文件 mtime 距今 < ``lease_seconds`` → 活跃 lease，yield False；
       超过 ``lease_seconds`` 且 **owner PID 已确认失活** → reclaim（换新 token）；
       mtime 旧但 PID 仍存活 → 不 reclaim（活跃长任务不被误删）；
-    - reclaim 串行化（P1/Repair4）：dead-owner 判定与删除在 ``<lock>.reclaim``
-      互斥锁临界区内重新执行——两个 reclaimer 不会互删对方刚创建的新 lease；
+    - reclaim 串行化（P1/Repair4/5）：dead-owner 判定与删除在 ``<lock>.reclaim``
+      **OS advisory lock** 临界区内重新执行——reclaimer 崩溃时内核自动释放，
+      无需 stale 删除协议，两个 reclaimer 不会互删对方刚创建的新 lease；
     - 释放：仅当锁文件中的 ``token`` 仍等于自己的 token 才 unlink——
       旧 owner 绝不会删除后来 owner 的锁。
     """
@@ -210,24 +239,10 @@ def try_lease_lock(
             os.close(fd)
             acquired = True
         except FileExistsError:
-            # lease 被占（或过期）：先获取 reclaim 互斥，串行化 dead-owner 判定与删除
-            reclaim_acquired = False
-            try:
-                rfd = os.open(reclaim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(rfd, str(os.getpid()).encode("ascii"))
-                os.close(rfd)
-                reclaim_acquired = True
-            except FileExistsError:
-                try:
-                    reclaim_stale = time.time() - reclaim_path.stat().st_mtime > lease_seconds
-                except FileNotFoundError:
-                    reclaim_stale = False
-                if reclaim_stale:
-                    try:
-                        reclaim_path.unlink()
-                    except FileNotFoundError:
-                        pass
-                    continue  # 清掉 stale reclaim 互斥后重试
+            # lease 被占（或过期）：先获取 reclaim advisory lock，
+            # 串行化 dead-owner 判定与删除（OS 自动释放，无 stale 竞态）
+            reclaim_fd = _try_advisory_lock(reclaim_path)
+            if reclaim_fd is None:
                 yield False  # 另一个 reclaimer 正在处理 → already_running
                 return
             try:
@@ -254,8 +269,8 @@ def try_lease_lock(
                     pass
             finally:
                 try:
-                    reclaim_path.unlink()
-                except FileNotFoundError:
+                    os.close(reclaim_fd)  # 释放 advisory lock（文件保留，内核负责回收）
+                except OSError:
                     pass
             # 回到主锁争抢
 
