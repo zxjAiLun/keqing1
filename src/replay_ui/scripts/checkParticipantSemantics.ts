@@ -134,6 +134,21 @@ const participantsApi = read('../../src/participants/api.py');
 check(participantsApi.includes('/ladder/{season_id}/project'), '投影触发 API');
 check(participantsApi.includes('/ladder/{season_id}/status'), '投影状态 API');
 
+// 14) R10-F Repair：fingerprint / generation CAS / exclusive / 自动消费
+const ladderIngest2 = read('../../src/replay/ladder_ingest.py');
+check(ladderIngest2.includes('participants_projection_fingerprint'), 'ledger 语义投影指纹（publisher unchanged-skip 感知）');
+check(ladderIngest2.includes('"exclusive"') || ladderIngest2.includes("'exclusive'"), 'participants exclusive 排他模式');
+const ledgerF2 = read('../../src/participants/ledger.py');
+check(ledgerF2.includes('"generation": uuid.uuid4().hex'), 'dirty marker 带 generation（CAS）');
+check(ledgerF2.includes('complete_ladder_projection'), '发布完成 CAS（generation 变了保留 dirty）');
+check(ledgerF2.includes('model_fields_set'), 'revise 区分省略与显式 null（可清空 season）');
+check(ledgerF2.includes('for season in {old_season, new_season}'), 'season move → 新旧双 dirty');
+const pls = read('../../scripts/mortal/publish_ladder_snapshot.py');
+check(pls.includes('extra_fingerprint'), 'publisher 指纹合并 ledger 投影输入');
+const proj = read('../../src/participants/projection.py');
+check(proj.includes('run_dirty_projection'), '自动 dirty consumer');
+check(proj.includes('start_worker'), '后台 worker 启动');
+
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);

@@ -83,7 +83,11 @@ app.include_router(playwithyou_router)
 
 # ========== Participants（账号 / 模型 / 统一对局账本）==========
 from participants.api import router as participants_router
+from participants import projection as participants_projection
+
 app.include_router(participants_router)
+# R10-F：启动时扫描 dirty markers 并自动投影（dirty consumer worker）。
+participants_projection.start_worker()
 
 # ========== 静态资源 ==========
 

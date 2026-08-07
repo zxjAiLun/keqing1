@@ -339,14 +339,31 @@ def ladder_dirty_path(season_id: str) -> Path:
 
 
 def mark_ladder_dirty(season_id: str | None) -> None:
-    """标记赛季天梯需重算。调用方须已持有 data_lock（不重取文件锁）。"""
+    """标记赛季天梯需重算。每次写入新的 generation（CAS 协议，P1-2）。
+
+    调用方须已持有 data_lock（不重取文件锁）。
+    幂等语义：多写一次只是多一次重建（安全 false-positive），少写会永久漏更新。
+    """
     if not season_id:
         return
     path = ladder_dirty_path(season_id)
     atomic_write_text(
         path,
-        json.dumps({"season_id": season_id, "marked_at": now_iso()}, ensure_ascii=False),
+        json.dumps(
+            {"season_id": season_id, "generation": uuid.uuid4().hex, "marked_at": now_iso()},
+            ensure_ascii=False,
+        ),
     )
+
+
+def read_ladder_generation(season_id: str) -> str | None:
+    """读取当前 dirty marker 的 generation（无锁读；投影 CAS 用）。"""
+    path = ladder_dirty_path(season_id)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload.get("generation")
 
 
 def clear_ladder_dirty(season_id: str) -> bool:
@@ -358,27 +375,59 @@ def clear_ladder_dirty(season_id: str) -> bool:
             return False
 
 
+def complete_ladder_projection(season_id: str, expected_generation: str | None) -> bool:
+    """发布完成后的 CAS：若 dirty generation 仍为 expected，则清 dirty + 批量置 ready。
+
+    返回 False 表示发布期间有新的 ledger 写入（generation 已变），dirty 与 pending
+    必须保留（P1-2 lost-update 防护）。检查 + 清除 + 状态更新在同一 data_lock 临界区。
+    """
+    with _write_lock, data_lock():
+        _recover_pending_transaction()
+        current_gen = read_ladder_generation(season_id)
+        if current_gen != expected_generation:
+            return False
+        try:
+            ladder_dirty_path(season_id).unlink()
+        except FileNotFoundError:
+            pass
+        _set_season_projection_state_locked(season_id, "ready")
+        return True
+
+
+def _set_season_projection_state_locked(season_id: str, state: str) -> int:
+    """锁内批量更新赛季内 active + rating_eligible match 的投影状态。"""
+    rows = _read_match_rows()
+    changed = 0
+    for raw in rows:
+        match = Match.model_validate(raw)
+        if match.season_id != season_id or match.status != "active":
+            continue
+        if not match.rating_eligible:
+            # P2-2：不参与正式计分的比赛恒为 not_applicable
+            if match.ladder_projection_state != "not_applicable":
+                match.ladder_projection_state = "not_applicable"
+                match.updated_at = now_iso()
+                _rewrite_match(match)
+                changed += 1
+            continue
+        if match.ladder_projection_state == state:
+            continue
+        match.ladder_projection_state = state
+        match.updated_at = now_iso()
+        _rewrite_match(match)
+        changed += 1
+    return changed
+
+
 def set_season_projection_state(season_id: str, state: str) -> int:
-    """批量更新赛季内 active match 的投影状态（ready/error）。
+    """批量更新赛季内 match 的投影状态（ready/error）。
 
     投影状态是派生视图（非对局修订），直接重写 matches.jsonl，不产生 revision。
     返回更新数。
     """
     with _write_lock, data_lock():
         _recover_pending_transaction()
-        rows = _read_match_rows()
-        changed = 0
-        for raw in rows:
-            match = Match.model_validate(raw)
-            if match.season_id != season_id or match.status != "active":
-                continue
-            if match.ladder_projection_state == state:
-                continue
-            match.ladder_projection_state = state
-            match.updated_at = now_iso()
-            _rewrite_match(match)
-            changed += 1
-        return changed
+        return _set_season_projection_state_locked(season_id, state)
 
 
 def _append_revision(row: dict, *, fsync: bool = False) -> None:
@@ -496,6 +545,8 @@ def create_match(payload: MatchCreate, registry) -> Match:
         now = now_iso()
         match_id = _generate_match_id()
         match, issues, blocking = build_match(payload, registry, match_id, now)
+        # P1-5：dirty 先于 Match 提交（即使后续崩溃也只会多重建一次，不会永久漏更新）
+        mark_ladder_dirty(match.season_id)
         _transactional_match_update(
             match,
             {
@@ -513,7 +564,6 @@ def create_match(payload: MatchCreate, registry) -> Match:
                 "after": match.model_dump(by_alias=True),
             },
         )
-        mark_ladder_dirty(match.season_id)
     return match
 
 
@@ -559,7 +609,7 @@ def build_match(
         resolution=payload.resolution,
         season_id=payload.season_id,
         rating_eligible=payload.rating_eligible,
-        ladder_projection_state="pending" if payload.season_id else "not_applicable",
+        ladder_projection_state="pending" if (payload.season_id and payload.rating_eligible) else "not_applicable",
         seats=resolved_seats,
         final_scores=payload.final_scores,
         ranks=ranks,
@@ -601,15 +651,18 @@ def revise_match(match_id: str, payload: MatchRevise, registry) -> Match:
             next_match.seats = payload.seats
         if payload.final_scores is not None:
             next_match.final_scores = payload.final_scores
-        if payload.season_id is not None:
+        # P1-3：区分「字段省略」与「显式 null」——显式 null 才能清空 season
+        if "season_id" in payload.model_fields_set:
             next_match.season_id = payload.season_id
-        if payload.rating_eligible is not None:
-            next_match.rating_eligible = payload.rating_eligible
-        # 赛季归属变化 → 投影状态重置为 pending（天梯需重算）
-        if next_match.season_id:
+        if "rating_eligible" in payload.model_fields_set:
+            next_match.rating_eligible = bool(payload.rating_eligible)
+        # P2-2：season 缺失或 not eligible → not_applicable；否则 pending（待重算）
+        if next_match.season_id and next_match.rating_eligible:
             next_match.ladder_projection_state = "pending"
-        elif next_match.ladder_projection_state != "not_applicable":
+        else:
             next_match.ladder_projection_state = "not_applicable"
+        old_season = current.season_id
+        new_season = next_match.season_id
 
         ranks, issues = validate_match(
             next_match.seats,
@@ -629,6 +682,9 @@ def revise_match(match_id: str, payload: MatchRevise, registry) -> Match:
         next_match.latest_revision_id = _generate_revision_id(match_id, next_match.revision)
         next_match.updated_at = now_iso()
         _assert_seat_accounts_exist(next_match.seats, registry)
+        # P1-3/P1-5：旧赛季与新赛季都标 dirty（去重），且先于 Match 提交
+        for season in {old_season, new_season}:
+            mark_ladder_dirty(season)
         _transactional_match_update(
             next_match,
             {
@@ -646,7 +702,6 @@ def revise_match(match_id: str, payload: MatchRevise, registry) -> Match:
                 "after": next_match.model_dump(by_alias=True),
             },
         )
-        mark_ladder_dirty(next_match.season_id)
         return next_match
 
 
@@ -668,6 +723,8 @@ def void_match(match_id: str, payload: MatchVoid) -> Match:
                 "updated_at": now,
             }
         )
+        # P1-5：作废比赛不再计分 → 提交前标 dirty（作废前所属赛季）
+        mark_ladder_dirty(current.season_id)
         _transactional_match_update(
             updated,
             {
@@ -685,8 +742,6 @@ def void_match(match_id: str, payload: MatchVoid) -> Match:
                 "after": updated.model_dump(by_alias=True),
             },
         )
-        # 作废的比赛不再计分 → 标记 dirty 重算（作废前所属赛季）
-        mark_ladder_dirty(current.season_id)
         return updated
 
 

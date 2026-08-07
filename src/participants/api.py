@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from . import ledger, registry, stats, aliases, intake
+from . import ledger, registry, stats, aliases, intake, projection
 from .schemas import (
     Account,
     AccountCreate,
@@ -182,6 +182,7 @@ def api_create_match(payload: MatchCreate) -> MatchResponse:
         ) from exc
     except ValueError as exc:
         raise _error(409, str(exc)) from exc
+    projection.request_projection(match.season_id)
     return MatchResponse(match=match, revisions=ledger.list_revision_summaries(match.match_id))
 
 
@@ -213,6 +214,7 @@ def api_revise_match(match_id: str, payload: MatchRevise) -> MatchResponse:
         ) from exc
     except ValueError as exc:
         raise _error(409, str(exc)) from exc
+    projection.request_projection(match.season_id)
     return MatchResponse(match=match, revisions=ledger.list_revision_summaries(match_id))
 
 
@@ -224,6 +226,7 @@ def api_void_match(match_id: str, payload: MatchVoid) -> MatchResponse:
         raise _error(404, str(exc)) from exc
     except ValueError as exc:
         raise _error(409, str(exc)) from exc
+    projection.request_projection(match.season_id)
     return MatchResponse(match=match, revisions=ledger.list_revision_summaries(match_id))
 
 
@@ -283,8 +286,10 @@ def api_intake_confirm(payload: IntakeConfirmRequest) -> MatchResponse:
         raise _error(409, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail={"error": f"落账失败: {exc}"}) from exc
+    match = ledger.get_match(result["match_id"])
+    projection.request_projection(match.season_id if match else None)
     return MatchResponse(
-        match=ledger.get_match(result["match_id"]),
+        match=match,
         revisions=ledger.list_revision_summaries(result["match_id"]),
     )
 
@@ -331,30 +336,13 @@ def api_ladder_projection_status(season_id: str) -> dict:
 def api_project_ladder_season(season_id: str) -> dict:
     """从 participants ledger 确定性重建并发布赛季天梯快照（R10-F）。
 
-    始终从完整 ledger 重建（幂等）；成功后清 dirty 并批量置 ready，
-    失败则置 error（dirty 保留，可重试）。
+    按钮/手动重试路径：generation CAS 保护（发布期间新写入 → needs_rebuild），
+    失败置 error（dirty 保留）。正常流程由后台 worker 自动消费。
     """
-    from replay import ladder as ladder_data
-
-    configs_dir = ladder_data.resolve_config_dir(_PARTICIPANTS_PROJECT_ROOT)
-    registry_path = configs_dir / f"{season_id}.json"
-    if not registry_path.is_file():
-        raise _error(404, f"赛季配置不存在: {season_id}")
-    try:
-        from scripts.mortal.publish_ladder_snapshot import publish_snapshot
-
-        result = publish_snapshot(registry_path=registry_path, log_dirs=[])
-    except Exception as exc:  # noqa: BLE001
-        ledger.set_season_projection_state(season_id, "error")
+    result = projection.project_season(season_id)
+    if result["state"] == "error":
         raise HTTPException(
             status_code=502,
-            detail={"error": f"天梯投影失败", "reason": str(exc)},
-        ) from exc
-    ledger.clear_ladder_dirty(season_id)
-    ledger.set_season_projection_state(season_id, "ready")
-    return {
-        "season_id": season_id,
-        "state": "ready",
-        "snapshot_dir": result.get("snapshot_dir"),
-        "games": result.get("games"),
-    }
+            detail={"error": "天梯投影失败", "reason": result.get("reason")},
+        )
+    return result

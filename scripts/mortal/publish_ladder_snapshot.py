@@ -427,6 +427,7 @@ def compute_source_fingerprint(
     preserve_log_dir_order: bool = False,
     interleave_log_dirs: bool = False,
     ingest_root: Path | None = None,
+    extra_fingerprint: str | None = None,
 ) -> str:
     """源日志输入指纹：覆盖 builder 实际处理顺序的路径、大小、mtime_ns。
 
@@ -434,6 +435,8 @@ def compute_source_fingerprint(
     用于避免人工重复执行、resume 无新增日志、调度器重复触发时的重复重建。
 
     ingest 赛季使用 sources_root 全量文件；否则使用 mjai 日志目录。
+    ``extra_fingerprint`` 追加合并（R10-F：participants ledger 投影指纹——
+    sources_root 不动但 ledger 变化时也必须触发重建）。
     """
     if ingest_root is not None:
         stats = _ordered_source_stats(ingest_root)
@@ -441,16 +444,18 @@ def compute_source_fingerprint(
         hasher.update(b"ingest=1;")
         for path, size, mtime_ns in stats:
             hasher.update(f"{path}\0{size}\0{mtime_ns}\n".encode("utf-8"))
-        return hasher.hexdigest()
-    stats = _ordered_log_stats(
-        log_dirs,
-        preserve_log_dir_order=preserve_log_dir_order,
-        interleave_log_dirs=interleave_log_dirs,
-    )
-    hasher = hashlib.sha256()
-    hasher.update(("preserve=%s;interleave=%s;" % (preserve_log_dir_order, interleave_log_dirs)).encode("ascii"))
-    for path, size, mtime_ns in stats:
-        hasher.update(f"{path}\0{size}\0{mtime_ns}\n".encode("utf-8"))
+    else:
+        stats = _ordered_log_stats(
+            log_dirs,
+            preserve_log_dir_order=preserve_log_dir_order,
+            interleave_log_dirs=interleave_log_dirs,
+        )
+        hasher = hashlib.sha256()
+        hasher.update(("preserve=%s;interleave=%s;" % (preserve_log_dir_order, interleave_log_dirs)).encode("ascii"))
+        for path, size, mtime_ns in stats:
+            hasher.update(f"{path}\0{size}\0{mtime_ns}\n".encode("utf-8"))
+    if extra_fingerprint:
+        hasher.update(b"extra=" + extra_fingerprint.encode("ascii"))
     return hasher.hexdigest()
 
 
@@ -581,6 +586,23 @@ def _staging_root_for(snapshot_root: Path, snapshot_name: str) -> Path:
     return snapshot_root / f".{snapshot_name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.staging"
 
 
+def _participants_extra_fingerprint(season: dict[str, Any]) -> str | None:
+    """participants ledger 语义投影指纹（P1-1）。
+
+    赛季 ingest 配置 ``participants.enabled`` 时，把 ledger 的 eligible 比赛
+    纳入 publisher fingerprint——否则 sources_root 不变但 matches.jsonl 变化
+    时会被 unchanged-skip，新比赛永远进不了榜单。
+    """
+    ingest_cfg = season.get("ingest") if isinstance(season.get("ingest"), dict) else None
+    participants_cfg = ingest_cfg.get("participants") if ingest_cfg else None
+    if not isinstance(participants_cfg, dict) or not participants_cfg.get("enabled"):
+        return None
+    from replay import ladder_ingest
+
+    season_id = str(season.get("season_id") or "")
+    return ladder_ingest.participants_projection_fingerprint(season_id)
+
+
 def publish_snapshot(
     *,
     registry_path: Path,
@@ -652,6 +674,8 @@ def publish_snapshot(
         preserve_log_dir_order=preserve_log_dir_order,
         interleave_log_dirs=interleave_log_dirs,
         ingest_root=ingest_root,
+        # R10-F：participants ledger 投影指纹——sources_root 不动但 ledger 变化也要重建
+        extra_fingerprint=_participants_extra_fingerprint(season),
     )
     # 非 ingest 赛季必须有 mjai 日志输入；ingest 赛季不需要 --log-dir。
     if ingest_root is None and not log_dirs:

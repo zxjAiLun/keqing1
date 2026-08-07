@@ -14,6 +14,7 @@ same season, the same accounts, the same scoring book.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -348,6 +349,36 @@ class ParticipantLedgerAdapter:
                 source_type=self.source_type,
                 source_ref=match.external_match_id,
             )
+
+
+def participants_projection_fingerprint(season_id: str) -> str:
+    """participants ledger 的语义投影指纹（P1-1）。
+
+    只有影响天梯的字段参与：season_id + active + rating_eligible + match_id +
+    occurred_at + game_length + 四座 account_id + final_scores。按稳定顺序
+    canonical JSON 后 SHA-256。revision note / projection state 等不影响。
+    """
+    from participants import ledger as participants_ledger
+
+    rows: list[dict] = []
+    for match in participants_ledger.list_matches(status="active").matches:
+        if match.season_id != season_id or not match.rating_eligible:
+            continue
+        rows.append(
+            {
+                "match_id": match.match_id,
+                "occurred_at": match.occurred_at,
+                "game_length": match.game_length,
+                "seats": [
+                    (seat.seat, seat.account_id, seat.model_identity_id, seat.model_artifact_id)
+                    for seat in sorted(match.seats, key=lambda s: s.seat)
+                ],
+                "final_scores": match.final_scores,
+            }
+        )
+    rows.sort(key=lambda row: row["match_id"])
+    payload = json.dumps(rows, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -708,6 +739,7 @@ def build_ingest_report(
     # R10-F：participants Match Ledger 作为正式计分的事实来源。
     # 赛季 ingest 配置 ``{"participants": {"enabled": true}}`` 时，直接从
     # participants 账本读取 rating_eligible 的比赛（不再复制 manual_tenhou）。
+    # ``exclusive: true`` 时不再读取 legacy playwithyou/manual_tenhou（P1-4 双计防护）。
     participants_cfg = ingest.get("participants")
     if isinstance(participants_cfg, dict) and participants_cfg.get("enabled"):
         from participants.paths import data_root as participants_data_root
@@ -716,6 +748,15 @@ def build_ingest_report(
         if participants_dir.is_dir():
             season_id = str(season.get("season_id") or "")
             source_entries.append((ParticipantLedgerAdapter(season_id=season_id), participants_dir))
+        if participants_cfg.get("exclusive"):
+            # P1-4：exclusive 时只读 participants ledger，legacy source 仅保留审计/迁移
+            exclusive_entries = [
+                entry for entry in source_entries if entry[0].source_type == "participants"
+            ]
+            matches = merge_ladder_matches(exclusive_entries, allowed_accounts=allowed_accounts)
+            result = replay_ladder_matches(matches, scoring_config=season.get("scoring"))
+            write_ingest_outputs(output_dir, result)
+            return result["report"]
 
     matches = merge_ladder_matches(source_entries, allowed_accounts=allowed_accounts)
     result = replay_ladder_matches(matches, scoring_config=season.get("scoring"))

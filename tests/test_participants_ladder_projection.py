@@ -59,9 +59,9 @@ def test_create_match_marks_dirty_and_pending(participants_root):
 def test_ineligible_match_no_dirty(participants_root):
     _accounts()
     match = ledger.create_match(_match_create(rating_eligible=False), registry)
-    # season_id 非空 → 仍标 dirty（可后续提升 eligible），投影状态 pending
+    # P2-2：not eligible → not_applicable；season_id 非空仍标 dirty（可后续提升）
     assert ledger.ladder_dirty_path(SEASON).exists()
-    assert match.ladder_projection_state == "pending"
+    assert match.ladder_projection_state == "not_applicable"
 
 
 def test_revise_void_mark_dirty(participants_root):
@@ -102,7 +102,19 @@ def test_project_season_api_success(participants_root, monkeypatch, tmp_path):
 
     configs = tmp_path / "configs"
     configs.mkdir()
-    (configs / f"{SEASON}.json").write_text(json.dumps({"season_id": SEASON}), encoding="utf-8")
+    season_cfg = {
+        "schema": "keqing.ladder.season.v1",
+        "season_id": SEASON,
+        "report_dir": "artifacts/ladder/reports/official-ladder-v1",
+        "status": "running",
+        "scoring": {"system": "tenhou_rank_progression"},
+        "ingest": {
+            "sources_root": str(tmp_path / "sources"),
+            "participants": {"enabled": True, "exclusive": True},
+        },
+        "models": [],
+    }
+    (configs / f"{SEASON}.json").write_text(json.dumps(season_cfg, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setenv("KEQING_LADDER_CONFIG_DIR", str(configs))
     monkeypatch.setattr(
         publish_ladder_snapshot, "publish_snapshot",
@@ -125,7 +137,19 @@ def test_project_season_api_failure_keeps_dirty(participants_root, monkeypatch, 
 
     configs = tmp_path / "configs"
     configs.mkdir()
-    (configs / f"{SEASON}.json").write_text(json.dumps({"season_id": SEASON}), encoding="utf-8")
+    season_cfg = {
+        "schema": "keqing.ladder.season.v1",
+        "season_id": SEASON,
+        "report_dir": "artifacts/ladder/reports/official-ladder-v1",
+        "status": "running",
+        "scoring": {"system": "tenhou_rank_progression"},
+        "ingest": {
+            "sources_root": str(tmp_path / "sources"),
+            "participants": {"enabled": True, "exclusive": True},
+        },
+        "models": [],
+    }
+    (configs / f"{SEASON}.json").write_text(json.dumps(season_cfg, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setenv("KEQING_LADDER_CONFIG_DIR", str(configs))
     monkeypatch.setattr(
         publish_ladder_snapshot, "publish_snapshot",
