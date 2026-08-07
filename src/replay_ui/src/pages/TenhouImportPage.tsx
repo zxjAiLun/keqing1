@@ -44,6 +44,9 @@ export function TenhouImportPage() {
   const [loading, setLoading] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // R10 UX Repair P1-6：正式天梯由 intake/confirm 决定（不再是 Play-with-you 启动选项）
+  const [ladderEligible, setLadderEligible] = useState(false);
+  const [ladderSeason, setLadderSeason] = useState('official-ladder-v1');
 
   const load = useCallback(async (signal: AbortSignal) => {
     try {
@@ -125,7 +128,13 @@ export function TenhouImportPage() {
     setConfirming(true);
     setError(null);
     try {
-      const resp = await participantsApi.intakeConfirm({ log_id: preview.log_id, resolutions, session_id: sessionId });
+      const resp = await participantsApi.intakeConfirm({
+        log_id: preview.log_id,
+        resolutions,
+        session_id: sessionId,
+        season_id: ladderEligible ? ladderSeason : null,
+        rating_eligible: ladderEligible ? true : null,
+      });
       navigate(routes.matchDetail(resp.match.match_id));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409 && e.body && typeof e.body === 'object') {
@@ -307,7 +316,23 @@ export function TenhouImportPage() {
               </div>
             </section>
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 14 }}>
+              {/* R10 UX Repair P1-6：确认时决定是否计入正式天梯 */}
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={ladderEligible}
+                  onChange={(e) => setLadderEligible(e.target.checked)}
+                />
+                计入正式天梯
+                {ladderEligible && (
+                  <input
+                    value={ladderSeason}
+                    onChange={(e) => setLadderSeason(e.target.value)}
+                    style={{ width: 150, border: '1px solid var(--border)', background: 'var(--page-bg)', color: 'var(--text-primary)', borderRadius: 4, padding: '4px 8px', fontSize: 12 }}
+                  />
+                )}
+              </label>
               <button
                 onClick={confirmImport}
                 disabled={confirming || Boolean(preview.duplicate_match_id)}

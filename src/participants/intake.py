@@ -532,6 +532,8 @@ def resolve_and_create_match(
     resolutions: list[dict],
     session_id: str | None = None,
     note: str | None = None,
+    season_id: str | None = None,
+    rating_eligible: bool | None = None,
 ) -> dict:
     """按用户逐座决议落账（P1-2 原子事务 + 锁内唯一键）。
 
@@ -603,6 +605,11 @@ def resolve_and_create_match(
 
         now = now_iso()
         match_id = ledger.generate_match_id()
+        # R10 UX Repair P1-6：confirm 阶段决定是否计入正式天梯（season + rating_eligible）
+        if season_id and rating_eligible:
+            projection_state = "pending"
+        else:
+            projection_state = "not_applicable"
         match = Match(
             match_id=match_id,
             occurred_at=preview["occurred_at"],
@@ -622,6 +629,9 @@ def resolve_and_create_match(
             seats=seats,
             final_scores=preview["final_scores"],
             ranks=list(ledger.final_ranks(preview["final_scores"], initial_oya=0)),
+            season_id=season_id,
+            rating_eligible=bool(rating_eligible),
+            ladder_projection_state=projection_state,
             revision=1,
             latest_revision_id=ledger.generate_revision_id(match_id, 1),
             created_at=now,
@@ -662,6 +672,8 @@ def resolve_and_create_match(
             aliases.register_alias_locked(alias)
         ledger._append_revision(revision_row, fsync=True)
         ledger._rewrite_match(match)
+        # P1-6：confirm 即计入正式天梯 → 锁内标 dirty（P1-5 durable outbox 合同）
+        ledger.mark_ladder_dirty(season_id)
         # 回填真实 match_id 到 artifact summary
         _write_artifact_files(
             staging,

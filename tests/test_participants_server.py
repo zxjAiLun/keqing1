@@ -223,3 +223,39 @@ def test_intake_confirm_endpoint(four_account_ids, monkeypatch):
     assert replay["replay_id"] == "20260804gm-0009-2147-32af115e"
     assert replay["has_events"] is True
     assert replay["match_id"] == resp.match.match_id
+
+
+def test_intake_confirm_with_ladder_eligibility(four_account_ids, monkeypatch):
+    """R10 UX Repair P1-6：confirm 时 season_id+rating_eligible → Match 带赛季 + 标 dirty。"""
+    from participants import intake, ledger
+    from participants.schemas import IntakeConfirmRequest, SeatResolution
+
+    monkeypatch.setattr(
+        intake, "download_tenhou6",
+        lambda log_id: {
+            "name": ["Nick", "NoName-1", "NoName-2", "FriendID"],
+            "rule": {"aka": True},
+            "log": [
+                [[0, 0, 0], [25000, 25000, 25000, 25000], [], [], [], [], [], [], [], [], [], [], [], [], [], [], ["和了", [5000, -5000, 0, 0], [0, 1]]],
+            ],
+        },
+    )
+    resolutions = [
+        SeatResolution(seat=0, action="assign", account_id="nick@01", alias_scope="global"),
+        SeatResolution(seat=1, action="assign", account_id="70k@01", alias_scope="global"),
+        SeatResolution(seat=2, action="assign", account_id="friend@01", alias_scope="global"),
+        SeatResolution(seat=3, action="create", display_name="Friend2", account_type="human", alias_scope="global"),
+    ]
+    resp = api.api_intake_confirm(
+        IntakeConfirmRequest(
+            log_id="20260807gm-0009-2147-32af115e",
+            resolutions=resolutions,
+            season_id="official-ladder-v1",
+            rating_eligible=True,
+        )
+    )
+    assert resp.match.season_id == "official-ladder-v1"
+    assert resp.match.rating_eligible is True
+    assert resp.match.ladder_projection_state == "pending"
+    # 锁内标 dirty（durable outbox）：赛季天梯待重算
+    assert ledger.ladder_dirty_path("official-ladder-v1").exists()

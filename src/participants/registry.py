@@ -304,6 +304,30 @@ def add_model_artifact(identity_id: str, payload: ModelArtifactCreate) -> ModelA
     return ModelArtifact.model_validate(store["artifacts"][-1])
 
 
+def set_current_model_artifact(identity_id: str, artifact_id: str) -> ModelArtifact:
+    """把指定 artifact 设为 current（同一 identity 其余产物全部降级，R10 UX Repair P1-4）。"""
+    with _write_lock, data_lock():
+        store = _read_models()
+        if not any(raw.get("model_identity_id") == identity_id for raw in store["identities"]):
+            raise KeyError(f"model identity not found: {identity_id}")
+        target = next(
+            (
+                raw
+                for raw in store["artifacts"]
+                if raw.get("model_artifact_id") == artifact_id
+                and raw.get("model_identity_id") == identity_id
+            ),
+            None,
+        )
+        if target is None:
+            raise KeyError(f"model artifact not found: {artifact_id}")
+        for raw in store["artifacts"]:
+            if raw.get("model_identity_id") == identity_id:
+                raw["is_current"] = raw.get("model_artifact_id") == artifact_id
+        write_json(_models_path(), MODELS_SCHEMA, store)
+    return ModelArtifact.model_validate(target)
+
+
 def update_model_identity(identity_id: str, payload: ModelIdentityUpdate) -> ModelIdentity:
     with _write_lock, data_lock():
         if payload.account_id is not None and not account_exists(payload.account_id):

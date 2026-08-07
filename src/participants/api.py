@@ -130,6 +130,16 @@ def api_add_artifact(model_identity_id: str, payload: ModelArtifactCreate) -> di
     return artifact.model_dump()
 
 
+@router.post("/models/{model_identity_id}/artifacts/{artifact_id}/current", response_model=dict)
+def api_set_current_artifact(model_identity_id: str, artifact_id: str) -> dict:
+    """把指定 artifact 设为 current（R10 UX Repair P1-4：current artifact 管理）。"""
+    try:
+        artifact = registry.set_current_model_artifact(model_identity_id, artifact_id)
+    except KeyError as exc:
+        raise _error(404, str(exc)) from exc
+    return artifact.model_dump()
+
+
 @router.patch("/models/{model_identity_id}", response_model=ModelIdentity)
 def api_update_model(model_identity_id: str, payload: ModelIdentityUpdate) -> ModelIdentity:
     try:
@@ -276,6 +286,8 @@ def api_intake_confirm(payload: IntakeConfirmRequest) -> MatchResponse:
             resolutions=[r.model_dump() for r in payload.resolutions],
             session_id=payload.session_id,
             note=payload.note,
+            season_id=payload.season_id,
+            rating_eligible=payload.rating_eligible,
         )
     except ValidationError as exc:
         raise HTTPException(

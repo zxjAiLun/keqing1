@@ -265,6 +265,28 @@ def _resolve_artifact_path(artifact, project_root: Path) -> Path:
     return path.resolve()
 
 
+def _artifact_spec_for_seat(account_id: str, identity_id: str, artifact_id: str) -> str:
+    """seat 直选 identity+artifact → 返回 artifact 绝对路径作为 checkpoint 来源（P1-3）。
+
+    旧 network spec（networks[slot]）只做 backend compatibility；生产 UI 的
+    launcher 请求直接由所选 artifact 派生冻结 checkpoint。
+    """
+    from participants import registry as participant_registry
+
+    identity = participant_registry.get_model_identity(identity_id)
+    if identity is None:
+        raise ValueError(f"model identity not found: {identity_id}")
+    if not participant_registry.identity_belongs_to_account(identity_id, account_id):
+        raise ValueError(f"账号 {account_id} 不能使用模型身份 {identity_id}")
+    artifact = next((a for a in identity.artifacts if a.model_artifact_id == artifact_id), None)
+    if artifact is None:
+        raise ValueError(f"model identity {identity_id} 无产物 {artifact_id}")
+    path = _resolve_artifact_path(artifact, PROJECT_ROOT)
+    if not path.exists():
+        raise ValueError(f"artifact checkpoint 不存在: {path}")
+    return str(path)
+
+
 def _freeze_launcher_models(roster_bindings: List[dict], specs: List[str]) -> tuple[List[dict], List[str]]:
     """为 launcher 参与者冻结模型身份/产物（P1-2 checkpoint 精确匹配）。
 
@@ -699,7 +721,16 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
                     continue
                 if not (0 <= slot <= 3):
                     raise ValueError(f"launcher_slot 必须在 [0,3]: {slot}")
-                spec = _resolve_spec(networks[slot], req.custom_paths, slot)
+                if entry.model_identity_id and entry.model_artifact_id:
+                    # P1-3：seat 直选 artifact → checkpoint 直接来自 artifact path
+                    spec = _artifact_spec_for_seat(
+                        str(entry.account_id or ""),
+                        entry.model_identity_id,
+                        entry.model_artifact_id,
+                    )
+                else:
+                    # backend compatibility：旧 network spec 推导
+                    spec = _resolve_spec(networks[slot], req.custom_paths, slot)
                 if spec is None:
                     raise ValueError(f"roster slot {slot} 未配置有效模型")
                 slot_specs.append((slot, spec))
