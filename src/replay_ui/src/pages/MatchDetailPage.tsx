@@ -130,7 +130,14 @@ export function MatchDetailPage() {
     setProjecting(true);
     setError(null);
     try {
-      await participantsApi.projectLadder(match.season_id);
+      const result = await participantsApi.projectLadder(match.season_id);
+      if (result.state === 'already_running') {
+        setError('已有投影正在运行，稍后自动刷新');
+      } else if (result.state === 'needs_rebuild') {
+        setError('发布期间有新的账本写入，天梯将自动重算');
+      } else if (result.state === 'error') {
+        setError(result.reason ?? '天梯投影失败');
+      }
       await load(new AbortController().signal);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

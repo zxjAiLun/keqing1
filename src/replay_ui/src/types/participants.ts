@@ -249,9 +249,10 @@ export interface LadderProjectionStatus {
 
 export interface LadderProjectResult {
   season_id: string;
-  state: 'ready' | 'error';
+  state: 'ready' | 'error' | 'needs_rebuild' | 'already_running';
   snapshot_dir?: string | null;
   games?: number | null;
+  reason?: string | null;
 }
 
 export interface IntakePreviewSeat {

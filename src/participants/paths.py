@@ -116,7 +116,7 @@ def data_lock():
 
 @contextlib.contextmanager
 def try_file_lock(lock_path: Path, stale_after: float = 30.0):
-    """非阻塞跨进程锁（single-flight）：已占用立即 yield False，不会等待。
+    """��阻塞跨进程锁（single-flight）：已占用立即 yield False，不会等待。
 
     - 成功获取：yield True，退出时删除锁文件；
     - 已被占用：yield False；锁文件过期则清除并重试一次。
@@ -147,4 +147,108 @@ def try_file_lock(lock_path: Path, stale_after: float = 30.0):
         try:
             lock_path.unlink()
         except FileNotFoundError:
+            pass
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """跨平台 PID 存活检查（lease reclaim 用）。"""
+    if pid is None or pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            handle = ctypes.windll.kernel32.OpenProcess(0x0001, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return False
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        except Exception:  # noqa: BLE001
+            return True  # 无法确认失活 → 保守视为存活
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+
+
+@contextlib.contextmanager
+def try_lease_lock(
+    lock_path: Path,
+    lease_seconds: float = 30.0,
+    heartbeat_interval: float = 5.0,
+):
+    """带 owner 身份的跨进程 lease 锁（长任务 single-flight，R10-F Repair 3）。
+
+    - 获取：``O_EXCL`` 创建，写入 ``{"pid": ..., "token": ...}``；
+    - 持有期间：后台线程定期 touch mtime（heartbeat，``heartbeat_interval<=0`` 关闭）；
+    - 竞争者：锁文件 mtime 距今 < ``lease_seconds`` → 活跃 lease，yield False；
+      超过 ``lease_seconds`` 且 **owner PID 已确认失活** → reclaim（换新 token）；
+      mtime 旧但 PID 仍存活 → 不 reclaim（活跃长任务不被误删）；
+    - 释放：仅当锁文件中的 ``token`` 仍等于自己的 token 才 unlink——
+      旧 owner 绝不会删除后来 owner 的锁。
+    """
+    import json as _json
+    import threading as _threading
+    import uuid as _uuid
+
+    lock_path = Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    token = _uuid.uuid4().hex
+    acquired = False
+    while not acquired:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, _json.dumps({"pid": os.getpid(), "token": token}).encode("ascii"))
+            os.close(fd)
+            acquired = True
+        except FileExistsError:
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if age > lease_seconds:
+                # lease 过期：仅当 owner 可确认失活才 reclaim
+                try:
+                    owner = _json.loads(lock_path.read_text(encoding="utf-8"))
+                    owner_alive = _pid_is_alive(int(owner.get("pid") or 0))
+                except (OSError, ValueError, TypeError):
+                    owner_alive = True  # 无法读取 → 保守视为存活，不 reclaim
+                if not owner_alive:
+                    try:
+                        lock_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+            yield False
+            return
+
+    stop = _threading.Event()
+
+    def _heartbeat() -> None:
+        while not stop.is_set():
+            try:
+                os.utime(lock_path, None)  # touch mtime，保持 lease 活跃
+            except OSError:
+                pass
+            stop.wait(heartbeat_interval)
+
+    heartbeat_thread: _threading.Thread | None = None
+    if heartbeat_interval and heartbeat_interval > 0:
+        heartbeat_thread = _threading.Thread(target=_heartbeat, daemon=True)
+        heartbeat_thread.start()
+    try:
+        yield True
+    finally:
+        stop.set()
+        # 仅当 token 仍匹配才删除（防止删除后来 owner 的锁）
+        try:
+            payload = _json.loads(lock_path.read_text(encoding="utf-8"))
+            if payload.get("token") == token:
+                lock_path.unlink()
+        except (OSError, ValueError):
             pass

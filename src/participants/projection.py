@@ -17,7 +17,7 @@ import threading
 from pathlib import Path
 
 from . import ledger
-from .paths import data_root, try_file_lock
+from .paths import data_root, try_lease_lock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -39,8 +39,8 @@ def _projection_lock_path(season_id: str) -> Path:
 
 
 def project_season(season_id: str) -> dict:
-    """投影单个赛季（per-season single-flight）。返回 {season_id, state, ...}。"""
-    with try_file_lock(_projection_lock_path(season_id)) as acquired:
+    """投影单个赛季（per-season single-flight lease）。返回 {season_id, state, ...}。"""
+    with try_lease_lock(_projection_lock_path(season_id)) as acquired:
         if not acquired:
             # 另一个 worker/手动请求正在投影同一赛季：不重复进入 publisher
             return {
@@ -123,11 +123,13 @@ def request_projection(season_id: str | None) -> None:
 
 
 def start_worker() -> None:
-    """启动后台 worker（幂等）：扫描现有 dirty + 唤醒后投影 + 10s 兜底轮询。"""
+    """启动后台 worker（幂等，可 start→stop→start 重入）。"""
     global _thread
     with _thread_lock:
         if _thread is not None and _thread.is_alive():
             return
+        _stop.clear()  # P2-1：重入时必须清掉上次的 stop 标记
+        _wake.clear()
 
         def _loop() -> None:
             while not _stop.is_set():
@@ -143,7 +145,7 @@ def start_worker() -> None:
 
 
 def stop_worker() -> None:
-    """停止后台 worker（lifespan shutdown）。"""
+    """停止后台 worker（lifespan shutdown）。置 None 以便同进程可重新 start。"""
     global _thread
     with _thread_lock:
         if _thread is None:

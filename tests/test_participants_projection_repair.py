@@ -375,3 +375,71 @@ def test_request_projection_none_wakes(participants_root):
     projection._wake.clear()
     projection.request_projection(None)
     assert projection._wake.is_set()
+
+
+# ---------------------------------------------------------------------------
+# R10-F Repair 3：projection lease 锁 ownership / worker 重入
+# ---------------------------------------------------------------------------
+
+def test_lease_lock_not_reclaimed_from_live_owner(participants_root):
+    """P1：owner 存活且 mtime 被调旧 → 竞争者不得 reclaim。"""
+    import os as _os
+    import time as _time
+
+    from participants.paths import try_lease_lock
+
+    lock_path = participants_root / "projection_locks" / "s1.lock"
+    with try_lease_lock(lock_path, lease_seconds=5, heartbeat_interval=0) as ok:
+        assert ok is True
+        # 人为把 mtime 调旧超过 lease（模拟 30s 阈值误删场景）
+        old = _time.time() - 60
+        _os.utime(lock_path, (old, old))
+        # owner（本进程）仍存活 → B 拿不到锁
+        with try_lease_lock(lock_path, lease_seconds=5, heartbeat_interval=0) as ok2:
+            assert ok2 is False
+    # owner 释放后正常可获取
+    with try_lease_lock(lock_path, lease_seconds=5, heartbeat_interval=0) as ok3:
+        assert ok3 is True
+
+
+def test_lease_lock_release_does_not_delete_other_owner(participants_root):
+    """P1：旧 owner 退出不得删除后来 owner 的锁（token 校验）。"""
+    import json as _json
+
+    from participants.paths import try_lease_lock
+
+    lock_path = participants_root / "projection_locks" / "s2.lock"
+    with try_lease_lock(lock_path, lease_seconds=5, heartbeat_interval=0) as ok:
+        assert ok is True
+        # 模拟锁被 owner B 替换（B 的 token + 已死 PID）
+        lock_path.write_text(_json.dumps({"pid": 99999999, "token": "owner-b"}), encoding="utf-8")
+        # A 退出：token 不匹配 → 不删除 B 的锁
+    assert lock_path.exists(), "旧 owner 不应删除后来 owner 的锁"
+
+
+def test_lease_lock_reclaim_after_owner_dead(participants_root):
+    """P1：owner 已失活且 lease 过期 → 竞争者可以 reclaim。"""
+    import json as _json
+    import os as _os
+    import time as _time
+
+    from participants.paths import try_lease_lock
+
+    lock_path = participants_root / "projection_locks" / "s3.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(_json.dumps({"pid": 99999999, "token": "dead-owner"}), encoding="utf-8")
+    _os.utime(lock_path, (_time.time() - 60, _time.time() - 60))
+    with try_lease_lock(lock_path, lease_seconds=5, heartbeat_interval=0) as ok:
+        assert ok is True
+
+
+def test_worker_start_stop_start_reentrant(participants_root):
+    """P2-1：同一进程 start → stop → start 可重入。"""
+    projection.start_worker()
+    assert projection._thread is not None and projection._thread.is_alive()
+    projection.stop_worker()
+    assert projection._thread is None
+    projection.start_worker()
+    assert projection._thread is not None and projection._thread.is_alive()
+    projection.stop_worker()
+    assert projection._thread is None

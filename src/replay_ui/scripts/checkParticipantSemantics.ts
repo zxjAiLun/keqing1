@@ -162,6 +162,16 @@ check(proj2.includes('stop_worker'), 'worker 可停止（lifespan）');
 const server2 = read('../../src/replay/server.py');
 check(server2.includes('participants_projection.start_worker()') && server2.includes('participants_projection.stop_worker()'), 'worker 放入 FastAPI lifespan');
 
+// 16) R10-F Repair 3：lease 锁 ownership / worker 重入
+const paths3 = read('../../src/participants/paths.py');
+check(paths3.includes('try_lease_lock'), 'projection 专用 lease 锁（owner 身份）');
+check(paths3.includes('_pid_is_alive'), 'reclaim 前校验 owner PID 存活');
+check(paths3.includes('payload.get("token") == token') || paths3.includes('payload.get("token") == token'), '释放仅当 token 匹配（不删后来 owner 的锁）');
+const proj3 = read('../../src/participants/projection.py');
+check(proj3.includes('_stop.clear()'), 'worker start 可重入（清 stop 标记）');
+const tstypes = read('src/types/participants.ts');
+check(tstypes.includes("'needs_rebuild'") && tstypes.includes("'already_running'"), 'TS 投影状态含 needs_rebuild/already_running');
+
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);
