@@ -592,6 +592,11 @@ def resolve_and_create_match(
             resolution_audit[str(seat.seat)] = audit
         if len({s.account_id for s in seats}) != 4:
             raise ValueError("四个座位不能指向同一账号")
+        # P1-2：计入正式天梯 → 正式赛季资格 gate（赛季存在/running/成员/human 模型/checkpoint 一致）
+        if season_id and rating_eligible:
+            from .ladder_eligibility import validate_ladder_eligibility
+
+            validate_ladder_eligibility(season_id, seats, registry=registry)
 
         # 全部校验通过后才写 staging（P2-2：校验失败不残留 staging）
         staging = _staging_dir(log_id)
@@ -664,16 +669,18 @@ def resolve_and_create_match(
         }
         atomic_write_text(ledger.pending_transaction_path(), json.dumps(pending, ensure_ascii=False))
 
-        # 提交：账号 → 别名 → revision → match → artifact promote
+        # 提交：账号 → 别名 → dirty（P1-1 durable outbox：先标 dirty 再提交）
+        # → revision → match → artifact promote
         # 初始创建用严格版（_resolve_seat 已锁内确认 ID 不存在）
         for acc in accounts_to_create:
             registry.create_account_locked(acc)
         for alias in aliases_to_register:
             aliases.register_alias_locked(alias)
+        # P1-1：eligible Match 的 dirty generation 必须先于 revision/Match 提交，
+        # 崩溃在提交后也只多 rebuild 一次，不会永久漏投影。
+        ledger.mark_ladder_dirty(season_id)
         ledger._append_revision(revision_row, fsync=True)
         ledger._rewrite_match(match)
-        # P1-6：confirm 即计入正式天梯 → 锁内标 dirty（P1-5 durable outbox 合同）
-        ledger.mark_ladder_dirty(season_id)
         # 回填真实 match_id 到 artifact summary
         _write_artifact_files(
             staging,
@@ -698,6 +705,9 @@ def recover_intake_transaction_locked(tx: dict) -> None:
     for raw in tx.get("aliases", []):
         aliases.register_alias_locked(ExternalAliasCreate.model_validate(raw))
     match = Match.model_validate(tx["match"])
+    # P1-1：恢复时补标 dirty——进程可能死在 rewrite 与 dirty 之间（eligible Match
+    # 恢复后必须产生 generation，否则 worker 永远看不到它）。
+    ledger.mark_ladder_dirty(match.season_id)
     revision_row = tx["revision"]
     if not any(row.get("revision_id") == revision_row["revision_id"] for row in ledger._read_revision_rows()):
         ledger._append_revision(revision_row, fsync=True)

@@ -151,11 +151,14 @@ export function PlayWithYouPage() {
       if (launchedSlots.length === 0) {
         throw new Error("至少需要一个「由本系统呼出」的座位");
       }
-      // P1-2：launched 且 local_model 的 seat 必须明确选择模型身份 + 产物
+      // P1-2/P1-3：launched 的 local_model 或 artifact-backed external_agent 都必须选模型
       for (const index of launchedSlots) {
         const entry = roster[index];
-        if (entry.controller_type === "local_model" && (!entry.model_identity_id || !entry.model_artifact_id)) {
-          throw new Error(`座位「${SEAT_WINDS[index]}」选择了本地模型，请选择模型身份与产物`);
+        if (
+          (entry.controller_type === "local_model" || entry.controller_type === "external_agent") &&
+          (!entry.model_identity_id || !entry.model_artifact_id)
+        ) {
+          throw new Error(`座位「${SEAT_WINDS[index]}」需要选择模型身份与产物`);
         }
         if (!entry.account_id) {
           throw new Error(`座位「${SEAT_WINDS[index]}」由本系统呼出，必须选择账号`);
@@ -306,7 +309,9 @@ export function PlayWithYouPage() {
               (m) => m.model_identity_id === entry.model_identity_id,
             );
             const artifacts = chosenIdentity?.artifacts ?? [];
-            const showModel = entry.controller_type === "local_model" && entry.launched;
+            const showModel =
+              (entry.controller_type === "local_model" || entry.controller_type === "external_agent") &&
+              entry.launched;
             return (
               <div
                 key={index}

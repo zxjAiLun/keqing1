@@ -239,8 +239,15 @@ def _validate_roster_bindings(roster_bindings: List[dict], specs: List[str]) -> 
         account_id = str(entry.get("account_id") or "").strip()
         if not account_id:
             raise ValueError(f"launcher 参与者必须填写账号（slot {slot}）")
-        if entry.get("controller_type") != "local_model":
-            raise ValueError(f"launcher 参与者 controller_type 必须为 local_model（slot {slot}）")
+        controller = str(entry.get("controller_type") or "")
+        if controller not in ("local_model", "external_agent"):
+            raise ValueError(
+                f"launcher 参与者 controller_type 必须为 local_model 或 external_agent（slot {slot}）"
+            )
+        if controller == "external_agent" and not (entry.get("model_identity_id") and entry.get("model_artifact_id")):
+            raise ValueError(
+                f"由本系统呼出的外部代理必须选择可启动的模型产物（slot {slot}）"
+            )
         raw_name = str(entry.get("expected_raw_name") or "").strip()
         if raw_name:
             if raw_name in raw_names:

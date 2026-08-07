@@ -569,6 +569,11 @@ def create_match(payload: MatchCreate, registry) -> Match:
         now = now_iso()
         match_id = _generate_match_id()
         match, issues, blocking = build_match(payload, registry, match_id, now)
+        # P1-2：正式计分 → 正式赛季资格 gate（赛季/成员/human 模型/checkpoint 一致）
+        if match.season_id and match.rating_eligible:
+            from .ladder_eligibility import validate_ladder_eligibility
+
+            validate_ladder_eligibility(match.season_id, match.seats, registry=registry)
         # P1-5：dirty 先于 Match 提交（即使后续崩溃也只会多重建一次，不会永久漏更新）
         mark_ladder_dirty(match.season_id)
         _transactional_match_update(
@@ -706,6 +711,11 @@ def revise_match(match_id: str, payload: MatchRevise, registry) -> Match:
         next_match.latest_revision_id = _generate_revision_id(match_id, next_match.revision)
         next_match.updated_at = now_iso()
         _assert_seat_accounts_exist(next_match.seats, registry)
+        # P1-2：修订后为正式计分 → 正式赛季资格 gate（阻止 70k@02 + V3 checkpoint 混记）
+        if next_match.season_id and next_match.rating_eligible:
+            from .ladder_eligibility import validate_ladder_eligibility
+
+            validate_ladder_eligibility(next_match.season_id, next_match.seats, registry=registry)
         # P1-3/P1-5：旧赛季与新赛季都标 dirty（去重），且先于 Match 提交
         for season in {old_season, new_season}:
             mark_ladder_dirty(season)
