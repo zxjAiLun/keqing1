@@ -251,3 +251,32 @@ def test_gate_rejects_rating_eligible_without_season(env):
             ),
             registry,
         )
+
+
+def test_gate_normalizes_season_id(env):
+    """UX Repair 3 / P1：season_id 带空白 → 验证通过但必须落账为 trim 后的规范值。"""
+    _accounts()
+    seats = [
+        MatchSeat(seat=0, account_id="nick@01", controller_type="human_ui"),
+        MatchSeat(seat=1, account_id="70k@01", controller_type="local_model"),
+        MatchSeat(seat=2, account_id="70k@02", controller_type="local_model"),
+        MatchSeat(seat=3, account_id="70k@03", controller_type="local_model"),
+    ]
+    match = ledger.create_match(
+        MatchCreate(
+            occurred_at="2026-08-08T13:00:00+08:00",
+            game_length="hanchan",
+            season_id=" official-ladder-v1 ",
+            rating_eligible=True,
+            seats=seats,
+            final_scores=[30000, 20000, 25000, 25000],
+            source="manual",
+        ),
+        registry,
+    )
+    # 落账必须用 trim 后的规范 season_id
+    assert match.season_id == SEASON
+    assert match.ladder_projection_state == "pending"
+    # dirty marker 路径也必须用规范名
+    assert ledger.ladder_dirty_path(SEASON).exists()
+    assert not ledger.ladder_dirty_path(" official-ladder-v1 ").exists()

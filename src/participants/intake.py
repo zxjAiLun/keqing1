@@ -593,10 +593,11 @@ def resolve_and_create_match(
         if len({s.account_id for s in seats}) != 4:
             raise ValueError("四个座位不能指向同一账号")
         # P1-2：正式计分 → 正式赛季资格 gate（rating_eligible ⇒ 必填 season + 校验）
+        # 返回值是 trim 后的规范 season_id，必须回写（防止空白 season 绕过投影）
         if rating_eligible:
             from .ladder_eligibility import ensure_ladder_eligibility
 
-            ensure_ladder_eligibility(season_id, seats, registry=registry)
+            season_id = ensure_ladder_eligibility(season_id, seats, registry=registry)
 
         # 全部校验通过后才写 staging（P2-2：校验失败不残留 staging）
         staging = _staging_dir(log_id)

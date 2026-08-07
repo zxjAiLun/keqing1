@@ -570,10 +570,11 @@ def create_match(payload: MatchCreate, registry) -> Match:
         match_id = _generate_match_id()
         match, issues, blocking = build_match(payload, registry, match_id, now)
         # P1-2：正式计分 → 正式赛季资格 gate（rating_eligible ⇒ 必填 season + 校验）
+        # 返回值是 trim 后的规范 season_id，必须回写 Match（防止空白 season 绕过投影）
         if match.rating_eligible:
             from .ladder_eligibility import ensure_ladder_eligibility
 
-            ensure_ladder_eligibility(match.season_id, match.seats, registry=registry)
+            match.season_id = ensure_ladder_eligibility(match.season_id, match.seats, registry=registry)
         # P1-5：dirty 先于 Match 提交（即使后续崩溃也只会多重建一次，不会永久漏更新）
         mark_ladder_dirty(match.season_id)
         _transactional_match_update(
@@ -712,10 +713,14 @@ def revise_match(match_id: str, payload: MatchRevise, registry) -> Match:
         next_match.updated_at = now_iso()
         _assert_seat_accounts_exist(next_match.seats, registry)
         # P1-2：修订后为正式计分 → 正式赛季资格 gate（rating_eligible ⇒ 必填 season + 校验）
+        # 返回值是 trim 后的规范 season_id，必须回写（防止空白 season 绕过投影）
         if next_match.rating_eligible:
             from .ladder_eligibility import ensure_ladder_eligibility
 
-            ensure_ladder_eligibility(next_match.season_id, next_match.seats, registry=registry)
+            next_match.season_id = ensure_ladder_eligibility(
+                next_match.season_id, next_match.seats, registry=registry
+            )
+            new_season = next_match.season_id
         # P1-3/P1-5：旧赛季与新赛季都标 dirty（去重），且先于 Match 提交
         for season in {old_season, new_season}:
             mark_ladder_dirty(season)

@@ -130,7 +130,14 @@ export function PlayWithYouPage() {
     try {
       const s = await getPlayWithYouStatus();
       setStatus(s);
-      if (!s.running) stopPolling();
+      if (s.running) {
+        // 运行中 → 确保 polling（覆盖 mount 恢复 / start 后的场景）
+        if (!pollingRef.current) {
+          pollingRef.current = window.setInterval(refresh, 2000);
+        }
+      } else {
+        stopPolling();
+      }
     } catch {
       /* ignore transient */
     }
@@ -180,8 +187,9 @@ export function PlayWithYouPage() {
         roster: rosterPayload,
       });
       setStatus(s);
+      // 启动后立即刷新一次（POST /start 已带 frozen_roster）+ 保持 polling
       stopPolling();
-      pollingRef.current = window.setInterval(refresh, 2000);
+      void refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "启动失败");
     } finally {
@@ -218,6 +226,11 @@ export function PlayWithYouPage() {
   }, []);
 
   useEffect(() => stopPolling, [stopPolling]);
+
+  // P2（UX Repair 3）：mount 时恢复运行状态——F5 刷新后仍能看到 running / frozen roster
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;

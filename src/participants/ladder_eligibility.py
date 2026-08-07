@@ -56,17 +56,21 @@ def ensure_ladder_eligibility(
     *,
     registry,
     project_root: Path = PROJECT_ROOT,
-) -> None:
-    """统一硬不变量（UX Repair 2 / P1-2）：
+) -> str:
+    """统一硬不变量（UX Repair 2/3 / P1-2）：
 
     ``rating_eligible == true`` ⇒ ``season_id`` 必须是非空有效字符串
     ⇒ 必须通过 ``validate_ladder_eligibility``。
 
-    任何把 rating_eligible 置 true 的入口（intake confirm / create / revise）都必须调用。
+    返回 **normalized season_id**（trim 后），caller **必须用返回值回写**
+    Match——否则 `" official-ladder-v1 "` 验证通过却落账成未规范化的值，
+    与 dirty marker / adapter 过滤不匹配，永远无法进入正式投影。
     """
-    if season_id is None or not str(season_id).strip():
+    normalized = str(season_id or "").strip()
+    if not normalized:
         raise ValueError("rating_eligible=true 必须指定正式赛季（season_id 不能为空）")
-    validate_ladder_eligibility(str(season_id).strip(), seats, registry=registry, project_root=project_root)
+    validate_ladder_eligibility(normalized, seats, registry=registry, project_root=project_root)
+    return normalized
 
 
 def validate_ladder_eligibility(

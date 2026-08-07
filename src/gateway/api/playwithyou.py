@@ -970,6 +970,7 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
         log_tail=session.tail(50),
         started_at=session.started_at,
         ladder_capture=_binding_view(session),
+        frozen_roster=session.frozen_roster,
     )
 
 
