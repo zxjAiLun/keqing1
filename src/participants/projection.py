@@ -126,8 +126,10 @@ def start_worker() -> None:
     """启动后台 worker（幂等，可 start→stop→start 重入）。"""
     global _thread
     with _thread_lock:
-        if _thread is not None and _thread.is_alive():
-            return
+        if _thread is not None:
+            if _thread.is_alive():
+                return  # 仍存活（可能还在长 publisher 中）→ 不重入
+            _thread = None
         _stop.clear()  # P2-1：重入时必须清掉上次的 stop 标记
         _wake.clear()
 
@@ -145,7 +147,11 @@ def start_worker() -> None:
 
 
 def stop_worker() -> None:
-    """停止后台 worker（lifespan shutdown）。置 None 以便同进程可重新 start。"""
+    """停止后台 worker（lifespan shutdown）。
+
+    P2：若原线程仍在长 publisher 中，join 超时后**保留 _thread 引用与 stop 标记**——
+    之后的 start_worker 看到存活线程不会重入（避免同进程双 worker）。
+    """
     global _thread
     with _thread_lock:
         if _thread is None:
@@ -154,6 +160,8 @@ def stop_worker() -> None:
         _wake.set()
         if _thread.is_alive():
             _thread.join(timeout=2.0)
+        if _thread.is_alive():
+            return  # 长任务仍在运行：保留引用，stop 标记保持设置
         _thread = None
 
 

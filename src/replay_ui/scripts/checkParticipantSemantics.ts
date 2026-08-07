@@ -172,6 +172,13 @@ check(proj3.includes('_stop.clear()'), 'worker start 可重入（清 stop 标记
 const tstypes = read('src/types/participants.ts');
 check(tstypes.includes("'needs_rebuild'") && tstypes.includes("'already_running'"), 'TS 投影状态含 needs_rebuild/already_running');
 
+// 17) R10-F Repair 4：reclaim 串行化 / worker shutdown 保引用
+const paths4 = read('../../src/participants/paths.py');
+check(paths4.includes('.reclaim'), 'dead-lease reclaim 用 reclaim 互斥串行化');
+check(paths4.includes('在 reclaim 临界区内重新读取/重新判定'), 'reclaim 临界区内重新判定 dead-owner 后才删除');
+const proj4 = read('../../src/participants/projection.py');
+check(proj4.includes('if _thread.is_alive():') && proj4.includes('不重入'), '长 publisher 时 start 不重入');
+
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);

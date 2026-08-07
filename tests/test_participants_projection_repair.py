@@ -443,3 +443,68 @@ def test_worker_start_stop_start_reentrant(participants_root):
     assert projection._thread is not None and projection._thread.is_alive()
     projection.stop_worker()
     assert projection._thread is None
+
+
+# ---------------------------------------------------------------------------
+# R10-F Repair 4：reclaim 串行化 / worker shutdown 保引用
+# ---------------------------------------------------------------------------
+
+def test_two_reclaimers_single_winner(participants_root):
+    """P1：两个 reclaimer 同时 reclaim 同一 dead lease → 恰好一个 winner。"""
+    import json as _json
+    import os as _os
+    import threading
+    import time as _time
+
+    from participants.paths import try_lease_lock
+
+    lock_path = participants_root / "projection_locks" / "s4.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(_json.dumps({"pid": 99999999, "token": "dead-a"}), encoding="utf-8")
+    _os.utime(lock_path, (_time.time() - 60, _time.time() - 60))
+
+    results: dict[str, bool] = {}
+    barrier = threading.Barrier(2)
+
+    def _contender(name):
+        barrier.wait()
+        with try_lease_lock(lock_path, lease_seconds=5, heartbeat_interval=0) as ok:
+            results[name] = ok
+
+    threads = [threading.Thread(target=_contender, args=(name,)) for name in ("B", "C")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    winners = [name for name, ok in results.items() if ok]
+    assert len(winners) == 1, f"应恰好一个 winner，得到 {results}"
+    assert len(results) == 2
+
+
+def test_worker_shutdown_keeps_reference_during_long_publish(participants_root, monkeypatch):
+    """P2：长 publisher 运行时 stop → 保留 _thread 引用，start 不重入。"""
+    import threading
+    import time
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _slow_projection():
+        entered.set()
+        release.wait(5)
+
+    monkeypatch.setattr(projection, "run_dirty_projection", _slow_projection)
+    projection.start_worker()
+    assert entered.wait(5), "worker 未进入长任务"
+    projection.stop_worker()
+    # join 超时：线程仍在长 publisher 中 → 保留引用 + stop 标记
+    assert projection._thread is not None and projection._thread.is_alive()
+    # start 不重入（不产生第二个 worker）
+    projection.start_worker()
+    assert projection._thread is not None
+    # 放行后原线程退出
+    release.set()
+    time.sleep(0.3)
+    assert not projection._thread.is_alive()
+    projection.stop_worker()
+    assert projection._thread is None

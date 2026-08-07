@@ -182,13 +182,15 @@ def try_lease_lock(
     lease_seconds: float = 30.0,
     heartbeat_interval: float = 5.0,
 ):
-    """带 owner 身份的跨进程 lease 锁（长任务 single-flight，R10-F Repair 3）。
+    """带 owner 身份的跨进程 lease 锁（长任务 single-flight，R10-F Repair 3/4）。
 
     - 获取：``O_EXCL`` 创建，写入 ``{"pid": ..., "token": ...}``；
     - 持有期间：后台线程定期 touch mtime（heartbeat，``heartbeat_interval<=0`` 关闭）；
     - 竞争者：锁文件 mtime 距今 < ``lease_seconds`` → 活跃 lease，yield False；
       超过 ``lease_seconds`` 且 **owner PID 已确认失活** → reclaim（换新 token）；
       mtime 旧但 PID 仍存活 → 不 reclaim（活跃长任务不被误删）；
+    - reclaim 串行化（P1/Repair4）：dead-owner 判定与删除在 ``<lock>.reclaim``
+      互斥锁临界区内重新执行——两个 reclaimer 不会互删对方刚创建的新 lease；
     - 释放：仅当锁文件中的 ``token`` 仍等于自己的 token 才 unlink——
       旧 owner 绝不会删除后来 owner 的锁。
     """
@@ -198,6 +200,7 @@ def try_lease_lock(
 
     lock_path = Path(lock_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    reclaim_path = lock_path.with_name(lock_path.name + ".reclaim")
     token = _uuid.uuid4().hex
     acquired = False
     while not acquired:
@@ -207,25 +210,54 @@ def try_lease_lock(
             os.close(fd)
             acquired = True
         except FileExistsError:
+            # lease 被占（或过期）：先获取 reclaim 互斥，串行化 dead-owner 判定与删除
+            reclaim_acquired = False
             try:
-                age = time.time() - lock_path.stat().st_mtime
-            except FileNotFoundError:
-                continue
-            if age > lease_seconds:
-                # lease 过期：仅当 owner 可确认失活才 reclaim
+                rfd = os.open(reclaim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(rfd, str(os.getpid()).encode("ascii"))
+                os.close(rfd)
+                reclaim_acquired = True
+            except FileExistsError:
+                try:
+                    reclaim_stale = time.time() - reclaim_path.stat().st_mtime > lease_seconds
+                except FileNotFoundError:
+                    reclaim_stale = False
+                if reclaim_stale:
+                    try:
+                        reclaim_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue  # 清掉 stale reclaim 互斥后重试
+                yield False  # 另一个 reclaimer 正在处理 → already_running
+                return
+            try:
+                # 在 reclaim 临界区内重新读取/重新判定（防 TOCTOU）
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                except FileNotFoundError:
+                    continue  # 锁已被他人取走 → 重新争抢主锁
+                if age <= lease_seconds:
+                    yield False  # 仍是活跃 lease
+                    return
                 try:
                     owner = _json.loads(lock_path.read_text(encoding="utf-8"))
                     owner_alive = _pid_is_alive(int(owner.get("pid") or 0))
                 except (OSError, ValueError, TypeError):
                     owner_alive = True  # 无法读取 → 保守视为存活，不 reclaim
-                if not owner_alive:
-                    try:
-                        lock_path.unlink()
-                    except FileNotFoundError:
-                        pass
-                    continue
-            yield False
-            return
+                if owner_alive:
+                    yield False
+                    return
+                # 确认 dead + expired：在 reclaim 临界区内删除（C 无法插队误删 B 的新锁）
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+            finally:
+                try:
+                    reclaim_path.unlink()
+                except FileNotFoundError:
+                    pass
+            # 回到主锁争抢
 
     stop = _threading.Event()
 
