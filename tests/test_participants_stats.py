@@ -312,3 +312,79 @@ def test_legacy_artifact_lazy_reconstruction(participants_root):
     # 重建后 riichi/calls 字段存在 → 立直率/副露率可算（分母 1，均为 0）
     assert result["detailed"]["riichi_rate"] == 0.0
     assert result["detailed"]["call_rate"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# R10-G Repair 2：legacy 重建优先原始 Tenhou6（恢复历史 tenpai）
+# ---------------------------------------------------------------------------
+
+def _legacy_kyoku(result):
+    return [[0, 0, 0], [25000] * 4, [], [], [], [], [], [], [], [], [], [], [], [], [], [], result]
+
+
+def test_legacy_reconstruction_prefers_raw_tenhou6(participants_root):
+    """P2：真实旧目录（old hands + 旧 events 无 tenpai + tenhou6 有 tenpai）→
+    重建优先 tenhou6，恢复流局 tenpai，统计分母正确。"""
+    import json as _json
+
+    _accounts()
+    log_id = "log1"
+    directory = intake.artifact_dir(log_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    # 旧 hands（无 riichi/calls/tenpai）
+    old_hands = [
+        {
+            "bakaze": "E", "kyoku": 1, "honba": 0, "oya": 0,
+            "scores_before": [25000] * 4, "winners": [],
+            "ryukyoku": {"reason": "ryukyoku", "deltas": [0, 0, 0, 0]},  # 旧格式：无 tenpai
+        }
+    ]
+    (directory / "hands.jsonl").write_text(_json.dumps(old_hands[0], ensure_ascii=False) + "\n", encoding="utf-8")
+    # 旧 events：ryukyoku 无 tenpai（若被优先使用则无法恢复）
+    (directory / "events.jsonl").write_text(
+        _json.dumps({"type": "ryukyoku", "reason": "ryukyoku", "deltas": [0, 0, 0, 0]}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    # 原始 tenhou6：流局听牌 [1,0,0,0]
+    tenhou6 = {"name": ["Nick", "A", "B", "C"], "rule": {"aka": True}, "log": [_legacy_kyoku(["流局", [0, 0, 0, 0], [1, 0, 0, 0]])]}
+    (directory / "tenhou6.json").write_text(_json.dumps(tenhou6, ensure_ascii=False), encoding="utf-8")
+    (directory / "summary.json").write_text(_json.dumps({"log_id": log_id}), encoding="utf-8")
+    _full_replay_match(log_id)
+
+    hands = intake.rich_hands_for_artifact(log_id)
+    assert hands[0]["ryukyoku"]["tenpai"] == [True, False, False, False]
+    result = stats.compute_account_stats("nick@01", registry, ledger)
+    assert result["coverage"]["ryukyoku_with_tenpai"] == 1
+    assert result["detailed"]["tenpai_rate"] == 1.0
+
+
+def test_g_era_artifact_missing_all_false_tenpai_still_upgraded(participants_root):
+    """P2：初版-G artifact（已有 riichi/calls 但流局缺 tenpai）→ 仍触发升级恢复。"""
+    import json as _json
+
+    _accounts()
+    log_id = "log1"
+    directory = intake.artifact_dir(log_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    # 已有 riichi/calls，但 ryukyoku 无 tenpai（全不听被旧 converter 省略）
+    hands = [
+        {
+            "bakaze": "E", "kyoku": 1, "honba": 0, "oya": 0,
+            "scores_before": [25000] * 4, "winners": [],
+            "ryukyoku": {"reason": "ryukyoku", "deltas": [0, 0, 0, 0]},
+            "riichi": [], "calls": [0, 0, 0, 0],
+        }
+    ]
+    (directory / "hands.jsonl").write_text(_json.dumps(hands[0], ensure_ascii=False) + "\n", encoding="utf-8")
+    # 原始 tenhou6：全不听 [0,0,0,0]
+    tenhou6 = {"name": ["Nick", "A", "B", "C"], "rule": {"aka": True}, "log": [_legacy_kyoku(["流局", [0, 0, 0, 0], [0, 0, 0, 0]])]}
+    (directory / "tenhou6.json").write_text(_json.dumps(tenhou6, ensure_ascii=False), encoding="utf-8")
+    (directory / "summary.json").write_text(_json.dumps({"log_id": log_id}), encoding="utf-8")
+    _full_replay_match(log_id)
+
+    assert intake._needs_hand_upgrade(hands) is True
+    rebuilt = intake.rich_hands_for_artifact(log_id)
+    assert rebuilt[0]["ryukyoku"]["tenpai"] == [False, False, False, False]
+    result = stats.compute_account_stats("nick@01", registry, ledger)
+    assert result["coverage"]["ryukyoku_with_tenpai"] == 1
+    assert result["detailed"]["tenpai_rate"] == 0.0

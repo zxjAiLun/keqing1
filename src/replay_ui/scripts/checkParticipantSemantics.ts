@@ -212,6 +212,12 @@ check(statsG2.includes('rich_hands_for_artifact'), 'stats 使用 lazy 重建的�
 const pageG2 = read('src/pages/ParticipantsPage.tsx');
 check(pageG2.includes('自摸率'), '前端展示自摸率');
 
+// 21) R10-G Repair 2：legacy 重建优先原始 Tenhou6
+const intakeG3 = read('../../src/participants/intake.py');
+check(intakeG3.includes('_needs_hand_upgrade'), 'hand upgrade 判定（含缺 all-false tenpai 的短窗口）');
+check(intakeG3.includes('优先原始 Tenhou6'), '重建优先 tenhou6.json（恢复历史 tenpai）');
+check(intakeG3.includes('HANDS_CONTRACT_VERSION'), 'hand summary contract version');
+
 if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);

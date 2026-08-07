@@ -39,6 +39,8 @@ from .ledger import ValidationError
 
 _INTENT = "intake"
 
+HANDS_CONTRACT_VERSION = "keqing.participant.hands.v2"
+
 _write_lock = threading.RLock()
 
 _DEFAULT_CTRL_BY_TYPE = {"human": "human_ui", "managed_bot": "local_model", "external_bot": "external_agent"}
@@ -267,7 +269,15 @@ def _write_artifact_files(directory: Path, *, tenhou6: dict, events: list[dict],
             fh.write(json.dumps(hand, ensure_ascii=False) + "\n")
     atomic_write_text(
         directory / "summary.json",
-        json.dumps({"schema": REPLAY_ARTIFACT_SCHEMA, "log_id": directory.parent.name, **summary}, ensure_ascii=False),
+        json.dumps(
+            {
+                "schema": REPLAY_ARTIFACT_SCHEMA,
+                "log_id": directory.parent.name,
+                "hand_summary_contract_version": HANDS_CONTRACT_VERSION,
+                **summary,
+            },
+            ensure_ascii=False,
+        ),
     )
 
 
@@ -299,9 +309,30 @@ def read_replay_artifact(log_id: str) -> dict | None:
     return summary
 
 
+def _needs_hand_upgrade(hands: list[dict]) -> bool:
+    """判断逐局摘要是否需要 G 字段升级。
+
+    - 缺 riichi/calls（R10-G 之前）→ 升级；
+    - 已有 riichi/calls 但流局缺 tenpai（2f4390a 初版-G 短窗口）→ 升级
+      （全不听流局可能被旧 converter 省略了 all-false tenpai）。
+    """
+    for hand in hands:
+        if "riichi" not in hand or "calls" not in hand:
+            return True
+        ryukyoku = hand.get("ryukyoku")
+        if ryukyoku is not None and "tenpai" not in ryukyoku:
+            return True
+    return False
+
+
 def rich_hands_for_artifact(log_id: str) -> list[dict] | None:
-    """读取 artifact 的逐局摘要；若缺 R10-G 字段（旧 artifact），
-    则从 events.jsonl / tenhou6.json **内存重算**（不回写 artifact）。"""
+    """读取 artifact 的逐局摘要；若缺 G 字段（旧 artifact），**内存重算**（不回写）。
+
+    重建优先级（P2/R10-G Repair2）：
+    1. 原始 ``tenhou6.json``（当前 converter 能恢复含 all-false 的 tenpai）；
+    2. ``events.jsonl`` fallback（旧 converter 的 ryukyoku 无 tenpai）；
+    3. 原 hands 最终 fallback。
+    """
     directory = artifact_dir(log_id)
     if not (directory / "hands.jsonl").exists():
         return None
@@ -310,25 +341,34 @@ def rich_hands_for_artifact(log_id: str) -> list[dict] | None:
         for line in (directory / "hands.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    if hands and all("riichi" in hand and "calls" in hand for hand in hands):
+    if not hands or not _needs_hand_upgrade(hands):
         return hands
-    events: list[dict] | None = None
-    if (directory / "events.jsonl").exists():
-        events = [
-            json.loads(line)
-            for line in (directory / "events.jsonl").read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-    elif (directory / "tenhou6.json").exists():
+
+    # 优先原始 Tenhou6：能恢复历史流局的 tenpai 标记（含 all-false）
+    tenhou6_path = directory / "tenhou6.json"
+    if tenhou6_path.exists():
         try:
-            tenhou6 = json.loads((directory / "tenhou6.json").read_text(encoding="utf-8"))
-            events = tenhou6_events(tenhou6)
+            tenhou6 = json.loads(tenhou6_path.read_text(encoding="utf-8"))
+            if tenhou6.get("log"):
+                rebuilt = hand_summaries(tenhou6_events(tenhou6))
+                if rebuilt:
+                    return rebuilt
         except (OSError, ValueError, json.JSONDecodeError):
-            events = None
-    if events:
-        rebuilt = hand_summaries(events)
-        if rebuilt:
-            return rebuilt
+            pass
+    # events fallback
+    events_path = directory / "events.jsonl"
+    if events_path.exists():
+        try:
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            rebuilt = hand_summaries(events)
+            if rebuilt:
+                return rebuilt
+        except (OSError, json.JSONDecodeError):
+            pass
     return hands
 
 
