@@ -227,3 +227,27 @@ def test_external_agent_launched_allowed_with_artifact():
     ]
     with pytest.raises(ValueError, match="可启动的模型产物"):
         pw._validate_roster_bindings(bad, [])
+
+
+def test_gate_rejects_rating_eligible_without_season(env):
+    """P1-2 不变量：rating_eligible=true 但 season 为空 → REJECT（不能绕过 gate）。"""
+    _accounts()
+    seats = [
+        MatchSeat(seat=0, account_id="nick@01", controller_type="human_ui"),
+        MatchSeat(seat=1, account_id="70k@01", controller_type="local_model"),
+        MatchSeat(seat=2, account_id="70k@02", controller_type="local_model"),
+        MatchSeat(seat=3, account_id="70k@03", controller_type="local_model"),
+    ]
+    with pytest.raises(ValueError, match="season_id 不能为空"):
+        ledger.create_match(
+            MatchCreate(
+                occurred_at="2026-08-08T12:00:00+08:00",
+                game_length="hanchan",
+                season_id="",
+                rating_eligible=True,
+                seats=seats,
+                final_scores=[30000, 20000, 25000, 25000],
+                source="manual",
+            ),
+            registry,
+        )

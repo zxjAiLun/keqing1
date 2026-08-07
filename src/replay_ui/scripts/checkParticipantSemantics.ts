@@ -238,4 +238,16 @@ if (failures > 0) {
   console.error(`participant semantics FAILED (${failures} issues)`);
   process.exit(1);
 }
+// 24) R10 Production UX Repair 1/2
+const pw2 = read('../../src/gateway/api/playwithyou.py');
+check(pw2.includes('names[index] if index < len(names)'), 'launcher 名字真相源 = names[index]（按 launcher_slot）');
+check(pw2.includes('frozen_roster'), 'PlayWithYouStatus 返回冻结阵容');
+const elig = read('../../src/participants/ladder_eligibility.py');
+check(elig.includes('ensure_ladder_eligibility'), 'rating_eligible ⇒ season 非空 + 校验（统一不变量）');
+const ledger2 = read('../../src/participants/ledger.py');
+check(ledger2.includes('if match.rating_eligible:') && ledger2.includes('ensure_ladder_eligibility'), 'create/revise 统一 gate 入口');
+const pwPage = read('src/pages/PlayWithYouPage.tsx');
+check(!pwPage.includes('expected_raw_name ||'), 'UI 不再覆盖 launcher 名称');
+check(pwPage.includes('status.frozen_roster'), '已配置阵容从 status 渲染');
+
 console.log('participant semantics OK (4-seat roster, force-save, routes, server mount, pytest whitelist)');

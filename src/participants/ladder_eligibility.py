@@ -50,6 +50,25 @@ def _artifact_path(registry, artifact_id: str) -> Path | None:
     return None
 
 
+def ensure_ladder_eligibility(
+    season_id: str | None,
+    seats: list[Any],
+    *,
+    registry,
+    project_root: Path = PROJECT_ROOT,
+) -> None:
+    """统一硬不变量（UX Repair 2 / P1-2）：
+
+    ``rating_eligible == true`` ⇒ ``season_id`` 必须是非空有效字符串
+    ⇒ 必须通过 ``validate_ladder_eligibility``。
+
+    任何把 rating_eligible 置 true 的入口（intake confirm / create / revise）都必须调用。
+    """
+    if season_id is None or not str(season_id).strip():
+        raise ValueError("rating_eligible=true 必须指定正式赛季（season_id 不能为空）")
+    validate_ladder_eligibility(str(season_id).strip(), seats, registry=registry, project_root=project_root)
+
+
 def validate_ladder_eligibility(
     season_id: str,
     seats: list[Any],
@@ -107,4 +126,4 @@ def validate_ladder_eligibility(
                 )
 
 
-__all__ = ["validate_ladder_eligibility"]
+__all__ = ["ensure_ladder_eligibility", "validate_ladder_eligibility"]

@@ -29,7 +29,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -110,6 +110,8 @@ class PWYSession:
         self.started_at = started_at
         self.capture_dir: Optional[Path] = None
         self.binding: Optional[dict] = None
+        # P2（UX Repair 2）：roster 模式冻结后的四人阵容（account/model/expected_name）
+        self.frozen_roster: Optional[List[dict]] = None
         self.log_lines: List[str] = []
         # Keep the original launcher output outside the FastAPI process.  The
         # status endpoint is intentionally in-memory for simplicity, but a
@@ -665,6 +667,8 @@ class PlayWithYouStatus(BaseModel):
     log_tail: List[str] = []
     started_at: Optional[float] = None
     ladder_capture: Optional[LadderCaptureView] = None
+    # P2（UX Repair 2）：roster 模式冻结阵容（account/controller/model/expected_name）
+    frozen_roster: Optional[List[Dict[str, Any]]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -795,8 +799,19 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
             with participants_data_lock():
                 participants_ledger.recover_pending_transaction_locked()
                 _validate_roster_bindings(roster_bindings, specs)
-                # P1-1：冻结返回与原 roster 同序，仅回填模型字段
+                # P1-1：返回与原 roster 同序，仅回填模型字段
                 roster_bindings, frozen_launcher_specs = _freeze_launcher_models(roster_bindings, specs)
+                # P1-1（UX Repair 2）：launcher 名字真相源 = 按 launcher_slot 排序
+                # 生成的 names[index]（1 个 bot → NoName；多个 → NoName-1/2/...）。
+                # UI 提供的 expected_raw_name 不得覆盖真实 launcher 名称。
+                launched_sorted = sorted(
+                    (entry for entry in roster_bindings if entry.get("launcher_slot") is not None),
+                    key=lambda entry: int(entry["launcher_slot"]),
+                )
+                for index, entry in enumerate(launched_sorted):
+                    entry["expected_raw_name"] = (
+                        names[index] if index < len(names) else f"NoName-{index + 1}"
+                    )
                 # P1：child/runtime 必须加载与 artifact 匹配的同一绝对 checkpoint 路径，
                 # 不再让子进程按动态名字（mortal/70k）重新解析。
                 launcher_command_specs = frozen_launcher_specs
@@ -820,6 +835,7 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
 
                 # R10-E：session-scoped 别名——NoName-{n} → 具体账号 + 模型版本。
                 # 按 launcher_slot 顺序（与真实 bot 顺序一致）；注册失败不 fail-open。
+                # P1-1：external_id 用已回填的真实 launcher 名称（names[index]）。
                 launched = sorted(
                     (entry for entry in roster_bindings if entry.get("launcher_slot") is not None),
                     key=lambda entry: int(entry["launcher_slot"]),
@@ -935,6 +951,9 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
     if req.ladder_capture is not None and req.ladder_capture.enabled:
         session.capture_dir = capture_dir
         session.binding = binding
+    if roster:
+        # P2：roster 模式把冻结阵容放进 session，status 可回传（UI 不再猜本地草稿）
+        session.frozen_roster = roster_bindings
     with _LOCK:
         SESSIONS[session_id] = session
         _HISTORY.append(session_id)
@@ -968,6 +987,7 @@ def playwithyou_status() -> PlayWithYouStatus:
             log_tail=session.tail(200),
             started_at=session.started_at,
             ladder_capture=_binding_view(session),
+            frozen_roster=session.frozen_roster,
         )
     # No in-memory session, but a launcher may still be alive as an orphan
     # (e.g. the backend process was restarted and lost its session record).

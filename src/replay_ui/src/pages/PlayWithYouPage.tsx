@@ -26,7 +26,6 @@ type RosterBinding = {
   model_identity_id: string;
   model_artifact_id: string;
   launched: boolean;
-  expected_raw_name: string;
 };
 
 const SEAT_WINDS = ["東", "南", "西", "北"];
@@ -109,10 +108,10 @@ export function PlayWithYouPage() {
 
   // R10 UX Repair：四人对局配置是唯一启动模式；seat 直选账号/控制器/模型。
   const [roster, setRoster] = useState<RosterBinding[]>([
-    { account_id: "nick@01", controller_type: "human_ui", model_identity_id: "", model_artifact_id: "", launched: false, expected_raw_name: "" },
-    { account_id: "70k@01", controller_type: "local_model", model_identity_id: "", model_artifact_id: "", launched: true, expected_raw_name: "NoName-1" },
-    { account_id: "70k@02", controller_type: "local_model", model_identity_id: "", model_artifact_id: "", launched: true, expected_raw_name: "NoName-2" },
-    { account_id: "", controller_type: "external_agent", model_identity_id: "", model_artifact_id: "", launched: false, expected_raw_name: "" },
+    { account_id: "nick@01", controller_type: "human_ui", model_identity_id: "", model_artifact_id: "", launched: false },
+    { account_id: "70k@01", controller_type: "local_model", model_identity_id: "", model_artifact_id: "", launched: true },
+    { account_id: "70k@02", controller_type: "local_model", model_identity_id: "", model_artifact_id: "", launched: true },
+    { account_id: "", controller_type: "external_agent", model_identity_id: "", model_artifact_id: "", launched: false },
   ]);
   const [accounts, setAccounts] = useState<ParticipantAccount[]>([]);
   const [identities, setIdentities] = useState<ModelIdentity[]>([]);
@@ -170,7 +169,7 @@ export function PlayWithYouPage() {
         model_identity_id: entry.model_identity_id || null,
         model_artifact_id: entry.model_artifact_id || null,
         launcher_slot: entry.launched ? index : null,
-        expected_raw_name: entry.expected_raw_name || (entry.launched ? `NoName-${index + 1}` : null),
+        expected_raw_name: null, // P1-1：launcher 名称由后端按 launcher_slot 生成
         resolution_required: !entry.account_id,
       }));
       const s = await startPlayWithYou({
@@ -366,24 +365,10 @@ export function PlayWithYouPage() {
                     type="checkbox"
                     checked={entry.launched}
                     disabled={isRunning}
-                    onChange={(e) =>
-                      updateSeat(index, {
-                        launched: e.target.checked,
-                        expected_raw_name: e.target.checked && !entry.expected_raw_name ? `NoName-${index + 1}` : entry.expected_raw_name,
-                      })
-                    }
+                    onChange={(e) => updateSeat(index, { launched: e.target.checked })}
                   />
                   由本系统呼出
                 </label>
-                {entry.launched && (
-                  <input
-                    value={entry.expected_raw_name}
-                    disabled={isRunning}
-                    onChange={(e) => updateSeat(index, { expected_raw_name: e.target.value })}
-                    placeholder={`NoName-${index + 1}`}
-                    style={{ ...inputStyle, width: 110 }}
-                  />
-                )}
                 {showModel && (
                   <>
                     <select
@@ -493,22 +478,31 @@ export function PlayWithYouPage() {
               }}
             >
               <div style={{ fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>已配置阵容（session 冻结）</div>
-              {roster.map((entry, index) => {
-                if (!entry.launched) return null;
-                const identity = identities.find((m) => m.model_identity_id === entry.model_identity_id);
-                const artifact = identity?.artifacts.find((a) => a.model_artifact_id === entry.model_artifact_id);
-                return (
-                  <div key={index} style={{ padding: "2px 0" }}>
-                    {SEAT_WINDS[index]} · <b>{entry.account_id}</b> → {entry.expected_raw_name || `NoName-${index + 1}`}
-                    {identity && (
-                      <span style={{ color: "var(--text-muted)" }}>
-                        {" "}· {identity.label}
-                        {artifact ? ` / ${artifact.label}` : ""}
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
+              {(status.frozen_roster ?? []).length > 0
+                ? status.frozen_roster!.map((entry, index) => {
+                    if (entry.launcher_slot === null || entry.launcher_slot === undefined) return null;
+                    const identity = identities.find((m) => m.model_identity_id === entry.model_identity_id);
+                    const artifact = identity?.artifacts.find((a) => a.model_artifact_id === entry.model_artifact_id);
+                    return (
+                      <div key={index} style={{ padding: "2px 0" }}>
+                        {SEAT_WINDS[entry.launcher_slot as number]} · <b>{entry.account_id}</b> → {entry.expected_raw_name}
+                        {identity && (
+                          <span style={{ color: "var(--text-muted)" }}>
+                            {" "}· {identity.label}
+                            {artifact ? ` / ${artifact.label}` : ""}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })
+                : roster.map((entry, index) => {
+                    if (!entry.launched) return null;
+                    return (
+                      <div key={index} style={{ padding: "2px 0" }}>
+                        {SEAT_WINDS[index]} · <b>{entry.account_id}</b> → NoName
+                      </div>
+                    );
+                  })}
             </div>
           )}
 

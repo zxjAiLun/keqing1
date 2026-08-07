@@ -125,6 +125,11 @@ export function TenhouImportPage() {
       setError('仍有座位未指派账号');
       return;
     }
+    // P1-2（UX Repair 2）：rating_eligible=true 必须指定非空赛季
+    if (ladderEligible && !ladderSeason.trim()) {
+      setError('计入正式天梯必须指定赛季（season_id 不能为空）');
+      return;
+    }
     setConfirming(true);
     setError(null);
     try {

@@ -592,11 +592,11 @@ def resolve_and_create_match(
             resolution_audit[str(seat.seat)] = audit
         if len({s.account_id for s in seats}) != 4:
             raise ValueError("四个座位不能指向同一账号")
-        # P1-2：计入正式天梯 → 正式赛季资格 gate（赛季存在/running/成员/human 模型/checkpoint 一致）
-        if season_id and rating_eligible:
-            from .ladder_eligibility import validate_ladder_eligibility
+        # P1-2：正式计分 → 正式赛季资格 gate（rating_eligible ⇒ 必填 season + 校验）
+        if rating_eligible:
+            from .ladder_eligibility import ensure_ladder_eligibility
 
-            validate_ladder_eligibility(season_id, seats, registry=registry)
+            ensure_ladder_eligibility(season_id, seats, registry=registry)
 
         # 全部校验通过后才写 staging（P2-2：校验失败不残留 staging）
         staging = _staging_dir(log_id)

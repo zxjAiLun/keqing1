@@ -505,3 +505,57 @@ def test_discover_captures_exposes_roster_and_evidence(tmp_path, monkeypatch):
     assert captures[0]["roster"] == payload["roster"]
     assert captures[0]["evidence_warning"] == payload["evidence_warning"]
     assert captures[0]["score_observers"] == ["70k@01"]
+
+
+def test_launcher_names_are_canonical(pw_env, tmp_path, monkeypatch):
+    """UX Repair 2 / P1-1：launcher 名称由后端按 launcher_slot 生成（UI 不覆盖）。
+
+    1 个 bot → NoName；sparse 2 个 → NoName-1/NoName-2；3 个 → NoName-1/2/3。
+    """
+    from participants import aliases
+    from participants.schemas import AccountCreate
+
+    registry = __import__("participants.registry", fromlist=["create_account"])
+    registry.create_account(AccountCreate(account_id="70k@03", display_name="70k@03", account_type="managed_bot"))
+
+    from gateway.api.playwithyou import ParticipantBindingRequest, StartPlayWithYouRequest
+
+    def _start(launched_slots):
+        networks = ["mortal" if i in launched_slots else "none" for i in range(4)]
+        roster = [
+            ParticipantBindingRequest(account_id="nick@01", controller_type="human_ui", launcher_slot=None),
+            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_slot=1 if 1 in launched_slots else None),
+            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_slot=2 if 2 in launched_slots else None),
+            ParticipantBindingRequest(account_id="70k@03", controller_type="local_model", launcher_slot=3 if 3 in launched_slots else None),
+        ]
+        req = StartPlayWithYouRequest(
+            networks=networks,
+            roster=roster,
+        )
+        status = pw.start_playwithyou(req)
+        return status.session_id
+
+    def _names(session_id):
+        return sorted(
+            a.external_id
+            for a in aliases.list_aliases()
+            if a.scope == "session" and a.session_id == session_id
+        )
+
+    # 1 个 launched（slot 1）→ NoName
+    sid1 = _start({1})
+    assert _names(sid1) == ["NoName"]
+    pw.SESSIONS.clear()
+    pw._HISTORY.clear()
+
+    # sparse 2 个 launched（slot 1, 3）→ NoName-1 / NoName-2（不是 NoName-2/NoName-4）
+    sid2 = _start({1, 3})
+    assert _names(sid2) == ["NoName-1", "NoName-2"]
+    pw.SESSIONS.clear()
+    pw._HISTORY.clear()
+
+    # 3 个 launched（slot 1,2,3）→ NoName-1 / NoName-2 / NoName-3
+    sid3 = _start({1, 2, 3})
+    assert _names(sid3) == ["NoName-1", "NoName-2", "NoName-3"]
+    pw.SESSIONS.clear()
+    pw._HISTORY.clear()

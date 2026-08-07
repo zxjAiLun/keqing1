@@ -65,6 +65,15 @@ export interface PlayWithYouStatus {
   log_tail: string[];
   started_at: number | null;
   ladder_capture?: LadderCaptureView | null;
+  // R10 UX Repair 2：roster 模式冻结阵容（后端为名字真相源）
+  frozen_roster?: Array<{
+    account_id: string;
+    controller_type?: string | null;
+    model_identity_id?: string | null;
+    model_artifact_id?: string | null;
+    launcher_slot?: number | null;
+    expected_raw_name?: string | null;
+  }> | null;
 }
 
 export interface LadderCaptureEntry {
