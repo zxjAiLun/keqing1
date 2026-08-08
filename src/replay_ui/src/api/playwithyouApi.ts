@@ -22,7 +22,7 @@ export interface ParticipantBindingRequest {
   controller_type: string;
   model_identity_id?: string | null;
   model_artifact_id?: string | null;
-  launcher_slot?: number | null; // 本系统实际呼出的 slot；null = 不启动
+  launcher_index?: number | null; // 第几个被实际呼出的参与者（0-based）；null = 不启动
   expected_raw_name?: string | null; // NoName-1 等
   resolution_required?: boolean;
 }
@@ -71,7 +71,7 @@ export interface PlayWithYouStatus {
     controller_type?: string | null;
     model_identity_id?: string | null;
     model_artifact_id?: string | null;
-    launcher_slot?: number | null;
+    launcher_index?: number | null;
     expected_raw_name?: string | null;
   }> | null;
 }
@@ -93,7 +93,7 @@ export interface LadderCaptureEntry {
   roster?: Array<{
     account_id: string;
     controller_type: string;
-    launcher_slot?: number | null;
+    launcher_index?: number | null;
     expected_raw_name?: string | null;
     model_identity_id?: string | null;
     model_artifact_id?: string | null;

@@ -211,7 +211,7 @@ def _validate_roster_bindings(roster_bindings: List[dict], specs: List[str]) -> 
     """P1-2：呼出前可信冻结 roster。
 
     - 已登记账号必须存在且启用、四账号不重复；
-    - launcher 参与者 controller_type=local_model、账号必填、launcher_slot 唯一、
+    - launcher 参与者 controller_type=local_model、账号必填、launcher_index 唯一、
       expected_raw_name 唯一、模型身份/产物归属正确；
     - 未识别外部参与者（无账号）必须 resolution_required=true。
     """
@@ -230,13 +230,13 @@ def _validate_roster_bindings(roster_bindings: List[dict], specs: List[str]) -> 
     launched_slots: List[int] = []
     raw_names: List[str] = []
     for entry in roster_bindings:
-        slot = entry.get("launcher_slot")
+        slot = entry.get("launcher_index")
         if slot is None:
             if not entry.get("account_id") and not entry.get("resolution_required"):
                 raise ValueError("未识别的外部参与者必须设置 resolution_required=true")
             continue
         if slot in launched_slots:
-            raise ValueError(f"launcher_slot 重复: {slot}")
+            raise ValueError(f"launcher_index 重复: {slot}")
         launched_slots.append(slot)
         account_id = str(entry.get("account_id") or "").strip()
         if not account_id:
@@ -308,17 +308,17 @@ def _freeze_launcher_models(roster_bindings: List[dict], specs: List[str]) -> tu
 
     返回 ``(frozen_roster, frozen_launcher_specs)``：
     - ``frozen_roster`` 保持**输入 roster 顺序**（仅回填模型字段 + resolved_checkpoint_path）；
-    - ``frozen_launcher_specs`` 为按 launcher_slot 排序的**绝对 checkpoint 路径**，
+    - ``frozen_launcher_specs`` 为按 launcher_index 排序的**绝对 checkpoint 路径**，
       直接传给 launcher（child/runtime 不再按动态名字重新解析）。
     """
     from inference.bot_registry import resolve_bot_spec
     from participants import registry as participant_registry
 
-    # launcher_slot → spec（specs 已按 launcher_slot 排序）
+    # launcher_index → spec（specs 已按 launcher_index 排序）
     launched_slots = sorted(
-        int(entry["launcher_slot"])
+        int(entry["launcher_index"])
         for entry in roster_bindings
-        if entry.get("launcher_slot") is not None
+        if entry.get("launcher_index") is not None
     )
     if len(launched_slots) != len(specs):
         raise ValueError("launcher 数量与启动配置不一致")
@@ -326,7 +326,7 @@ def _freeze_launcher_models(roster_bindings: List[dict], specs: List[str]) -> tu
 
     frozen: List[dict] = []
     for entry in roster_bindings:
-        slot = entry.get("launcher_slot")
+        slot = entry.get("launcher_index")
         if slot is None:
             frozen.append(entry)
             continue
@@ -381,8 +381,8 @@ def _freeze_launcher_models(roster_bindings: List[dict], specs: List[str]) -> tu
     frozen_launcher_specs = [
         str(entry["resolved_checkpoint_path"])
         for entry in sorted(
-            (entry for entry in frozen if entry.get("launcher_slot") is not None),
-            key=lambda entry: int(entry["launcher_slot"]),
+            (entry for entry in frozen if entry.get("launcher_index") is not None),
+            key=lambda entry: int(entry["launcher_index"]),
         )
     ]
     return frozen, frozen_launcher_specs
@@ -636,7 +636,7 @@ class ParticipantBindingRequest(BaseModel):
     controller_type: str = "manual_only"
     model_identity_id: Optional[str] = None
     model_artifact_id: Optional[str] = None
-    launcher_slot: Optional[int] = None  # 本系统实际呼出的 slot；None = 不启动
+    launcher_index: Optional[int] = None  # 第几个被实际呼出的参与者（0-based）；None = 不启动
     expected_raw_name: Optional[str] = None  # NoName-1 等
     resolution_required: bool = False
 
@@ -715,7 +715,7 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
     while len(networks) < 4:
         networks.append("none")
 
-    # Resolve launcher specs. R10-E roster 模式：从预期四人阵容的 launcher_slot 推导，
+    # Resolve launcher specs. R10-E roster 模式：从预期四人阵容的 launcher_index 推导，
     # 与 quantity 解耦（Nick human_ui + 2 本地 bot + 外部 Mortal → quantity=2 合法）。
     roster = list(req.roster)
     roster_bindings: List[dict] = []
@@ -726,12 +726,12 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
                 raise ValueError("roster 必须恰好 4 位预期参与者")
             slot_specs: List[tuple[int, str]] = []
             for entry in roster:
-                slot = entry.launcher_slot
+                slot = entry.launcher_index
                 roster_bindings.append(entry.model_dump())
                 if slot is None:
                     continue
                 if not (0 <= slot <= 3):
-                    raise ValueError(f"launcher_slot 必须在 [0,3]: {slot}")
+                    raise ValueError(f"launcher_index 必须在 [0,3]: {slot}")
                 if entry.model_identity_id and entry.model_artifact_id:
                     # P1-3：seat 直选 artifact → checkpoint 直接来自 artifact path
                     spec = _artifact_spec_for_seat(
@@ -801,12 +801,12 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
                 _validate_roster_bindings(roster_bindings, specs)
                 # P1-1：返回与原 roster 同序，仅回填模型字段
                 roster_bindings, frozen_launcher_specs = _freeze_launcher_models(roster_bindings, specs)
-                # P1-1（UX Repair 2）：launcher 名字真相源 = 按 launcher_slot 排序
+                # P1-1（UX Repair 2）：launcher 名字真相源 = 按 launcher_index 排序
                 # 生成的 names[index]（1 个 bot → NoName；多个 → NoName-1/2/...）。
                 # UI 提供的 expected_raw_name 不得覆盖真实 launcher 名称。
                 launched_sorted = sorted(
-                    (entry for entry in roster_bindings if entry.get("launcher_slot") is not None),
-                    key=lambda entry: int(entry["launcher_slot"]),
+                    (entry for entry in roster_bindings if entry.get("launcher_index") is not None),
+                    key=lambda entry: int(entry["launcher_index"]),
                 )
                 for index, entry in enumerate(launched_sorted):
                     entry["expected_raw_name"] = (
@@ -834,11 +834,11 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
                 os.replace(tmp_binding, capture_dir / "binding.json")
 
                 # R10-E：session-scoped 别名——NoName-{n} → 具体账号 + 模型版本。
-                # 按 launcher_slot 顺序（与真实 bot 顺序一致）；注册失败不 fail-open。
+                # 按 launcher_index 顺序（与真实 bot 顺序一致）；注册失败不 fail-open。
                 # P1-1：external_id 用已回填的真实 launcher 名称（names[index]）。
                 launched = sorted(
-                    (entry for entry in roster_bindings if entry.get("launcher_slot") is not None),
-                    key=lambda entry: int(entry["launcher_slot"]),
+                    (entry for entry in roster_bindings if entry.get("launcher_index") is not None),
+                    key=lambda entry: int(entry["launcher_index"]),
                 )
                 for index, entry in enumerate(launched):
                     account_id = str(entry.get("account_id") or "").strip()

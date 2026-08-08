@@ -83,8 +83,8 @@ def _roster_request():
         networks=["mortal", "mortal", "none", "none"],
         roster=[
             ParticipantBindingRequest(account_id="nick@01", controller_type="human_ui"),
-            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_slot=0, expected_raw_name="NoName-1"),
-            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_slot=1, expected_raw_name="NoName-2"),
+            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_index=0, expected_raw_name="NoName-1"),
+            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_index=1, expected_raw_name="NoName-2"),
             ParticipantBindingRequest(account_id="mortal@01", controller_type="external_agent"),
         ],
     )
@@ -101,7 +101,7 @@ def test_start_with_roster_quantity_two(pw_env):
     assert binding["mode"] == "roster"
     assert len(binding["roster"]) == 4
     # P1-2：launcher 模型身份/产物已从 spec 冻结（70k → 70k identity + current artifact）
-    launched = [e for e in binding["roster"] if e.get("launcher_slot") is not None]
+    launched = [e for e in binding["roster"] if e.get("launcher_index") is not None]
     assert len(launched) == 2
     assert all(e.get("model_identity_id") == "70k" for e in launched)
     assert all(e.get("model_artifact_id") for e in launched)
@@ -126,7 +126,7 @@ def test_start_with_roster_rejects_invalid_length(pw_env):
         networks=["mortal", "none", "none", "none"],
         roster=[
             ParticipantBindingRequest(account_id="nick@01", controller_type="human_ui"),
-            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_slot=0),
+            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_index=0),
         ],
     )
     with pytest.raises(HTTPException) as exc:
@@ -135,7 +135,7 @@ def test_start_with_roster_rejects_invalid_length(pw_env):
     assert "4" in str(exc.value.detail)
 
 
-def test_start_with_roster_requires_launcher_slot(pw_env):
+def test_start_with_roster_requires_launcher_index(pw_env):
     from fastapi import HTTPException
     from gateway.api.playwithyou import ParticipantBindingRequest, StartPlayWithYouRequest
 
@@ -178,10 +178,10 @@ def test_launcher_build_configs_roster_wiring(tmp_path, monkeypatch):
         "bot_account_ids": [],
         "mode": "roster",
         "roster": [
-            {"account_id": "nick@01", "controller_type": "human_ui", "launcher_slot": None, "expected_raw_name": "Nick"},
-            {"account_id": "70k@01", "controller_type": "local_model", "launcher_slot": 0, "expected_raw_name": "NoName-1", "model_identity_id": "70k", "model_artifact_id": "a1"},
-            {"account_id": "70k@02", "controller_type": "local_model", "launcher_slot": 1, "expected_raw_name": "NoName-2", "model_identity_id": "70k", "model_artifact_id": "a2"},
-            {"account_id": "mortal@01", "controller_type": "external_agent", "launcher_slot": None},
+            {"account_id": "nick@01", "controller_type": "human_ui", "launcher_index": None, "expected_raw_name": "Nick"},
+            {"account_id": "70k@01", "controller_type": "local_model", "launcher_index": 0, "expected_raw_name": "NoName-1", "model_identity_id": "70k", "model_artifact_id": "a1"},
+            {"account_id": "70k@02", "controller_type": "local_model", "launcher_index": 1, "expected_raw_name": "NoName-2", "model_identity_id": "70k", "model_artifact_id": "a2"},
+            {"account_id": "mortal@01", "controller_type": "external_agent", "launcher_index": None},
         ],
         "frozen_at": 0.0,
     }
@@ -212,7 +212,7 @@ def test_launcher_build_configs_roster_wiring(tmp_path, monkeypatch):
 
 
 def test_launcher_roster_slot_sorting(tmp_path, monkeypatch):
-    """P1-2：roster 顺序与 launcher_slot 顺序不同时，按 slot 对齐（NoName-1 不串线）。"""
+    """P1-2：roster 顺序与 launcher_index 顺序不同时，按 slot 对齐（NoName-1 不串线）。"""
     import argparse
 
     from scripts import launch_tenhou_bots as launcher
@@ -230,10 +230,10 @@ def test_launcher_roster_slot_sorting(tmp_path, monkeypatch):
         "bot_account_ids": [],
         "mode": "roster",
         "roster": [
-            {"account_id": "nick@01", "controller_type": "human_ui", "launcher_slot": None},
-            {"account_id": "70k@02", "controller_type": "local_model", "launcher_slot": 1, "expected_raw_name": "NoName-2"},
-            {"account_id": "70k@01", "controller_type": "local_model", "launcher_slot": 0, "expected_raw_name": "NoName-1"},
-            {"account_id": "mortal@01", "controller_type": "external_agent", "launcher_slot": None},
+            {"account_id": "nick@01", "controller_type": "human_ui", "launcher_index": None},
+            {"account_id": "70k@02", "controller_type": "local_model", "launcher_index": 1, "expected_raw_name": "NoName-2"},
+            {"account_id": "70k@01", "controller_type": "local_model", "launcher_index": 0, "expected_raw_name": "NoName-1"},
+            {"account_id": "mortal@01", "controller_type": "external_agent", "launcher_index": None},
         ],
         "frozen_at": 0.0,
     }
@@ -252,7 +252,7 @@ def test_launcher_roster_slot_sorting(tmp_path, monkeypatch):
         ladder_capture_dir=str(capture_dir),
     )
     configs, collector = launcher._build_configs(args)
-    # 按 launcher_slot 排序：slot0 → 70k@01（NoName-1），slot1 → 70k@02（NoName-2）
+    # 按 launcher_index 排序：slot0 → 70k@01（NoName-1），slot1 → 70k@02（NoName-2）
     assert configs[0].ladder_account_id == "70k@01"
     assert configs[1].ladder_account_id == "70k@02"
 
@@ -282,8 +282,8 @@ def test_roster_rejects_unknown_account(pw_env):
         networks=["mortal", "mortal", "none", "none"],
         roster=[
             ParticipantBindingRequest(account_id="ghost@01", controller_type="human_ui"),
-            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_slot=0),
-            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_slot=1),
+            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_index=0),
+            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_index=1),
             ParticipantBindingRequest(account_id="mortal@01", controller_type="external_agent"),
         ],
     )
@@ -310,8 +310,8 @@ def test_roster_rejects_disabled_account(pw_env):
         networks=["mortal", "mortal", "none", "none"],
         roster=[
             ParticipantBindingRequest(account_id="nick@01", controller_type="human_ui"),
-            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_slot=0),
-            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_slot=1),
+            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_index=0),
+            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_index=1),
             ParticipantBindingRequest(account_id="mortal@01", controller_type="external_agent"),
         ],
     )
@@ -322,15 +322,15 @@ def test_roster_rejects_disabled_account(pw_env):
 
 
 def test_roster_freeze_preserves_original_order(pw_env):
-    """P1-1：roster 原始顺序与 launcher_slot 顺序不同时，binding 保持原四人顺序，别名正确。"""
+    """P1-1：roster 原始顺序与 launcher_index 顺序不同时，binding 保持原四人顺序，别名正确。"""
     from gateway.api.playwithyou import ParticipantBindingRequest, StartPlayWithYouRequest
 
     req = StartPlayWithYouRequest(
         networks=["mortal", "mortal", "none", "none"],
         roster=[
             ParticipantBindingRequest(account_id="nick@01", controller_type="human_ui"),
-            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_slot=1, expected_raw_name="NoName-2"),
-            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_slot=0, expected_raw_name="NoName-1"),
+            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_index=1, expected_raw_name="NoName-2"),
+            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_index=0, expected_raw_name="NoName-1"),
             ParticipantBindingRequest(account_id="mortal@01", controller_type="external_agent"),
         ],
     )
@@ -339,7 +339,7 @@ def test_roster_freeze_preserves_original_order(pw_env):
     binding = json.loads((capture_dir / "binding.json").read_text(encoding="utf-8"))
     # 保持原四人顺序（不交换成员）
     assert [e["account_id"] for e in binding["roster"]] == ["nick@01", "70k@02", "70k@01", "mortal@01"]
-    launched = {int(e["launcher_slot"]): e for e in binding["roster"] if e.get("launcher_slot") is not None}
+    launched = {int(e["launcher_index"]): e for e in binding["roster"] if e.get("launcher_index") is not None}
     assert launched[0]["account_id"] == "70k@01"
     assert launched[1]["account_id"] == "70k@02"
     # 会话别名：NoName-1 → 70k@01，NoName-2 → 70k@02（不串线）
@@ -379,8 +379,8 @@ def test_roster_validation_failure_no_subprocess(pw_env):
         networks=["mortal", "mortal", "none", "none"],
         roster=[
             ParticipantBindingRequest(account_id="ghost@01", controller_type="human_ui"),
-            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_slot=0),
-            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_slot=1),
+            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_index=0),
+            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_index=1),
             ParticipantBindingRequest(account_id="mortal@01", controller_type="external_agent"),
         ],
     )
@@ -447,8 +447,8 @@ def test_frozen_checkpoint_does_not_drift(tmp_path, monkeypatch):
         networks=["mortal", "mortal", "none", "none"],
         roster=[
             ParticipantBindingRequest(account_id="nick@01", controller_type="human_ui"),
-            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_slot=0, expected_raw_name="NoName-1"),
-            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_slot=1, expected_raw_name="NoName-2"),
+            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_index=0, expected_raw_name="NoName-1"),
+            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_index=1, expected_raw_name="NoName-2"),
             ParticipantBindingRequest(account_id="mortal@01", controller_type="external_agent"),
         ],
     )
@@ -495,7 +495,7 @@ def test_discover_captures_exposes_roster_and_evidence(tmp_path, monkeypatch):
         "state": "awaiting_import",
         "match": {"match_id": "tenhou:abc"},
         "tenhou_log_url": "https://tenhou.net/3/?log=abc",
-        "roster": [{"account_id": "70k@01", "controller_type": "local_model", "launcher_slot": 0}],
+        "roster": [{"account_id": "70k@01", "controller_type": "local_model", "launcher_index": 0}],
         "evidence_warning": "observer 70k@01 规范化后分数不一致",
         "score_observers": ["70k@01"],
     }
@@ -508,7 +508,7 @@ def test_discover_captures_exposes_roster_and_evidence(tmp_path, monkeypatch):
 
 
 def test_launcher_names_are_canonical(pw_env, tmp_path, monkeypatch):
-    """UX Repair 2 / P1-1：launcher 名称由后端按 launcher_slot 生成（UI 不覆盖）。
+    """UX Repair 2 / P1-1：launcher 名称由后端按 launcher_index 生成（UI 不覆盖）。
 
     1 个 bot → NoName；sparse 2 个 → NoName-1/NoName-2；3 个 → NoName-1/2/3。
     """
@@ -520,13 +520,16 @@ def test_launcher_names_are_canonical(pw_env, tmp_path, monkeypatch):
 
     from gateway.api.playwithyou import ParticipantBindingRequest, StartPlayWithYouRequest
 
-    def _start(launched_slots):
-        networks = ["mortal" if i in launched_slots else "none" for i in range(4)]
+    def _start(launched_rows):
+        # Repair 4：launcher_index = 第几个被实际呼出的参与者（0-based），不是 roster 行号；
+        # networks 也按 launcher 顺序（第 N 个被呼出者用什么 spec），不是 roster 行号。
+        networks = ["mortal" if i < len(launched_rows) else "none" for i in range(4)]
+        li_for_row = {row: i for i, row in enumerate(sorted(launched_rows))}
         roster = [
-            ParticipantBindingRequest(account_id="nick@01", controller_type="human_ui", launcher_slot=None),
-            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_slot=1 if 1 in launched_slots else None),
-            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_slot=2 if 2 in launched_slots else None),
-            ParticipantBindingRequest(account_id="70k@03", controller_type="local_model", launcher_slot=3 if 3 in launched_slots else None),
+            ParticipantBindingRequest(account_id="nick@01", controller_type="human_ui", launcher_index=None),
+            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_index=li_for_row.get(1)),
+            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_index=li_for_row.get(2)),
+            ParticipantBindingRequest(account_id="70k@03", controller_type="local_model", launcher_index=li_for_row.get(3)),
         ]
         req = StartPlayWithYouRequest(
             networks=networks,
@@ -548,9 +551,15 @@ def test_launcher_names_are_canonical(pw_env, tmp_path, monkeypatch):
     pw.SESSIONS.clear()
     pw._HISTORY.clear()
 
-    # sparse 2 个 launched（slot 1, 3）→ NoName-1 / NoName-2（不是 NoName-2/NoName-4）
+    # sparse 2 个 launched（row 1, 3）→ launcher_index 0/1，NoName-1 / NoName-2
     sid2 = _start({1, 3})
     assert _names(sid2) == ["NoName-1", "NoName-2"]
+    # binding 必须存 launcher_index 0/1（不是 roster 行号 1/3）
+    binding2 = json.loads(
+        (pw_env / "ladder" / "captures" / "playwithyou" / sid2 / "binding.json").read_text(encoding="utf-8")
+    )
+    li2 = sorted(int(e["launcher_index"]) for e in binding2["roster"] if e.get("launcher_index") is not None)
+    assert li2 == [0, 1]
     pw.SESSIONS.clear()
     pw._HISTORY.clear()
 

@@ -28,8 +28,6 @@ type RosterBinding = {
   launched: boolean;
 };
 
-const SEAT_WINDS = ["東", "南", "西", "北"];
-
 const CONTROLLER_OPTIONS = [
   { value: "human_ui", label: "真人" },
   { value: "local_model", label: "本地模型" },
@@ -155,8 +153,11 @@ export function PlayWithYouPage() {
         .map((entry, index) => (entry.launched ? index : null))
         .filter((slot): slot is number => slot !== null);
       if (launchedSlots.length === 0) {
-        throw new Error("至少需要一个「由本系统呼出」的座位");
+        throw new Error("至少需要一个「由本系统呼出」的参与者");
       }
+      // Repair 4：launcher_index = 第几个被实际呼出的参与者（0-based），与 roster 行号分离。
+      const launcherIndexByRow = new Map<number, number>();
+      launchedSlots.forEach((rowIndex, launcherIdx) => launcherIndexByRow.set(rowIndex, launcherIdx));
       // P1-2/P1-3：launched 的 local_model 或 artifact-backed external_agent 都必须选模型
       for (const index of launchedSlots) {
         const entry = roster[index];
@@ -164,10 +165,10 @@ export function PlayWithYouPage() {
           (entry.controller_type === "local_model" || entry.controller_type === "external_agent") &&
           (!entry.model_identity_id || !entry.model_artifact_id)
         ) {
-          throw new Error(`座位「${SEAT_WINDS[index]}」需要选择模型身份与产物`);
+          throw new Error(`参与者 ${index + 1} 需要选择模型身份与产物`);
         }
         if (!entry.account_id) {
-          throw new Error(`座位「${SEAT_WINDS[index]}」由本系统呼出，必须选择账号`);
+          throw new Error(`参与者 ${index + 1} 由本系统呼出，必须选择账号`);
         }
       }
       const rosterPayload: ParticipantBindingRequest[] = roster.map((entry, index) => ({
@@ -175,8 +176,8 @@ export function PlayWithYouPage() {
         controller_type: entry.controller_type,
         model_identity_id: entry.model_identity_id || null,
         model_artifact_id: entry.model_artifact_id || null,
-        launcher_slot: entry.launched ? index : null,
-        expected_raw_name: null, // P1-1：launcher 名称由后端按 launcher_slot 生成
+        launcher_index: entry.launched ? launcherIndexByRow.get(index) ?? null : null,
+        expected_raw_name: null, // P1-1：launcher 名称由后端按 launcher 顺序生成
         resolution_required: !entry.account_id,
       }));
       const s = await startPlayWithYou({
@@ -286,7 +287,7 @@ export function PlayWithYouPage() {
       )}
 
       <div className="card" style={{ padding: 14, marginBottom: 12 }}>
-        <SectionTitle title="四人对局配置" description="四个座位永远存在；勾选「由本系统呼出」的座位启动本地模型/外部代理。" />
+        <SectionTitle title="四人对局配置" description="四个参与者；实际坐席（東南西北）由天凤牌谱在开局后决定，不是本页面顺序。" />
 
         {/* Lobby + speed + device */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 12 }}>
@@ -338,7 +339,7 @@ export function PlayWithYouPage() {
                   background: entry.launched ? "rgba(142,68,173,0.04)" : "var(--surface-subtle)",
                 }}
               >
-                <span style={{ width: 24, fontWeight: 800, color: "var(--text-muted)" }}>{SEAT_WINDS[index]}</span>
+                <span style={{ width: 24, fontWeight: 800, color: "var(--text-muted)" }}>#{index + 1}</span>
                 <select
                   value={entry.account_id}
                   disabled={isRunning}
@@ -490,15 +491,15 @@ export function PlayWithYouPage() {
                 color: "var(--text-secondary)",
               }}
             >
-              <div style={{ fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>已配置阵容（session 冻结）</div>
+              <div style={{ fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>已配置阵容（session 冻结，开局后实际坐席由天凤牌谱决定）</div>
               {(status.frozen_roster ?? []).length > 0
                 ? status.frozen_roster!.map((entry, index) => {
-                    if (entry.launcher_slot === null || entry.launcher_slot === undefined) return null;
+                    if (entry.launcher_index === null || entry.launcher_index === undefined) return null;
                     const identity = identities.find((m) => m.model_identity_id === entry.model_identity_id);
                     const artifact = identity?.artifacts.find((a) => a.model_artifact_id === entry.model_artifact_id);
                     return (
                       <div key={index} style={{ padding: "2px 0" }}>
-                        {SEAT_WINDS[entry.launcher_slot as number]} · <b>{entry.account_id}</b> → {entry.expected_raw_name}
+                        <b>{entry.expected_raw_name}</b> → {entry.account_id}
                         {identity && (
                           <span style={{ color: "var(--text-muted)" }}>
                             {" "}· {identity.label}
@@ -512,7 +513,7 @@ export function PlayWithYouPage() {
                     if (!entry.launched) return null;
                     return (
                       <div key={index} style={{ padding: "2px 0" }}>
-                        {SEAT_WINDS[index]} · <b>{entry.account_id}</b> → NoName
+                        NoName → <b>{entry.account_id}</b>
                       </div>
                     );
                   })}

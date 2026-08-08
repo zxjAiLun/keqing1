@@ -90,7 +90,7 @@ check(matchesPage.includes('status') && matchesPage.includes('void'), 'MatchesPa
 const playwithyou = read('../../src/gateway/api/playwithyou.py');
 check(playwithyou.includes('ParticipantBindingRequest'), 'playwithyou 定义 ParticipantBindingRequest（预期四人阵容）');
 check(playwithyou.includes('roster: List[') && playwithyou.includes('ParticipantBindingRequest'), 'StartPlayWithYouRequest 含 roster 字段');
-check(playwithyou.includes('launcher_slot'), 'ParticipantBindingRequest 含 launcher_slot（与 launcher 数量分离）');
+check(playwithyou.includes('launcher_index'), 'ParticipantBindingRequest 含 launcher_index（与 launcher 数量分离）');
 check(playwithyou.includes('scope="session"') || playwithyou.includes("scope='session'"), 'start 注册 session-scoped 别名');
 const capture = read('../../src/gateway/playwithyou_capture.py');
 check(capture.includes('awaiting_import'), '捕获层支持 awaiting_import（任一 observer 捕获 log 即可）');
@@ -98,7 +98,7 @@ check(capture.includes('roster'), 'CaptureBinding 支持 roster 模式');
 
 // 10) R10-E Repair：真实 launcher 接线 / 赛后状态机 / 互斥
 const launcher = read('../../scripts/launch_tenhou_bots.py');
-check(launcher.includes('mode == "roster"') && launcher.includes('launcher_slot'), 'launcher 识别 roster 模式并按 slot 接线');
+check(launcher.includes('mode == "roster"') && launcher.includes('launcher_index'), 'launcher 识别 roster 模式并按 slot 接线');
 check(launcher.includes('config.ladder_account_id = str(entry["account_id"])'), 'launcher 按 roster entry 绑定 ladder_account_id');
 check(playwithyou.includes('_validate_roster_bindings'), 'start 前校验 roster（账号存在/启用/模型归属）');
 check(playwithyou.includes('不能同时开启'), 'roster 与旧正式天梯绑定互斥');
@@ -240,7 +240,7 @@ if (failures > 0) {
 }
 // 24) R10 Production UX Repair 1/2
 const pw2 = read('../../src/gateway/api/playwithyou.py');
-check(pw2.includes('names[index] if index < len(names)'), 'launcher 名字真相源 = names[index]（按 launcher_slot）');
+check(pw2.includes('names[index] if index < len(names)'), 'launcher 名字真相源 = names[index]（按 launcher_index）');
 check(pw2.includes('frozen_roster'), 'PlayWithYouStatus 返回冻结阵容');
 const elig = read('../../src/participants/ladder_eligibility.py');
 check(elig.includes('ensure_ladder_eligibility'), 'rating_eligible ⇒ season 非空 + 校验（统一不变量）');
@@ -250,4 +250,11 @@ const pwPage = read('src/pages/PlayWithYouPage.tsx');
 check(!pwPage.includes('expected_raw_name ||'), 'UI 不再覆盖 launcher 名称');
 check(pwPage.includes('status.frozen_roster'), '已配置阵容从 status 渲染');
 
+
+// 25) Repair 4：pregame roster 是 seat-agnostic（不出现東南西北 / launcher_index 语义）
+check(!pwPage.includes('SEAT_WINDS'), 'PlayWithYouPage 不出现 SEAT_WINDS（开局前不知道坐席）');
+check(pwPage.includes('参与者 ${index + 1}'), 'roster 行显示参与者编号而非東南西北');
+check(pwPage.includes('launcherIndexByRow'), 'launcher_index 由被呼出者序号计算，与 roster 行号分离');
+const launcherScript = read('../../scripts/launch_tenhou_bots.py');
+check(launcherScript.includes('launcher_index'), 'launcher 按 launcher_index 对齐');
 console.log('participant semantics OK (4-seat roster, force-save, routes, server mount, pytest whitelist)');

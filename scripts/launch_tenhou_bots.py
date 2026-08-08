@@ -96,11 +96,11 @@ def _build_configs(args: argparse.Namespace) -> list[BotClientConfig]:
         mode = str(binding_raw.get("mode") or "confirm")
 
         if mode == "roster":
-            # R10-E 通用四人阵容：launcher 数 = 带 launcher_slot 的 entry 数。
+            # R10-E 通用四人阵容：launcher 数 = 带 launcher_index 的 entry 数（Repair 4：被呼出者序号）。
             roster = [dict(entry) for entry in binding_raw.get("roster") or []]
             launched = sorted(
-                (entry for entry in roster if entry.get("launcher_slot") is not None),
-                key=lambda entry: int(entry["launcher_slot"]),
+                (entry for entry in roster if entry.get("launcher_index") is not None),
+                key=lambda entry: int(entry["launcher_index"]),
             )
             if len(launched) != len(configs):
                 sys.exit(

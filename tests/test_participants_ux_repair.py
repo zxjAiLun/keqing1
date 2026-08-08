@@ -210,20 +210,20 @@ def test_external_agent_launched_allowed_with_artifact():
     )
     art = identity.artifacts[0]
     bindings = [
-        {"account_id": "ext_mortal@01", "controller_type": "external_agent", "model_identity_id": identity.model_identity_id, "model_artifact_id": art.model_artifact_id, "launcher_slot": 0, "expected_raw_name": "NoName-1"},
-        {"account_id": "ext_mortal@02", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_slot": None},
-        {"account_id": "ext_mortal@03", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_slot": None},
-        {"account_id": "ext_mortal@04", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_slot": None},
+        {"account_id": "ext_mortal@01", "controller_type": "external_agent", "model_identity_id": identity.model_identity_id, "model_artifact_id": art.model_artifact_id, "launcher_index": 0, "expected_raw_name": "NoName-1"},
+        {"account_id": "ext_mortal@02", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_index": None},
+        {"account_id": "ext_mortal@03", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_index": None},
+        {"account_id": "ext_mortal@04", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_index": None},
     ]
     # 不抛错：external_agent + artifact 合法（specs 数 = launched 数）
     pw._validate_roster_bindings(bindings, ["artifacts/external_mortal_20240308_best_min.pth"])
 
     # 无 artifact 的真实远程 agent 拒绝本地 launcher
     bad = [
-        {"account_id": "ext_mortal@01", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_slot": 0, "expected_raw_name": "NoName-1"},
-        {"account_id": "ext_mortal@02", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_slot": None},
-        {"account_id": "ext_mortal@03", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_slot": None},
-        {"account_id": "ext_mortal@04", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_slot": None},
+        {"account_id": "ext_mortal@01", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_index": 0, "expected_raw_name": "NoName-1"},
+        {"account_id": "ext_mortal@02", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_index": None},
+        {"account_id": "ext_mortal@03", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_index": None},
+        {"account_id": "ext_mortal@04", "controller_type": "external_agent", "model_identity_id": None, "model_artifact_id": None, "launcher_index": None},
     ]
     with pytest.raises(ValueError, match="可启动的模型产物"):
         pw._validate_roster_bindings(bad, [])

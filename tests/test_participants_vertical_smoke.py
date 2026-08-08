@@ -151,8 +151,8 @@ def _start_roster(env):
         networks=["mortal", "mortal", "none", "none"],
         roster=[
             ParticipantBindingRequest(account_id="nick@01", controller_type="human_ui"),
-            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_slot=0, expected_raw_name="NoName-1"),
-            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_slot=1, expected_raw_name="NoName-2"),
+            ParticipantBindingRequest(account_id="70k@01", controller_type="local_model", launcher_index=0, expected_raw_name="NoName-1"),
+            ParticipantBindingRequest(account_id="70k@02", controller_type="local_model", launcher_index=1, expected_raw_name="NoName-2"),
             ParticipantBindingRequest(account_id="friend@01", controller_type="external_agent"),
         ],
     )
