@@ -16,6 +16,8 @@ import {
 } from "../api/playwithyouApi";
 import { participantsApi } from "../api/participantsApi";
 import type { ModelIdentity } from "../types/participants";
+import { useNavigate } from "react-router-dom";
+import { routes } from "../routes";
 
 const ACCENT = "#8e44ad";
 
@@ -85,6 +87,7 @@ type LauncherRow = {
 };
 
 export function PlayWithYouPage() {
+  const navigate = useNavigate();
   const [lobbyId, setLobbyId] = useState<string>("2147");
   const [speed, setSpeed] = useState<SpeedId>("normal");
   const [device, setDevice] = useState<DeviceId>("cuda");
@@ -404,6 +407,48 @@ export function PlayWithYouPage() {
                   {b.name} = {shortSpec(b.spec)}
                 </span>
               ))}
+            </div>
+          )}
+
+          {/* P1-C：session_id 展示 + 赛后导入链接（session alias 依赖它解析 NoName→模型） */}
+          {status.session_id && (
+            <div
+              style={{
+                marginBottom: 10,
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                flexWrap: "wrap",
+                fontSize: 12,
+                padding: "8px 10px",
+                borderRadius: 6,
+                border: "1px solid rgba(142,68,173,0.3)",
+                background: "rgba(142,68,173,0.05)",
+                color: "var(--text-secondary)",
+              }}
+            >
+              <span>
+                Session: <b style={{ color: "var(--text-primary)" }}>{status.session_id}</b>
+              </span>
+              <button
+                type="button"
+                onClick={() => void navigator.clipboard?.writeText(status.session_id ?? "")}
+                style={ghostSmallBtn}
+              >
+                复制
+              </button>
+              <span style={{ color: "var(--text-muted)" }}>对局结束后用它自动识别 NoName-N → 模型</span>
+              <button
+                type="button"
+                onClick={() => {
+                  const params = new URLSearchParams();
+                  if (status.session_id) params.set("session_id", status.session_id);
+                  navigate(`${routes.matchImport}?${params.toString()}`);
+                }}
+                style={{ ...ghostSmallBtn, borderColor: ACCENT, color: ACCENT, fontWeight: 700 }}
+              >
+                赛后导入 →
+              </button>
             </div>
           )}
 

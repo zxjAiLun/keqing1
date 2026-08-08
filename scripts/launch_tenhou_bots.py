@@ -119,8 +119,16 @@ def _build_configs(args: argparse.Namespace) -> list[BotClientConfig]:
                 binding=binding,
                 capture_dir=Path(args.ladder_capture_dir),
             )
-            for config, entry in zip(configs, launched, strict=True):
-                config.ladder_account_id = str(entry["account_id"])
+            for index, (config, entry) in enumerate(zip(configs, launched, strict=True)):
+                # Play-with-you simplification：observer key 是 capture 内部相关键，不是
+                # Participant Account。account-less launcher 用 NoName-N / launcher:N 保证
+                # 唯一——绝不能用 str(account_id)（两个 bot 会都变 "None" 导致 collector conflict）。
+                observer_key = (
+                    str(entry.get("account_id") or "").strip()
+                    or str(entry.get("expected_raw_name") or "").strip()
+                    or f"launcher:{index}"
+                )
+                config.ladder_account_id = observer_key
                 config.capture_sink = collector
                 # P1：runtime 必须加载父进程冻结的同一 checkpoint 路径，
                 # 不再按 bot_name（动态 spec）重新解析。bot_name 保持绝对路径 spec。

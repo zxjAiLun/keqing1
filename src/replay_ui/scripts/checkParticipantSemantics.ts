@@ -99,7 +99,11 @@ check(capture.includes('roster'), 'CaptureBinding 支持 roster 模式');
 // 10) R10-E Repair：真实 launcher 接线 / 赛后状态机 / 互斥
 const launcher = read('../../scripts/launch_tenhou_bots.py');
 check(launcher.includes('mode == "roster"') && launcher.includes('launcher_slot'), 'launcher 识别 roster 模式并按 slot 接线');
-check(launcher.includes('config.ladder_account_id = str(entry["account_id"])'), 'launcher 按 roster entry 绑定 ladder_account_id');
+check(
+  launcher.includes('config.ladder_account_id = observer_key') &&
+    launcher.includes('or f"launcher:{index}"'),
+  'launcher observer key：account_id or expected_raw_name or launcher:N（唯一）',
+);
 check(playwithyou.includes('_validate_roster_bindings'), 'start 前校验 roster（账号存在/启用/模型归属）');
 check(playwithyou.includes('不能同时开启'), 'roster 与旧正式天梯绑定互斥');
 const capture2 = read('../../src/gateway/playwithyou_capture.py');

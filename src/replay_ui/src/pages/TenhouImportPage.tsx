@@ -91,12 +91,12 @@ export function TenhouImportPage() {
             seat.candidates.length === 1 && seat.candidates[0].confidence === 'confirmed'
               ? seat.candidates[0]
               : undefined;
-          // account-less 候选（只冻结模型）：人工选账号，默认按 match 记录对齐
           const autoHasAccount = Boolean(autoCandidate?.account_id);
           return {
             ...EMPTY_DRAFT,
             seat: seat.seat,
-            account_id: autoCandidate?.account_id ?? '',
+            // P2-D：account-less alias 的唯一可绑定账号自动建议（backend 已算好）
+            account_id: autoCandidate?.account_id ?? seat.auto_account_id ?? '',
             alias_id: autoCandidate?.alias_id ?? '',
             // 消费已有候选别名（有账号）时不再创建新 alias；模型已冻结需人工选账号 → match
             alias_scope: autoHasAccount ? 'none' : 'match',
@@ -242,6 +242,11 @@ export function TenhouImportPage() {
               <div style={{ display: 'grid', gap: 8 }}>
                 {drafts.map((draft) => {
                   const seatInfo = preview.seats.find((s) => s.seat === draft.seat)!;
+                  // P1-B：frozen-model 座位（account-less source alias）有模型证据，
+                  // 禁止"新建账号"——新建路径不携带 alias_id 会静默丢模型证据。
+                  const frozenModel = seatInfo.candidates.some(
+                    (c) => c.model_identity_id && !c.account_id,
+                  );
                   return (
                     <div key={draft.seat} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px', display: 'grid', gap: 8 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -273,7 +278,7 @@ export function TenhouImportPage() {
                           style={selectStyle}
                         >
                           <option value="assign">指派已有账号</option>
-                          <option value="create">新建账号</option>
+                          <option value="create" disabled={frozenModel}>新建账号</option>
                         </select>
                         {draft.action === 'assign' ? (
                           <select
@@ -281,7 +286,12 @@ export function TenhouImportPage() {
                             onChange={(e) => {
                               const accountId = e.target.value;
                               const candidate = seatInfo.candidates.find((c) => c.account_id === accountId);
-                              updateDraft(draft.seat, { account_id: accountId, alias_id: candidate?.alias_id ?? '' });
+                              // P1-B：选账号不能清掉 account-less source alias（NoName-N → 模型证据）；
+                              // 无账号候选匹配时保留原 alias_id，确认时后端从 alias 读取冻结模型。
+                              updateDraft(draft.seat, {
+                                account_id: accountId,
+                                alias_id: candidate?.alias_id ?? draft.alias_id,
+                              });
                             }}
                             style={{ ...selectStyle, flex: 1 }}
                           >

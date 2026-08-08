@@ -606,3 +606,54 @@ def test_model_only_launchers_no_account(pw_env):
     assert launched[0]["account_id"] is None
     pw.SESSIONS.clear()
     pw._HISTORY.clear()
+
+
+def test_accountless_launcher_unique_observer_keys(tmp_path, monkeypatch):
+    """P1-A：account-less launcher 的 observer key 必须唯一（NoName-N），
+    两个 bot 上报不同真实 seat 时 collector 不 conflict。"""
+    import argparse
+
+    from scripts import launch_tenhou_bots as launcher
+    from gateway.playwithyou_capture import PlayWithYouCaptureCollector
+
+    monkeypatch.setattr(launcher, "resolve_bot_spec", lambda spec, root: ("checkpoint", tmp_path / f"{spec}.pth"))
+    monkeypatch.setattr(launcher, "_pick_device", lambda device: "cpu")
+    monkeypatch.setattr(launcher, "normalize_tenhou_room", lambda room, **kw: "L2147_9")
+
+    capture_dir = tmp_path / "capture"
+    (capture_dir / "pending").mkdir(parents=True)
+    binding = {
+        "session_id": "s_acl",
+        "season_id": "",
+        "human_account_id": "",
+        "bot_account_ids": [],
+        "mode": "roster",
+        "roster": [
+            {"account_id": None, "controller_type": None, "launcher_slot": 0, "expected_raw_name": "NoName-1", "model_identity_id": "v3", "model_artifact_id": "a1", "resolved_checkpoint_path": str(tmp_path / "v3.pth")},
+            {"account_id": None, "controller_type": None, "launcher_slot": 1, "expected_raw_name": "NoName-2", "model_identity_id": "ext", "model_artifact_id": "a2", "resolved_checkpoint_path": str(tmp_path / "ext.pth")},
+        ],
+        "frozen_at": 0.0,
+    }
+    (capture_dir / "binding.json").write_text(json.dumps(binding, ensure_ascii=False), encoding="utf-8")
+
+    args = argparse.Namespace(
+        bots=["v3", "ext"], name_prefix="NoName", room="2147", device="cuda",
+        game_type="hanchan", gateway_host="127.0.0.1", gateway_port=12101,
+        bot_verbose=False, think_delay=0.0, ladder_capture_dir=str(capture_dir),
+    )
+    configs, collector = launcher._build_configs(args)
+    assert collector is not None
+    # observer key 唯一：NoName-1 / NoName-2（不是字符串 "None"）
+    assert configs[0].ladder_account_id == "NoName-1"
+    assert configs[1].ladder_account_id == "NoName-2"
+    assert len({c.ladder_account_id for c in configs}) == 2
+
+    # 两个 observer 各自上报不同真实 seat → 不 conflict
+    collector.observe("NoName-1", {"type": "start_game", "tenhou_log_seat": 0, "log": "https://tenhou.net/3/?log=gm1&tw=0"})
+    collector.observe("NoName-2", {"type": "start_game", "tenhou_log_seat": 1, "log": "https://tenhou.net/3/?log=gm1&tw=1"})
+    assert collector._state != "conflict"
+
+    # 同一 observer 上报不同 seat → 仍正确判冲突（证明 key 区分是必要的）
+    collector.observe("NoName-1", {"type": "start_game", "tenhou_log_seat": 2, "log": "https://tenhou.net/3/?log=gm1&tw=2"})
+    assert collector._state == "conflict"
+    assert "重复上报不同全局 seat" in (collector._conflict_reason or "")
