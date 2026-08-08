@@ -460,6 +460,9 @@ def _resolve_seat(
                 raise ValueError(f"账号已停用: {account_id}")
             if model_identity_id and not registry.identity_belongs_to_account(model_identity_id, account_id):
                 raise ValueError(f"账号 {account_id} 不能使用本次运行模型身份 {model_identity_id}")
+            # P1：NoName-N 是 session-generated name，禁止晋升成 global identity rule
+            if alias_scope == "global":
+                raise ValueError(f"座位 {seat_no}（{name}）的会话别名不能保存为全局别名")
             # 记录人工对齐：用户选择保留时才注册（默认 match 作用域）
             if alias_scope not in (None, "none"):
                 alias_to_register = _build_alias(

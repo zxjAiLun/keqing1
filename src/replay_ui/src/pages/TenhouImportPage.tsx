@@ -323,18 +323,30 @@ export function TenhouImportPage() {
                           value={draft.alias_scope}
                           onChange={(e) => {
                             const scope = e.target.value as DraftResolution['alias_scope'];
-                            // 用户显式要新建/提升 alias → 放弃消费已有候选，切换为基于当前账号新建
+                            // P1：frozen-model 座位的 source alias 是不可变证据——
+                            // 切 scope 绝不能清掉它（否则 confirm 丢失 model，且 NoName-N
+                            // 可能被晋升成 global identity rule）。
                             updateDraft(draft.seat, {
                               alias_scope: scope,
-                              alias_id: scope !== 'none' ? '' : draft.alias_id,
+                              alias_id: frozenModel ? draft.alias_id : scope !== 'none' ? '' : draft.alias_id,
                             });
                           }}
                           style={selectStyle}
                         >
-                          <option value="global">保存为全局别名</option>
-                          <option value="session">仅本次会话</option>
-                          <option value="match">仅本局</option>
-                          <option value="none">不保存别名</option>
+                          {/* frozen NoName-N 只允许本局/不保存，禁止 global/session（session-generated name） */}
+                          {frozenModel ? (
+                            <>
+                              <option value="match">保存本局账号对齐</option>
+                              <option value="none">不保存账号对齐</option>
+                            </>
+                          ) : (
+                            <>
+                              <option value="global">保存为全局别名</option>
+                              <option value="session">仅本次会话</option>
+                              <option value="match">仅本局</option>
+                              <option value="none">不保存别名</option>
+                            </>
+                          )}
                         </select>
                         <select
                           value={draft.confidence}

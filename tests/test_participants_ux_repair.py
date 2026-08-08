@@ -280,3 +280,43 @@ def test_gate_normalizes_season_id(env):
     # dirty marker 路径也必须用规范名
     assert ledger.ladder_dirty_path(SEASON).exists()
     assert not ledger.ladder_dirty_path(" official-ladder-v1 ").exists()
+
+
+def test_gate_rejects_human_seat_with_bot_artifact(env):
+    """P1：正式人类座位不能携带冻结 bot 模型产物——防止 bot 战绩记到 Nick 名下。
+
+    用全局 identity（account_id=None，任意账号可绑定）复现真实漏洞场景：
+    identity_belongs_to_account 会通过，必须由 eligibility gate 拒绝。
+    """
+    _accounts()
+    global_70k = registry.create_model_identity(
+        ModelIdentityCreate(model_identity_id="70k-global", label="70k", kind="local_model", artifact_path="checkpoints/70k.pth")
+    )
+    art_70k = global_70k.artifacts[0]
+    seats = [
+        # nick@01 是 human，却携带 70k artifact → REJECT
+        MatchSeat(seat=0, account_id="nick@01", controller_type="human_ui", model_identity_id=global_70k.model_identity_id, model_artifact_id=art_70k.model_artifact_id),
+        MatchSeat(seat=1, account_id="70k@01", controller_type="local_model"),
+        MatchSeat(seat=2, account_id="70k@02", controller_type="local_model"),
+        MatchSeat(seat=3, account_id="70k@03", controller_type="local_model"),
+    ]
+    with pytest.raises(ValueError, match="不能携带冻结 bot 模型产物"):
+        ledger.create_match(_match_create(seats), registry)
+
+
+def test_gate_accepts_bot_artifact_on_bot_account(env):
+    """P1：bot artifact + 对应 bot 账号 + official ladder → ACCEPT。"""
+    _accounts()
+    global_70k = registry.create_model_identity(
+        ModelIdentityCreate(model_identity_id="70k-global", label="70k", kind="local_model", artifact_path="checkpoints/70k.pth")
+    )
+    art_70k = global_70k.artifacts[0]
+    seats = [
+        MatchSeat(seat=0, account_id="nick@01", controller_type="human_ui"),
+        MatchSeat(seat=1, account_id="70k@01", controller_type="local_model", model_identity_id=global_70k.model_identity_id, model_artifact_id=art_70k.model_artifact_id),
+        MatchSeat(seat=2, account_id="70k@02", controller_type="local_model"),
+        MatchSeat(seat=3, account_id="70k@03", controller_type="local_model"),
+    ]
+    match = ledger.create_match(_match_create(seats), registry)
+    assert match.rating_eligible is True
+    assert ledger.ladder_dirty_path(SEASON).exists()

@@ -115,6 +115,14 @@ def validate_ladder_eligibility(
                 raise ValueError(
                     f"人类账号 {account_id} 必须属于 model_id=human（当前属于 {season_model['model_id'] or '未知'}）"
                 )
+            # P1（UX Repair 2）：正式人类座位不能携带冻结 bot 模型产物——
+            # 否则 '实际跑 70k artifact + 赛后记 nick@01' 会被 human checkpoint=none 跳过比较。
+            if seat.model_identity_id or seat.model_artifact_id:
+                raise ValueError(
+                    f"正式人类座位 {account_id} 不能携带冻结 bot 模型产物"
+                )
+            if seat.controller_type and seat.controller_type != "human_ui":
+                raise ValueError(f"正式人类座位 {account_id} 的控制器必须为 human_ui")
         artifact_id = seat.model_artifact_id
         if artifact_id:
             # 模型受控座位：冻结 artifact 必须与该账号赛季模型的 checkpoint 精确一致

@@ -247,12 +247,17 @@ def _validate_roster_bindings(roster_bindings: List[dict], specs: List[str]) -> 
             if not account_id:
                 # model-only launcher 必须显式选模型
                 raise ValueError(f"launcher 参与者必须选择模型身份与产物（slot {slot}）")
-            # account-backed 且未显式选模型 → 走旧 networks[slot] fallback（backcompat）
             controller = str(entry.get("controller_type") or "")
-            if controller not in ("local_model", "external_agent"):
+            if controller == "external_agent":
+                # 外部代理没有 networks fallback：无 artifact 不能由本系统启动
+                raise ValueError(
+                    f"由本系统呼出的外部代理必须选择可启动的模型产物（slot {slot}）"
+                )
+            if controller != "local_model":
                 raise ValueError(
                     f"launcher 参与者 controller_type 必须为 local_model 或 external_agent（slot {slot}）"
                 )
+            # account-backed local_model 未显式选模型 → 走旧 networks[slot] fallback（backcompat）
             raw_name = str(entry.get("expected_raw_name") or "").strip()
             if raw_name:
                 if raw_name in raw_names:

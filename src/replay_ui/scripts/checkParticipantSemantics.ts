@@ -261,5 +261,12 @@ check(pwBackend.includes('_artifact_spec_for_launcher'), 'account-less launcher 
 const intake5 = read('../../src/participants/intake.py');
 check(intake5.includes('需要人工指派账号'), 'account-less alias：模型已知但需人工选账号');
 check(intake5.includes('_auto_account_id'), '唯一可绑定账号自动建议');
+const elig5 = read('../../src/participants/ladder_eligibility.py');
+check(elig5.includes('不能携带冻结 bot 模型产物'), '正式人类座位禁止携带 bot artifact');
+check(elig5.includes('控制器必须为 human_ui'), '正式人类座位控制器必须 human_ui');
+check(intake5.includes('不能保存为全局别名'), 'account-less source alias 禁止晋升 global');
+const import5 = read('src/pages/TenhouImportPage.tsx');
+check(import5.includes('frozenModel ? draft.alias_id :'), 'frozen seat 切 scope 不清 source alias');
+check(import5.includes('保存本局账号对齐'), 'frozen NoName 只允许 match/none');
 
 console.log('participant semantics OK (model-only launcher, account-less session alias, force-save, routes, server mount, pytest whitelist)');
