@@ -574,7 +574,8 @@ def test_two_process_reclaimers_single_winner_with_stale_reclaim(participants_ro
     root = Path(__file__).resolve().parents[1]
     env = {
         **_os.environ,
-        "PYTHONPATH": str(root / "src"),
+        # R10 layout split：participants 已迁至 workbench/（pyproject pythonpath 同规则）
+        "PYTHONPATH": str(root / "workbench") + _os.pathsep + str(root / "src"),
         "KEQING_PARTICIPANT_DATA_ROOT": str(participants_root),
     }
     procs = [

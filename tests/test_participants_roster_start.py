@@ -162,7 +162,7 @@ def test_launcher_build_configs_roster_wiring(tmp_path, monkeypatch):
     import argparse
     import sys as _sys
 
-    from scripts import launch_tenhou_bots as launcher
+    from workbench import launch_tenhou_bots as launcher
 
     # 模拟 spec 解析与设备选择，聚焦 binding 接线
     monkeypatch.setattr(launcher, "resolve_bot_spec", lambda spec, root: ("checkpoint", tmp_path / f"{spec}.pth"))
@@ -215,7 +215,7 @@ def test_launcher_roster_slot_sorting(tmp_path, monkeypatch):
     """P1-2：roster 顺序与 launcher_slot 顺序不同时，按 slot 对齐（NoName-1 不串线）。"""
     import argparse
 
-    from scripts import launch_tenhou_bots as launcher
+    from workbench import launch_tenhou_bots as launcher
 
     monkeypatch.setattr(launcher, "resolve_bot_spec", lambda spec, root: ("checkpoint", tmp_path / f"{spec}.pth"))
     monkeypatch.setattr(launcher, "_pick_device", lambda device: "cpu")
@@ -397,7 +397,7 @@ def test_frozen_checkpoint_does_not_drift(tmp_path, monkeypatch):
     binding 与别名记录 A 对应 artifact，绝不允许「冻结的是 A、实际加载的是 B」。"""
     import argparse
 
-    from scripts import launch_tenhou_bots as launcher
+    from workbench import launch_tenhou_bots as launcher
     from participants import registry
     from participants.schemas import AccountCreate, ModelIdentityCreate
 
@@ -613,7 +613,7 @@ def test_accountless_launcher_unique_observer_keys(tmp_path, monkeypatch):
     两个 bot 上报不同真实 seat 时 collector 不 conflict。"""
     import argparse
 
-    from scripts import launch_tenhou_bots as launcher
+    from workbench import launch_tenhou_bots as launcher
     from gateway.playwithyou_capture import PlayWithYouCaptureCollector
 
     monkeypatch.setattr(launcher, "resolve_bot_spec", lambda spec, root: ("checkpoint", tmp_path / f"{spec}.pth"))
