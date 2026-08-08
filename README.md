@@ -1,5 +1,17 @@
 # Keqing1
 
+> **Archived migration source.** This repository is frozen; no further
+> feature development happens here.
+>
+> Succession:
+> - Workbench line `codex/r10-ux-repair-5` → `zxjAiLun/keqing1-workbench` `main`
+>   (split at `b714e5c`; PR #11 closed as superseded)
+> - Mortal training line `codex/mortal-training-next` @ `6ff580cb`
+>   → `zxjAiLun/keqing1_experiment` `main` @ `74a3154`
+>
+> Historical branches remain as frozen references for tracing. Shared runtime
+> data lives in the `keqing-data` directory beside the project folder.
+
 Keqing1 is now a Mortal-based Riichi Mahjong toolkit.
 
 The active project direction is:
