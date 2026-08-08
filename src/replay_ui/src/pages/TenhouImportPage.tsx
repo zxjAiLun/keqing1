@@ -7,7 +7,7 @@ import { SEAT_WINDS } from '../components/Matches/labels';
 import { participantsApi } from '../api/participantsApi';
 import { ApiError } from '../api/replayApi';
 import { routes } from '../routes';
-import type { Account, IntakePreview, SeatResolution, SeatNo } from '../types/participants';
+import type { Account, IntakePreview, ModelIdentity, SeatResolution, SeatNo } from '../types/participants';
 
 type DraftResolution = {
   seat: SeatNo;
@@ -39,6 +39,7 @@ export function TenhouImportPage() {
   const [url, setUrl] = useState(prefilledUrl);
   const [sessionId, setSessionId] = useState<string | undefined>(prefilledSession);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [identities, setIdentities] = useState<ModelIdentity[]>([]);
   const [preview, setPreview] = useState<IntakePreview | null>(null);
   const [drafts, setDrafts] = useState<DraftResolution[]>([]);
   const [loading, setLoading] = useState(false);
@@ -50,8 +51,12 @@ export function TenhouImportPage() {
 
   const load = useCallback(async (signal: AbortSignal) => {
     try {
-      const accountsResp = await participantsApi.listAccounts(signal);
+      const [accountsResp, modelsResp] = await Promise.all([
+        participantsApi.listAccounts(signal),
+        participantsApi.listModels(signal),
+      ]);
       setAccounts(accountsResp.accounts);
+      setIdentities(modelsResp.identities);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -86,13 +91,15 @@ export function TenhouImportPage() {
             seat.candidates.length === 1 && seat.candidates[0].confidence === 'confirmed'
               ? seat.candidates[0]
               : undefined;
+          // account-less 候选（只冻结模型）：人工选账号，默认按 match 记录对齐
+          const autoHasAccount = Boolean(autoCandidate?.account_id);
           return {
             ...EMPTY_DRAFT,
             seat: seat.seat,
             account_id: autoCandidate?.account_id ?? '',
             alias_id: autoCandidate?.alias_id ?? '',
-            // 消费已有候选别名时不再创建新 alias（提升为 global 需用户显式操作）
-            alias_scope: autoCandidate ? 'none' : 'match',
+            // 消费已有候选别名（有账号）时不再创建新 alias；模型已冻结需人工选账号 → match
+            alias_scope: autoHasAccount ? 'none' : 'match',
           };
         }),
       );
@@ -237,14 +244,27 @@ export function TenhouImportPage() {
                   const seatInfo = preview.seats.find((s) => s.seat === draft.seat)!;
                   return (
                     <div key={draft.seat} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px', display: 'grid', gap: 8 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                         <span style={{ fontWeight: 800, color: 'var(--text-muted)' }}>{SEAT_WINDS[draft.seat]}</span>
                         <span style={{ fontWeight: 700 }}>{seatInfo.raw_name}</span>
                         {seatInfo.candidates.length > 0 && (
                           <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                            候选：{seatInfo.candidates.map((c) => c.account_id).join(' / ')}
+                            候选：{seatInfo.candidates.map((c) => c.account_id || '（模型已冻结，待选账号）').join(' / ')}
                           </span>
                         )}
+                        {/* Play-with-you simplification：session 只冻结了模型 → 显示本次运行模型 */}
+                        {seatInfo.candidates
+                          .filter((c) => c.model_identity_id && !c.account_id)
+                          .map((c) => {
+                            const identity = identities.find((m) => m.model_identity_id === c.model_identity_id);
+                            const artifact = identity?.artifacts.find((a) => a.model_artifact_id === c.model_artifact_id);
+                            return (
+                              <span key={c.alias_id} style={{ fontSize: 11, color: '#8e44ad' }}>
+                                本次运行模型：{identity?.label ?? c.model_identity_id}
+                                {artifact ? ` / ${artifact.label}` : ''}
+                              </span>
+                            );
+                          })}
                       </div>
                       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                         <select

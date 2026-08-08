@@ -120,7 +120,8 @@ class ExternalAlias(BaseModel):
     provider: str = "tenhou"
     external_id: str
     display_name: str | None = None
-    account_id: str
+    # Play-with-you simplification：session alias 可只携带模型事实，不绑定账号
+    account_id: str | None = None
     model_identity_id: str | None = None
     model_artifact_id: str | None = None
     scope: ExternalAliasScope = "global"
@@ -135,7 +136,8 @@ class ExternalAliasCreate(BaseModel):
     provider: str = "tenhou"
     external_id: str = Field(min_length=1)
     display_name: str | None = None
-    account_id: str = Field(min_length=1)
+    # 允许账号无绑定：session 阶段只记录 NoName-N → 模型身份/产物
+    account_id: str | None = None
     model_identity_id: str | None = None
     model_artifact_id: str | None = None
     scope: ExternalAliasScope = "global"

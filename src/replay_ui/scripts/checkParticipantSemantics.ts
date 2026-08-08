@@ -247,7 +247,15 @@ check(elig.includes('ensure_ladder_eligibility'), 'rating_eligible ⇒ season �
 const ledger2 = read('../../src/participants/ledger.py');
 check(ledger2.includes('if match.rating_eligible:') && ledger2.includes('ensure_ladder_eligibility'), 'create/revise 统一 gate 入口');
 const pwPage = read('src/pages/PlayWithYouPage.tsx');
-check(!pwPage.includes('expected_raw_name ||'), 'UI 不再覆盖 launcher 名称');
-check(pwPage.includes('status.frozen_roster'), '已配置阵容从 status 渲染');
+check(!pwPage.includes('SEAT_WINDS'), 'PlayWithYouPage 不出现東南西北（开局前不知道坐席）');
+check(!pwPage.includes('account_id'), 'PlayWithYouPage 不选账号（账号推迟到赛后导入）');
+check(pwPage.includes('launchers'), 'Play-with-you simplification：只呼出模型（launchers）');
+check(pwPage.includes('status.frozen_roster'), '本次启动模型从 status 渲染');
+const pwBackend = read('../../src/gateway/api/playwithyou.py');
+check(pwBackend.includes('launchers: List'), 'StartPlayWithYouRequest 支持 launchers');
+check(pwBackend.includes('_artifact_spec_for_launcher'), 'account-less launcher 从 artifact 冻结 checkpoint');
+const intake5 = read('../../src/participants/intake.py');
+check(intake5.includes('需要人工指派账号'), 'account-less alias：模型已知但需人工选账号');
+check(intake5.includes('_auto_account_id'), '唯一可绑定账号自动建议');
 
-console.log('participant semantics OK (4-seat roster, force-save, routes, server mount, pytest whitelist)');
+console.log('participant semantics OK (model-only launcher, account-less session alias, force-save, routes, server mount, pytest whitelist)');

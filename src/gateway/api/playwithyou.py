@@ -210,16 +210,18 @@ def _spec_to_model_id(spec: str, project_root: Path) -> Optional[str]:
 def _validate_roster_bindings(roster_bindings: List[dict], specs: List[str]) -> None:
     """P1-2：呼出前可信冻结 roster。
 
-    - 已登记账号必须存在且启用、四账号不重复；
-    - launcher 参与者 controller_type=local_model、账号必填、launcher_slot 唯一、
-      expected_raw_name 唯一、模型身份/产物归属正确；
-    - 未识别外部参与者（无账号）必须 resolution_required=true。
+    - 已登记账号必须存在且启用、账号不重复（有账号时才校验）；
+    - launcher 参与者必须选模型身份+产物；有账号时 controller 可启动且
+      identity 属于账号；launcher_slot 唯一、expected_raw_name 唯一；
+    - Play-with-you simplification：launcher 可**不带账号**（只呼出模型，
+      账号/坐席由赛后 intake 决定），此时跳过账号/controller 校验。
+    - 未识别外部参与者（无账号且未呼出）必须 resolution_required=true。
     """
     from participants import registry as participant_registry
 
     known_ids = [str(entry.get("account_id") or "").strip() for entry in roster_bindings if entry.get("account_id")]
     if len(set(known_ids)) != len(known_ids):
-        raise ValueError("四个已知账号必须互不重复")
+        raise ValueError("已登记账号必须互不重复")
     for account_id in known_ids:
         account = participant_registry.get_account(account_id)
         if account is None:
@@ -239,29 +241,40 @@ def _validate_roster_bindings(roster_bindings: List[dict], specs: List[str]) -> 
             raise ValueError(f"launcher_slot 重复: {slot}")
         launched_slots.append(slot)
         account_id = str(entry.get("account_id") or "").strip()
-        if not account_id:
-            raise ValueError(f"launcher 参与者必须填写账号（slot {slot}）")
-        controller = str(entry.get("controller_type") or "")
-        if controller not in ("local_model", "external_agent"):
-            raise ValueError(
-                f"launcher 参与者 controller_type 必须为 local_model 或 external_agent（slot {slot}）"
-            )
-        if controller == "external_agent" and not (entry.get("model_identity_id") and entry.get("model_artifact_id")):
-            raise ValueError(
-                f"由本系统呼出的外部代理必须选择可启动的模型产物（slot {slot}）"
-            )
+        identity_id = entry.get("model_identity_id")
+        artifact_id = entry.get("model_artifact_id")
+        if not (identity_id and artifact_id):
+            if not account_id:
+                # model-only launcher 必须显式选模型
+                raise ValueError(f"launcher 参与者必须选择模型身份与产物（slot {slot}）")
+            # account-backed 且未显式选模型 → 走旧 networks[slot] fallback（backcompat）
+            controller = str(entry.get("controller_type") or "")
+            if controller not in ("local_model", "external_agent"):
+                raise ValueError(
+                    f"launcher 参与者 controller_type 必须为 local_model 或 external_agent（slot {slot}）"
+                )
+            raw_name = str(entry.get("expected_raw_name") or "").strip()
+            if raw_name:
+                if raw_name in raw_names:
+                    raise ValueError(f"expected_raw_name 重复: {raw_name}")
+                raw_names.append(raw_name)
+            continue
+        if account_id:
+            # account-backed：controller 必须可启动 + identity 必须属于账号
+            controller = str(entry.get("controller_type") or "")
+            if controller not in ("local_model", "external_agent"):
+                raise ValueError(
+                    f"launcher 参与者 controller_type 必须为 local_model 或 external_agent（slot {slot}）"
+                )
+            if not participant_registry.identity_belongs_to_account(identity_id, account_id):
+                raise ValueError(f"模型身份 {identity_id} 不属于账号 {account_id}")
+        if not participant_registry.artifact_belongs_to_identity(identity_id, artifact_id):
+            raise ValueError(f"模型产物 {artifact_id} 不属于身份 {identity_id}")
         raw_name = str(entry.get("expected_raw_name") or "").strip()
         if raw_name:
             if raw_name in raw_names:
                 raise ValueError(f"expected_raw_name 重复: {raw_name}")
             raw_names.append(raw_name)
-        identity_id = entry.get("model_identity_id")
-        artifact_id = entry.get("model_artifact_id")
-        if identity_id:
-            if not participant_registry.identity_belongs_to_account(identity_id, account_id):
-                raise ValueError(f"模型身份 {identity_id} 不属于账号 {account_id}")
-            if not participant_registry.artifact_belongs_to_identity(identity_id, artifact_id):
-                raise ValueError(f"模型产物 {artifact_id} 不属于身份 {identity_id}")
     if len(launched_slots) != len(specs):
         raise ValueError(f"launcher 数量与启动配置不一致（{len(launched_slots)} vs {len(specs)}）")
 
@@ -272,6 +285,23 @@ def _resolve_artifact_path(artifact, project_root: Path) -> Path:
     if not path.is_absolute():
         path = project_root / path
     return path.resolve()
+
+
+def _artifact_spec_for_launcher(identity_id: str, artifact_id: str) -> str:
+    """Play-with-you simplification：account-less launcher——只校验 artifact 属于
+    identity 并返回绝对 checkpoint 路径（不涉及账号归属）。"""
+    from participants import registry as participant_registry
+
+    identity = participant_registry.get_model_identity(identity_id)
+    if identity is None:
+        raise ValueError(f"model identity not found: {identity_id}")
+    artifact = next((a for a in identity.artifacts if a.model_artifact_id == artifact_id), None)
+    if artifact is None:
+        raise ValueError(f"model identity {identity_id} 无产物 {artifact_id}")
+    path = _resolve_artifact_path(artifact, PROJECT_ROOT)
+    if not path.exists():
+        raise ValueError(f"artifact checkpoint 不存在: {path}")
+    return str(path)
 
 
 def _artifact_spec_for_seat(account_id: str, identity_id: str, artifact_id: str) -> str:
@@ -331,7 +361,29 @@ def _freeze_launcher_models(roster_bindings: List[dict], specs: List[str]) -> tu
             frozen.append(entry)
             continue
         spec = slot_to_spec[int(slot)]
-        account_id = str(entry["account_id"])
+        account_id = str(entry.get("account_id") or "").strip()
+        req_identity = entry.get("model_identity_id")
+        req_artifact = entry.get("model_artifact_id")
+        if not account_id:
+            # Play-with-you simplification：account-less launcher——所选 artifact 即 checkpoint
+            if not (req_identity and req_artifact):
+                raise ValueError(f"launcher slot {slot} 必须选择模型身份与产物")
+            identity = participant_registry.get_model_identity(req_identity)
+            if identity is None:
+                raise ValueError(f"model identity not found: {req_identity}")
+            artifact = next((a for a in identity.artifacts if a.model_artifact_id == req_artifact), None)
+            if artifact is None:
+                raise ValueError(f"model identity {req_identity} 无产物 {req_artifact}")
+            resolved_path = _resolve_artifact_path(artifact, PROJECT_ROOT)
+            frozen.append(
+                {
+                    **entry,
+                    "model_identity_id": req_identity,
+                    "model_artifact_id": req_artifact,
+                    "resolved_checkpoint_path": str(resolved_path),
+                }
+            )
+            continue
         try:
             _kind, resolved_path = resolve_bot_spec(spec, PROJECT_ROOT)
         except (ValueError, FileNotFoundError) as exc:
@@ -629,11 +681,16 @@ class StartPlayWithYouRequest(BaseModel):
     # R10-E：预期四人阵容（与 launcher 数量分离）。提供时采用通用捕获流程，
     # 不要求恰好 1 人类 + 3 bot。
     roster: List["ParticipantBindingRequest"] = []
+    # Play-with-you simplification：只呼出模型（1-4 个），不预绑账号/坐席。
+    # 提供时优先于 roster；每个 entry 只需 model_identity_id + model_artifact_id。
+    launchers: List["ParticipantBindingRequest"] = []
 
 
 class ParticipantBindingRequest(BaseModel):
-    account_id: str = ""
-    controller_type: str = "manual_only"
+    # Play-with-you simplification：account 可留空 = 只呼出模型（不预绑账号），
+    # 账号/坐席由赛后 Tenhou intake 决定。
+    account_id: Optional[str] = None
+    controller_type: Optional[str] = None
     model_identity_id: Optional[str] = None
     model_artifact_id: Optional[str] = None
     launcher_slot: Optional[int] = None  # 本系统实际呼出的 slot；None = 不启动
@@ -718,11 +775,23 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
     # Resolve launcher specs. R10-E roster 模式：从预期四人阵容的 launcher_slot 推导，
     # 与 quantity 解耦（Nick human_ui + 2 本地 bot + 外部 Mortal → quantity=2 合法）。
     roster = list(req.roster)
+    if req.launchers:
+        # Play-with-you simplification：launchers（1-4 个 model-only）优先于 roster。
+        if not (1 <= len(req.launchers) <= 4):
+            raise HTTPException(status_code=400, detail="一次呼出 1-4 个模型")
+        roster = [
+            ParticipantBindingRequest(
+                model_identity_id=ln.model_identity_id,
+                model_artifact_id=ln.model_artifact_id,
+                launcher_slot=index,
+            )
+            for index, ln in enumerate(req.launchers)
+        ]
     roster_bindings: List[dict] = []
     launcher_specs: List[str] = []
     try:
         if roster:
-            if len(roster) != 4:
+            if len(roster) != 4 and not req.launchers:
                 raise ValueError("roster 必须恰好 4 位预期参与者")
             slot_specs: List[tuple[int, str]] = []
             for entry in roster:
@@ -733,12 +802,18 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
                 if not (0 <= slot <= 3):
                     raise ValueError(f"launcher_slot 必须在 [0,3]: {slot}")
                 if entry.model_identity_id and entry.model_artifact_id:
-                    # P1-3：seat 直选 artifact → checkpoint 直接来自 artifact path
-                    spec = _artifact_spec_for_seat(
-                        str(entry.account_id or ""),
-                        entry.model_identity_id,
-                        entry.model_artifact_id,
-                    )
+                    if str(entry.account_id or "").strip():
+                        # account-backed：checkpoint 来自所选 artifact（带账号归属校验）
+                        spec = _artifact_spec_for_seat(
+                            str(entry.account_id or ""),
+                            entry.model_identity_id,
+                            entry.model_artifact_id,
+                        )
+                    else:
+                        # Play-with-you simplification：只呼出模型，不预绑账号
+                        spec = _artifact_spec_for_launcher(
+                            entry.model_identity_id, entry.model_artifact_id
+                        )
                 else:
                     # backend compatibility：旧 network spec 推导
                     spec = _resolve_spec(networks[slot], req.custom_paths, slot)
@@ -841,7 +916,8 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
                     key=lambda entry: int(entry["launcher_slot"]),
                 )
                 for index, entry in enumerate(launched):
-                    account_id = str(entry.get("account_id") or "").strip()
+                    # Play-with-you simplification：无账号 launcher → account_id=None
+                    account_id = (str(entry.get("account_id") or "").strip() or None)
                     expected_name = str(entry.get("expected_raw_name") or names[index] or f"NoName-{index + 1}")
                     alias = participant_aliases.register_alias_locked(
                         ParticipantAliasCreate(

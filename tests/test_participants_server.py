@@ -286,3 +286,108 @@ def test_intake_confirm_with_ladder_eligibility(four_account_ids, monkeypatch, t
     assert resp.match.ladder_projection_state == "pending"
     # 锁内标 dirty（durable outbox）：赛季天梯待重算
     assert ledger.ladder_dirty_path("official-ladder-v1").exists()
+
+
+def test_intake_accountless_session_alias_manual_assignment(four_account_ids, monkeypatch, tmp_path):
+    """Play-with-you simplification：session alias 只冻结模型 → confirm 需人工选账号。
+
+    所选账号必须能使用该模型身份；匹配后记录 match-scoped 对齐别名。
+    """
+    import json as _json
+
+    from participants import aliases, intake, ledger, registry
+    from participants.schemas import ExternalAliasCreate, IntakeConfirmRequest, ModelIdentityCreate, SeatResolution
+
+    # 一个账号限定的模型身份（70k@01 可用）——用于校验 account-less alias 人工选账号
+    registry.create_model_identity(
+        ModelIdentityCreate(model_identity_id="model-70k", label="70k", kind="local_model", account_id="70k@01", artifact_path="checkpoints/70k.pth")
+    )
+    identity = registry.get_model_identity("model-70k")
+    # 注册 account-less session alias（模拟 Play-with-you 呼出后）
+    aliases.register_alias_locked(
+        ExternalAliasCreate(
+            provider="tenhou",
+            external_id="NoName-1",
+            account_id=None,
+            model_identity_id=identity.model_identity_id,
+            model_artifact_id=identity.artifacts[0].model_artifact_id,
+            scope="session",
+            session_id="s-acc-less",
+        )
+    )
+
+    monkeypatch.setattr(
+        intake, "download_tenhou6",
+        lambda log_id: {
+            "name": ["Nick", "NoName-1", "NoName-2", "FriendID"],
+            "rule": {"aka": True},
+            "log": [
+                [[0, 0, 0], [25000, 25000, 25000, 25000], [], [], [], [], [], [], [], [], [], [], [], [], [], [], ["和了", [5000, -5000, 0, 0], [0, 1]]],
+            ],
+        },
+    )
+    alias = next(
+        a for a in aliases.resolve_candidates("tenhou", "NoName-1", session_id="s-acc-less")
+    )
+    assert alias.account_id is None  # session alias 不绑账号
+
+    resolutions = [
+        SeatResolution(seat=0, action="assign", account_id="nick@01", alias_scope="global"),
+        SeatResolution(seat=1, action="assign", account_id="70k@01", alias_id=alias.alias_id, alias_scope="match"),
+        SeatResolution(seat=2, action="assign", account_id="friend@01", alias_scope="global"),
+        SeatResolution(seat=3, action="create", display_name="Friend2", account_type="human", alias_scope="global"),
+    ]
+    resp = api.api_intake_confirm(
+        IntakeConfirmRequest(log_id="20260808gm-0009-2147-32af115e", resolutions=resolutions, session_id="s-acc-less")
+    )
+    seat1 = next(s for s in resp.match.seats if s.seat == 1)
+    assert seat1.account_id == "70k@01"
+    assert seat1.model_identity_id == identity.model_identity_id
+    assert seat1.model_artifact_id == identity.artifacts[0].model_artifact_id
+    # 人工对齐记录成 match-scoped 别名
+    match_aliases = [
+        a for a in aliases.list_aliases()
+        if a.external_id == "NoName-1" and a.scope == "match" and a.external_match_id == "20260808gm-0009-2147-32af115e"
+    ]
+    assert len(match_aliases) == 1 and match_aliases[0].account_id == "70k@01"
+
+
+def test_intake_accountless_alias_rejects_incompatible_account(four_account_ids, monkeypatch, tmp_path):
+    """account-less alias 人工选账号必须能使用该模型身份（70k@01 专属身份 → 选 friend@01 拒绝）。"""
+    from participants import aliases, intake, registry
+    from participants.schemas import ExternalAliasCreate, IntakeConfirmRequest, ModelIdentityCreate, SeatResolution
+
+    registry.create_model_identity(
+        ModelIdentityCreate(model_identity_id="model-70k", label="70k", kind="local_model", account_id="70k@01", artifact_path="checkpoints/70k.pth")
+    )
+    identity = registry.get_model_identity("model-70k")
+    aliases.register_alias_locked(
+        ExternalAliasCreate(
+            provider="tenhou", external_id="NoName-1", account_id=None,
+            model_identity_id=identity.model_identity_id,
+            model_artifact_id=identity.artifacts[0].model_artifact_id,
+            scope="session", session_id="s-bad",
+        )
+    )
+    monkeypatch.setattr(
+        intake, "download_tenhou6",
+        lambda log_id: {
+            "name": ["Nick", "NoName-1", "NoName-2", "FriendID"],
+            "rule": {"aka": True},
+            "log": [[[0, 0, 0], [25000, 25000, 25000, 25000], [], [], [], [], [], [], [], [], [], [], [], [], [], [], ["和了", [5000, -5000, 0, 0], [0, 1]]]],
+        },
+    )
+    alias = next(a for a in aliases.resolve_candidates("tenhou", "NoName-1", session_id="s-bad"))
+    resolutions = [
+        SeatResolution(seat=0, action="assign", account_id="nick@01", alias_scope="global"),
+        SeatResolution(seat=1, action="assign", account_id="friend@01", alias_id=alias.alias_id, alias_scope="match"),
+        SeatResolution(seat=2, action="assign", account_id="70k@01", alias_scope="global"),
+        SeatResolution(seat=3, action="create", display_name="Friend2", account_type="human", alias_scope="global"),
+    ]
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        api.api_intake_confirm(
+            IntakeConfirmRequest(log_id="20260808gm-0009-2147-32af115e", resolutions=resolutions, session_id="s-bad")
+        )
+    assert exc.value.status_code == 409

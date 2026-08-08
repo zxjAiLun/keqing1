@@ -559,3 +559,50 @@ def test_launcher_names_are_canonical(pw_env, tmp_path, monkeypatch):
     assert _names(sid3) == ["NoName-1", "NoName-2", "NoName-3"]
     pw.SESSIONS.clear()
     pw._HISTORY.clear()
+
+
+def test_model_only_launchers_no_account(pw_env):
+    """Play-with-you simplification：launchers 只呼出模型，session alias 不绑账号。"""
+    from participants import aliases
+
+    # 建两个身份/产物
+    from participants.schemas import ModelIdentityCreate
+
+    registry = __import__("participants.registry", fromlist=["create_model_identity"])
+    for name in ("v3.pth", "ext.pth"):
+        ck = pw_env / "checkpoints" / name
+        ck.parent.mkdir(parents=True, exist_ok=True)
+        ck.write_text("", encoding="utf-8")
+    registry.create_model_identity(
+        ModelIdentityCreate(model_identity_id="v3", label="V3", kind="local_model", artifact_path=str(pw_env / "checkpoints" / "v3.pth"))
+    )
+    registry.create_model_identity(
+        ModelIdentityCreate(model_identity_id="ext", label="External", kind="external_agent", artifact_path=str(pw_env / "checkpoints" / "ext.pth"))
+    )
+
+    from gateway.api.playwithyou import ParticipantBindingRequest, StartPlayWithYouRequest
+
+    req = StartPlayWithYouRequest(
+        launchers=[
+            ParticipantBindingRequest(model_identity_id="v3", model_artifact_id=registry.get_model_identity("v3").artifacts[0].model_artifact_id),
+            ParticipantBindingRequest(model_identity_id="ext", model_artifact_id=registry.get_model_identity("ext").artifacts[0].model_artifact_id),
+        ]
+    )
+    status = pw.start_playwithyou(req)
+    # session alias：NoName-1/NoName-2 → 模型事实，account_id=None
+    by_name = {
+        a.external_id: a
+        for a in aliases.list_aliases()
+        if a.scope == "session" and a.session_id == status.session_id
+    }
+    assert set(by_name) == {"NoName-1", "NoName-2"}
+    assert by_name["NoName-1"].account_id is None
+    assert by_name["NoName-1"].model_identity_id == "v3"
+    assert by_name["NoName-2"].model_identity_id == "ext"
+    # frozen roster 也在 status 里（含 checkpoint）
+    assert status.frozen_roster is not None
+    launched = [e for e in status.frozen_roster if e.get("launcher_slot") is not None]
+    assert len(launched) == 2
+    assert launched[0]["account_id"] is None
+    pw.SESSIONS.clear()
+    pw._HISTORY.clear()

@@ -18,8 +18,9 @@ export interface LadderCaptureRequest {
 }
 
 export interface ParticipantBindingRequest {
-  account_id: string;
-  controller_type: string;
+  // Play-with-you simplification：account/controller 可选（launchers 只带模型）
+  account_id?: string | null;
+  controller_type?: string | null;
   model_identity_id?: string | null;
   model_artifact_id?: string | null;
   launcher_slot?: number | null; // 本系统实际呼出的 slot；null = 不启动
@@ -30,7 +31,7 @@ export interface ParticipantBindingRequest {
 export interface StartPlayWithYouRequest {
   lobby_id: string;
   speed: SpeedId;
-  quantity: number;
+  quantity?: number;
   device: DeviceId;
   name_prefix?: string;
   tenhou_cookie?: string;
@@ -40,6 +41,7 @@ export interface StartPlayWithYouRequest {
   custom_paths?: Record<number, string>; // slot -> absolute .pth path
   ladder_capture?: LadderCaptureRequest;
   roster?: ParticipantBindingRequest[]; // R10-E 通用四人阵容（唯一启动模式）
+  launchers?: ParticipantBindingRequest[]; // Play-with-you simplification：只呼出模型（1-4 个），不预绑账号
 }
 
 export interface BotInfo {

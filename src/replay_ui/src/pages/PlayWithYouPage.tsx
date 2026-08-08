@@ -1,7 +1,7 @@
 // src/replay_ui/src/pages/PlayWithYouPage.tsx
-// "Play with you" — 四人对局配置（R10 UX Repair：roster 唯一启动模式）。
-// 每个 seat 直选 账号 / 控制器 / 是否由本系统呼出 / 模型身份 / 模型产物；
-// 正式天梯不再作为启动模式，改由赛后 Match intake/confirm/revise 决定。
+// "Play with you" — 呼出模型（Play-with-you simplification）。
+// 只负责「呼出哪些模型、几个 bot、进哪个房间」。账号是谁、实际東南西北是谁、
+// 记到谁名下、是否进正式天梯——全部由赛后 Tenhou Import 决定。
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { PageShell, SectionTitle } from "../components/Layout/PageScaffold";
@@ -13,29 +13,11 @@ import {
   type DeviceId,
   type BotInfo,
   type PlayWithYouStatus,
-  type ParticipantBindingRequest,
 } from "../api/playwithyouApi";
 import { participantsApi } from "../api/participantsApi";
-import type { Account as ParticipantAccount, ModelIdentity } from "../types/participants";
+import type { ModelIdentity } from "../types/participants";
 
 const ACCENT = "#8e44ad";
-
-type RosterBinding = {
-  account_id: string;
-  controller_type: string;
-  model_identity_id: string;
-  model_artifact_id: string;
-  launched: boolean;
-};
-
-const SEAT_WINDS = ["東", "南", "西", "北"];
-
-const CONTROLLER_OPTIONS = [
-  { value: "human_ui", label: "真人" },
-  { value: "local_model", label: "本地模型" },
-  { value: "external_agent", label: "外部代理" },
-  { value: "manual_only", label: "仅登记" },
-];
 
 const SPEED_OPTIONS: Array<{ value: SpeedId; label: string }> = [
   { value: "slow", label: "Slow" },
@@ -97,6 +79,11 @@ function Segmented<T extends string>({
   );
 }
 
+type LauncherRow = {
+  model_identity_id: string;
+  model_artifact_id: string;
+};
+
 export function PlayWithYouPage() {
   const [lobbyId, setLobbyId] = useState<string>("2147");
   const [speed, setSpeed] = useState<SpeedId>("normal");
@@ -106,14 +93,10 @@ export function PlayWithYouPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // R10 UX Repair：四人对局配置是唯一启动模式；seat 直选账号/控制器/模型。
-  const [roster, setRoster] = useState<RosterBinding[]>([
-    { account_id: "nick@01", controller_type: "human_ui", model_identity_id: "", model_artifact_id: "", launched: false },
-    { account_id: "70k@01", controller_type: "local_model", model_identity_id: "", model_artifact_id: "", launched: true },
-    { account_id: "70k@02", controller_type: "local_model", model_identity_id: "", model_artifact_id: "", launched: true },
-    { account_id: "", controller_type: "external_agent", model_identity_id: "", model_artifact_id: "", launched: false },
+  // Play-with-you simplification：只选择要呼出的模型（1-4 个）。
+  const [launchers, setLaunchers] = useState<LauncherRow[]>([
+    { model_identity_id: "", model_artifact_id: "" },
   ]);
-  const [accounts, setAccounts] = useState<ParticipantAccount[]>([]);
   const [identities, setIdentities] = useState<ModelIdentity[]>([]);
 
   const logRef = useRef<HTMLDivElement | null>(null);
@@ -131,7 +114,6 @@ export function PlayWithYouPage() {
       const s = await getPlayWithYouStatus();
       setStatus(s);
       if (s.running) {
-        // 运行中 → 确保 polling（覆盖 mount 恢复 / start 后的场景）
         if (!pollingRef.current) {
           pollingRef.current = window.setInterval(refresh, 2000);
         }
@@ -143,51 +125,40 @@ export function PlayWithYouPage() {
     }
   }, [stopPolling]);
 
-  const updateSeat = (index: number, patch: Partial<RosterBinding>) => {
-    setRoster((prev) => prev.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)));
+  const updateLauncher = (index: number, patch: Partial<LauncherRow>) => {
+    setLaunchers((prev) =>
+      prev.map((row, i) => (i === index ? { ...row, ...patch } : row)),
+    );
+  };
+
+  const addLauncher = () => {
+    setLaunchers((prev) => [...prev, { model_identity_id: "", model_artifact_id: "" }]);
+  };
+
+  const removeLauncher = (index: number) => {
+    setLaunchers((prev) => prev.filter((_, i) => i !== index));
   };
 
   const start = async () => {
     setLoading(true);
     setError(null);
     try {
-      const launchedSlots = roster
-        .map((entry, index) => (entry.launched ? index : null))
-        .filter((slot): slot is number => slot !== null);
-      if (launchedSlots.length === 0) {
-        throw new Error("至少需要一个「由本系统呼出」的座位");
+      const filled = launchers.filter(
+        (l) => l.model_identity_id && l.model_artifact_id,
+      );
+      if (filled.length === 0) {
+        throw new Error("请至少选择一个要呼出的模型");
       }
-      // P1-2/P1-3：launched 的 local_model 或 artifact-backed external_agent 都必须选模型
-      for (const index of launchedSlots) {
-        const entry = roster[index];
-        if (
-          (entry.controller_type === "local_model" || entry.controller_type === "external_agent") &&
-          (!entry.model_identity_id || !entry.model_artifact_id)
-        ) {
-          throw new Error(`座位「${SEAT_WINDS[index]}」需要选择模型身份与产物`);
-        }
-        if (!entry.account_id) {
-          throw new Error(`座位「${SEAT_WINDS[index]}」由本系统呼出，必须选择账号`);
-        }
-      }
-      const rosterPayload: ParticipantBindingRequest[] = roster.map((entry, index) => ({
-        account_id: entry.account_id,
-        controller_type: entry.controller_type,
-        model_identity_id: entry.model_identity_id || null,
-        model_artifact_id: entry.model_artifact_id || null,
-        launcher_slot: entry.launched ? index : null,
-        expected_raw_name: null, // P1-1：launcher 名称由后端按 launcher_slot 生成
-        resolution_required: !entry.account_id,
-      }));
       const s = await startPlayWithYou({
         lobby_id: lobbyId,
         speed,
-        quantity: launchedSlots.length,
         device,
-        roster: rosterPayload,
+        launchers: filled.map((l) => ({
+          model_identity_id: l.model_identity_id,
+          model_artifact_id: l.model_artifact_id,
+        })),
       });
       setStatus(s);
-      // 启动后立即刷新一次（POST /start 已带 frozen_roster）+ 保持 polling
       stopPolling();
       void refresh();
     } catch (e) {
@@ -213,21 +184,16 @@ export function PlayWithYouPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    Promise.all([
-      participantsApi.listAccounts(controller.signal),
-      participantsApi.listModels(controller.signal),
-    ])
-      .then(([accResp, modelResp]) => {
-        setAccounts(accResp.accounts);
-        setIdentities(modelResp.identities);
-      })
+    participantsApi
+      .listModels(controller.signal)
+      .then((resp) => setIdentities(resp.identities))
       .catch(() => {});
     return () => controller.abort();
   }, []);
 
   useEffect(() => stopPolling, [stopPolling]);
 
-  // P2（UX Repair 3）：mount 时恢复运行状态——F5 刷新后仍能看到 running / frozen roster
+  // mount 时恢复运行状态（F5 刷新后仍能看到 running / frozen roster）
   useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -238,10 +204,9 @@ export function PlayWithYouPage() {
 
   const isRunning = status?.running ?? false;
   const joinUrl = `https://tenhou.net/0/?${status?.lobby_id ?? lobbyId}`;
-  const launchedCount = roster.filter((entry) => entry.launched).length;
 
   return (
-    <PageShell width={1120}>
+    <PageShell width={960}>
       <div
         style={{
           display: "flex",
@@ -257,7 +222,7 @@ export function PlayWithYouPage() {
             Play with you · 天凤在线呼出
           </div>
           <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-            配置四人对局：每个座位直选账号 / 控制器 / 模型。正式天梯在赛后 Match 确认时决定，不再是启动选项。
+            只负责呼出模型进入天凤个室；账号/坐席/正式计分全部在赛后导入时决定。
           </div>
         </div>
         {isRunning ? (
@@ -276,7 +241,7 @@ export function PlayWithYouPage() {
             className="btn-primary"
             style={{ height: 34, padding: "0 16px", fontSize: 13, background: loading ? "var(--text-muted)" : ACCENT }}
           >
-            {loading ? "呼出中..." : "呼出账号"}
+            {loading ? "呼出中..." : `呼出 ${launchers.filter((l) => l.model_identity_id && l.model_artifact_id).length} 个 Bot`}
           </button>
         )}
       </div>
@@ -286,9 +251,8 @@ export function PlayWithYouPage() {
       )}
 
       <div className="card" style={{ padding: 14, marginBottom: 12 }}>
-        <SectionTitle title="四人对局配置" description="四个座位永远存在；勾选「由本系统呼出」的座位启动本地模型/外部代理。" />
+        <SectionTitle title="呼出设置" description="选择要进入天凤个室的模型（1-4 个）。" />
 
-        {/* Lobby + speed + device */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 12 }}>
           <div>
             <label style={labelStyle}>Tenhou Lobby ID</label>
@@ -307,23 +271,19 @@ export function PlayWithYouPage() {
               <Segmented options={SPEED_OPTIONS} value={speed} onChange={setSpeed} disabled={isRunning} />
               <Segmented options={DEVICE_OPTIONS} value={device} onChange={setDevice} disabled={isRunning} />
             </div>
-            <div style={hintStyle}>本系统呼出 {launchedCount} 个座位；Speed 在自己回合前的思考停顿。</div>
+            <div style={hintStyle}>Speed 在自己回合前的思考停顿，便于观战。</div>
           </div>
         </div>
 
-        {/* Roster rows */}
+        {/* 呼出模型列表 */}
+        <label style={labelStyle}>呼出模型（实际坐席由天凤牌谱决定，不是这里的顺序）</label>
         <div style={{ display: "grid", gap: 8 }}>
-          {roster.map((entry, index) => {
-            const relevantIdentities = identities.filter(
-              (m) => m.account_id === entry.account_id || m.account_id == null,
-            );
+          {launchers.map((row, index) => {
+            const relevantIdentities = identities;
             const chosenIdentity = relevantIdentities.find(
-              (m) => m.model_identity_id === entry.model_identity_id,
+              (m) => m.model_identity_id === row.model_identity_id,
             );
             const artifacts = chosenIdentity?.artifacts ?? [];
-            const showModel =
-              (entry.controller_type === "local_model" || entry.controller_type === "external_agent") &&
-              entry.launched;
             return (
               <div
                 key={index}
@@ -335,93 +295,64 @@ export function PlayWithYouPage() {
                   border: "1px solid var(--border)",
                   borderRadius: 8,
                   padding: "8px 10px",
-                  background: entry.launched ? "rgba(142,68,173,0.04)" : "var(--surface-subtle)",
+                  background: "var(--surface-subtle)",
                 }}
               >
-                <span style={{ width: 24, fontWeight: 800, color: "var(--text-muted)" }}>{SEAT_WINDS[index]}</span>
+                <span style={{ width: 24, fontWeight: 800, color: "var(--text-muted)" }}>#{index + 1}</span>
                 <select
-                  value={entry.account_id}
+                  value={row.model_identity_id}
                   disabled={isRunning}
-                  onChange={(e) => {
-                    const accountId = e.target.value;
-                    const acc = accounts.find((a) => a.account_id === accountId);
-                    updateSeat(index, {
-                      account_id: accountId,
-                      controller_type: acc?.default_controller ?? entry.controller_type,
-                      model_identity_id: "",
-                      model_artifact_id: "",
-                    });
-                  }}
-                  style={{ ...inputStyle, flex: 1, minWidth: 120 }}
+                  onChange={(e) =>
+                    updateLauncher(index, { model_identity_id: e.target.value, model_artifact_id: "" })
+                  }
+                  style={{ ...inputStyle, flex: 1, minWidth: 150 }}
                 >
-                  <option value="">选择账号…</option>
-                  {accounts.map((a) => (
-                    <option key={a.account_id} value={a.account_id}>
-                      {a.display_name}（{a.account_id}）{a.enabled ? "" : " · 停用"}
+                  <option value="">选择模型身份…</option>
+                  {relevantIdentities.map((m) => (
+                    <option key={m.model_identity_id} value={m.model_identity_id}>
+                      {m.label}{m.kind === "external_agent" ? "（外部）" : ""}
                     </option>
                   ))}
                 </select>
                 <select
-                  value={entry.controller_type}
-                  disabled={isRunning}
-                  onChange={(e) =>
-                    updateSeat(index, { controller_type: e.target.value, model_identity_id: "", model_artifact_id: "" })
-                  }
-                  style={inputStyle}
+                  value={row.model_artifact_id}
+                  disabled={isRunning || artifacts.length === 0}
+                  onChange={(e) => updateLauncher(index, { model_artifact_id: e.target.value })}
+                  style={{ ...inputStyle, flex: 1, minWidth: 150 }}
                 >
-                  {CONTROLLER_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
+                  <option value="">
+                    {artifacts.length === 0 ? "该身份无产物" : "选择模型产物…"}
+                  </option>
+                  {artifacts.map((art) => (
+                    <option key={art.model_artifact_id} value={art.model_artifact_id}>
+                      {art.label}{art.is_current ? "（当前）" : ""} · {shortSpec(art.artifact_path ?? "")}
+                    </option>
                   ))}
                 </select>
-                <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, whiteSpace: "nowrap" }}>
-                  <input
-                    type="checkbox"
-                    checked={entry.launched}
+                {launchers.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => removeLauncher(index)}
                     disabled={isRunning}
-                    onChange={(e) => updateSeat(index, { launched: e.target.checked })}
-                  />
-                  由本系统呼出
-                </label>
-                {showModel && (
-                  <>
-                    <select
-                      value={entry.model_identity_id}
-                      disabled={isRunning}
-                      onChange={(e) =>
-                        updateSeat(index, { model_identity_id: e.target.value, model_artifact_id: "" })
-                      }
-                      style={{ ...inputStyle, flex: 1, minWidth: 130 }}
-                    >
-                      <option value="">选择模型身份…</option>
-                      {relevantIdentities.map((m) => (
-                        <option key={m.model_identity_id} value={m.model_identity_id}>
-                          {m.label}{m.account_id == null ? "（全局）" : ""}
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      value={entry.model_artifact_id}
-                      disabled={isRunning || artifacts.length === 0}
-                      onChange={(e) => updateSeat(index, { model_artifact_id: e.target.value })}
-                      style={{ ...inputStyle, flex: 1, minWidth: 130 }}
-                    >
-                      <option value="">
-                        {artifacts.length === 0 ? "该身份无产物" : "选择模型产物…"}
-                      </option>
-                      {artifacts.map((art) => (
-                        <option key={art.model_artifact_id} value={art.model_artifact_id}>
-                          {art.label}{art.is_current ? "（当前）" : ""} · {shortSpec(art.artifact_path ?? "")}
-                        </option>
-                      ))}
-                    </select>
-                  </>
+                    style={ghostSmallBtn}
+                  >
+                    移除
+                  </button>
                 )}
               </div>
             );
           })}
         </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+          {launchers.length < 4 && (
+            <button type="button" onClick={addLauncher} disabled={isRunning} style={ghostSmallBtn}>
+              + 添加一个 Bot
+            </button>
+          )}
+        </div>
         <div style={hintStyle}>
-          由本系统呼出 = false 的座位为真人 / 外部 Mortal / 朋友：赛后通过 Tenhou name / session 别名 / 人工 resolve 绑定。
+          每个模型对应一个被呼出的 bot（天凤名 NoName / NoName-1 / NoName-2…）。
+          赛后 Tenhou Import 时人工/自动确认账号。
         </div>
       </div>
 
@@ -476,7 +407,7 @@ export function PlayWithYouPage() {
             </div>
           )}
 
-          {/* 已配置阵容（呼出后展示 NoName ↔ 账号 ↔ 模型） */}
+          {/* 本次启动的模型（不是账号事实；账号在赛后导入决定） */}
           {isRunning && (
             <div
               style={{
@@ -490,7 +421,9 @@ export function PlayWithYouPage() {
                 color: "var(--text-secondary)",
               }}
             >
-              <div style={{ fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>已配置阵容（session 冻结）</div>
+              <div style={{ fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>
+                本次启动的模型（session 冻结；账号/坐席由赛后导入决定）
+              </div>
               {(status.frozen_roster ?? []).length > 0
                 ? status.frozen_roster!.map((entry, index) => {
                     if (entry.launcher_slot === null || entry.launcher_slot === undefined) return null;
@@ -498,21 +431,24 @@ export function PlayWithYouPage() {
                     const artifact = identity?.artifacts.find((a) => a.model_artifact_id === entry.model_artifact_id);
                     return (
                       <div key={index} style={{ padding: "2px 0" }}>
-                        {SEAT_WINDS[entry.launcher_slot as number]} · <b>{entry.account_id}</b> → {entry.expected_raw_name}
+                        <b>{entry.expected_raw_name}</b>
                         {identity && (
                           <span style={{ color: "var(--text-muted)" }}>
-                            {" "}· {identity.label}
+                            {" "}→ {identity.label}
                             {artifact ? ` / ${artifact.label}` : ""}
                           </span>
                         )}
                       </div>
                     );
                   })
-                : roster.map((entry, index) => {
-                    if (!entry.launched) return null;
+                : launchers.map((row, index) => {
+                    const identity = identities.find((m) => m.model_identity_id === row.model_identity_id);
                     return (
                       <div key={index} style={{ padding: "2px 0" }}>
-                        {SEAT_WINDS[index]} · <b>{entry.account_id}</b> → NoName
+                        {index === 0 && launchers.filter((l) => l.model_identity_id && l.model_artifact_id).length === 1
+                          ? "NoName"
+                          : `NoName-${index + 1}`}
+                        {identity && <span style={{ color: "var(--text-muted)" }}> → {identity.label}</span>}
                       </div>
                     );
                   })}
@@ -568,4 +504,15 @@ const inputStyle: CSSProperties = {
   padding: "0 10px",
   fontSize: 13,
   boxSizing: "border-box",
+};
+
+const ghostSmallBtn: CSSProperties = {
+  border: "1px solid var(--border)",
+  background: "transparent",
+  color: "var(--text-secondary)",
+  borderRadius: 4,
+  fontSize: 12,
+  padding: "4px 10px",
+  cursor: "pointer",
+  whiteSpace: "nowrap",
 };

@@ -199,6 +199,28 @@ def _game_length_from_hands(hands: list[dict]) -> str:
 # Preview（不落账）
 # ---------------------------------------------------------------------------
 
+def _auto_account_id(candidates: list, registry) -> str | None:
+    """候选唯一且 confirmed → 自动账号。
+
+    - 候选绑定账号 → 直接用；
+    - Play-with-you simplification：session alias 只带模型（无账号）→ 若该
+      模型身份只有唯一可绑定账号则自动建议；否则 None（人工选择）。
+    """
+    if len(candidates) != 1 or candidates[0].confidence != "confirmed":
+        return None
+    if candidates[0].account_id:
+        return candidates[0].account_id
+    identity_id = candidates[0].model_identity_id
+    if not identity_id:
+        return None
+    eligible = [
+        a.account_id
+        for a in registry.list_accounts()
+        if registry.identity_belongs_to_account(identity_id, a.account_id)
+    ]
+    return eligible[0] if len(eligible) == 1 else None
+
+
 def build_preview(text: str, *, session_id: str | None = None) -> dict:
     """解析 + 下载 + 生成不落账的 preview，含逐座候选身份。"""
     parsed = parse_tenhou_url(text)
@@ -222,9 +244,7 @@ def build_preview(text: str, *, session_id: str | None = None) -> dict:
                 "seat": seat,
                 "raw_name": name,
                 "candidates": [c.model_dump() for c in candidates],
-                "auto_account_id": (
-                    candidates[0].account_id if len(candidates) == 1 and candidates[0].confidence == "confirmed" else None
-                ),
+                "auto_account_id": _auto_account_id(candidates, registry),
             }
         )
     return {
@@ -409,7 +429,8 @@ def _resolve_seat(
         if alias is None:
             raise ValueError(f"座位 {seat_no} 的别名不适用于当前牌谱/会话/玩家: {alias_id}")
         # alias 为权威；请求携带冲突字段 → 拒绝而不是覆盖
-        if raw_res.get("account_id") and raw_res.get("account_id") != alias.account_id:
+        # （account-less alias 无账号：请求的 account_id 是人工指派，不算冲突）
+        if alias.account_id and raw_res.get("account_id") and raw_res.get("account_id") != alias.account_id:
             raise ValueError(f"座位 {seat_no} 的 account_id 与别名绑定冲突")
         req_identity = raw_res.get("model_identity_id")
         req_artifact = raw_res.get("model_artifact_id")
@@ -420,14 +441,34 @@ def _resolve_seat(
         account_id = alias.account_id
         model_identity_id = alias.model_identity_id
         model_artifact_id = alias.model_artifact_id
-        # 别名指向的账号必须存在且启用（P1-3 stale alias）
-        account = registry.get_account(account_id)
-        if account is None:
-            raise ValueError(f"别名绑定的账号已不存在: {account_id}")
-        if not account.enabled:
-            raise ValueError(f"别名绑定的账号已停用: {account_id}")
+        if account_id:
+            # 别名绑定了账号：权威自动解析
+            account = registry.get_account(account_id)
+            if account is None:
+                raise ValueError(f"别名绑定的账号已不存在: {account_id}")
+            if not account.enabled:
+                raise ValueError(f"别名绑定的账号已停用: {account_id}")
+            alias_to_register = None  # 消费已有 alias 时不再创建新别名
+        else:
+            # Play-with-you simplification：session alias 只带模型事实，账号由人工/唯一推断选择。
+            # 请求必须提供 account_id（不可缺省），且所选账号必须能使用该模型身份。
+            account_id = raw_res.get("account_id")
+            account = registry.get_account(account_id) if account_id else None
+            if account is None:
+                raise ValueError(f"座位 {seat_no}（{name}）需要人工指派账号（本次运行模型已冻结）")
+            if not account.enabled:
+                raise ValueError(f"账号已停用: {account_id}")
+            if model_identity_id and not registry.identity_belongs_to_account(model_identity_id, account_id):
+                raise ValueError(f"账号 {account_id} 不能使用本次运行模型身份 {model_identity_id}")
+            # 记录人工对齐：用户选择保留时才注册（默认 match 作用域）
+            if alias_scope not in (None, "none"):
+                alias_to_register = _build_alias(
+                    name=name, account_id=account_id, seat_no=seat_no,
+                    model_identity_id=model_identity_id, model_artifact_id=model_artifact_id,
+                    alias_scope=alias_scope, confidence=confidence,
+                    session_id=session_id, external_match_id=external_match_id,
+                )
         controller_type = raw_res.get("default_controller") or account.default_controller
-        alias_to_register = None  # 消费已有 alias 时不再创建新别名
     elif action == "create":
         display_name = raw_res.get("display_name") or name or f"seat{seat_no + 1}"
         slug = "".join(ch.lower() if (ch.isalnum() or ch in "-_") else ("-" if ch.isspace() else "") for ch in display_name.strip())
