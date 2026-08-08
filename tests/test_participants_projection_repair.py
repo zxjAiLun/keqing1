@@ -18,6 +18,12 @@ SEASON = "official-ladder-v1"
 def participants_root(tmp_path, monkeypatch):
     root = tmp_path / "participants"
     monkeypatch.setenv("KEQING_PARTICIPANT_DATA_ROOT", str(root))
+    # 正式资格 gate 需要有效赛季配置（测试账号全部为成员）
+    configs = tmp_path / "configs"
+    configs.mkdir(exist_ok=True)
+    season_cfg = _season_config(tmp_path)
+    (configs / f"{SEASON}.json").write_text(json.dumps(season_cfg, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("KEQING_LADDER_CONFIG_DIR", str(configs))
     return root
 
 
@@ -63,15 +69,15 @@ def _season_config(tmp_path, *, exclusive=True) -> dict:
             "participants": {"enabled": True, "exclusive": exclusive},
         },
         "models": [
+            {"model_id": "human", "accounts": [{"account_id": "nick@01"}]},
             {
                 "model_id": "70k",
                 "accounts": [
-                    {"account_id": "nick@01"},
                     {"account_id": "70k@01"},
                     {"account_id": "70k@02"},
                     {"account_id": "70k@03"},
                 ],
-            }
+            },
         ],
     }
 
@@ -165,8 +171,17 @@ def test_project_season_lost_update_keeps_dirty(participants_root, monkeypatch, 
 # P1-3：season move → 双 dirty / 显式清空
 # ---------------------------------------------------------------------------
 
-def test_revise_season_move_dirty_both(participants_root):
+def test_revise_season_move_dirty_both(participants_root, monkeypatch, tmp_path):
     _accounts()
+    # 正式资格 gate 要求 season 存在：为 season-a / season-b 建配置（含成员）
+    configs = tmp_path / "configs"
+    configs.mkdir(exist_ok=True)
+    for sid in ("season-a", "season-b"):
+        cfg = _season_config(tmp_path)
+        cfg["season_id"] = sid
+        (configs / f"{sid}.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("KEQING_LADDER_CONFIG_DIR", str(configs))
+
     match = ledger.create_match(_match_create(season_id="season-a"), registry)
     ledger.clear_ladder_dirty("season-a")
     assert not ledger.ladder_dirty_path("season-b").exists()

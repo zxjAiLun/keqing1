@@ -65,6 +65,8 @@ export const participantsApi = {
     api('/participants/models', { method: 'POST', body: JSON.stringify(payload) }),
   addModelArtifact: (modelIdentityId: string, payload: ModelArtifactCreate): Promise<ModelArtifact> =>
     api(`/participants/models/${encodeURIComponent(modelIdentityId)}/artifacts`, { method: 'POST', body: JSON.stringify(payload) }),
+  setCurrentArtifact: (modelIdentityId: string, artifactId: string): Promise<ModelArtifact> =>
+    api(`/participants/models/${encodeURIComponent(modelIdentityId)}/artifacts/${encodeURIComponent(artifactId)}/current`, { method: 'POST' }),
 
   // ---- 对局账本 ----
   listMatches: (params: {

@@ -238,6 +238,9 @@ export interface IntakeConfirmRequest {
   resolutions: SeatResolution[];
   session_id?: string | null;
   note?: string | null;
+  // R10 UX Repair P1-6：正式天梯由 confirm 决定
+  season_id?: string | null;
+  rating_eligible?: boolean | null;
 }
 
 export interface LadderProjectionStatus {

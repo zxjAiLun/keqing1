@@ -1,12 +1,13 @@
 // src/replay_ui/src/pages/ParticipantsPage.tsx
-// R10：参赛者管理 —— 账号 + 模型身份/产物。
+// R10：参赛者管理 —— 账号 + 模型身份/产物（R10 UX Repair P1-4：artifact 管理）。
 import { useCallback, useEffect, useState } from 'react';
 import { PageHeader, PageShell } from '../components/Layout/PageScaffold';
 import { AccountTable } from '../components/Participants/AccountTable';
 import { AccountFormModal } from '../components/Participants/AccountFormModal';
 import { ModelFormModal } from '../components/Participants/ModelFormModal';
+import { MODEL_PRESETS } from '../components/Participants/modelPresets';
 import { participantsApi } from '../api/participantsApi';
-import type { Account, AccountCreate, AccountStatsResponse, ModelIdentity } from '../types/participants';
+import type { Account, AccountCreate, AccountStatsResponse, ModelArtifactCreate, ModelIdentity } from '../types/participants';
 
 export function ParticipantsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -20,6 +21,67 @@ export function ParticipantsPage() {
   const [statsAccount, setStatsAccount] = useState('');
   const [stats, setStats] = useState<AccountStatsResponse | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
+  // R10 UX Repair P1-4：artifact 管理（添加产物表单）
+  const [addingArtifactFor, setAddingArtifactFor] = useState<string | null>(null);
+  const [artifactPreset, setArtifactPreset] = useState('');
+  const [artifactLabel, setArtifactLabel] = useState('');
+  const [artifactPath, setArtifactPath] = useState('');
+  const [artifactBusy, setArtifactBusy] = useState(false);
+
+  const refreshModels = useCallback(async () => {
+    try {
+      const resp = await participantsApi.listModels();
+      setIdentities(resp.identities);
+    } catch {
+      /* transient */
+    }
+  }, []);
+
+  const openAddArtifact = (identityId: string) => {
+    setAddingArtifactFor(identityId);
+    setArtifactPreset('');
+    setArtifactLabel('');
+    setArtifactPath('');
+  };
+
+  const applyArtifactPreset = (presetId: string) => {
+    setArtifactPreset(presetId);
+    const preset = MODEL_PRESETS.find((p) => p.id === presetId);
+    if (preset) {
+      setArtifactLabel(preset.label);
+      setArtifactPath(preset.artifact_path);
+    }
+  };
+
+  const addArtifact = async () => {
+    if (!addingArtifactFor || !artifactLabel.trim()) return;
+    setArtifactBusy(true);
+    try {
+      const payload: ModelArtifactCreate = {
+        label: artifactLabel.trim(),
+        artifact_path: artifactPath.trim() || null,
+      };
+      await participantsApi.addModelArtifact(addingArtifactFor, payload);
+      setAddingArtifactFor(null);
+      await refreshModels();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setArtifactBusy(false);
+    }
+  };
+
+  const setCurrentArtifact = async (identityId: string, artifactId: string) => {
+    setArtifactBusy(true);
+    try {
+      await participantsApi.setCurrentArtifact(identityId, artifactId);
+      await refreshModels();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setArtifactBusy(false);
+    }
+  };
 
   const loadStats = useCallback(async (accountId: string) => {
     if (!accountId) return;
@@ -161,21 +223,83 @@ export function ParticipantsPage() {
         <section style={cardStyle}>
           <div style={cardHeaderStyle}>
             <span style={{ fontWeight: 800 }}>模型身份（{identities.length}）</span>
+            <button style={primaryBtn} onClick={() => setCreatingModel(true)}>新建模型身份</button>
           </div>
           <div style={{ display: 'grid', gap: 8 }}>
             {identities.map((identity) => (
               <div key={identity.model_identity_id} style={modelRowStyle}>
-                <div>
+                <div style={{ minWidth: 180 }}>
                   <div style={{ fontWeight: 700 }}>{identity.label}</div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                     {identity.model_identity_id} · {identity.kind}
                     {identity.account_id ? ` · ${identity.account_id}` : ' · 全局'}
                   </div>
                 </div>
-                <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                  {identity.artifacts.length > 0
-                    ? identity.artifacts.map((a) => `${a.label}${a.is_current ? '（当前）' : ''}`).join(' / ')
-                    : '无产物（外部代理或仅身份）'}
+                {/* 产物列表（R10 UX Repair P1-4） */}
+                <div style={{ flex: 1, display: 'grid', gap: 4, fontSize: 12 }}>
+                  {identity.artifacts.length === 0 && (
+                    <div style={{ color: 'var(--text-muted)' }}>无产物（外部代理或仅身份）</div>
+                  )}
+                  {identity.artifacts.map((art) => (
+                    <div key={art.model_artifact_id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontWeight: 700, color: art.is_current ? 'var(--accent)' : 'var(--text-primary)' }}>
+                        {art.label}{art.is_current ? '（当前）' : ''}
+                      </span>
+                      <code style={{ color: 'var(--text-muted)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {art.artifact_path ?? '—'}
+                      </code>
+                      {!art.is_current && (
+                        <button
+                          type="button"
+                          onClick={() => void setCurrentArtifact(identity.model_identity_id, art.model_artifact_id)}
+                          disabled={artifactBusy}
+                          style={ghostSmallBtn}
+                        >
+                          设为当前
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  {/* 添加产物 */}
+                  {addingArtifactFor === identity.model_identity_id ? (
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginTop: 4 }}>
+                      <select
+                        value={artifactPreset}
+                        onChange={(e) => applyArtifactPreset(e.target.value)}
+                        style={smallInput}
+                      >
+                        <option value="">使用预置…</option>
+                        {MODEL_PRESETS.map((p) => (
+                          <option key={p.id} value={p.id}>{p.label}</option>
+                        ))}
+                      </select>
+                      <input
+                        value={artifactLabel}
+                        onChange={(e) => setArtifactLabel(e.target.value)}
+                        placeholder="产物名称"
+                        style={{ ...smallInput, width: 120 }}
+                      />
+                      <input
+                        value={artifactPath}
+                        onChange={(e) => setArtifactPath(e.target.value)}
+                        placeholder="checkpoint 路径"
+                        style={{ ...smallInput, flex: 1, minWidth: 200 }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void addArtifact()}
+                        disabled={artifactBusy || !artifactLabel.trim()}
+                        style={ghostSmallBtn}
+                      >
+                        添加
+                      </button>
+                      <button type="button" onClick={() => setAddingArtifactFor(null)} style={ghostSmallBtn}>取消</button>
+                    </div>
+                  ) : (
+                    <button type="button" onClick={() => openAddArtifact(identity.model_identity_id)} style={ghostSmallBtn}>
+                      + 添加产物
+                    </button>
+                  )}
                 </div>
               </div>
             ))}
@@ -226,6 +350,16 @@ const ghostBtn: React.CSSProperties = {
 const modelRowStyle: React.CSSProperties = {
   display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
   border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px',
+};
+
+const ghostSmallBtn: React.CSSProperties = {
+  border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-secondary)',
+  borderRadius: 4, fontSize: 11, padding: '3px 8px', cursor: 'pointer', whiteSpace: 'nowrap',
+};
+
+const smallInput: React.CSSProperties = {
+  border: '1px solid var(--border)', background: 'var(--page-bg)', color: 'var(--text-primary)',
+  borderRadius: 4, padding: '4px 8px', fontSize: 12, boxSizing: 'border-box',
 };
 
 function fmt(value: number | null | undefined, percent = false): string {

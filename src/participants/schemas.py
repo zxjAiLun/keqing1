@@ -189,6 +189,9 @@ class IntakeConfirmRequest(BaseModel):
     resolutions: list[SeatResolution]
     session_id: str | None = None
     note: str | None = None
+    # R10 UX Repair P1-6：正式天梯由 intake/confirm/revise 决定，不再是启动模式
+    season_id: str | None = None
+    rating_eligible: bool | None = None
 
 
 class MatchSeat(BaseModel):

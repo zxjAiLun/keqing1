@@ -31,13 +31,15 @@ export interface StartPlayWithYouRequest {
   lobby_id: string;
   speed: SpeedId;
   quantity: number;
-  networks: string[]; // length 4, slot 0..3
-  custom_paths: Record<number, string>; // slot -> absolute .pth path
   device: DeviceId;
   name_prefix?: string;
   tenhou_cookie?: string;
+  // R10 UX Repair：生产 UI 不再发送旧 networks/custom_paths/ladder_capture；
+  // 保留为 backend compatibility（旧 launcher spec 只做兼容映射，不做 UI truth）。
+  networks?: string[]; // length 4, slot 0..3
+  custom_paths?: Record<number, string>; // slot -> absolute .pth path
   ladder_capture?: LadderCaptureRequest;
-  roster?: ParticipantBindingRequest[]; // R10-E 通用四人阵容
+  roster?: ParticipantBindingRequest[]; // R10-E 通用四人阵容（唯一启动模式）
 }
 
 export interface BotInfo {
@@ -63,6 +65,15 @@ export interface PlayWithYouStatus {
   log_tail: string[];
   started_at: number | null;
   ladder_capture?: LadderCaptureView | null;
+  // R10 UX Repair 2：roster 模式冻结阵容（后端为名字真相源）
+  frozen_roster?: Array<{
+    account_id: string;
+    controller_type?: string | null;
+    model_identity_id?: string | null;
+    model_artifact_id?: string | null;
+    launcher_slot?: number | null;
+    expected_raw_name?: string | null;
+  }> | null;
 }
 
 export interface LadderCaptureEntry {

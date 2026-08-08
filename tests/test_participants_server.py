@@ -223,3 +223,66 @@ def test_intake_confirm_endpoint(four_account_ids, monkeypatch):
     assert replay["replay_id"] == "20260804gm-0009-2147-32af115e"
     assert replay["has_events"] is True
     assert replay["match_id"] == resp.match.match_id
+
+
+def test_intake_confirm_with_ladder_eligibility(four_account_ids, monkeypatch, tmp_path):
+    """R10 UX Repair P1-6：confirm 时 season_id+rating_eligible → Match 带赛季 + 标 dirty。"""
+    import json as _json
+
+    from participants import intake, ledger
+    from participants.schemas import IntakeConfirmRequest, SeatResolution
+
+    # 正式资格 gate 需要有效赛季配置（账号全部为成员）
+    configs = tmp_path / "configs"
+    configs.mkdir(exist_ok=True)
+    season_cfg = {
+        "schema": "keqing.ladder.season.v1",
+        "season_id": "official-ladder-v1",
+        "report_dir": "artifacts/ladder/reports/official-ladder-v1",
+        "status": "running",
+        "scoring": {"system": "tenhou_rank_progression"},
+        "ingest": {"sources_root": str(tmp_path / "sources"), "participants": {"enabled": True, "exclusive": True}},
+        "models": [
+            {
+                "model_id": "human",
+                "accounts": [
+                    {"account_id": "nick@01"},
+                    {"account_id": "friend@01"},
+                    {"account_id": "70k@01"},
+                    {"account_id": "mortal41b"},
+                ],
+            }
+        ],
+    }
+    (configs / "official-ladder-v1.json").write_text(_json.dumps(season_cfg, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("KEQING_LADDER_CONFIG_DIR", str(configs))
+
+    monkeypatch.setattr(
+        intake, "download_tenhou6",
+        lambda log_id: {
+            "name": ["Nick", "NoName-1", "NoName-2", "FriendID"],
+            "rule": {"aka": True},
+            "log": [
+                [[0, 0, 0], [25000, 25000, 25000, 25000], [], [], [], [], [], [], [], [], [], [], [], [], [], [], ["和了", [5000, -5000, 0, 0], [0, 1]]],
+            ],
+        },
+    )
+    resolutions = [
+        SeatResolution(seat=0, action="assign", account_id="nick@01", alias_scope="global"),
+        SeatResolution(seat=1, action="assign", account_id="70k@01", alias_scope="global"),
+        SeatResolution(seat=2, action="assign", account_id="friend@01", alias_scope="global"),
+        SeatResolution(seat=3, action="assign", account_id="mortal41b", alias_scope="global"),
+    ]
+    resp = api.api_intake_confirm(
+        IntakeConfirmRequest(
+            log_id="20260807gm-0009-2147-32af115e",
+            resolutions=resolutions,
+            season_id="official-ladder-v1",
+            rating_eligible=True,
+        )
+    )
+    assert resp.match.season_id == "official-ladder-v1"
+    assert resp.match.rating_eligible is True
+    assert resp.match.ladder_projection_state == "pending"
+    # 锁内标 dirty（durable outbox）：赛季天梯待重算
+    assert ledger.ladder_dirty_path("official-ladder-v1").exists()

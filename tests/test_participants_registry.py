@@ -154,3 +154,24 @@ def test_identity_reference_blocks_hard_delete():
     result = registry.delete_account("a@02", referenced=True)
     assert result["disabled"] is True
     assert registry.get_account("a@02").enabled is False
+
+
+def test_set_current_artifact_demotes_others():
+    """R10 UX Repair P1-4：显式把指定 artifact 设为 current，其余降级。"""
+    registry.create_account(AccountCreate(account_id="70k@01", display_name="70k", account_type="managed_bot"))
+    identity = registry.create_model_identity(
+        ModelIdentityCreate(label="70k", kind="local_model", account_id="70k@01", artifact_path="ckpt-a.pth")
+    )
+    art_b = registry.add_model_artifact(identity.model_identity_id, ModelArtifactCreate(label="b", artifact_path="ckpt-b.pth"))
+    art_a = identity.artifacts[0]
+
+    # 当前 current 是 b（新增自动设 current）；把 a 设为 current → a 是唯一 current
+    registry.set_current_model_artifact(identity.model_identity_id, art_a.model_artifact_id)
+    refreshed = registry.get_model_identity(identity.model_identity_id)
+    current = [art for art in refreshed.artifacts if art.is_current]
+    assert len(current) == 1 and current[0].model_artifact_id == art_a.model_artifact_id
+    assert not any(art.model_artifact_id == art_b.model_artifact_id and art.is_current for art in refreshed.artifacts)
+
+    # 不存在的 artifact → 404 语义（KeyError）
+    with pytest.raises(KeyError):
+        registry.set_current_model_artifact(identity.model_identity_id, "nope")

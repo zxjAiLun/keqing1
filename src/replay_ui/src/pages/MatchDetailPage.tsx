@@ -86,6 +86,11 @@ export function MatchDetailPage() {
     if (!data) return;
     setError(null);
     setIssues([]);
+    // P1-2（UX Repair 2）：rating_eligible=true 必须指定非空赛季
+    if (ratingEligible && !seasonId.trim()) {
+      setError('「纳入正式天梯计分」必须指定赛季（season_id 不能为空）');
+      return;
+    }
     try {
       await participantsApi.reviseMatch(data.match.match_id, {
         seats,

@@ -532,6 +532,8 @@ def resolve_and_create_match(
     resolutions: list[dict],
     session_id: str | None = None,
     note: str | None = None,
+    season_id: str | None = None,
+    rating_eligible: bool | None = None,
 ) -> dict:
     """按用户逐座决议落账（P1-2 原子事务 + 锁内唯一键）。
 
@@ -590,6 +592,12 @@ def resolve_and_create_match(
             resolution_audit[str(seat.seat)] = audit
         if len({s.account_id for s in seats}) != 4:
             raise ValueError("四个座位不能指向同一账号")
+        # P1-2：正式计分 → 正式赛季资格 gate（rating_eligible ⇒ 必填 season + 校验）
+        # 返回值是 trim 后的规范 season_id，必须回写（防止空白 season 绕过投影）
+        if rating_eligible:
+            from .ladder_eligibility import ensure_ladder_eligibility
+
+            season_id = ensure_ladder_eligibility(season_id, seats, registry=registry)
 
         # 全部校验通过后才写 staging（P2-2：校验失败不残留 staging）
         staging = _staging_dir(log_id)
@@ -603,6 +611,11 @@ def resolve_and_create_match(
 
         now = now_iso()
         match_id = ledger.generate_match_id()
+        # R10 UX Repair P1-6：confirm 阶段决定是否计入正式天梯（season + rating_eligible）
+        if season_id and rating_eligible:
+            projection_state = "pending"
+        else:
+            projection_state = "not_applicable"
         match = Match(
             match_id=match_id,
             occurred_at=preview["occurred_at"],
@@ -622,6 +635,9 @@ def resolve_and_create_match(
             seats=seats,
             final_scores=preview["final_scores"],
             ranks=list(ledger.final_ranks(preview["final_scores"], initial_oya=0)),
+            season_id=season_id,
+            rating_eligible=bool(rating_eligible),
+            ladder_projection_state=projection_state,
             revision=1,
             latest_revision_id=ledger.generate_revision_id(match_id, 1),
             created_at=now,
@@ -654,12 +670,16 @@ def resolve_and_create_match(
         }
         atomic_write_text(ledger.pending_transaction_path(), json.dumps(pending, ensure_ascii=False))
 
-        # 提交：账号 → 别名 → revision → match → artifact promote
+        # 提交：账号 → 别名 → dirty（P1-1 durable outbox：先标 dirty 再提交）
+        # → revision → match → artifact promote
         # 初始创建用严格版（_resolve_seat 已锁内确认 ID 不存在）
         for acc in accounts_to_create:
             registry.create_account_locked(acc)
         for alias in aliases_to_register:
             aliases.register_alias_locked(alias)
+        # P1-1：eligible Match 的 dirty generation 必须先于 revision/Match 提交，
+        # 崩溃在提交后也只多 rebuild 一次，不会永久漏投影。
+        ledger.mark_ladder_dirty(season_id)
         ledger._append_revision(revision_row, fsync=True)
         ledger._rewrite_match(match)
         # 回填真实 match_id 到 artifact summary
@@ -686,6 +706,9 @@ def recover_intake_transaction_locked(tx: dict) -> None:
     for raw in tx.get("aliases", []):
         aliases.register_alias_locked(ExternalAliasCreate.model_validate(raw))
     match = Match.model_validate(tx["match"])
+    # P1-1：恢复时补标 dirty——进程可能死在 rewrite 与 dirty 之间（eligible Match
+    # 恢复后必须产生 generation，否则 worker 永远看不到它）。
+    ledger.mark_ladder_dirty(match.season_id)
     revision_row = tx["revision"]
     if not any(row.get("revision_id") == revision_row["revision_id"] for row in ledger._read_revision_rows()):
         ledger._append_revision(revision_row, fsync=True)

@@ -14,6 +14,38 @@ from participants.schemas import AccountCreate, MatchCreate, MatchRevise, MatchS
 def participants_root(tmp_path, monkeypatch):
     root = tmp_path / "participants"
     monkeypatch.setenv("KEQING_PARTICIPANT_DATA_ROOT", str(root))
+    # 正式资格 gate 需要有效赛季配置（测试账号全部为成员）：
+    # 避免落到仓库版本化赛季（无 70k@03）导致 eligible Match 创建被拒。
+    configs = tmp_path / "configs"
+    configs.mkdir(exist_ok=True)
+    season_cfg = {
+        "schema": "keqing.ladder.season.v1",
+        "season_id": SEASON,
+        "report_dir": "artifacts/ladder/reports/official-ladder-v1",
+        "status": "running",
+        "scoring": {"system": "tenhou_rank_progression"},
+        "ingest": {
+            "sources_root": str(tmp_path / "sources"),
+            "participants": {"enabled": True, "exclusive": True},
+        },
+        "models": [
+            {"model_id": "human", "accounts": [{"account_id": "nick@01"}]},
+            {
+                "model_id": "70k",
+                "accounts": [
+                    {"account_id": "70k@01"},
+                    {"account_id": "70k@02"},
+                    {"account_id": "70k@03"},
+                ],
+            },
+        ],
+    }
+    (configs / f"{SEASON}.json").write_text(json.dumps(season_cfg, ensure_ascii=False), encoding="utf-8")
+    # adapter 过滤测试用到 other-season：为它建同结构配置（gate 要求赛季存在）
+    other_cfg = dict(season_cfg)
+    other_cfg["season_id"] = "other-season"
+    (configs / "other-season.json").write_text(json.dumps(other_cfg, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("KEQING_LADDER_CONFIG_DIR", str(configs))
     return root
 
 
@@ -101,7 +133,7 @@ def test_project_season_api_success(participants_root, monkeypatch, tmp_path):
     match = ledger.create_match(_match_create(), registry)
 
     configs = tmp_path / "configs"
-    configs.mkdir()
+    configs.mkdir(exist_ok=True)
     season_cfg = {
         "schema": "keqing.ladder.season.v1",
         "season_id": SEASON,
@@ -112,7 +144,17 @@ def test_project_season_api_success(participants_root, monkeypatch, tmp_path):
             "sources_root": str(tmp_path / "sources"),
             "participants": {"enabled": True, "exclusive": True},
         },
-        "models": [],
+        "models": [
+            {"model_id": "human", "accounts": [{"account_id": "nick@01"}]},
+            {
+                "model_id": "70k",
+                "accounts": [
+                    {"account_id": "70k@01"},
+                    {"account_id": "70k@02"},
+                    {"account_id": "70k@03"},
+                ],
+            },
+        ],
     }
     (configs / f"{SEASON}.json").write_text(json.dumps(season_cfg, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setenv("KEQING_LADDER_CONFIG_DIR", str(configs))
@@ -136,7 +178,7 @@ def test_project_season_api_failure_keeps_dirty(participants_root, monkeypatch, 
     match = ledger.create_match(_match_create(), registry)
 
     configs = tmp_path / "configs"
-    configs.mkdir()
+    configs.mkdir(exist_ok=True)
     season_cfg = {
         "schema": "keqing.ladder.season.v1",
         "season_id": SEASON,
@@ -147,7 +189,17 @@ def test_project_season_api_failure_keeps_dirty(participants_root, monkeypatch, 
             "sources_root": str(tmp_path / "sources"),
             "participants": {"enabled": True, "exclusive": True},
         },
-        "models": [],
+        "models": [
+            {"model_id": "human", "accounts": [{"account_id": "nick@01"}]},
+            {
+                "model_id": "70k",
+                "accounts": [
+                    {"account_id": "70k@01"},
+                    {"account_id": "70k@02"},
+                    {"account_id": "70k@03"},
+                ],
+            },
+        ],
     }
     (configs / f"{SEASON}.json").write_text(json.dumps(season_cfg, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setenv("KEQING_LADDER_CONFIG_DIR", str(configs))

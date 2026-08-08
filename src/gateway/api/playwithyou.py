@@ -29,7 +29,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -110,6 +110,8 @@ class PWYSession:
         self.started_at = started_at
         self.capture_dir: Optional[Path] = None
         self.binding: Optional[dict] = None
+        # P2（UX Repair 2）：roster 模式冻结后的四人阵容（account/model/expected_name）
+        self.frozen_roster: Optional[List[dict]] = None
         self.log_lines: List[str] = []
         # Keep the original launcher output outside the FastAPI process.  The
         # status endpoint is intentionally in-memory for simplicity, but a
@@ -239,8 +241,15 @@ def _validate_roster_bindings(roster_bindings: List[dict], specs: List[str]) -> 
         account_id = str(entry.get("account_id") or "").strip()
         if not account_id:
             raise ValueError(f"launcher 参与者必须填写账号（slot {slot}）")
-        if entry.get("controller_type") != "local_model":
-            raise ValueError(f"launcher 参与者 controller_type 必须为 local_model（slot {slot}）")
+        controller = str(entry.get("controller_type") or "")
+        if controller not in ("local_model", "external_agent"):
+            raise ValueError(
+                f"launcher 参与者 controller_type 必须为 local_model 或 external_agent（slot {slot}）"
+            )
+        if controller == "external_agent" and not (entry.get("model_identity_id") and entry.get("model_artifact_id")):
+            raise ValueError(
+                f"由本系统呼出的外部代理必须选择可启动的模型产物（slot {slot}）"
+            )
         raw_name = str(entry.get("expected_raw_name") or "").strip()
         if raw_name:
             if raw_name in raw_names:
@@ -263,6 +272,28 @@ def _resolve_artifact_path(artifact, project_root: Path) -> Path:
     if not path.is_absolute():
         path = project_root / path
     return path.resolve()
+
+
+def _artifact_spec_for_seat(account_id: str, identity_id: str, artifact_id: str) -> str:
+    """seat 直选 identity+artifact → 返回 artifact 绝对路径作为 checkpoint 来源（P1-3）。
+
+    旧 network spec（networks[slot]）只做 backend compatibility；生产 UI 的
+    launcher 请求直接由所选 artifact 派生冻结 checkpoint。
+    """
+    from participants import registry as participant_registry
+
+    identity = participant_registry.get_model_identity(identity_id)
+    if identity is None:
+        raise ValueError(f"model identity not found: {identity_id}")
+    if not participant_registry.identity_belongs_to_account(identity_id, account_id):
+        raise ValueError(f"账号 {account_id} 不能使用模型身份 {identity_id}")
+    artifact = next((a for a in identity.artifacts if a.model_artifact_id == artifact_id), None)
+    if artifact is None:
+        raise ValueError(f"model identity {identity_id} 无产物 {artifact_id}")
+    path = _resolve_artifact_path(artifact, PROJECT_ROOT)
+    if not path.exists():
+        raise ValueError(f"artifact checkpoint 不存在: {path}")
+    return str(path)
 
 
 def _freeze_launcher_models(roster_bindings: List[dict], specs: List[str]) -> tuple[List[dict], List[str]]:
@@ -636,6 +667,8 @@ class PlayWithYouStatus(BaseModel):
     log_tail: List[str] = []
     started_at: Optional[float] = None
     ladder_capture: Optional[LadderCaptureView] = None
+    # P2（UX Repair 2）：roster 模式冻结阵容（account/controller/model/expected_name）
+    frozen_roster: Optional[List[Dict[str, Any]]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -699,7 +732,16 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
                     continue
                 if not (0 <= slot <= 3):
                     raise ValueError(f"launcher_slot 必须在 [0,3]: {slot}")
-                spec = _resolve_spec(networks[slot], req.custom_paths, slot)
+                if entry.model_identity_id and entry.model_artifact_id:
+                    # P1-3：seat 直选 artifact → checkpoint 直接来自 artifact path
+                    spec = _artifact_spec_for_seat(
+                        str(entry.account_id or ""),
+                        entry.model_identity_id,
+                        entry.model_artifact_id,
+                    )
+                else:
+                    # backend compatibility：旧 network spec 推导
+                    spec = _resolve_spec(networks[slot], req.custom_paths, slot)
                 if spec is None:
                     raise ValueError(f"roster slot {slot} 未配置有效模型")
                 slot_specs.append((slot, spec))
@@ -757,8 +799,19 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
             with participants_data_lock():
                 participants_ledger.recover_pending_transaction_locked()
                 _validate_roster_bindings(roster_bindings, specs)
-                # P1-1：冻结返回与原 roster 同序，仅回填模型字段
+                # P1-1：返回与原 roster 同序，仅回填模型字段
                 roster_bindings, frozen_launcher_specs = _freeze_launcher_models(roster_bindings, specs)
+                # P1-1（UX Repair 2）：launcher 名字真相源 = 按 launcher_slot 排序
+                # 生成的 names[index]（1 个 bot → NoName；多个 → NoName-1/2/...）。
+                # UI 提供的 expected_raw_name 不得覆盖真实 launcher 名称。
+                launched_sorted = sorted(
+                    (entry for entry in roster_bindings if entry.get("launcher_slot") is not None),
+                    key=lambda entry: int(entry["launcher_slot"]),
+                )
+                for index, entry in enumerate(launched_sorted):
+                    entry["expected_raw_name"] = (
+                        names[index] if index < len(names) else f"NoName-{index + 1}"
+                    )
                 # P1：child/runtime 必须加载与 artifact 匹配的同一绝对 checkpoint 路径，
                 # 不再让子进程按动态名字（mortal/70k）重新解析。
                 launcher_command_specs = frozen_launcher_specs
@@ -782,6 +835,7 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
 
                 # R10-E：session-scoped 别名——NoName-{n} → 具体账号 + 模型版本。
                 # 按 launcher_slot 顺序（与真实 bot 顺序一致）；注册失败不 fail-open。
+                # P1-1：external_id 用已回填的真实 launcher 名称（names[index]）。
                 launched = sorted(
                     (entry for entry in roster_bindings if entry.get("launcher_slot") is not None),
                     key=lambda entry: int(entry["launcher_slot"]),
@@ -897,6 +951,9 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
     if req.ladder_capture is not None and req.ladder_capture.enabled:
         session.capture_dir = capture_dir
         session.binding = binding
+    if roster:
+        # P2：roster 模式把冻结阵容放进 session，status 可回传（UI 不再猜本地草稿）
+        session.frozen_roster = roster_bindings
     with _LOCK:
         SESSIONS[session_id] = session
         _HISTORY.append(session_id)
@@ -913,6 +970,7 @@ def start_playwithyou(req: StartPlayWithYouRequest) -> PlayWithYouStatus:
         log_tail=session.tail(50),
         started_at=session.started_at,
         ladder_capture=_binding_view(session),
+        frozen_roster=session.frozen_roster,
     )
 
 
@@ -930,6 +988,7 @@ def playwithyou_status() -> PlayWithYouStatus:
             log_tail=session.tail(200),
             started_at=session.started_at,
             ladder_capture=_binding_view(session),
+            frozen_roster=session.frozen_roster,
         )
     # No in-memory session, but a launcher may still be alive as an orphan
     # (e.g. the backend process was restarted and lost its session record).
