@@ -127,7 +127,7 @@ def test_ledger_adapter_filters(participants_root):
 
 
 def test_project_season_api_success(participants_root, monkeypatch, tmp_path):
-    from scripts.mortal import publish_ladder_snapshot
+    from training.mortal import publish_ladder_snapshot
 
     _accounts()
     match = ledger.create_match(_match_create(), registry)
@@ -172,7 +172,7 @@ def test_project_season_api_success(participants_root, monkeypatch, tmp_path):
 
 def test_project_season_api_failure_keeps_dirty(participants_root, monkeypatch, tmp_path):
     from fastapi import HTTPException
-    from scripts.mortal import publish_ladder_snapshot
+    from training.mortal import publish_ladder_snapshot
 
     _accounts()
     match = ledger.create_match(_match_create(), registry)

@@ -92,7 +92,7 @@ def _write_season_config(tmp_path, monkeypatch, *, exclusive=True) -> dict:
 
 
 def _mock_publish(monkeypatch, tmp_path):
-    from scripts.mortal import publish_ladder_snapshot
+    from training.mortal import publish_ladder_snapshot
 
     def _publish(**kw):
         return {"snapshot_dir": str(tmp_path / "snap"), "games": 1}
@@ -118,7 +118,7 @@ def test_participants_projection_fingerprint_changes(participants_root):
 
 
 def test_publish_uses_ledger_extra_fingerprint(participants_root, monkeypatch, tmp_path):
-    from scripts.mortal import publish_ladder_snapshot as pls
+    from training.mortal import publish_ladder_snapshot as pls
 
     _accounts()
     ledger.create_match(_match_create(), registry)
@@ -141,7 +141,7 @@ def test_publish_uses_ledger_extra_fingerprint(participants_root, monkeypatch, t
 # ---------------------------------------------------------------------------
 
 def test_project_season_lost_update_keeps_dirty(participants_root, monkeypatch, tmp_path):
-    from scripts.mortal import publish_ladder_snapshot
+    from training.mortal import publish_ladder_snapshot
 
     _accounts()
     ledger.create_match(_match_create(), registry)
@@ -313,7 +313,7 @@ def test_single_flight_prevents_concurrent_publishers(participants_root, monkeyp
     """P1-2：worker + manual 同时 project 同一 generation → 只有一个进入 publisher。"""
     import threading
 
-    from scripts.mortal import publish_ladder_snapshot
+    from training.mortal import publish_ladder_snapshot
 
     _accounts()
     ledger.create_match(_match_create(), registry)

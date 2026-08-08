@@ -27,7 +27,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["workbench", "src", "."]
 testpaths = ["tests"]
 python_files = [
     "test_mortal_eval_metrics.py",

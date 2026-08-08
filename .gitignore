@@ -52,6 +52,10 @@ artifacts/**/runs/
 *.onnx
 metrics.json
 
+# Repository-local mutable runtime data.  Keep only the layout guide in Git.
+/data/*
+!/data/README.md
+
 # Data files (raw and processed)
 dataset/
 dataset_debug*/
@@ -79,10 +83,10 @@ dataset_debug*/
 !/uv.lock
 
 # Replay UI project manifests
-!src/replay_ui/package.json
-!src/replay_ui/package-lock.json
-!src/replay_ui/tsconfig.json
-!src/replay_ui/tsconfig.*.json
+!workbench/replay_ui/package.json
+!workbench/replay_ui/package-lock.json
+!workbench/replay_ui/tsconfig.json
+!workbench/replay_ui/tsconfig.*.json
 
 *.jsonl
 *.jsonl.gz
@@ -138,6 +142,7 @@ archive/
 
 # Local-only working surfaces
 docs/**
+training/docs/**
 !docs/project_overview_current.md
 !docs/mortal/
 !docs/mortal/archive_decisions_2026_05.md
@@ -163,6 +168,7 @@ processed_*/
 .edge-reviewer-cdp-profile/
 node_modules/
 scripts/mortal/reviewer_browser_auto.mjs
+training/mortal/reviewer_browser_auto.mjs
 start_reviewer_browser_auto_game00000.cmd
 
 # Launcher build artifacts

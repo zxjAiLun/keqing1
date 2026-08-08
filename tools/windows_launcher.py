@@ -20,7 +20,7 @@ APP_TITLE = "Keqing1 工作台"
 DEFAULT_PORT = 8000
 LAUNCH_CMD_TEMPLATE = [
     r".\.venv-win\Scripts\python.exe",
-    "src/main.py",
+    "workbench/main.py",
     "--port",
     str(DEFAULT_PORT),
     "local",
@@ -48,7 +48,7 @@ def find_project_root() -> Path:
     configured_root = os.environ.get("KEQING1_ROOT")
     if configured_root:
         candidate = Path(configured_root).expanduser().resolve()
-        if (candidate / "src" / "main.py").exists():
+        if (candidate / "workbench" / "main.py").exists():
             return candidate
 
     if getattr(sys, "frozen", False):
@@ -56,18 +56,18 @@ def find_project_root() -> Path:
     else:
         exe_dir = Path(__file__).resolve().parent.parent
 
-    # 检查 exe_dir 是否是项目根目录（存在 src/main.py）
-    if (exe_dir / "src" / "main.py").exists():
+    # 检查 exe_dir 是否是项目根目录（存在 workbench/main.py）
+    if (exe_dir / "workbench" / "main.py").exists():
         return exe_dir
 
     # 检查父目录（exe 在 dist/ 下）
     parent = exe_dir.parent
-    if (parent / "src" / "main.py").exists():
+    if (parent / "workbench" / "main.py").exists():
         return parent
 
     # 检查当前工作目录
     cwd = Path.cwd()
-    if (cwd / "src" / "main.py").exists():
+    if (cwd / "workbench" / "main.py").exists():
         return cwd
 
     # 都找不到，返回 exe_dir 并在后续报错

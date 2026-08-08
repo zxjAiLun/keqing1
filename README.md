@@ -24,6 +24,21 @@ Dueling DQN action-value framework. Future policy or value heads should attach
 to that Mortal-compatible backbone instead of reviving an independent
 KeqingRL observation stack.
 
+## Workspace Layout
+
+- `training/` owns Mortal training, self-play, evaluation, research notes, and
+  runbooks.
+- `workbench/` owns the control-plane backend, replay UI, participant/ladder
+  operations, and local launchers.
+- `data/` is the Git-ignored local root for mutable Workbench state. Set
+  `KEQING_DATA_ROOT` to use a different root.
+- `src/` retains the shared Python runtime and inference code used by both
+  areas during this first split.
+
+Existing `artifacts/` data is intentionally left in place. Model checkpoint,
+dataset, and training-run path migration happens consumer by consumer rather
+than by copying or deleting existing data.
+
 ## Environment
 
 Install Python dependencies with:
@@ -35,40 +50,32 @@ uv sync
 Install replay UI dependencies with:
 
 ```bash
-cd src/replay_ui
+cd workbench/replay_ui
 npm install
 ```
 
 ## Active Entry Points
 
-Generate 4-Mortal RiichiEnv selfplay replays:
+Generate one or more Mortal self-play hanchan logs:
 
 ```bash
-uv run python scripts/mortal/generate_riichienv_selfplay_replays.py \
+uv run python training/mortal/selfplay_native.py \
   --model artifacts/mortal_serving/mortal.pth \
-  --output-dir artifacts/replays/mortal_selfplay_smoke \
+  --output-dir data/replays/mortal_selfplay_smoke \
+  --seed-start 0 \
   --games 1
-```
-
-Materialize Mortal review sidecars for existing MJAI replays:
-
-```bash
-uv run python scripts/mortal/materialize_replay_sidecars.py \
-  --replay-dir artifacts/replays \
-  --model artifacts/mortal_serving/mortal.pth \
-  --recursive
 ```
 
 Run local replay/review service:
 
 ```bash
-uv run python src/main.py local --port 8000
+uv run python workbench/main.py local --port 8000
 ```
 
 Run gateway only:
 
 ```bash
-uv run python src/main.py --gateway-port 11600 tenhou
+uv run python workbench/main.py --gateway-port 11600 tenhou
 ```
 
 Supported active bot names:
@@ -79,10 +86,12 @@ Supported active bot names:
 ## Key Directories
 
 - `third_party/Mortal/`: upstream Mortal/libriichi code
-- `artifacts/mortal_training/`: local Mortal training/checkpoint artifacts
-- `scripts/mortal/`: active Mortal workflow utilities
+- `training/`: active Mortal workflow utilities, training helpers, and research notes
+- `workbench/`: local control-plane backend, launchers, and replay UI
+- `data/`: Git-ignored local mutable data; see `data/README.md`
+- `artifacts/`: legacy local Mortal training/checkpoint artifacts, retained during migration
 - `src/inference/mortal_bot.py`: Mortal checkpoint-backed runtime wrapper
-- `src/replay_ui/`: replay and decision review GUI
+- `workbench/replay_ui/`: replay and decision review GUI
 - `src/mahjong_env/`: shared Mahjong semantics still used by tooling
 - `rust/keqing_core/`: frozen compatibility/research reference
 - `docs/`: current status boards and workflow notes
@@ -90,9 +99,9 @@ Supported active bot names:
 ## Current Read First
 
 1. `docs/project_overview_current.md`
-2. `docs/project_progress.md`
-3. `docs/mortal/mainline_pivot_2026_05_09.md`
-4. `plans/mortal_training_runbook_2026_04_28.md`
+2. `training/docs/mortal/current_mainline.md`
+3. `training/docs/mortal/ladder_publisher_integration.md`
+4. `training/plans/mortal_training_runbook_2026_04_28.md`
 
 ## Verification
 
@@ -100,6 +109,6 @@ Focused active checks:
 
 ```bash
 uv run pytest -q
-cd src/replay_ui && npm run build
+cd workbench/replay_ui && npm run build
 cargo test --manifest-path rust/keqing_core/Cargo.toml
 ```

@@ -258,7 +258,7 @@ def test_invalid_season_or_account_rejected_before_start(season_env) -> None:
 
 def test_capture_dir_lives_outside_sources_root(season_env) -> None:
     """C12：capture 目录不在 sources_root 内，pending 文件不改变 ingest 指纹。"""
-    from scripts.mortal import publish_ladder_snapshot as publisher
+    from training.mortal import publish_ladder_snapshot as publisher
 
     capture_dir = capture_dir_for_session(Path(season_env["root"]) / "data", "abc123")
     pending_dir = capture_dir / "pending"
@@ -325,7 +325,7 @@ def test_publish_failure_keeps_accepted_source_and_can_retry(
     tmp_path: Path, season_env, monkeypatch
 ) -> None:
     """C13：publish 失败保留 accepted source，可 retry-publish。"""
-    import scripts.mortal.publish_ladder_snapshot as publisher_mod
+    import training.mortal.publish_ladder_snapshot as publisher_mod
     from gateway.api import playwithyou as pwy_api
     from gateway.playwithyou_capture import CAPTURE_SCHEMA
 
@@ -629,7 +629,7 @@ def test_conflict_visible_without_finalize(tmp_path: Path) -> None:
 
 def test_accepted_publish_failed_cannot_be_ignored(tmp_path: Path, season_env, monkeypatch) -> None:
     """C30：accepted_publish_failed 不允许 ignore（source 已写入，只能 retry）。"""
-    import scripts.mortal.publish_ladder_snapshot as publisher_mod
+    import training.mortal.publish_ladder_snapshot as publisher_mod
     from gateway.api import playwithyou as pwy_api
     from gateway.playwithyou_capture import CAPTURE_SCHEMA
 
@@ -737,7 +737,7 @@ def test_concurrent_confirms_do_not_overwrite(tmp_path: Path, season_env) -> Non
 
 def test_retry_clears_publish_error(tmp_path: Path, season_env, monkeypatch) -> None:
     """C32：retry 成功后 publish_error 被清除。"""
-    import scripts.mortal.publish_ladder_snapshot as publisher_mod
+    import training.mortal.publish_ladder_snapshot as publisher_mod
     from gateway.api import playwithyou as pwy_api
     from gateway.playwithyou_capture import CAPTURE_SCHEMA
 

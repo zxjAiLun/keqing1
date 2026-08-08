@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from replay import ladder
-from scripts.mortal import build_platform_account_report as account_report
+from training.mortal import build_platform_account_report as account_report
 
 TENHOU_SCORING = {
     "system": "tenhou_rank_progression",

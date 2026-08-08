@@ -13,7 +13,7 @@ for entry in (str(_ROOT), str(_ROOT / "src")):
     if entry not in sys.path:
         sys.path.insert(0, entry)
 
-from scripts.mortal import publish_ladder_snapshot as publisher  # noqa: E402
+from training.mortal import publish_ladder_snapshot as publisher  # noqa: E402
 from replay import ladder  # noqa: E402
 
 

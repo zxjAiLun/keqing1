@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from scripts.mortal import eval_metrics
-from scripts.mortal import stat_report
+from training.mortal import eval_metrics
+from training.mortal import stat_report
 
 
 def test_summarize_rank_counts_exports_rank_and_pt() -> None:

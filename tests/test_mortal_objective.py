@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from scripts.mortal.objective import compute_objective_losses, objective_contract_from_config
+from training.mortal.objective import compute_objective_losses, objective_contract_from_config
 
 
 def _fixture() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
